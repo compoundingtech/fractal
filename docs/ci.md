@@ -16,13 +16,14 @@ The five required queue checks and complete test partitions are retained.
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
-on `main` are `linux-gate`, `isolation-vm`, `genie-freshness`,
-`typescript-client` and `mail-redelivery-canaries` (`ci-script-tests`, the CI scripts' own tests on their declared inputs, runs beside
-`genie-freshness` and joins the required list once it has run green on `main`),
-and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)).
+on `main` are `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (`ci-script-tests`, the CI scripts' own tests on their
+declared inputs, runs beside `genie-freshness` and joins the required list once it has run green on `main`),
+and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)). The VM tests
+(`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
+requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
 
-Every **ready** pull request, including a fork, gets the Linux gate, the isolation VM, the
-freshness check, the TypeScript client check and the mail redelivery canaries. Draft PRs allocate no CI runners: every job in Workspace CI, Performance, Public repository check,
+Every **ready** pull request, including a fork, gets the Linux gate, the freshness check, the
+TypeScript client check and the web lane. Draft PRs allocate no CI runners: every job in Workspace CI, Performance, Public repository check,
 release validation, Nix validation and optional macOS CI has a draft guard. This includes metadata
 jobs and `always()` collectors. `ready_for_review` starts checks; `converted_to_draft` enters the
 existing PR concurrency group and cancels obsolete ready-head work while skipping every new job.
@@ -550,8 +551,8 @@ both generations continue to coordinate with Claude's own config lock.
 survives a SIGKILL of its supervisor's cgroup, for both exec and pty tasks. The managed-agent
 color contract also checks environment propagation through a real user scope, including a
 PTY restart. These three tests need a real systemd user manager, which Namespace's runner
-image does not boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the required
-`isolation-vm` job:
+image does not boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily
+`daily-isolation-vm` job (`daily-long.yml`):
 
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
@@ -1361,9 +1362,9 @@ The macOS workflow was manually disabled when this audit ran. Its cache configur
 maintained without changing that repository setting. Portable publishing permissions and
 accepted-source verification remain in place.
 
-## Required mail redelivery canaries
+## Daily mail redelivery canaries
 
-Alongside the two Linux test shards, `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
+Once a day (`daily-mail-redelivery-canaries` in `daily-long.yml`), `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
 unignored regressions: boot/reconnect mailbox suppression and recent unoffered recovery for
 Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with hour-old
 mail held and recent unoffered mail consumed exactly once; legacy polling recovery through the
@@ -1376,13 +1377,10 @@ The mailbox cases seed hour-old sent mail and recent staged and delivered-but-un
 mail, prove zero historical offers, preserve explicit mailbox access, and recover an in-flight
 send after a daemon restart with exactly one receipt pair. Every selected test runs with zero retries.
 
-The script fails if any required test is missing, ignored, or filtered out. The named
-`mail-redelivery-canaries` check executes the script on its own Namespace 8x16 runner; a skipped
-or failed job cannot pass.
-`linux-gate` requires it, so this protection applies to pull requests and merge groups. It
-restores the main-seeded Linux test Cargo and Nix caches, prepares the same fixtures and rendered
-hooks, and retains its own logs, timing and failure evidence. It never uses the native priority
-or merge lanes, and neither test shard waits for it before starting its own suite.
+The script fails if any required test is missing, ignored, or filtered out. It ran per pull request
+and in the merge queue as a required check, a member of `linux-gate`, until 2026-10-23; since then it
+runs only in the daily run, and the canary tests are in `.config/daily-only.filterset`, so the
+per-PR test shards leave them out too. A red daily run comments on the run's one open issue.
 Apply the fifth live ruleset check after this workflow has passed on main.
 
 ## Generated files and existing workflows
@@ -1429,15 +1427,15 @@ gh pr merge NUMBER --auto
 ```
 
 The queue tests the pull request on top of the current `main` and the entries ahead of it with
-`linux-gate`, `isolation-vm`, `genie-freshness`, `typescript-client`, and
-`mail-redelivery-canaries` (these run on the `merge_group` event; see the
+`linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (these run on the
+`merge_group` event; see the
 trigger in `fleet.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
 request does not need to be rebased onto the latest `main` first. A draft cannot be queued. If a
 queued check fails, the entry leaves the queue and the pull request page says why: fix it and
 queue it again. The merge train (`st lanes join smalltalk`) is retired.
 
 The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
-by an administrator and never by CI) requires the five checks from GitHub Actions with an empty
+by an administrator and never by CI) requires the four checks from GitHub Actions with an empty
 bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
 merge method MERGE, a proposed three entries build at once (see [Merge overflow and daily Namespace minutes](#merge-overflow-and-daily-namespace-minutes)),
 up to five merge together, and a check that

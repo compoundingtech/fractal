@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
-  scripts/st-test [--check NAME]... [--all] [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
+  scripts/st-test [--check NAME]... [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
 
-For every check that has a local command (the table below; the heavy ones, which build and test the Rust workspace, only when
-named or with --all: run `scripts/st-test --all --push origin` once on the head you mark ready) it runs that command once, on the
-tree the pull request will be tested as, through scripts/evidence-wrap, and the signer records the exit code and the digest of
+For every check that has a local command (the table below: the whole per-PR suite; run `scripts/st-test --push origin` on the head
+you mark ready, and --all, accepted, means the same) it runs that command once, on the tree the pull request will be tested as, through scripts/evidence-wrap, and the signer records the exit code and the digest of
 the output it measured under this host's key (scripts/evidence-keygen). A failing run is recorded too. It then
 asks the verifier, from the accepted base, whether the tree is now covered, and prints one line per check.
 
@@ -53,6 +52,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 sys.dont_write_bytecode = True
@@ -66,20 +66,17 @@ LOCAL = {
                           'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client'],
     'genie-freshness': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-genie-freshness'],
     'ci-script-tests': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-script-tests'],
-    # A Linux gate stage, run as its CI job runs it but with a home of its own (scripts/ci-local).
-    'mail-redelivery-canaries': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'mail-redelivery-canaries'],
-    # The stages a linux-gate skip covers (the tests, clippy, fleet compatibility and the canaries), in one run.
-    'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries'],
-    # The VM tests: CI's isolation-vm job, with the test archive and gateway it downloads built in place (needs /dev/kvm).
-    'isolation-vm': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'isolation-vm'],
+    # The stages a linux-gate skip covers (the tests, clippy and fleet compatibility), in one run, as their CI jobs run them but
+    # with a home of their own (scripts/ci-local). The VM tests and the mail redelivery canaries run daily (daily-long.yml).
+    'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat'],
 }
-# Checks that build and test the Rust workspace: tens of minutes of a shared host. They run only when named (--check) or with
-# --all, never by default, so the pre-push hook keeps signing the light checks within its wait.
-HEAVY = frozenset({'mail-redelivery-canaries', 'linux-gate', 'isolation-vm'})
+# Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
+# (a builds.slice scope, the kept target below), which nobody has to ask for.
+BUILDS = frozenset({'linux-gate'})
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate'})
 BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
-# The heavy checks build in one cargo target per pool tree (<pool>/target-N, outside the tree so the cleaning keeps it), kept between
+# The checks that build use one cargo target per pool tree (<pool>/target-N, outside the tree so the cleaning keeps it), kept between
 # runs, so a run does not start cold: the tree's path is the same every run, so the workspace's own crates rebuild only when they
 # changed and the dependencies and build scripts are reused. It is removed before a run once it passes TARGET_MAX_GB (the run holds
 # the tree's lock, so nobody else uses it). ST_EVIDENCE_TARGET=PATH names one shared target for all trees instead (kept as before:
@@ -180,7 +177,7 @@ def trim(target):
 
 
 def shared_target(tree_target=None):
-    """The kept target for the heavy checks and a lock held while they use it, or (None, None) when it is off or the caller set one.
+    """The kept target for the checks that build and a lock held while they use it, or (None, None) when it is off or the caller set one.
 
     With a pool tree's own target (and no ST_EVIDENCE_TARGET), that target: the tree's lock is held, so there is nothing to lock here."""
     if os.environ.get('ST_EVIDENCE_TARGET') == 'off' or os.environ.get('CARGO_TARGET_DIR'):
@@ -202,7 +199,7 @@ def shared_target(tree_target=None):
 
 
 def governed(argv, name):
-    """`argv` (evidence-wrap and the check under it) as the host's build cap governs a heavy check: a builds.slice scope around
+    """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
     everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
     memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
 
@@ -459,9 +456,9 @@ def main(argv):
     parser.add_argument('--attempt', default='1')
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
-    parser.add_argument('--all', action='store_true', help='with no --check: the heavy checks too (' + ', '.join(sorted(HEAVY)) + ')')
+    parser.add_argument('--all', action='store_true', help='accepted, and the same as no flag: every check runs')
     parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree (a lane edit, '
-                        'and with --all a policy check that has no local command, count as covered: CI runs them); exit 0 if all are, 3 if not')
+                        'and with no --check a policy check that has no local command, count as covered: CI runs them); exit 0 if all are, 3 if not')
     parser.add_argument('--toolchain-sha256', help='passed to evidence-wrap: skip the nix evaluation, record this digest')
     args = parser.parse_args(argv)
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._/-]*', args.base):
@@ -469,7 +466,7 @@ def main(argv):
     unknown = [name for name in args.check if name not in LOCAL]
     if unknown:
         raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join(LOCAL)}')
-    checks = args.check or [name for name in LOCAL if args.all or name not in HEAVY]
+    checks = args.check or list(LOCAL)
     if args.list:
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')
@@ -496,7 +493,7 @@ def main(argv):
                 else:
                     is_covered, why = covered(str(verifier), Path('.'), tree, name, args.base, repository, lane_base)
                     rows.append((name, is_covered, 'covered' if is_covered else 'not covered', why))
-            if args.all and not args.check:
+            if not args.check:
                 # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
                 rows += [(name, True, 'CI runs it', 'no local command') for name in policy_checks(args.base) if name not in LOCAL]
         for name, is_covered, label, why in rows:
@@ -532,18 +529,15 @@ def main(argv):
             signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
             rows, failed, unsigned = [], False, False
             lanes = lane_names(args.base)
-            target, target_lock = shared_target(tree_target) if any(name in HEAVY for name in checks) else (None, None)
+            target, target_lock = shared_target(tree_target) if any(name in BUILDS for name in checks) else (None, None)
             unmaterialized = materialize_members(directory)
-            for name in checks:
+            def run_one(name, output=None):
+                """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
                 if unmaterialized:
-                    rows.append((name, 'NOT RUN', 0, unmaterialized))
-                    failed = True
-                    continue
+                    return (name, 'NOT RUN', 0, unmaterialized), True, False
                 edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in lanes else []
                 if edits:
-                    rows.append((name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'))
-                    unsigned = True
-                    continue
+                    return (name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'), False, True
                 wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
                         '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
                 if name in lanes:
@@ -554,7 +548,7 @@ def main(argv):
                     wrap += ['--toolchain-sha256', args.toolchain_sha256]
                 if args.push:
                     wrap += ['--push', args.push]
-                environment = dict(os.environ, CARGO_TARGET_DIR=str(target)) if target and name in HEAVY else None
+                environment = dict(os.environ, CARGO_TARGET_DIR=str(target)) if target and name in BUILDS else None
                 if name in BASE_BOUND:
                     # clippy's ratchet compares with the base, as CI compares with the event's base: the base as just fetched,
                     # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.
@@ -563,16 +557,52 @@ def main(argv):
                 started = time.monotonic()
                 try:
                     command = wrap + ['--'] + LOCAL[name]
-                    done = subprocess.run(governed(command, name) if name in HEAVY else command, cwd=directory, timeout=args.time_limit,
-                                          env=environment)
+                    done = subprocess.run(governed(command, name) if name in BUILDS else command, cwd=directory, timeout=args.time_limit,
+                                          env=environment, stdout=output, stderr=subprocess.STDOUT if output else None)
                     code = done.returncode
                 except subprocess.TimeoutExpired:
                     code = 124
                 seconds = round(time.monotonic() - started)
                 ok = code == 0
-                failed = failed or not ok
                 is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
-                rows.append((name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why))
+                return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why), not ok, False
+
+            # The light checks run alongside the ones that build, one after another in a lane of their own, as CI runs them on runners of
+            # their own: they wait on network, Nix and Node rather than the Rust build, and run after it they added minutes to every
+            # run. Their output is kept and printed in order once the build lane is done, so the two never interleave. ST_EVIDENCE_SERIAL=1
+            # runs every check one after another, as before.
+            builds = [name for name in checks if name in BUILDS]
+            light = [name for name in checks if name not in BUILDS]
+            results = {}
+            if builds and light and os.environ.get('ST_EVIDENCE_SERIAL') != '1':
+                logs = {name: Path(scratch) / f'{name}.log' for name in light}
+
+                def light_lane():
+                    for name in light:
+                        with open(logs[name], 'w') as output:
+                            try:
+                                results[name] = run_one(name, output)
+                            except Exception as error:  # a lane that dies is a failed check, never a silent pass
+                                results[name] = ((name, f'FAILED ({type(error).__name__})', 0, str(error)[:120]), True, False)
+
+                lane = threading.Thread(target=light_lane, name='st-test-light')
+                print(f'st-test: {", ".join(light)} run alongside {", ".join(builds)}; their output follows when it is done', flush=True)
+                lane.start()
+                for name in builds:
+                    results[name] = run_one(name)
+                lane.join()
+                for name in light:
+                    print(f'\n----- st-test: {name} output -----', flush=True)
+                    sys.stdout.write(logs[name].read_text(errors='replace') if logs[name].exists() else '(no output)\n')
+                    sys.stdout.flush()
+            else:
+                for name in checks:
+                    results[name] = run_one(name)
+            for name in checks:
+                row, check_failed, check_unsigned = results[name]
+                rows.append(row)
+                failed = failed or check_failed
+                unsigned = unsigned or check_unsigned
             print(f'\nst-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
             for name, result, seconds, why in rows:
                 print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')

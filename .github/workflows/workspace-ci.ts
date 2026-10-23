@@ -470,7 +470,7 @@ printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SU
  */
 export const evidenceStageNames = [
   'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4',
-  'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries',
+  'linux-clippy', 'linux-fleet-compat',
 ] as const
 const evidenceHelper = '"$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"'
 /**
@@ -487,10 +487,10 @@ export const evidenceStageJob = (name: string) =>
 
 /**
  * Jobs that are not `scripts/ci-linux` stages but are required checks too (genie-freshness, ci-script-tests,
- * typescript-client, isolation-vm). They sign from the outcomes of their own steps; a step that did
+ * typescript-client). They sign from the outcomes of their own steps; a step that did
  * not run (for example because the job was covered by a trusted note) makes no note.
  */
-export const evidenceStepNames = ['genie-freshness', 'ci-script-tests', 'typescript-client', 'isolation-vm'] as const
+export const evidenceStepNames = ['genie-freshness', 'ci-script-tests', 'typescript-client'] as const
 /**
  * A lane that is skipped whenever its paths are untouched (fractal-web), so a run that did not execute it makes no note
  * for it. Each shard signs its own note (scripts/ci-evidence-signing STEP_INPUTS), and the evidence note job signs one
@@ -504,9 +504,7 @@ export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
 // which it did not run its work: the signing helper refuses when this is 'true' (and so makes no note), whatever the
 // job's log or step outcomes say. Every gate named here must be in that job's `needs`.
 export const gateSkipExpression = (name: string): string => {
-  const gates = name === 'mail-redelivery-canaries'
-    ? ['linux-gate', 'mail-redelivery-canaries']
-    : [...evidenceStepNames, ...evidenceLaneNames].includes(name as never) ? [name] : ['linux-gate']
+  const gates = [...evidenceStepNames, ...evidenceLaneNames].includes(name as never) ? [name] : ['linux-gate']
   return '${{ ' + gates.map((gate) => `needs.evidence-gate-${gate}.outputs.skip == 'true'`).join(' || ') + ' }}'
 }
 

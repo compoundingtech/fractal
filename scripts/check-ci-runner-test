@@ -180,41 +180,31 @@ check("fork cannot use common pool metadata", [{'runners': [ci2_worker]}],
 import re
 blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow.split("\njobs:\n", 1)[1]))
 required_priority = "github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3"
-for job in ("linux-clippy", "linux-fleet-compat", "isolation-vm"):
+for job in ("linux-clippy", "linux-fleet-compat"):
     assert "github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1" in blocks[job], (job, "supporting merge job uses chosen priority pool")
     assert required_priority in blocks[job], (job, "merge precedes PR")
     assert "github.run-id=" in blocks[job], (job, "prevent cross-run assignment")
-    if job == 'isolation-vm':
-        assert "namespace-profile-linux-x86-64;job.priority={1};github.run-id=" in blocks[job], (job, "profile controls must be inline")
-        assert "namespace-features:" not in blocks[job], (job, "separate feature labels are unsupported with profiles")
-    else:
-        assert "namespace-features:github.run-id=" in blocks[job], (job, "shape labels need a separate features label")
-for job in ('genie-freshness', 'typescript-client'):
+    assert "namespace-features:github.run-id=" in blocks[job], (job, "shape labels need a separate features label")
+# The VM tests and the mail redelivery canaries run once a day (daily-long.yml), never per pull request or in the merge queue.
+for job in ('isolation-vm', 'mail-redelivery-canaries', 'evidence-gate-isolation-vm', 'evidence-gate-mail-redelivery-canaries'):
+    assert job not in blocks, (job, 'daily only')
+for job in ('genie-freshness', 'ci-script-tests', 'typescript-client'):
     assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'light checks must not consume reserved or Namespace capacity')
     assert 'namespace-profile-' not in blocks[job] and 'namespace-features:' not in blocks[job] and 'cargo-cache' not in blocks[job], job
     assert 'Keep valid same-source build outputs' not in blocks[job] and 'build-snapshot' not in blocks[job], job
-for job, output in [('linux-tests-shard-2', 'ci1_secondary'), ('mail-redelivery-canaries', 'ci1_mail')]:
+for job, output in [('linux-tests-shard-2', 'ci1_secondary')]:
     assert f'outputs.{output}) ||' in blocks[job], (job, 'extra jobs need their own idle-slot output')
     assert "github.event_name != 'merge_group' && needs.pick-runner.outputs." + output in blocks[job], (job, 'PR extras must use their own distinct slot')
     assert 'job.priority={1}' in blocks[job] and 'github.run-id={0}' in blocks[job], (job, 'Namespace fallback must evaluate priority and run affinity')
     assert required_priority in blocks[job], job
 assert "outputs.ci1" in blocks["linux-tests"], "primary shard must retain reserved routing"
-canaries = blocks['mail-redelivery-canaries']
-def needs_of(block):
-    """Job names in `needs`, whatever layout the generator chose: one line, a list, or a bracketed block."""
-    # Job-level keys sit at four spaces and may come before or after `steps` (a spread job puts them after).
-    found = re.search(r'^    needs:(.*?)(?=^    \S|\Z)', block, re.M | re.S)
-    return set(re.findall(r'[A-Za-z][A-Za-z0-9_-]*', found.group(1))) if found else set()
-canary_needs = needs_of(canaries)
-assert {'pick-runner', 'linux-test-build'} <= canary_needs and 'linux-tests' not in canary_needs, "canaries must run beside both test shards after the shared build"
-assert 'scripts/ci-linux mail-redelivery-canaries' in canaries, "the required check must execute the canaries itself"
 assert 'cargo-linux-tests-' in blocks['linux-test-build'], "producer must reuse protected-main test dependency caches"
-for consumer in ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'mail-redelivery-canaries', 'isolation-vm'):
+for consumer in ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4'):
     assert 'cargo-cache' not in blocks[consumer] and 'Build selected test targets' not in blocks[consumer], (consumer, 'archive consumers must not restore/rebuild Cargo targets')
     assert 'needs.linux-test-build.outputs.artifact-id' in blocks[consumer], (consumer, 'artifact must come from its successful producer')
     assert 'needs.linux-test-build.outputs.manifest-sha256' in blocks[consumer], (consumer, 'manifest hash must come from its successful producer')
 assert 'needs.linux-test-build.result' in blocks['linux-gate'], 'the gate must explicitly fail a failed producer'
-for consumer in ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'mail-redelivery-canaries', 'isolation-vm'):
+for consumer in ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4'):
     assert 'Require the shared test producer to succeed' in blocks[consumer]
     assert 'PRODUCER_RESULT' in blocks[consumer] and 'shared test producer failed or was skipped' in blocks[consumer]
     assert 'CI_TEST_ARCHIVE_PRODUCER_ATTEMPT' in blocks[consumer]
@@ -222,11 +212,9 @@ for consumer in ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'l
     assert 'GH_TOKEN: ${{ github.token }}' in blocks[consumer], 'download uses the existing read-only job token'
     assert 'CI_TEST_ARCHIVE_ARTIFACT_ID' in blocks[consumer]
     assert 'actions/download-artifact@' not in blocks[consumer], 'do not stream unverified files into the consumer directory'
-assert 'ST_ISOLATION_BUILD_WORKSPACE' in blocks['isolation-vm']
 assert 'Keep valid same-source build outputs' in blocks['linux-test-build'], 'shared producer must retain its build snapshot'
-assert 'CI_TEST_PARTITION' not in canaries, "every required canary must run"
 assert 'mail_redelivery' not in blocks['linux-tests'] and 'scripts/ci-mail-redelivery-canaries' not in blocks['linux-tests'], "canaries cannot serialize the primary shard"
-assert 'needs.mail-redelivery-canaries.result' in blocks['linux-gate'], "failures and skips must still fail the Linux gate"
+assert 'mail-redelivery-canaries' not in blocks['linux-gate'], "the canaries are no member of the Linux gate: they run daily"
 assert "job.priority={1}" in blocks["linux-tests"] and "github.run-id={0}" in blocks["linux-tests"], "event priority and evaluated run id in Namespace fallback"
 performance = (ROOT / ".github/workflows/perf.yml").read_text()
 assert "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3" in performance
@@ -268,7 +256,7 @@ def route(job, event, profile='', picked='', merge_ci1='', merge_picked='', part
     expression = expression.replace('github.event_name', repr(event)).replace('github.run_id', '123').replace('vars.CI_MERGE_NAMESPACE_PROFILE', repr(profile)).replace('vars.CI_MERGE_CI1', repr(merge_ci1))
     return eval(expression.replace('&&', ' and ').replace('||', ' or '), {'__builtins__': {}}, {'fromJSON': json.loads, 'format': lambda template, *args: template.format(*args)})
 
-for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'isolation-vm', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
+for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'linux-tests', 'linux-tests-shard-2'):
     for switch in ('', 'off', 'on'):
         for profile in ('', 'queue-reserved'):
             assert route(job, 'merge_group', profile, '["ci1-priority"]', merge_ci1=switch) == ['ci1-priority']
@@ -289,37 +277,37 @@ for n in (3,4):
 gate_script = textwrap.dedent(blocks['linux-gate'].split('run: |\n',1)[1].split('\n      - ',1)[0])
 # The per-stage skip flags the workflow computes when every covered stage's own rule says skip (build, tests, shard 2,
 # clippy, fleet compat, then the two merge-only shards); scripts/ci-evidence-gate-test checks the flags against the rules.
-COVERED_FLAGS='true false true true true true false true true'
+COVERED_FLAGS='true false true true true true true true'
 def gate(event,base,extra,skip=None,flags=COVERED_FLAGS):
     env={**os.environ,'EVENT':event,'RESULTS':' '.join(base),'MERGE_RESULTS':' '.join(extra),'STAGE_SKIPS':flags}
     env.pop('GATE_SKIP',None)
     if skip is not None:
         env['GATE_SKIP']=skip
     return subprocess.run([bash,'-c',gate_script],env=env,capture_output=True).returncode
-assert gate('merge_group',['success']*7,['success']*2) == 0
-assert gate('pull_request',['success']*7,['skipped']*2) == 0
-assert gate('workflow_dispatch',['success']*7,['skipped']*2) == 0
-for i in range(9):
+assert gate('merge_group',['success']*6,['success']*2) == 0
+assert gate('pull_request',['success']*6,['skipped']*2) == 0
+assert gate('workflow_dispatch',['success']*6,['skipped']*2) == 0
+for i in range(8):
     for bad in ('failure','cancelled','skipped'):
-        results=['success']*9;results[i]=bad
-        assert gate('merge_group',results[:7],results[7:]) != 0,(i,bad)
-assert gate('merge_group',['success']*6,['success']*2) != 0
-assert gate('merge_group',['success']*7,['success']) != 0
-assert gate('pull_request',['success']*7,['success']*2) != 0
+        results=['success']*8;results[i]=bad
+        assert gate('merge_group',results[:6],results[6:]) != 0,(i,bad)
+assert gate('merge_group',['success']*5,['success']*2) != 0
+assert gate('merge_group',['success']*6,['success']) != 0
+assert gate('pull_request',['success']*6,['success']*2) != 0
 print('passed: four merge shards preserve exact archive provenance, merge roles and strict event-qualified aggregation')
 
 # Evidence skip: a stage the gate skipped at JOB level reports `skipped`. It is accepted only when this gate decided
 # skip, only in the positions of those stages, and never for a failure or a cancellation. RESULTS is, in order:
-# linux-test-build, upgrade-impact, linux-tests, linux-tests-shard-2, linux-clippy, linux-fleet-compat, canaries.
+# linux-test-build, upgrade-impact, linux-tests, linux-tests-shard-2, linux-clippy, linux-fleet-compat.
 SKIPPABLE = (0, 2, 3, 4, 5)      # build, tests, shard 2, clippy, fleet compat (zero-based)
-NEVER_SKIPPED = (1, 6)           # upgrade-impact and the canaries always run
-covered = ['skipped', 'success', 'skipped', 'skipped', 'skipped', 'skipped', 'success']
+NEVER_SKIPPED = (1,)            # upgrade-impact always runs
+covered = ['skipped', 'success', 'skipped', 'skipped', 'skipped', 'skipped']
 for event in ('merge_group', 'pull_request', 'workflow_dispatch'):
     assert gate(event, covered, ['skipped'] * 2, skip='true') == 0, event
-    assert gate(event, ['success'] * 7, ['skipped'] * 2, skip='true') == 0, event
+    assert gate(event, ['success'] * 6, ['skipped'] * 2, skip='true') == 0, event
     # Each stage on its own: skipped is accepted exactly where a job-level skip is possible.
-    for i in range(7):
-        results = ['success'] * 7
+    for i in range(6):
+        results = ['success'] * 6
         results[i] = 'skipped'
         assert (gate(event, results, ['skipped'] * 2, skip='true') == 0) == (i in SKIPPABLE), (event, i)
         # ...and never without the gate's decision, whatever the value of the variable.
@@ -330,18 +318,18 @@ for event in ('merge_group', 'pull_request', 'workflow_dispatch'):
         results = list(covered)
         results[i] = 'skipped'
         assert gate(event, results, ['skipped'] * 2, skip='true') != 0, (event, i)
-for i in range(9):
+for i in range(8):
     for bad in ('failure', 'cancelled'):
-        results = ['skipped'] * 9
+        results = ['skipped'] * 8
         results[i] = bad
-        assert gate('merge_group', results[:7], results[7:], skip='true') != 0, (i, bad)
-        results = ['success'] * 9
+        assert gate('merge_group', results[:6], results[6:], skip='true') != 0, (i, bad)
+        results = ['success'] * 8
         results[i] = bad
-        assert gate('merge_group', results[:7], results[7:], skip='true') != 0, (i, bad)
+        assert gate('merge_group', results[:6], results[6:], skip='true') != 0, (i, bad)
 # The merge-only shards may be skipped under a skip (they are job-level skips too) but not otherwise.
 assert gate('merge_group', covered, ['skipped', 'skipped'], skip='true') == 0
 assert gate('merge_group', covered, ['skipped', 'skipped'], skip=None) != 0
-assert gate('merge_group', ['skipped'] * 6, ['skipped'] * 2, skip='true') != 0   # a missing stage result still fails
+assert gate('merge_group', ['skipped'] * 5, ['skipped'] * 2, skip='true') != 0   # a missing stage result still fails
 assert gate('merge_group', covered, ['skipped'], skip='true') != 0
 assert gate('pull_request', covered, ['success', 'skipped'], skip='true') != 0  # extra shards stay merge-only
 print('passed: an evidence skip lets the aggregate accept skipped stages only when its own gate decided, never failures')
@@ -380,7 +368,7 @@ for raw in cache_conditions:
                             'vars.CI_OUTAGE_FAST_QUEUE': switch,
                             'env.CI_LOCAL_CACHES': local,
                             **{f'needs.evidence-gate-{gate}.outputs.skip': skip for gate in (
-                                'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'mail-redelivery-canaries', 'isolation-vm')},
+                                'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate')},
                         }.items():
                             expression = expression.replace(token, repr(value))
                         expression = expression.replace('!(', 'not (')
@@ -402,13 +390,11 @@ for step in ('Download this run attempt’s successful test build', 'Verify sour
 print('passed: outage merge-group cache saves skip only while enabled; ordinary events, guards and artifacts unchanged')
 print("passed: bounded test shards, reserved primary lane, idle general slots, Namespace fallback, and required aggregation")
 
-# A stage overflow must not route isolation-vm onto the non-KVM shape.
-for job in ('linux-test-build','linux-clippy','linux-fleet-compat','linux-tests','linux-tests-shard-2','linux-tests-shard-3','linux-tests-shard-4','mail-redelivery-canaries'):
+for job in ('linux-test-build','linux-clippy','linux-fleet-compat','linux-tests','linux-tests-shard-2','linux-tests-shard-3','linux-tests-shard-4'):
     assert route(job,'merge_group',picked=json.dumps(overflow_shape),merge_picked=json.dumps([overflow_profile])) == overflow_shape,job
-assert route('isolation-vm','merge_group',picked=json.dumps(overflow_shape),merge_picked=json.dumps([overflow_profile])) == [overflow_profile]
 nix=(ROOT/'.github/workflows/nix.yml').read_text()
 assert '&& (false) }}' in nix and 'tags:' not in nix, 'optional Nix stays off merge-serving runners and release tags'
-print('passed: stage overflow uses 8x16; only VM uses KVM profile; optional Nix off shared pool')
+print('passed: stage overflow uses 8x16; optional Nix off shared pool')
 
 # Exercise the advisory reader's actual IO boundary with no network or credentials.
 import runpy
@@ -556,6 +542,6 @@ for mode in ('on', 'off', 'invalid'):
     assert route('linux-test-build', 'merge_group', producer_mode=mode)[0].startswith(('namespace-profile-', 'nscloud-'))
 assert route('linux-test-build', 'merge_group', profile='existing-custom', producer_mode='on') == ['namespace-profile-existing-custom;job.priority=1;github.run-id=123']
 assert route('linux-test-build', 'merge_group', producer_mode='on', producer_picked='["ci-host-ci1","ci1-priority"]') == ['ci-host-ci1', 'ci1-priority']
-for job in ('linux-tests','linux-tests-shard-2','linux-tests-shard-3','linux-tests-shard-4','mail-redelivery-canaries','isolation-vm','linux-clippy','linux-fleet-compat'):
+for job in ('linux-tests','linux-tests-shard-2','linux-tests-shard-3','linux-tests-shard-4','linux-clippy','linux-fleet-compat'):
     assert 'ci1_build' not in blocks[job] and 'CI_MERGE_TEST_BUILD_OWNED' not in blocks[job]
 print('passed: merge producer-only six-member admission, at most three busy and two eligible idle, host affinity, configured Namespace rollback and unchanged other consumers')
