@@ -38,6 +38,9 @@ const CONVERSATION_CHANGED: &str = "SELECT
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_legacy_from_index
       WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
         AND json_extract(body,'$.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>?2 AND store_index<=?3)
+    OR EXISTS(SELECT 1 FROM main.local_native_delivery_receipts_v2
+      INDEXED BY local_native_delivery_owner_cut_v2
+      WHERE actor IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM local_observations INDEXED BY local_observations_subject_id_index
       WHERE subject=?1 AND id>?4 AND id<=?5)";
 
@@ -804,7 +807,7 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
                 .query_map(params![owner, after, i64::MAX, 0, i64::MAX], |row| row.get::<_, String>(3))?
                 .collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
             for index in ["claims_subject_index", "claims_message_to_order_index", "claims_message_from_index",
-                "claims_message_legacy_to_index", "claims_message_legacy_from_index", "local_observations_subject_id_index"] {
+                "claims_message_legacy_to_index", "claims_message_legacy_from_index", "local_observations_subject_id_index", "local_native_delivery_owner_cut_v2"] {
                 assert!(plan.contains(index), "{plan}");
             }
             assert!(!plan.contains("SCAN claims"), "{plan}");
