@@ -1,7 +1,7 @@
 // Ported from smalltalk apps/ios/terminalStyle.ts (ANSI palette, 256-colour cube, inverse/dim
 // handling); extended with a design-token palette that follows the host theme.
 
-import type { TerminalColor, TerminalRun } from '@smalltalk/st3-client/schema'
+import type { TerminalColor, TerminalRun } from '@fractal/client/schema'
 import type { CSSProperties } from 'react'
 
 /**

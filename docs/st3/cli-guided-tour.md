@@ -210,6 +210,9 @@ surface.
 st conversations --help
 st conversations ls --help
 st conversations ls person/alex
+st conversations ls person/alex --from agent/worker
+st conversations ls person/alex --from agent/worker --subject "Review ready"
+st conversations ls person/alex --from agent/worker --subject-prefix "Review" --archive --count
 st conversations sessions --help
 st conversations sessions
 st conversations read --help
@@ -220,6 +223,16 @@ st conversations timeline --help
 `conversations ls --as MAILBOX` is the same as the positional mailbox, matching `read --as`. A
 harness process with `ST_AGENT` can read, archive, send, reply, claim, and act on work only as that
 agent; a different `agent/...` actor is refused.
+
+`ls --from ACTOR` filters by sender; combine it with either `--subject TEXT` for an exact
+message subject or `--subject-prefix TEXT` for a literal prefix within that sender's messages.
+Both subject filters require `--from`: subject-only listing is out of scope because it would
+need a title index to avoid reading the whole mailbox. Both are case-sensitive and match the
+human-readable subject (`title` in JSON), not the `message/...` resource ID. They are mutually
+exclusive; `%` and `_` have no wildcard meaning. The daemon
+applies these filters before paging, including for `--archive`, `--count`, and `--json`.
+With an older daemon that ignores these query fields, the CLI filters the returned pages
+locally for the same result.
 
 Use a returned message ID for `read`/`thread` and a returned session ID for `timeline`. Inspect the
 write paths:
@@ -406,6 +419,13 @@ exit status, evidence, remediation, stable repair classes, approval token, and z
 
 Why: transport reachability and immutable-record convergence need explicit diagnostics rather than
 being mistaken for mission health.
+
+For transport preference, inspect `st fleet transports add fabric --help`.
+On an intentionally selected listening member, `st fleet transports add fabric --prefer`
+enables Fabric or moves an existing Fabric route first without changing its exposure.
+Omit `--prefer` to preserve existing transport order; see
+[automatic transport selection](replication.md#automatic-transport-selection) for
+explicit peer override precedence and the loopback-last fallback.
 
 ```sh
 st replication --help

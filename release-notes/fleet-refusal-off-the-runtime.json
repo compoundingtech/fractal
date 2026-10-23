@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A node removed from its fleet records the removal even when the refusal arrives while it publishes its endpoints, instead of its replication worker stalling",
+  "replay": {"status": "none", "detail": "No claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, index, schema-version, fleet.toml or wire change: the refusal is written to the same files, under the same lock, in the same order."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "The replication worker now waits for the fleet settings lock off its async runtime. Before, a refusal that arrived while endpoint publication held that lock could stall the worker: it printed that it stops syncing and never wrote [removed] to fleet.toml."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step. A worker that stalled this way on an earlier build records the removal at its next refusal after the upgrade restarts it."},
+  "recovery": {"status": "none", "detail": "Binary swap-back is supported; an earlier build has the stall again."}
+}

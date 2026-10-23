@@ -86,7 +86,7 @@ Codex also cannot express two of the rules the policy wants. It cannot allow the
 naming the only local socket: with networking on, any local Unix socket the seat's OS user can
 reach connects. That includes other seats' PTY and attach sockets, the ssh agent, and any local
 daemon socket. With networking off, even the named socket is refused. A control in
-`crates/st-drivers/tests/codex_managed_sandbox.rs` keeps this visible and fails the day Codex
+`crates/fractal-drivers/tests/codex_managed_sandbox.rs` keeps this visible and fails the day Codex
 learns the rule. And Codex's `domains` allowlist is not enforced by `codex sandbox`, so egress is
 not narrowed to git, gh and registries.
 
@@ -139,7 +139,7 @@ Codex's workspace profile allows reads and temporary-directory writes according 
 its built-in rules. On Linux, enabling networking also permits other Unix sockets:
 the socket entry is not a socket-only security boundary. Writes outside the workspace
 and permitted temporary roots remain restricted. The recorded Codex 0.160.1 controls
-in `crates/st-drivers/tests/fixtures/codex-managed-profile-probe.json` show workspace
+in `crates/fractal-drivers/tests/fixtures/codex-managed-profile-probe.json` show workspace
 writes and socket connection succeeding, an outside write failing with a read-only
 filesystem, and a socket connection failing with EPERM when networking is disabled.
 The fixture also retains an invalid initial probe invocation and the successful

@@ -14,21 +14,19 @@
  * are computed from these atoms, so fixture and live adapters share the same contract.
  */
 import type {
-  Agent as AgentRow,
   Attention,
   Mission,
   TerminalScreen,
   AgentCheckout,
-  UsageSummary,
   ActionResult,
   AttachmentInputEncoded,
   BlobChunk,
   BlobUpload,
   ConversationSearch,
-} from '@smalltalk/st3-client/schema'
-import type { ErrorEnvelope } from '@smalltalk/st3-client'
-import type { MessageSendInput } from '@st3/sdk/effect'
-import type { ConnectionState } from '@st3/sdk/effect'
+} from '@fractal/client/schema'
+import type { ErrorEnvelope } from '@fractal/client'
+import type { Timestamp } from '@fractal/client/schema'
+import type { ConnectionState, DecodedAgent, DecodedUsageSummary, MessageSendInput, Undecodable } from '@fractal/sdk/effect'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
 
@@ -41,9 +39,12 @@ import type { TerminalHistoryFactory } from '../terminal/historySource.ts'
 import type { TerminalInputPortFactory } from '../terminal/orderedTerminalInput.ts'
 import type { TerminalResizePort } from '../terminal/terminal-resize-port.ts'
 import type { AgentControlPort } from '../agents/agent-control-port.ts'
+import type { PromptAnswerPort } from '../conversation/alerts/prompt-answer-port.ts'
+import type { AlertActionPort } from '../conversation/alerts/alert-action-port.ts'
 import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
+import type { NativeDetailsSource } from './nativeDetailsSource.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
 /**
  * One followed projection as a feature sees it. Fixtures can produce every case (what `AllStates`
@@ -55,6 +56,10 @@ export type Feed<A> =
       readonly _tag: 'Observed'
       readonly value: A
       readonly freshness: 'live' | 'stale'
+      /** Client epoch milliseconds of the last successful getter read; retained across failed refreshes. */
+      readonly readAt?: number
+      /** Producer snapshot time, not the client's receipt or display clock. */
+      readonly snapshotCreatedAt?: Timestamp
       /** Explicitly bounded published evidence; absence makes no completeness claim. */
       readonly coverage?: { readonly _tag: 'Partial' }
       /** A newer transcript read failed; these are still the last trusted rows, not a repair. */
@@ -97,6 +102,28 @@ export type SeatLifecycle =
   | { readonly _tag: 'Bounded' }
   | { readonly _tag: 'Unknown' }
 
+/** Native child observations are not independently fileable seats and carry no activity/usage facts. */
+export interface AgentSubagent {
+  readonly id: string
+  readonly driver: string
+  readonly description?: string
+  readonly session_id?: string
+  readonly started_at?: string
+  readonly subagent_type?: string
+  readonly work_id?: string
+  readonly lease_expires_at: string
+}
+
+/** Retained native work identity; the title is optional and never synthesized from a goal. */
+export interface AgentWork {
+  readonly id: string
+  readonly missionId: string
+  readonly runId: string
+  readonly path: string
+  readonly title?: string
+  readonly state: string
+}
+
 /** One agent session as the fleet projection lists it, keyed by `ref` with its terminal ref beside it. */
 export interface Agent {
   readonly ref: string
@@ -112,7 +139,11 @@ export interface Agent {
   readonly status: string
   readonly state?: string
   readonly description?: string
-  readonly usage: Known<UsageSummary>
+  /** Known only with a recognized aggregation; dependent figures are never derived otherwise. */
+  readonly usage: Known<DecodedUsageSummary>
+  readonly incarnationId?: string
+  /** Only occupancy newer than a retained incarnation transition may claim current context. */
+  readonly contextObservedAfter?: number
   /** Requested checkout, not confirmation of a successful checkout. */
   readonly checkout: Known<AgentCheckout>
   readonly workspace: Known<string>
@@ -124,7 +155,11 @@ export interface Agent {
   readonly lastActivityAt: Known<number>
   /** Exact observed state boundary when supplied (currently suspension), not last activity. */
   readonly statusSince?: number
+  readonly subagents?: readonly AgentSubagent[]
   readonly mission?: string
+  readonly currentWork?: readonly AgentWork[]
+  /** The server's bounded upcoming window, not the complete queue. */
+  readonly upcomingWork?: readonly AgentWork[]
 }
 
 /** The fleet projection: every host the gateway knows and the agents running on them. */
@@ -132,6 +167,18 @@ export interface Fleet {
   readonly hosts: readonly Host[]
   readonly agents: readonly Agent[]
 }
+
+/**
+ * SDK decode evidence for the latest roster observation. `decodeStale`: every row in the latest
+ * frame failed to decode, so the observed rows are the retained last-good roster.
+ */
+export interface RosterDecode {
+  readonly undecodable: readonly Undecodable[]
+  readonly decodeStale: boolean
+}
+
+/** A roster whose latest frame decoded completely. */
+export const decodedRoster: RosterDecode = { undecodable: [], decodeStale: false }
 
 /** The loaded conversation window; older history is a boundary, not an available fetch operation. */
 export interface ConversationPage {
@@ -251,12 +298,18 @@ export interface DataSource {
   readonly attachments?: AttachmentPort
   /** Schema-coupled native family reads; unsupported native producers carry an explicit reason. */
   readonly subjectReads: SubjectReads
+  /** Visible Details uses shared native getter facts; no private harness decoding. */
+  readonly nativeDetails?: NativeDetailsSource
   readonly connection: Atom.Atom<ConnectionState>
   /** Browser reachability is a local signal, not a claim about the gateway's host. */
   readonly network?: Atom.Atom<NetworkReachability>
   /** One explicit reconnect attempt, bypassing the current countdown. */
   readonly reconnect?: () => void
-  readonly agents: Atom.Atom<Feed<readonly AgentRow[]>>
+  readonly agents: Atom.Atom<Feed<readonly DecodedAgent[]>>
+  /** Rows the SDK could not decode for the agents feed; absent sources decode every row. */
+  readonly rosterDecode?: Atom.Atom<RosterDecode>
+  /** Explicit recovery for a failed or ended roster follow; a healthy follow is untouched. */
+  readonly retryAgents?: () => void
   readonly missions: Atom.Atom<Feed<readonly Mission[]>>
   readonly attention: Atom.Atom<Feed<readonly Attention[]>>
   readonly proposed?: Readonly<Record<string, ProposedMissionFields>>
@@ -280,6 +333,10 @@ export interface DataSource {
   readonly documents?: DocumentPort
   /** Explicit geometry action; never tied to the browser pane dimensions. */
   readonly terminalResize?: TerminalResizePort
+  /** Answers to native harness prompts (`prompt.respond`), one submission each. */
+  readonly prompts?: PromptAnswerPort
+  /** Answers to asks and review gates (`work.done`, `review.*`), one submission each. */
+  readonly alertActions?: AlertActionPort
   /** Retained owner scrollback, with its own independently granted availability. */
   readonly terminalHistory?: TerminalHistoryFactory
   /** Ordered input sessions bound to one terminal incarnation; absent when the source cannot type. */
@@ -296,7 +353,7 @@ export interface DataSource {
   readonly sync?: {
     /** Protocol-decoded observations, not merely an open socket. */
     readonly gateway: Atom.Atom<FeedSyncObservation>
-    readonly agents: Atom.Atom<FeedSync<readonly AgentRow[]>>
+    readonly agents: Atom.Atom<FeedSync<readonly DecodedAgent[]>>
     readonly missions: Atom.Atom<FeedSync<readonly Mission[]>>
     readonly attention: Atom.Atom<FeedSync<readonly Attention[]>>
     readonly conversation: (agentRef: string) => Atom.Atom<FeedSync<ConversationPage>>
@@ -308,13 +365,16 @@ export interface DataSource {
 export const observed = <A>({
   value,
   freshness = 'live',
+  snapshotCreatedAt,
 }: {
   readonly value: A
   readonly freshness?: 'live' | 'stale'
+  readonly snapshotCreatedAt?: Timestamp
 }): Feed<A> => ({
   _tag: 'Observed',
   value,
   freshness,
+  ...(snapshotCreatedAt === undefined ? {} : { snapshotCreatedAt }),
 })
 /** The feed before the first observation arrives. */
 export const waiting: Feed<never> = { _tag: 'Waiting' }
