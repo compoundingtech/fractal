@@ -34,6 +34,16 @@ between splits; `Ctrl+T`, `Ctrl+V`, `Ctrl+X` and `Ctrl+W` open a tab, split righ
 close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens Now over the space; `Ctrl+Q` quits.
 Middle-click a tab to close it: press and release over the same tab. This uses the same
 close action as `Ctrl+W` and the tab's right-click menu.
+
+Tab prefixes identify **A**gent (including its terminal), **M**ission, and **I**nbox/alert
+cards. Agent activity follows the type: `>` working/compacting, `-` idle, `x`
+down/stopped/retired, `◆` waiting on a person/login, `!` fault, `~` starting/unknown.
+`◆N` counts open alerts for the subject (zero is quiet; `◆?` means not loaded).
+A separate `?` marks a pending question tool call, not an ordinary permission prompt.
+Mission tabs aggregate their agents' pending questions; Inbox aggregates all of them.
+Counts drop first in a narrow strip; type, activity and question markers precede the
+truncated name. Overflow markers still reach hidden tabs.
+
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
 attaches the agent's terminal. `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies

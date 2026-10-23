@@ -7,12 +7,58 @@
 //! that could drift from what is drawn.
 
 use super::glass_store::{self, Stored, StoredGlass, StoredView};
-use super::layout::{Group, Layout, Side, Tab};
+use super::layout::{Group, Layout, Side, Tab, TabKind};
 use super::*;
 use ratatui::style::Color;
 use fractal_client::{GlassBody, GlassLayout, GlassSplit, GlassTab};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::PathBuf;
+
+/// Live tab chrome. Never stored with the workspace: observations can change between frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TabBadge {
+    kind: &'static str,
+    activity: &'static str,
+    alerts: Option<usize>,
+    ask: bool,
+    needs_person: bool,
+}
+
+impl TabBadge {
+    fn width(self, title: &str) -> usize {
+        let count = match self.alerts {
+            Some(count) if count > 0 => 2 + count.ilog10() as usize + 1,
+            None if !self.kind.is_empty() => 3,
+            _ => 0,
+        };
+        let prefix = text::width(self.kind) + text::width(self.activity)
+            + if self.ask { 2 } else { 0 } + count;
+        1 + prefix + usize::from(prefix > 0) + text::width(title) + 1
+    }
+
+    fn label(self, title: &str, width: usize, counts: bool) -> String {
+        let mut label = format!(" {}{}", self.kind, self.activity);
+        if self.ask {
+            label.push_str(" ?");
+        }
+        if counts {
+            match self.alerts {
+                Some(count) if count > 0 => { let _ = write!(label, " ◆{count}"); }
+                None if !self.kind.is_empty() => label.push_str(" ◆?"),
+                _ => {}
+            }
+        } else if self.needs_person && !self.ask {
+            label.push_str(" ◆");
+        }
+        if label.len() > 1 {
+            label.push(' ');
+        }
+        label.push_str(title);
+        label.push(' ');
+        text::truncate(&label, width)
+    }
+}
 
 /// The palette's sections, in order; a digit key opens the palette at one.
 const SECTIONS: [&str; 8] = [
@@ -2289,21 +2335,22 @@ impl Ui {
             buf.set_stringn(area.x, area.y, "▌", 1, theme::fg(theme::ACCENT).bg(strip));
         }
         let mut x = area.x + 1;
-        let tabs = group.tabs.iter().map(|tab| {
+        let tabs: Vec<_> = group.tabs.iter().map(|tab| {
             let pane = Pane::parse(&tab.pane);
             let title = tab.title.clone().unwrap_or_else(|| {
                 pane.as_ref()
                     .map(|pane| self.pane_title(pane))
                     .unwrap_or_else(|| tab.pane.clone())
             });
-            let needs = pane.is_some_and(|pane| self.pane_needs_person(&pane));
-            (title, needs)
-        });
-        let labels: Vec<(String, bool)> = tabs
-            .map(|(title, needs)| {
-                let label = format!(" {}{title} ", if needs { "◆ " } else { "" });
-                (text::truncate(&label, 28), needs)
-            })
+            (title, self.tab_badge(tab, pane.as_ref()))
+        }).collect();
+        let available = area.width.saturating_sub(x - area.x);
+        let label_width = usize::from(available).min(28);
+        // Lose numeric detail before type/activity/question identity or a whole tab.
+        let counts = tabs.iter().map(|(title, badge)| badge.width(title).min(label_width) + 1)
+            .sum::<usize>() <= usize::from(available);
+        let labels: Vec<_> = tabs.iter()
+            .map(|(title, badge)| (badge.label(title, label_width, counts), badge.needs_person))
             .collect();
         let widths: Vec<u16> = labels.iter().map(|(label, _)| text::width(label) as u16).collect();
         let (first, last) = visible_tabs(&widths, group.current, area.width.saturating_sub(x - area.x));
@@ -2404,6 +2451,59 @@ impl Ui {
             Pane::Usage(None) => "Usage".into(),
             Pane::Usage(Some(id)) => format!("Usage · {}", super::usage::label(&self.world, id)),
             other => other.key(),
+        }
+    }
+
+    fn tab_badge(&self, tab: &Tab, pane: Option<&Pane>) -> TabBadge {
+        let kind = match tab.kind() {
+            TabKind::Agent => "A",
+            TabKind::Mission => "M",
+            TabKind::Inbox => "I",
+            TabKind::Other => return TabBadge::default(),
+        };
+        let agent = match pane {
+            Some(Pane::Agent(Some(id)) | Pane::Terminal(id)) => Some(id.as_str()),
+            _ => None,
+        };
+        let mission = match pane {
+            Some(Pane::Mission(Some(id)) | Pane::Declaration(Some(id))) => Some(id.as_str()),
+            _ => None,
+        };
+        let includes = |item: &Attention| match pane {
+            Some(Pane::List(0)) => true,
+            Some(Pane::Home(id)) => id.as_deref() == Some(item.id.as_str()),
+            _ => agent.is_some_and(|id| item.is_in(id))
+                || mission.is_some_and(|id| item.mission.as_deref() == Some(id)),
+        };
+        let alerts = self.world.attention.ready().map(|items| {
+            items.iter().filter(|item| item.is_alert() && includes(item)).count()
+        });
+        let ask = self.world.pending_calls.iter().any(|(id, calls)| {
+            let in_scope = match pane {
+                Some(Pane::List(0)) => true,
+                _ => agent == Some(id.as_str())
+                    || mission.is_some_and(|mission| self.world.agents.items().iter()
+                        .any(|a| a.id == *id && a.mission.as_deref() == Some(mission)))
+                    || self.world.attention.items().iter()
+                        .any(|item| includes(item) && item.is_in(id)),
+            };
+            in_scope && calls.iter().any(|call| {
+                matches!(call.tool.as_str(), "AskUserQuestion" | "request_user_input")
+            })
+        });
+        let activity = agent.and_then(|id| self.world.agents.items().iter().find(|a| a.id == id))
+            .map_or(if tab.kind() == TabKind::Agent { "~" } else { "" }, |agent| match agent.state {
+                AgentState::Working | AgentState::Compacting => ">",
+                AgentState::Idle => "-",
+                AgentState::Down | AgentState::Stopped | AgentState::Retired => "x",
+                AgentState::NeedsYou | AgentState::NeedsLogin => "◆",
+                AgentState::Fault => "!",
+                AgentState::Starting | AgentState::Unknown => "~",
+            });
+        TabBadge {
+            kind, activity, alerts, ask,
+            needs_person: ask || alerts.is_some_and(|count| count > 0)
+                || pane.is_some_and(|pane| self.pane_needs_person(pane)),
         }
     }
 
@@ -4430,6 +4530,82 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn tab_badge_strip(ui: &Ui, width: u16) -> String {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buffer = Buffer::empty(area);
+        ui.tab_strip(&mut buffer, area, ui.glasses.glass(), 0);
+        (0..width).map(|x| buffer[(x, 0)].symbol()).collect::<String>()
+            .split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn tab_badge_world() -> Ui {
+        let mut ui = glass();
+        let template = ui.world.agents.items()[0].clone();
+        let mut agents = Vec::new();
+        for (id, state) in [("agent/a", AgentState::Working), ("agent/b", AgentState::Idle), ("agent/c", AgentState::Stopped)] {
+            let mut agent = template.clone();
+            agent.id = id.into();
+            agent.state = state;
+            agent.mission = (id == "agent/a").then(|| "mission/m".into());
+            agents.push(agent);
+        }
+        ui.world.agents = Load::Ready(agents);
+        let mut alert = ui.world.attention.items()[0].clone();
+        alert.id = "attention/a".into();
+        alert.agent = Some("agent/a".into());
+        alert.conversations = vec!["agent/a".into()];
+        alert.mission = Some("mission/m".into());
+        let mut second = alert.clone();
+        second.id = "attention/b".into();
+        let mut update = alert.clone();
+        update.id = "attention/update".into();
+        update.kind = AttentionKind::Message { from: "agent/a".into(), body: "informational".into() };
+        ui.world.attention = Load::Ready(vec![alert, second, update]);
+        ui.world.pending_calls.insert("agent/a".into(), vec![PendingCall {
+            id: "call/question".into(), tool: "AskUserQuestion".into(), input: serde_json::json!({}),
+        }]);
+        ui.glasses.glass_mut().layout = Layout::Group(Group {
+            tabs: [
+                ("agent:agent/a", "Atlas"), ("agent:agent/b", "Idle"),
+                ("agent:agent/c", "Stopped"), ("mission:mission/m", "Mission"),
+                ("list:home", "Inbox"),
+            ].into_iter().map(|(pane, title)| Tab { pane: pane.into(), title: Some(title.into()) }).collect(),
+            current: 0,
+        });
+        ui
+    }
+
+    #[test]
+    fn tab_badge_strip_snapshot_shows_kind_activity_counts_and_pending_ask() {
+        let ui = tab_badge_world();
+        assert_eq!(tab_badge_strip(&ui, 120),
+            "A> ? ◆2 Atlas A- Idle Ax Stopped M ? ◆2 Mission I ? ◆2 Inbox +");
+    }
+
+    #[test]
+    fn tab_badge_narrow_strip_drops_counts_before_type_and_question() {
+        let ui = tab_badge_world();
+        let shown = tab_badge_strip(&ui, 18);
+        assert!(shown.starts_with("A> ?"), "{shown}");
+        assert!(!shown.contains("◆2"), "{shown}");
+        assert!(shown.contains('›'), "hidden tabs remain reachable: {shown}");
+    }
+
+    #[test]
+    fn tab_badge_live_updates_clear_questions_and_preserve_unknown_counts() {
+        let mut ui = tab_badge_world();
+        ui.world.pending_calls.clear();
+        ui.world.attention = Load::Ready(Vec::new());
+        let tab = Tab::pane("agent:agent/a");
+        let pane = Pane::parse(&tab.pane);
+        let badge = ui.tab_badge(&tab, pane.as_ref());
+        assert_eq!(badge.alerts, Some(0));
+        assert!(!badge.ask);
+        assert_eq!(badge.label("Atlas", 28, true), " A> Atlas ");
+        ui.world.attention = Load::Loading;
+        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).label("Atlas", 28, true), " A> ◆? Atlas ");
     }
 
     /// The focused group, the tab it shows (Home is group 0's 0), and every group's pane keys.
