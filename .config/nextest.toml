@@ -169,6 +169,6 @@ retries = 0
 # SLO source controls retain the first adverse result. Measurement cases run in
 # nextest's isolated per-test process and print actual tuples on success.
 [[profile.ci.overrides]]
-filter = 'package(=st3) and test(/^store::slo_breaches::tests::/)'
+filter = '(package(=fractal-store) and test(/^store::slo_breaches::tests::/)) or (package(=fractal-reconcile) and test(/^reconcile::tests::slo_breach_flow_tests::/))'
 retries = 0
 success-output = "immediate"
