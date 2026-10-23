@@ -2337,6 +2337,7 @@ dependencies = [
  "fractal-secrets",
  "fractal-telemetry",
  "fractal-terminal-direct",
+ "fractal-tiles-registry",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -2459,6 +2460,15 @@ dependencies = [
  "smallclaims",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "fractal-tiles-registry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
