@@ -14,7 +14,7 @@
     "remote_mode": "online-thin-client"
   },
   "streams": [
-    { "id": "collections.stream", "method": "GET", "path": "/v1/client/collections/stream", "websocket_protocol": "st3.client.collections.v0", "command": "CollectionCommand", "frame": "CollectionFrame", "max_subscriptions": 8 }
+    { "id": "collections.stream", "method": "GET", "path": "/v1/client/collections/stream", "websocket_protocol": "fractal.client.collections.v0", "command": "CollectionCommand", "frame": "CollectionFrame", "max_subscriptions": 8 }
   ],
   "reads": [
     {"id": "notes.list", "method": "GET", "path": "/v1/client/notes", "response": "DirectiveNotes", "scope": "read.projections", "query": {"actor": "optional exact authenticated person or agent; cannot select another actor"}},
@@ -109,8 +109,8 @@
     { "id": "assistant.grant.revoke", "method": "POST", "path": "/v1/client/assistant/grants/{id}/revoke", "response": "AssistantGrant", "local_only": true, "actor": "daemon-configured-owner", "capability": "assistant.grants.v1" },
     { "id": "assistant.grant.policy", "method": "POST", "path": "/v1/client/assistant/grants/{id}/policy", "request": "AssistantGrantPolicy", "response": "AssistantGrant", "local_only": true, "actor": "daemon-configured-owner", "capability": "assistant.grants.v1" },
     { "id": "assistant.grant.read-trust", "method": "POST", "path": "/v1/client/assistant/grants/{id}/read-trust", "request": "AssistantReadTrustRequest", "response": "AssistantGrant", "local_only": true, "actor": "daemon-configured-owner", "capability": "assistant.grants.v1", "increments_policy_revision": true },
-    { "id": "terminal.stream", "method": "GET", "path": "/v1/client/terminals/{id}/stream", "response": "TerminalScreen", "websocket_protocol": "st3.client.terminal.v0" },
-    { "id": "conversation.stream", "method": "GET", "path": "/v1/client/conversations/{id}/stream", "response": "ConversationChanges", "websocket_protocol": "st3.client.conversation.v0" },
+    { "id": "terminal.stream", "method": "GET", "path": "/v1/client/terminals/{id}/stream", "response": "TerminalScreen", "websocket_protocol": "fractal.client.terminal.v0" },
+    { "id": "conversation.stream", "method": "GET", "path": "/v1/client/conversations/{id}/stream", "response": "ConversationChanges", "websocket_protocol": "fractal.client.conversation.v0" },
     {"id": "glasses.put", "method": "PUT", "path": "/v1/client/glasses/{id}", "request": "GlassPut", "response": "Glass", "scope": "control.glasses", "idempotency_header": "Idempotency-Key"},
     {"id": "glasses.delete", "method": "DELETE", "path": "/v1/client/glasses/{id}", "request": "GlassDelete", "response": "Glass", "scope": "control.glasses", "idempotency_header": "Idempotency-Key"}
   ],
