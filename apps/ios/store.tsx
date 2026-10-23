@@ -288,7 +288,7 @@ function useAppStore(proof?: FabricProfile) {
   // faster than every thirty seconds: a retry that failed waits for the next measurement to ask again.
   const reporting = useRef<{ busy: boolean; last: number; send: () => void }>({ busy: false, last: 0, send: () => {} });
   // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — literal lookups are required by Expo.
-  const client = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  const client = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
   const pushRef = useRef<PushRegistrationLifecycle | null>(null);
   if (!pushRef.current) pushRef.current = new PushRegistrationLifecycle(nativePushPorts({
     readEnabled: async () => (await AsyncStorage.getItem(PUSH_KEY)) === '1',
@@ -310,7 +310,7 @@ function useAppStore(proof?: FabricProfile) {
     const remotes = new Map<string, PushRemote | undefined>();
     const remoteFor = (baseUrl: string, bearer: string): PushRemote => {
       // Capture each issuer's own credential, never a mutable selected-route credential.
-      const remote = (signal: AbortSignal) => new FractalClient({ baseUrl, credential: () => bearer, fetchImpl: gatewayFetch((input, init) => fetch(input, { ...init, signal })), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
+      const remote = (signal: AbortSignal) => new FractalClient({ baseUrl, credential: () => bearer, fetchImpl: gatewayFetch((input, init) => fetch(input, { ...init, signal })), client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
       return {
         register: request => pushWrite(async signal => (await remote(signal).pushRegister(request)).value),
         unregister: () => pushWrite(async signal => (await remote(signal).pushUnregister()).value),
@@ -367,7 +367,7 @@ function useAppStore(proof?: FabricProfile) {
     return () => { if (observations.ready === state.send) observations.ready = undefined; };
   }, [proof, client, observations]);
   // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  const uploader = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  const uploader = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
 
   // Settings: read once. A build that carries a fabric target (EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT, set in an
   // ignored env file on the build host) opens on fabric until the person chooses otherwise.
@@ -705,7 +705,7 @@ function useAppStore(proof?: FabricProfile) {
     try {
       if (old && !await push.forgetIssuer(profileKey)) throw new Error('Notification cleanup is incomplete. Reconnect to the paired member before replacing its pairing.');
       // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-      const gatewayClient = new FractalClient({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
+      const gatewayClient = new FractalClient({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
       const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage });
       consumed = true; deviceId = result.value.device_id;
       if (result.value.kind !== 'paired-session') throw new Error('A phone profile cannot enroll an external assistant.');
@@ -970,7 +970,7 @@ function useAppStore(proof?: FabricProfile) {
       const answer = (await client.messageBodyGet(message)).value;
       return { text: answer.text, complete: answer.complete };
     },
-    /** Send Small Talk to an agent, as stui does: fenced to a fresh snapshot, once more if it moved. */
+    /** Send Fractal to an agent, as stui does: fenced to a fresh snapshot, once more if it moved. */
     async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<Sent> {
       if (!client || !uploader) return { how: 'failed', error: 'not connected' };
       if (status !== 'online' || (proof && !proof.ready)) return { how: 'failed', error: 'offline' };
