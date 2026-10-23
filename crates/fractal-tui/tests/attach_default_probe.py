@@ -15,7 +15,7 @@ Cases, each one stui:
   no-terminal    an agent without a terminal opens its conversation, with no error
   alert          an alert arriving while attached shows on top of the terminal; typed keys
                  still reach the program; a click shows it, a click answers it, and its "open
-                 in Now" opens Home, which Ctrl+H closes onto the terminal
+                 in Inbox" opens a tab, which Ctrl+W closes onto the terminal
   reconnect      cutting the link shows "reconnecting" with its reason and the key to the
                  conversation; tries back off while the link is refused; the terminal comes
                  back by itself; Ctrl+\\ reaches the conversation while it is down
@@ -316,16 +316,17 @@ def case_alert(stui):
     wait_for(stui.status, lambda status: status["answered"] == ["ask/probe=Yes"], "answer sent")
     time.sleep(0.2)
     assert bytes(stui.wire_input[start:]) == b"", f"clicks reached the program: {bytes(stui.wire_input[start:])!r}"
-    # Opening it works while attached: "open in Now" opens Home over the space, where Ctrl+H
-    # closes it again onto the terminal. (While the terminal has the keys Ctrl+H is the
-    # program's, a backspace to many; Home is this click, or Ctrl+K, away.)
+    # Opening it works while attached: "open in Inbox" opens a regular tab; Ctrl+W closes it
+    # and returns focus to the still-attached terminal. Ctrl+H refocuses Inbox, not a toggle.
     status = stui.status()
-    now = next(alert["rect"] for alert in status["alerts"] if alert["tap"] == "Open")
-    stui.click(now)
-    wait_for(stui.status, lambda status: status["home"] and not status["focused"], "Home opened")
+    inbox = next(alert["rect"] for alert in status["alerts"] if alert["tap"] == "Open")
+    stui.click(inbox)
+    wait_for(stui.status, lambda status: status["pane"] == "list:home" and not status["focused"], "Inbox tab opened")
     stui.send(b"\x1b[104;5u")  # Ctrl+H as a kitty-keyboard terminal sends it
-    wait_for(stui.status, lambda status: not status["home"] and status["focused"], "back on the terminal")
-    print("alert: shown on top of the attached terminal; keys reach the program; clicks show, answer and open it in Now")
+    wait_for(stui.status, lambda status: status["pane"] == "list:home" and not status["home"], "Inbox tab refocused")
+    stui.send(b"\x1b[119;5u")  # Ctrl+W closes the Inbox tab
+    wait_for(stui.status, lambda status: status["pane"] != "list:home" and status["focused"], "back on the terminal")
+    print("alert: shown on top of the attached terminal; keys reach the program; clicks show, answer and open it in Inbox")
 
 
 def case_reconnect(stui):

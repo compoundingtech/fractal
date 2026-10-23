@@ -263,7 +263,7 @@ not billed cost or a claim of lower wall time. Cold seeds and evicted entries st
 downloads. A valid warm archive supplies the entire shell without the public NAR fetch that failed
 in run 38922273766/job 117046015044.
 
-The [original trial measurements](https://github.com/compoundingtech/smalltalk/pull/849#issuecomment-5936374396)
+The [original trial measurements](https://github.com/compoundingtech/fractal/pull/849#issuecomment-5936374396)
 recorded a warm run of 6m59s with this design, versus 8m49s to 9m30s with only the Cargo cache.
 That trial excluded the messaging matrix; current CI includes it. Caching the entire Nix store
 instead took 90–105 seconds to restore 4.4 GB, which cost more than it saved. The selected
@@ -818,7 +818,7 @@ fall back to an older success; duplicate attempts, future attempts, mixed heads,
 mixed runs and missing shards fail closed. A new head/run cannot reuse old receipts.
 
 Storybook builds once per shard rather than introducing a third, serialized build job
-and transferring the full static asset tree. In [the #2901 baseline web job](https://github.com/compoundingtech/smalltalk/actions/runs/38651083493/job/116150585943),
+and transferring the full static asset tree. In [the #2901 baseline web job](https://github.com/compoundingtech/fractal/actions/runs/38651083493/job/116150585943),
 Storybook took 9.878 seconds (0.165 runner-minutes); runner initialization through the
 frozen install took 142.457 seconds (2.374 runner-minutes). Duplicating the small build
 is cheaper than another similarly prepared build job, even before artifact transfer.
@@ -1155,7 +1155,7 @@ all came from the slower ones.
 At those rates the run also sees reads refused while a published list is withdrawn: a retryable 503
 "still being prepared", or a window's resync before its first snapshot. The store keeps serving
 each list while it projects a replication backlog in chunks and refolds it once the backlog is in
-([#3553](https://github.com/compoundingtech/smalltalk/issues/3553)), so none is expected. The
+([#3553](https://github.com/compoundingtech/fractal/issues/3553)), so none is expected. The
 report keeps them apart from failed requests, under `unavailable` with the seconds they spanned,
 the step summary shows them, and any fails the run (`AVAILABILITY_GATED`).
 Generated usage history contains cumulative response rollups for long-lived standing sessions
@@ -1444,7 +1444,7 @@ never reports fails its entry after 60 minutes. Repository settings enable nativ
 branch deletion after merge. Check the live settings against the file with `gh-check-settings`:
 
 ```sh
-nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/smalltalk --file .github/repo-settings.json
+nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/fractal --file .github/repo-settings.json
 ```
 
 A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no deletion, no update and
@@ -1457,12 +1457,12 @@ as drifted during that window.
 pull request has merged through the queue.
 
 To roll back, restore the previous ruleset (the JSON is in the body of pull request #916) with
-`gh api --method PUT repos/compoundingtech/smalltalk/rulesets/20563764 --input old-main-ruleset.json`,
+`gh api --method PUT repos/compoundingtech/fractal/rulesets/20563764 --input old-main-ruleset.json`,
 then start the train again with `st missions start` on its mission.
 
 ## Measured concurrency
 
-The [manual capacity run](https://github.com/compoundingtech/smalltalk/actions/runs/36931429222)
+The [manual capacity run](https://github.com/compoundingtech/fractal/actions/runs/36931429222)
 on 2026-10-01 recorded the workspace limits with `nsc workspace concurrency --output json`:
 
 | Platform | Concurrent vCPUs | Concurrent memory |
@@ -1487,13 +1487,13 @@ runs executing 19 Namespace jobs together. Including the manual capacity run, th
 eight runs and 24 jobs. These are observed overlaps of runs at different stages, rather than
 eight fully parallel Workspace CI groups. The runs were:
 
-- main: [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36930646852)
-  and [macOS CI](https://github.com/compoundingtech/smalltalk/actions/runs/36930646948) for one commit,
-  with [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931186016)
-  and [macOS CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931186029) for the next;
-- merge group: [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36930644645);
-- PRs: [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931199367)
-  and [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931346163).
+- main: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36930646852)
+  and [macOS CI](https://github.com/compoundingtech/fractal/actions/runs/36930646948) for one commit,
+  with [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931186016)
+  and [macOS CI](https://github.com/compoundingtech/fractal/actions/runs/36931186029) for the next;
+- merge group: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36930644645);
+- PRs: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931199367)
+  and [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931346163).
 
 The initial jobs in 13 observed CI runs created from 21:30 UTC had a median startup delay of
 18 seconds, a 95th percentile of 187 seconds (nearest rank) and a maximum of 305 seconds (57 jobs). Startup
@@ -1543,7 +1543,7 @@ job stayed `queued` with no runner (13 minutes and counting). A plain `gh run ca
 to it. Recover with the force-cancel endpoint and a rerun:
 
 ```sh
-gh api --method POST repos/compoundingtech/smalltalk/actions/runs/RUN_ID/force-cancel
+gh api --method POST repos/compoundingtech/fractal/actions/runs/RUN_ID/force-cancel
 gh run rerun RUN_ID
 ```
 

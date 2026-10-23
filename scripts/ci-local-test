@@ -70,7 +70,8 @@ class CiLocal(unittest.TestCase):
         return done, calls
 
     def test_the_stages_run_in_a_home_of_their_own_without_the_account_s_variables(self):
-        done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2')
+        done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2',
+                                     RUSTC_WRAPPER='/nix/store/x-sccache/bin/sccache', CARGO_BUILD_RUSTC_WRAPPER='sccache')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([call['argv'] for call in calls],
                          [['build', '--locked', '-p', 'fractal-drivers', '--bin', 'ci-hooks-install'], [], ['mail-redelivery-canaries']])
@@ -85,6 +86,9 @@ class CiLocal(unittest.TestCase):
             self.assertTrue(str(scratch).startswith(f'{self.home}/.cache/ci-local/run.'), scratch)
             self.assertEqual(env['TMPDIR'], str(scratch.parent / 'tmp'))
             self.assertNotIn('LD_PRELOAD', env)  # a host's preloaded allocator: CI preloads nothing
+            # no compiler cache server: one started here would keep this run's HOME and TMPDIR, removed at exit, for every build
+            self.assertNotIn('RUSTC_WRAPPER', env)
+            self.assertNotIn('CARGO_BUILD_RUSTC_WRAPPER', env)
             for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
                          'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST3_OTELITE_BIN'):
                 self.assertNotIn(name, env)

@@ -803,10 +803,11 @@ pub fn run(context: Context) -> Result<()> {
                                 timing.seen = card.state != "resolved";
                             }
                         }
-                        answers.retain(|_, timing| {
-                            if !timing.seen { timing.gone = true; }
+                        answers.retain(|id, timing| {
+                            timing.gone = !timing.seen;
                             if let Some(at) = timing.landed() {
                                 landed_answers.push(at);
+                                ui.finish_answer(id, true);
                                 false
                             } else {
                                 true
@@ -1166,11 +1167,13 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Notice(notice) => ui.flash(notice),
                 Fetched::AlertOutcome(id, accepted) => {
                     if !accepted {
+                        ui.finish_answer(&id, false);
                         answers.remove(&id);
                     } else if let Some(timing) = answers.get_mut(&id) {
                         timing.accepted = true;
                         if let Some(at) = timing.landed() {
                             landed_answers.push(at);
+                            ui.finish_answer(&id, true);
                             answers.remove(&id);
                         }
                     }
@@ -1673,14 +1676,14 @@ pub fn run(context: Context) -> Result<()> {
                 });
                 continue;
             }
+            ui.note_acted(&effect);
             if let Effect::Attention { id, .. } = &effect {
-                if answers.len() < 256 || answers.contains_key(id) {
+                if answers.len() < 256 || answers.contains_key(id) || ui.pending_answers.contains_key(id) {
                     answers.insert(id.clone(), AnswerTiming::new(Instant::now()));
                 } else {
                     super::slo::METRICS.add("measurement_overflow", 1);
                 }
             }
-            ui.note_acted(&effect);
             match effect {
                 Effect::LoadContent(key) => {
                     content_reads.enqueue(key);
@@ -1989,6 +1992,7 @@ pub fn run(context: Context) -> Result<()> {
                 Effect::Attention { id, .. } => Some(id.clone()),
                 _ => None,
             };
+            let optimistic_answer = alert.as_ref().is_some_and(|id| ui.pending_answers.contains_key(id));
             let shell = matches!(effect, Effect::CreateTerminal { .. });
             let client = client.clone();
             let tx = fetched_tx.clone();
@@ -2025,7 +2029,12 @@ pub fn run(context: Context) -> Result<()> {
                     // handled (`Fetched::Sent`).
                     Err(_) if sends_message => {}
                     Err(error) => {
-                        let _ = tx.send(Fetched::Notice(format!("Not done: {}", plain(&error))));
+                        let notice = if optimistic_answer {
+                            format!("Could not confirm answer: {} · request restored; check before sending again", plain(&error))
+                        } else {
+                            format!("Not done: {}", plain(&error))
+                        };
+                        let _ = tx.send(Fetched::Notice(notice));
                     }
                 }
             });
@@ -3132,7 +3141,7 @@ async fn perform(
                 )
                 .await?;
             Ok((
-                "Launch created; the planner's proposal will appear in Now".into(),
+                "Launch created; the planner's proposal will appear in Inbox".into(),
                 None,
             ))
         }
@@ -4076,6 +4085,7 @@ mod tests {
 
     #[test]
     fn no_initial_subject_preserves_the_restored_space() {
+        use super::super::pane::Pane;
         let mut ui = Ui::new(super::super::demo::world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
@@ -4083,7 +4093,8 @@ mod tests {
         let before = ui.focus();
         focus_initial_subject(&mut ui, &mut None, true, true);
         assert_eq!(ui.focus(), before);
-        assert!(ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert!(!ui.home_open(), "Inbox is a restored tab, not a modal");
     }
 
     fn refusal(code: fractal_client::ErrorCode, retryable: bool) -> anyhow::Error {

@@ -794,16 +794,32 @@ def read_lanes(repo, commit):
         raise Failure('error', f'no readable lane file at {commit}:{LANES_PATH}')
 
 
-def lane_for(repo, tree, lanes, check):
-    """The lane check of `check` for the verified tree, from (lane file text, accepted base commit); None without a lane file."""
+def lane_for(repo, tree, lanes, check, lane_base=None):
+    """The lane check of `check` for the verified tree, from (lane file text, accepted base commit); None without a lane file.
+
+    `lane_base` (the pull request's branch point) holds the tree to the lane's definition at that commit instead of the base's: a
+    branch that is only behind main, and changes none of the lane's files itself, is not a lane edit, and its note carries the
+    branch point's digest. The branch point must be an ancestor of the base (a definition main accepted) and the lane file itself
+    must be the same blob at both, so the argv and the paths are the base's either way."""
     if lanes is None:
         return None
     text, base = lanes
-    base_tree = git(repo, 'rev-parse', '--verify', '--end-of-options', base + '^{tree}').decode().strip()
+    definition_base = base
+    if lane_base is not None:
+        if not OID.match(lane_base):
+            raise Failure('error', 'the lane base must be a full lowercase commit ID')
+        code, _ = no_lazy(repo, 'merge-base', '--is-ancestor', lane_base, base)
+        if code != 0:
+            raise Failure('error', f'the lane base {lane_base[:12]} is not an ancestor of the accepted base')
+        here, there = (no_lazy(repo, 'rev-parse', '--verify', '-q', f'{commit}:{LANES_PATH}') for commit in (lane_base, base))
+        if here[0] != 0 or here != there:
+            raise Failure('definition_changed', f'{LANES_PATH} differs between the branch point and the accepted base')
+        definition_base = lane_base
+    base_tree = git(repo, 'rev-parse', '--verify', '--end-of-options', definition_base + '^{tree}').decode().strip()
     return lane_definition(repo, base_tree, tree, lane_rules(text, check))
 
 
-def require_all(repo, tree, keys, policy_text, repository, lane_file=None):
+def require_all(repo, tree, keys, policy_text, repository, lane_file=None, lane_base=None):
     """Every check whose policy says `require` (shadow or reject), judged by the same rules as a single check.
 
     One entry per such check with its own reason, so a missing lane is named, not folded into one boolean. The overall
@@ -824,7 +840,7 @@ def require_all(repo, tree, keys, policy_text, repository, lane_file=None):
             continue
         try:
             # A broken lane file or a missing definition path is a verifier error (it propagates); only a check without a lane entry is a lane refusal.
-            definition = lane_for(repo, tree, lane_file, check)
+            definition = lane_for(repo, tree, lane_file, check, lane_base)
         except Failure as failure:
             if failure.reason != 'no_lane':
                 raise
@@ -905,6 +921,9 @@ def main(argv):
     parser.add_argument('--lanes-from', metavar='COMMIT',
                         help=f'also hold the check to its lane definition in {LANES_PATH} at this accepted base: the lane\'s script blobs must be '
                              'identical in the verified tree and the base (definition_changed) and the note must carry the base\'s digest (wrong_definition)')
+    parser.add_argument('--lane-base', metavar='COMMIT',
+                        help='hold the lane to its definition at this commit (a pull request\'s branch point, an ancestor of the base with the '
+                             'same lane file) instead of at the base: a tree that only lags main is not a lane edit')
     parser.add_argument('--require-all', action='store_true',
                         help='judge every check whose policy says `require` (needs --policy-from, --repository and keys); '
                              'exit 1 only when a check in mode reject is not satisfied, exit 2 (decision error) when it could not decide')
@@ -975,6 +994,9 @@ def main(argv):
     elif args.repository is not None:
         print('--repository is only used with --policy-from', file=sys.stderr)
         return 2
+    if args.lane_base is not None and not (args.lanes_from or args.policy_from):
+        print('--lane-base is only used with --lanes-from or --policy-from', file=sys.stderr)
+        return 2
     if args.max_age is not None and args.max_age <= 0:
         print('--max-age must be a positive number of seconds', file=sys.stderr)
         return 2
@@ -1024,7 +1046,8 @@ def main(argv):
                 raise Failure('error', f'key list {args.keys} not found')
         if args.require_all:
             lane_file = (read_lanes(args.repo, args.lanes_from), args.lanes_from) if args.lanes_from else None
-            result = require_all(args.repo, tree, keys, read_policy(args.repo, args.policy_from), args.repository, lane_file)
+            result = require_all(args.repo, tree, keys, read_policy(args.repo, args.policy_from), args.repository, lane_file,
+                                 args.lane_base)
             print(json.dumps(result, indent=2))
             return 1 if result['decision'] == 'reject' else 0
         rules = None
@@ -1052,8 +1075,9 @@ def main(argv):
         # A level held to its lane (by_level lane: true) is judged against the lane file of the same base as the policy.
         policy_base = args.policy_from
         result = verify(args.repo, tree, args.check, keys, command, kinds, bind, args.max_age, args.runner_prefix,
-                        trust_levels, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check),
-                        level_lane=(lambda: lane_for(args.repo, tree, (read_lanes(args.repo, policy_base), policy_base), args.check))
+                        trust_levels, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check, args.lane_base),
+                        level_lane=(lambda: lane_for(args.repo, tree, (read_lanes(args.repo, policy_base), policy_base), args.check,
+                                                     args.lane_base))
                         if policy_base else None, log_keys=log_keys, run_inputs=run_inputs)
         print(json.dumps(result, indent=2))
         return 0
