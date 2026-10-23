@@ -535,3 +535,115 @@ fn preparation_rebuild_subject_discovery_searches_indexes_without_scanning_claim
         "{plan:?}");
     assert!(!plan.iter().any(|step| step.starts_with("SCAN claims")), "{plan:?}");
 }
+
+fn pending_query_fixture(claims: usize) -> Connection {
+    // Only the canonical reader's columns are needed. Keep orphan rows possible, as in
+    // historical stores; public admission would reject several of these fixtures.
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch(
+        "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
+         CREATE TABLE claims(store_index INTEGER PRIMARY KEY, id TEXT UNIQUE,
+             batch_id TEXT, subject TEXT, accepted_at_unix_ms TEXT);
+         CREATE INDEX claims_batch_index ON claims(batch_id,store_index);
+         CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY,position INTEGER) WITHOUT ROWID;
+         CREATE TABLE replica_records(claim_id TEXT,position INTEGER);
+         CREATE INDEX replica_claim_index ON replica_records(claim_id,position);
+         CREATE TABLE local_resource_preparation_pending(claim_id TEXT PRIMARY KEY) WITHOUT ROWID;
+         INSERT INTO batches VALUES('batch/a','node/a',2),('batch/b','node/b',1),('edge','node/a',2);",
+    ).unwrap();
+    connection.execute(
+        "WITH RECURSIVE seq(i) AS(VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<?1)
+         INSERT INTO claims SELECT i,printf('claim/%07d',i),
+             CASE WHEN i<=20 THEN 'edge' WHEN i%2=0 THEN 'batch/b' ELSE 'batch/a' END,
+             printf('subject/%d',i%13),CASE WHEN i<=20 THEN '1000' ELSE CAST(1000+i%3 AS TEXT) END FROM seq",
+        [i64::try_from(claims).unwrap()],
+    ).unwrap();
+    connection.execute_batch(
+        "INSERT INTO claim_positions SELECT id,store_index FROM claims WHERE store_index>20;
+         INSERT INTO claim_positions VALUES('claim/0000001',9),('claim/0000002',9),
+             ('claim/0000003',0),('claim/0000004',-1),('claim/0000005',9223372036854775807);
+         INSERT INTO replica_records VALUES('claim/0000001',2),('claim/0000006',8),('claim/0000006',3);
+         UPDATE claims SET batch_id='absent-batch' WHERE store_index=20;
+         UPDATE claims SET accepted_at_unix_ms='x' WHERE store_index=18;
+         UPDATE claims SET accepted_at_unix_ms='01' WHERE store_index=19;",
+    ).unwrap();
+    connection
+}
+
+fn old_pending_query() -> String {
+    format!(
+        "SELECT claims.id,claims.subject FROM claims JOIN batches ON batches.id=claims.batch_id
+         JOIN local_resource_preparation_pending pending ON pending.claim_id=claims.id
+         ORDER BY {CANONICAL_ORDER}"
+    )
+}
+
+fn pending_query_result(connection: &Connection, sql: &str) -> (Vec<(String, String)>, i32) {
+    let mut statement = connection.prepare(sql).unwrap();
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    (rows, statement.get_status(rusqlite::StatementStatus::VmStep))
+}
+
+#[test]
+fn preparation_empty_pending_does_not_scan_claims() {
+    for claims in [1_000, 100_000] {
+        let connection = pending_query_fixture(claims);
+        for analyze in [false, true] {
+            if analyze { connection.execute_batch("ANALYZE").unwrap(); }
+            let (rows, steps) = pending_query_result(&connection, &PENDING_QUERY);
+            assert!(rows.is_empty());
+            assert!(steps < 100, "{claims} claims, analyzed={analyze}: {steps} VM steps");
+        }
+    }
+}
+
+#[test]
+fn preparation_pending_query_preserves_canonical_order() {
+    let connection = pending_query_fixture(1_000);
+    let mut fixtures: Vec<Vec<String>> = [0, 1, 5, 500].into_iter()
+        .map(|pending| ((1_001-pending)..=1_000).map(|i| format!("claim/{i:07}")).collect())
+        .collect();
+    fixtures.push(vec!["missing-claim".into()]);
+    fixtures.push(vec!["claim/0000020".into()]);
+    let mut legacy: Vec<_> = (1..=20).map(|i| format!("claim/{i:07}")).collect();
+    legacy.push("missing-claim".into());
+    fixtures.push(legacy);
+    for analyze in [false, true] {
+        if analyze { connection.execute_batch("ANALYZE").unwrap(); }
+        for (fixture, ids) in fixtures.iter().enumerate() {
+            connection.execute("DELETE FROM local_resource_preparation_pending", []).unwrap();
+            for id in ids.iter().rev() {
+                connection.execute("INSERT INTO local_resource_preparation_pending VALUES(?1)", [id]).unwrap();
+            }
+            let actual = pending_query_result(&connection, &PENDING_QUERY).0;
+            assert_eq!(actual, pending_query_result(&connection, &old_pending_query()).0,
+                "fixture={fixture}, analyzed={analyze}");
+            if fixture == 4 || fixture == 5 { assert!(actual.is_empty()); }
+            if fixture == 6 {
+                let position = |id: &str| actual.iter().position(|row| row.0 == id).unwrap();
+                assert!(position("claim/0000001") < position("claim/0000002"));
+                assert!(!actual.iter().any(|row| row.0 == "claim/0000020"));
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual 100k-claim before/after timing; run with --ignored --nocapture"]
+fn preparation_pending_query_benchmark() {
+    let connection = pending_query_fixture(100_000);
+    for pending in [0, 1, 5, 500] {
+        connection.execute("DELETE FROM local_resource_preparation_pending", []).unwrap();
+        connection.execute(
+            "INSERT INTO local_resource_preparation_pending SELECT id FROM claims WHERE store_index>100000-?1",
+            [pending],
+        ).unwrap();
+        for (name, sql) in [("before", old_pending_query()), ("after", PENDING_QUERY.to_string())] {
+            let start = std::time::Instant::now();
+            let (rows, steps) = pending_query_result(&connection, &sql);
+            eprintln!("{name}: claims=100000 pending={pending} rows={} vm_steps={steps} elapsed={:?}",
+                rows.len(), start.elapsed());
+        }
+    }
+}

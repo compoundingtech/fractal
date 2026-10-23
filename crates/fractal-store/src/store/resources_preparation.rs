@@ -4,6 +4,14 @@ use super::*;
 const PREPARATION_VERSION: &str = "1";
 const RELEVANT: &str = "(substr(claims.subject,1,9)='resource/' OR claims.kind='resource.observed'
     OR EXISTS (SELECT 1 FROM local_resource_preparation state WHERE state.subject=claims.subject))";
+
+// CROSS JOIN fixes the loop order even with STAT4: an empty queue must never scan claims.
+static PENDING_QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
+    "SELECT claims.id,claims.subject FROM local_resource_preparation_pending pending
+     CROSS JOIN claims ON claims.id=pending.claim_id
+     CROSS JOIN batches ON batches.id=claims.batch_id
+     ORDER BY {CANONICAL_ORDER}"
+));
 const PREPARATION_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc674146d8179 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_resource_preparation (
     subject TEXT PRIMARY KEY,
@@ -364,13 +372,14 @@ pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
         rebuild_subject(transaction, &subject)?;
     }
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hde81dd267781 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_dirty", [])?;
+    // Dirty subjects must be rebuilt even when no new claims are pending.
+    if !transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_pending)", [], |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
     // Process new claims in canonical order, even when one transaction admits several rows.
-    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
-        "SELECT claims.id,claims.subject FROM claims JOIN batches ON batches.id=claims.batch_id
-         JOIN local_resource_preparation_pending pending ON pending.claim_id=claims.id
-         ORDER BY {CANONICAL_ORDER}"
-    ));
-    let pending = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-he337585ac427 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?
+    let pending = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-he337585ac427 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &PENDING_QUERY)?
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (id, subject) in pending {
