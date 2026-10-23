@@ -150,7 +150,7 @@ be restarted through its source publication.
 Typed harness declarations start without a boot task prompt and wait for input unless an initial
 message is supplied. Launchers need no separate no-boot mode and no path into fractal's internal state.
 The equivalent client-v0 read is documented under
-[agent workspace directories](st3/client-v0/README.md#agent-workspace-directories).
+[agent workspace directories](st3/client-v0/README.md#seat-workspace-directories).
 
 ## Bring an existing native session under fractal
 

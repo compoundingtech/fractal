@@ -77,7 +77,7 @@ Finish a first-run prompt by attaching, then detach with **Ctrl+\\**:
 st terminals attach agent/garden/worker
 ```
 
-After fixing its dependency, restart a stale running agent; explicitly start an intentionally stopped one. Resume a suspended one instead. [Agent lifecycle](agent-lifecycle.md) gives the commands and their different effects. Retry failed work through the graph after correcting its cause; preserve the failure evidence rather than completing a step just to make the display green.
+After fixing its dependency, restart a stale running agent; explicitly start an intentionally stopped one. Resume a suspended one instead. [Agent lifecycle](seat-lifecycle.md) gives the commands and their different effects. Retry failed work through the graph after correcting its cause; preserve the failure evidence rather than completing a step just to make the display green.
 
 For a Claude agent with stale delivery, check `fractal claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:fractal` says failed, select it and **Reconnect**. A ready installation does not by itself prove that an agent's channel connected.
 
@@ -184,7 +184,7 @@ st agents show agent/import/codex/ID
 
 Use actual IDs from discovery; these are placeholders. Check the native session's owning home,
 workspace and saved declaration. An older imported Codex agent with explicit `resume` arguments
-can time out even after installing a new binary. Follow the [exact declaration repair](agent-lifecycle.md#repair-a-codex-import-created-before-strict-resume);
+can time out even after installing a new binary. Follow the [exact declaration repair](seat-lifecycle.md#repair-a-codex-import-created-before-strict-resume);
 re-importing does not rewrite an existing agent. Keep exported environment values and transcript
 contents private. Inspect delivery state and stop reasons for other stale agents before deciding
 whether to resume, start or restart them.
