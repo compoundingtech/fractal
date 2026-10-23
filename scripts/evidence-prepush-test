@@ -583,7 +583,7 @@ class Hook(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertTrue(self.remote_has('refs/heads/feature'))
         self.assertNotIn('evidence:', done.stderr)
-        self.assertEqual([c['argv'] for c in self.calls()], [['--status', '--all', '--base', 'origin/main']])
+        self.assertEqual([c['argv'] for c in self.calls()], [['--status', '--base', 'origin/main']])
         self.assertEqual(self.receipts()[-1]['outcome'], 'covered')
 
     def test_an_agents_uncovered_tree_is_refused_with_the_command_and_nothing_is_signed(self):
@@ -594,7 +594,7 @@ class Hook(unittest.TestCase):
                 self.assertNotEqual(done.returncode, 0)
                 self.assertFalse(self.remote_has('refs/heads/feature'))
                 self.assertIn(f'refused: this tree ({tree[:12]}) is not covered for: linux-gate, mail-redelivery-canaries', done.stderr)
-                self.assertIn('    scripts/st-test --all --push origin\n', done.stderr)
+                self.assertIn('    scripts/st-test --push origin\n', done.stderr)
                 self.assertIn('fractal-web              CI runs it', done.stderr)  # the status is shown as it is
                 self.assertEqual({k: v for k, v in self.receipts()[-1].items() if k != 'time'},
                                  {'tree': tree, 'branch': 'feature', 'agent': 'agent/some/seat', 'outcome': 'refused',

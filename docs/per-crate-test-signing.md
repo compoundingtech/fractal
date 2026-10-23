@@ -69,7 +69,7 @@ no test in it (checked by the verifier from the nextest list of the same run), s
 5. Push the notes (`--push`) as today. Failing crates are signed as failures and do not poison other crates.
 
 Interplay with the other `st-test` changes: skip-ci-sigs-2's defaults (full suite; isolation-vm and canaries to daily) change `LOCAL`
-and `HEAVY`; this adds a `rust-tests` entry beside `linux-gate`, which stays for clippy, fleet-compat and the canaries until section 4.
+and the default set; this adds a `rust-tests` entry beside `linux-gate`, which stays for clippy, fleet-compat and the canaries until section 4.
 The worktree pool (#3697) and "skip checks whose tree already has a passing signature" compose: the per-crate missing set is the finer form
 of the same skip.
 
