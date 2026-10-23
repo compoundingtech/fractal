@@ -4,6 +4,10 @@ use crate::feed::TerminalUpdate;
 use std::{collections::BTreeMap, future::Future, net::Shutdown, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tokio::{sync::mpsc, task::JoinHandle};
 
+#[cfg(test)]
+#[path = "live_attach_cleanup_tests.rs"]
+mod cleanup_tests;
+
 // Local discovery is one daemon read; direct open includes the existing 4s Fabric dial.
 pub(super) const DISCOVERY: Duration = Duration::from_secs(6);
 pub(super) const DIRECT: Duration = Duration::from_secs(6);

@@ -736,7 +736,9 @@ async fn connected(
                                 pending_reports.report(window, Instant::now(), message);
                             }
                         } else if following.as_ref().is_some_and(|current| current.subscription == id) {
-                            terminal_failed(updates, following, code, message);
+                            if let Err(error) = fail_following(client, stream, updates, following, code, message).await {
+                                return Ended::Dropped(error.to_string());
+                            }
                         }
                     }
                     CollectionEvent::Screen { id, screen } => {
@@ -749,10 +751,14 @@ async fn connected(
             command = commands.recv() => match command {
                 Some(Command::Reconnect) => {}
                 None => {
-                    stop_following(client, stream, following).await;
+                    let _ = stop_following(client, stream, following).await;
                     return Ended::Closed;
                 }
-                Some(Command::Unfollow) => stop_following(client, stream, following).await,
+                Some(Command::Unfollow) => {
+                    if let Err(error) = stop_following(client, stream, following).await {
+                        return Ended::Dropped(error.to_string());
+                    }
+                }
                 Some(Command::Missions { follow }) => {
                     if follow == *missions {
                         continue;
@@ -821,7 +827,9 @@ async fn connected(
                     }
                 }
                 Some(Command::Follow { runtime_ids, generation }) => {
-                    stop_following(client, stream, following).await;
+                    if let Err(error) = stop_following(client, stream, following).await {
+                        return Ended::Dropped(error.to_string());
+                    }
                     match resolve(client, &runtime_ids).await {
                         Ok((runtime_id, terminal_id)) => {
                             *following = Some(Following {
@@ -1016,6 +1024,23 @@ fn terminal_screen(updates: &mpsc::Sender<Update>, following: &mut Option<Follow
     }).is_ok()
 }
 
+/// Unsubscribe before classifying an error: the server can retain presence/opened bookkeeping
+/// after dropping its failed receiver, including when no first screen was ever sent.
+async fn fail_following(
+    client: &Client,
+    stream: &mut CollectionStream,
+    updates: &mpsc::Sender<Update>,
+    following: &mut Option<Following>,
+    code: Option<ErrorCode>,
+    message: String,
+) -> Result<(), ClientError> {
+    if let Some(current) = following.as_mut() {
+        clear_following(client, stream, current).await?;
+    }
+    terminal_failed(updates, following, code, message);
+    Ok(())
+}
+
 /// A terminal subscription ended with an error. A terminal out of reach attaches again after a
 /// backoff; one whose process exited (`terminal-ended`), or any other refusal, stops following.
 fn terminal_failed(
@@ -1081,7 +1106,7 @@ async fn follow(
     {
         Ok(attachment) => attachment,
         Err(Refusal::Restarted) => {
-            *following = None;
+            stop_following(client, stream, following).await?;
             let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Ended {
                 restarted: true,
                 reason: "Terminal restarted".into(),
@@ -1089,6 +1114,7 @@ async fn follow(
             return Ok(());
         }
         Err(Refusal::Unavailable(reason)) => {
+            clear_following(client, stream, current).await?;
             current.retry_at =
                 Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
             current.failures += 1;
@@ -1096,7 +1122,7 @@ async fn follow(
             return Ok(());
         }
         Err(Refusal::Failed(reason)) => {
-            *following = None;
+            stop_following(client, stream, following).await?;
             let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Ended {
                 restarted: false,
                 reason,
@@ -1104,16 +1130,16 @@ async fn follow(
             return Ok(());
         }
     };
+    current.incarnation = Some(attachment.runtime_incarnation.clone());
+    current.attachment_id = Some(attachment.attachment_id.clone());
     let Some(capability) = attachment.stream_capability.clone() else {
-        *following = None;
+        stop_following(client, stream, following).await?;
         let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Ended {
             restarted: false,
             reason: "st returned no stream capability for the terminal".into(),
         }});
         return Ok(());
     };
-    current.incarnation = Some(attachment.runtime_incarnation.clone());
-    current.attachment_id = Some(attachment.attachment_id.clone());
     let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Attached {
         terminal_id: current.terminal_id.clone(),
         attachment_id: attachment.attachment_id,
@@ -1151,22 +1177,35 @@ async fn converse(
         .await
 }
 
-/// Stop following: leave the subscription and end the viewer record.
+/// Clear server bookkeeping even if its terminal receiver has already failed.
+async fn clear_following(
+    client: &Client,
+    stream: &mut CollectionStream,
+    current: &mut Following,
+) -> Result<(), ClientError> {
+    stream.unsubscribe(&current.subscription).await?;
+    if let (Some(attachment_id), Some(incarnation)) = (current.attachment_id.take(), current.incarnation.as_ref()) {
+        let client = client.clone();
+        let terminal = current.terminal_id.clone();
+        let incarnation = incarnation.clone();
+        tokio::spawn(async move {
+            let _ = detach(&client, &terminal, &attachment_id, &incarnation).await;
+        });
+    }
+    Ok(())
+}
+
+/// Do not forget the subscription ID until its cleanup command has been sent.
 async fn stop_following(
     client: &Client,
     stream: &mut CollectionStream,
     following: &mut Option<Following>,
-) {
-    let Some(current) = following.take() else {
-        return;
-    };
-    let _ = stream.unsubscribe(&current.subscription).await;
-    if let (Some(attachment_id), Some(incarnation)) = (current.attachment_id, current.incarnation) {
-        let client = client.clone();
-        tokio::spawn(async move {
-            let _ = detach(&client, &current.terminal_id, &attachment_id, &incarnation).await;
-        });
+) -> Result<(), ClientError> {
+    if let Some(current) = following.as_mut() {
+        clear_following(client, stream, current).await?;
     }
+    *following = None;
+    Ok(())
 }
 
 enum Refusal {
