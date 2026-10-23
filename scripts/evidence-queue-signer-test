@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +31,15 @@ with open(os.environ['STUB_LOG'], 'a') as log:
     log.write(json.dumps({'head': head, 'tree': tree, 'parents': parents, 'checks': checks,
                           'target': os.environ.get('CARGO_TARGET_DIR')}) + '\\n')
 results = json.loads(os.environ.get('STUB_RESULTS', '{}'))
+if os.environ.get('STUB_PUSH_NOTES'):
+    # A note per check, as evidence-wrap pushes it: a commit holding one file named after the tree, under refs/tags/evidence/TREE/.
+    for name in checks:
+        statement = {'predicate': {'observed_at': os.environ['STUB_PUSH_NOTES'], 'observed': {'checks': {name: {}}}}}
+        blob = subprocess.run(['git', 'hash-object', '-w', '--stdin'], input=json.dumps(statement), capture_output=True,
+                              text=True).stdout.strip()
+        listing = subprocess.run(['git', 'mktree'], input=f'100644 blob {blob}\\t{tree}\\n', capture_output=True, text=True).stdout.strip()
+        note = subprocess.run(['git', 'commit-tree', listing, '-m', 'st gate observation v1'], capture_output=True, text=True).stdout.strip()
+        subprocess.run(['git', 'push', '-q', 'origin', f'{note}:refs/tags/evidence/{tree}/{name}'], check=True)
 print('st-test: tree 0123456789ab (HEAD), in a clean worktree')
 for name in checks:
     print(f'  {name:<20} {results.get(name, "passed"):<12} {60:>6}s  why')
@@ -81,7 +91,8 @@ class QueueSigner(unittest.TestCase):
         self.config.mkdir()
         self.presign.mkdir()
         (self.presign / 'authors').write_text('ours\n')
-        (self.presign / 'limits.json').write_text(json.dumps({'sample': 1, 'min_free_gib': 0}))
+        (self.presign / 'limits.json').write_text(json.dumps({'sample': 1}))
+        (self.config / 'start.json').write_text(json.dumps({'min_free_gib': 0}))
         self.pressure, self.meminfo = tmp / 'pressure', tmp / 'meminfo'
         self.pressure.write_text('some avg10=1.00 avg60=2.00 avg300=1.00 total=1\nfull avg10=0 avg60=0 avg300=0 total=0\n')
         self.meminfo.write_text('MemTotal: 67108864 kB\nMemAvailable: 50331648 kB\n')
@@ -181,14 +192,16 @@ class QueueSigner(unittest.TestCase):
         self.run_signer('observe')
         prediction = self.state_now()['prediction']
         self.assertEqual((prediction['pr'], prediction['on']), (2, self.main))
-        self.run_signer('sign')
+        signed = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() + 30))
+        self.run_signer('sign', STUB_PUSH_NOTES=signed)
         [run] = self.runs()
         self.assertEqual((run['tree'], run['parents']), (prediction['tree'], [self.main, head]))
         self.assertEqual(run['checks'], ['typescript-client', 'genie-freshness', 'linux-gate'], 'every local check, heavy too')
         self.assertIsNone(run['target'], "st-test's own kept target, not the pre-sign worker's")
         [attempt] = self.lines('attempts.jsonl')
-        self.assertEqual((attempt['kind'], attempt['outcome'], sorted(attempt['signed_at'])),
-                         ('predicted', 'signed', ['genie-freshness', 'linux-gate', 'typescript-client']))
+        self.assertEqual((attempt['kind'], attempt['outcome'], attempt['signed_at_source']), ('predicted', 'signed', 'note'))
+        self.assertEqual(attempt['signed_at'], dict.fromkeys(['typescript-client', 'genie-freshness', 'linux-gate'], signed),
+                         "each note's own time, read back from the pushed notes")
         # Queued as predicted: the group tree is the predicted tree, already signed.
         group = self.enqueue(2, self.main, 1)
         self.run_signer('observe')
@@ -196,9 +209,10 @@ class QueueSigner(unittest.TestCase):
         self.assertTrue(record['predicted_equal'])
         self.run_signer('sign')
         self.assertEqual(len(self.runs()), 1, 'a tree is signed once')
-        # The gate looked a day later than the note: ready before it, and the results agree.
+        # The gate looked a day after the note: ready before it, and the results agree.
         self.leave(2, group, landed=True)
-        self.queue_ran(group, 8, '2026-10-24T10:00:00Z', {'linux-gate': 'success', 'typescript-client': 'success'})
+        gate = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() + 86400))
+        self.queue_ran(group, 8, gate, {'linux-gate': 'success', 'typescript-client': 'success'})
         self.run_signer('observe')
         [line] = self.lines('entries.jsonl')
         self.assertTrue(line['landed'])
@@ -223,15 +237,24 @@ class QueueSigner(unittest.TestCase):
         self.run_signer('sign')
         self.run_signer('sign')
         self.assertEqual([run['head'] for run in self.runs()], [first, second], 'position order')
+        # No note read back (this st-test pushes none): the note times are estimated, and the line says so.
+        self.assertEqual({a['signed_at_source'] for a in self.lines('attempts.jsonl')}, {'estimate'})
 
-    def test_a_busy_host_starts_nothing_and_says_so(self):
+    def test_a_busy_full_or_short_of_memory_host_starts_nothing_and_says_so(self):
         self.pull(5, 'five')
         self.enqueue(5, self.main, 1)
         self.run_signer('observe')
-        self.pressure.write_text('some avg10=20 avg60=20.00 avg300=20 total=1\n')
+        # Operations' start line is 12%, under the 15% stop: 13% starts nothing.
+        self.pressure.write_text('some avg10=13 avg60=13.00 avg300=13 total=1\n')
+        self.run_signer('sign')
+        self.pressure.write_text('some avg10=1 avg60=1.00 avg300=1 total=1\n')
+        self.meminfo.write_text('MemTotal: 67108864 kB\nMemAvailable: 18874368 kB\n')
+        self.run_signer('sign')
+        (self.config / 'start.json').write_text(json.dumps({'min_free_gib': 1e9}))
+        self.meminfo.write_text('MemTotal: 67108864 kB\nMemAvailable: 50331648 kB\n')
         self.run_signer('sign')
         self.assertEqual(self.runs(), [])
-        self.assertEqual([skip['reason'] for skip in self.lines('skips.jsonl')], ['busy'])
+        self.assertEqual([skip['reason'] for skip in self.lines('skips.jsonl')], ['busy', 'memory', 'disk'])
 
     def test_off_stops_both(self):
         self.pull(6, 'six')

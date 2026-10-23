@@ -25,8 +25,13 @@ check on it, signing as the host and pushing the notes. Only our own authors' co
 are by a login in the pre-sign worker's authors file (~/.config/evidence-presign/authors); every entry is still observed and
 recorded. ~/.config/evidence-queue-signer/every-author, the host operator's decision, runs every entry. st-test runs a heavy check
 through the host's build slot; this adds no slot.
-The pre-sign worker's limits apply (scripts/evidence-presign-worker), except that it starts when IO pressure is under the start line
-rather than after ten calm minutes: the queue does not wait for a calm host, and a measurement that never starts measures nothing.
+The pre-sign worker's stop limits apply (scripts/evidence-presign-worker). It starts on operations' terms for this host (START below):
+IO pressure under 12% (three points under the 15% stop, so a run is not started only to be killed a minute later), at least 165 GiB
+free (a cold run writes about 19 GiB above the host's 134 GiB reserve) and 20 GiB of available memory, with no wait for ten calm
+minutes: the queue does not wait for a calm host, and a measurement that never starts measures nothing.
+A tree is never run twice, whatever the outcome: one stopped for load is not retried (for measurement, that is a result too).
+When the run ended, each note's time is read back from the notes pushed for the tree (their observed_at); when none can be read it
+is estimated from the run's start and st-test's per-check seconds, and the line says which (signed_at_source).
 ~/.config/evidence-queue-signer/off stops both before they do anything.
 
 State: ~/.local/state/evidence-queue-signer/ (entries.json, the open records; entries.jsonl, one line per finished entry;
@@ -51,6 +56,7 @@ sys.dont_write_bytecode = True
 CONFIG = Path(os.environ.get('EVIDENCE_QUEUE_CONFIG') or Path.home() / '.config/evidence-queue-signer')
 STATE = Path(os.environ.get('EVIDENCE_QUEUE_STATE') or Path.home() / '.local/state/evidence-queue-signer')
 BASE = 'main'
+START = {'start_io60': 12.0, 'min_free_gib': 165.0, 'start_mem_gib': 20.0}  # operations' start terms (stops: the worker's)
 SETTLE = 3 * 3600  # an entry that left the queue is written out once its checks finished, or after this long
 QUERY = '''query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: "main") {
   entries(first: 50) { nodes { position state enqueuedAt pullRequest { number headRefOid author { login } }
@@ -350,7 +356,13 @@ def sign(args):
     lock = run_lock('sign')
     if lock is None:
         return 0
-    rules = W.limits()
+    rules = dict(W.limits(), **START)
+    start = CONFIG / 'start.json'  # an override agreed with operations
+    if start.exists():
+        given = json.loads(start.read_text())
+        if set(given) - set(START):
+            raise Failure(f'{start}: unknown start terms {", ".join(sorted(set(given) - set(START)))}')
+        rules.update({key: float(value) for key, value in given.items()})
     repo = Path(args.repo).resolve()
     W.clone(repo, args.repository)
     attempted = {a.get('tree') for a in read_lines(STATE / 'attempts.jsonl')}
@@ -372,6 +384,8 @@ def sign(args):
         return not_starting('disk', f'{W.free_gib(repo):.0f} GiB free, under {rules["min_free_gib"]:.0f}: not starting')
     if W.io60() >= rules['start_io60']:
         return not_starting('busy', f'IO pressure {W.io60():.1f}% is over {rules["start_io60"]}%: not starting this tick')
+    if W.mem_gib() < rules['start_mem_gib']:
+        return not_starting('memory', f'{W.mem_gib():.1f} GiB available, under {rules["start_mem_gib"]:.0f}: not starting this tick')
     commit = build_commit(repo, pick, pick['pr'])
     if commit is None:
         return not_starting('unavailable', f'#{pick["pr"]}: the commit for tree {pick["tree"][:12]} cannot be built here')
@@ -388,13 +402,16 @@ def sign(args):
             'since': pick['since'], 'started_at': stamp(started), 'wait_s': round(started - seconds_of(pick['since'])),
             'seconds': seconds, 'checks': {name: rows.get(name, 'no result') for name in checks},
             'io60_peak': round(peak, 2), 'log': str(log)}
-    # st-test pushes each note as soon as its check is signed: a check's note time is the start plus the checks run up to it.
     line['stage_seconds'] = stage_seconds(log)
-    elapsed, line['signed_at'] = started, {}
-    for name in checks:
-        elapsed += line['stage_seconds'].get(name, 0)
-        if line['checks'][name] == 'passed':
-            line['signed_at'][name] = stamp(elapsed)
+    line['signed_at'], line['signed_at_source'] = note_times(repo, pick['tree'], started), 'note'
+    if not line['signed_at']:
+        # No note read back: estimate it as the start plus the checks run up to it (st-test pushes each note when it is signed),
+        # which is early by the time st-test spends between checks.
+        elapsed, line['signed_at_source'] = started, 'estimate'
+        for name in checks:
+            elapsed += line['stage_seconds'].get(name, 0)
+            if line['checks'][name] == 'passed':
+                line['signed_at'][name] = stamp(elapsed)
     if reason:
         line.update(outcome='deferred', stopped=reason)
     else:
@@ -403,6 +420,24 @@ def sign(args):
     append(STATE / 'attempts.jsonl', line)
     say(f'#{pick["pr"]} {pick["kind"]} tree {pick["tree"][:12]}: {line["outcome"]} in {seconds}s')
     return 0
+
+
+def note_times(repo, tree, since):
+    """When each check's note from this run was signed: its observed_at, read back from the notes pushed for the tree."""
+    git(repo, 'fetch', '-q', '--no-tags', 'origin', f'+refs/tags/evidence/{tree}/*:refs/queue-notes/{tree}/*', check=False)
+    times = {}
+    refs = git(repo, 'for-each-ref', '--format=%(refname)', f'refs/queue-notes/{tree}/', check=False).stdout.split()
+    for ref in refs:
+        try:
+            predicate = json.loads(git(repo, 'cat-file', '-p', f'{ref}:{tree}').stdout)['predicate']
+            at = predicate['observed_at']
+            if seconds_of(at) < since - 60:
+                continue  # an earlier run's note for the same tree
+            for name in predicate['observed']['checks']:
+                times[name] = min(times.get(name, at), at)
+        except (Failure, ValueError, KeyError, TypeError):
+            continue
+    return times
 
 
 def stage_seconds(log):

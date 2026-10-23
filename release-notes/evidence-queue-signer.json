@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "On the signing host, after sign-off: copy scripts/evidence-queue-timer to ~/.local/bin and the four evidence-queue unit files to ~/.config/systemd/user, optionally write ~/.config/evidence-queue-signer/next-command, then systemctl --user enable --now evidence-queue-observe.timer evidence-queue-sign.timer."
+    "detail": "On the signing host, after sign-off: copy scripts/evidence-queue-timer to ~/.local/bin and the four evidence-queue unit files to ~/.config/systemd/user, optionally write ~/.config/evidence-queue-signer/next-command, then systemctl --user enable --now evidence-queue-observe.timer evidence-queue-sign.timer. The installed ~/.local/bin/evidence-queue-timer is the one file not read from main: a change to it needs a reinstall."
   },
   "recovery": {
     "status": "none",

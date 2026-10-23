@@ -1521,9 +1521,13 @@ time, then the queue's entries in position order, never a tree twice, and runs `
 as fetched, or the prediction's merge of the same two parents, which has the same tree), signing as the host. Only our own authors'
 code runs: a tree runs when its pull request and every entry ahead of it are by a login in `~/.config/evidence-presign/authors`;
 `~/.config/evidence-queue-signer/every-author` (the operator's decision) runs every entry. Its runs go through the host's build slot
-like any `st-test`, and the worker's stop limits apply; it starts when IO pressure is under 15% rather than after ten calm minutes. Each
-run appends a line to `attempts.jsonl` (wait from first seen to start, seconds per check, the time each note was pushed), and
-`evidence-queue-signer report` sums a window. `~/.config/evidence-queue-signer/off` stops both.
+like any `st-test`, and the worker's stop limits apply. It starts on operations' terms for the host: IO pressure under 12% (three
+points under the stop), at least 165 GiB free and 20 GiB of available memory, without the worker's wait for ten calm minutes
+(`~/.config/evidence-queue-signer/start.json` overrides them, agreed with operations). Each
+run appends a line to `attempts.jsonl` (wait from first seen to start, seconds per check, and each note's time, read back from the
+pushed notes' `observed_at`, or estimated from the start and the per-check seconds when none can be read, as `signed_at_source`
+says). A tree is run once whatever the outcome, so a tree stopped for load is not retried. `evidence-queue-signer report` sums a window, and
+`~/.config/evidence-queue-signer/off` stops both.
 
 ### When the gate says skip
 
