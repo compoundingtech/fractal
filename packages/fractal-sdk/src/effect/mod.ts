@@ -26,7 +26,7 @@
  * of `parentSpan`) whose `traceparent` they carry; socket opens carry the caller's `traceContext`.
  * Each subscribe attempt opens a bounded `wf.ux.first_frame` root (and an `st3.follow.subscribe`
  * child of `parentSpan`) whose context the subscribe command carries.
- * `adoptEarlyCollections` adopts the socket `index.html` opened before the bundle (`early.ts`).
+ * Platform adapters may adopt an already-open collections socket without another connection.
  */
 import {
   ClientError,
@@ -37,6 +37,7 @@ import {
   type CollectionFrame,
   type CollectionSocketFactory,
   type CollectionStream,
+  type Resource as ResourceWire,
   isTransientCode,
   isTransient,
   FractalClient,
@@ -64,8 +65,7 @@ import * as SubscriptionRef from 'effect/SubscriptionRef'
 import type * as Tracer from 'effect/Tracer'
 
 import * as Exit from 'effect/Exit'
-import { makeAdmission } from './admission.ts'
-import { takeEarlyCollections } from './early.ts'
+import { makeAdmission, type Admission } from './admission.ts'
 import { makeFirstFrames, type FirstFrameAttempt, type FirstFrameOutcome } from './firstFrame.ts'
 import {
   type FollowFreshness,
@@ -80,7 +80,7 @@ import { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, type Deco
 export { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, normalizeDecodePath, decodedUsageEquivalence, openAgent, type Open, type DecodedAgent, type DecodedUsageSummary, type DecodedResource, type ResourceDecodeDiagnostic, type DecodeDiagnosticCounts, type Undecodable, type Unrecognized, type UnrecognizedLeaf } from './resourceDecode.ts'
 import type { SyncStatus } from './sync-status.ts'
 import { syncStatusFromFreshness, syncStatusFromFailure } from './sync-projection.ts'
-import { browserSocket, type TraceContext, traceContextOf, traceQuerySocket } from './trace.ts'
+import { type TraceContext, traceContextOf } from './trace.ts'
 
 export type { SyncStatus, SyncStage, StaleReason, SyncFailureCause } from './sync-status.ts'
 export * as SyncStatusSchema from './sync-status-schema.ts'
@@ -91,13 +91,7 @@ export {
   traceContextOf,
   traceparentOf,
   validTraceContext,
-  wrapTraceFetch,
 } from './trace.ts'
-export {
-  EARLY_COLLECTIONS_GLOBAL,
-  type EarlyBootstrap,
-  peekEarlyBootstrap,
-} from './early.ts'
 export {
   FIRST_FRAME_BUDGET_PHASE,
   FIRST_FRAME_SPAN,
@@ -221,6 +215,8 @@ export type FollowSpec =
       readonly collection: CollectionName
       readonly limit: number
       readonly filters?: CollectionFilters
+      /** Local decoder identity, never serialized; different typed descriptors remain independent. */
+      readonly descriptor?: string
     }
   | { readonly _tag: 'Conversation'; readonly ref: string }
   | {
@@ -234,7 +230,7 @@ export type FollowSpec =
 export const followKey = (spec: FollowSpec): string => {
   switch (spec._tag) {
     case 'Window':
-      return `window:${spec.collection}:${spec.limit}:${JSON.stringify(spec.filters ?? {})}`
+      return `window:${spec.collection}:${spec.limit}:${JSON.stringify(spec.filters ?? {})}${spec.descriptor === undefined ? '' : `:descriptor:${spec.descriptor}`}`
     case 'Conversation':
       return `conversation:${spec.ref}`
     case 'Terminal':
@@ -243,8 +239,8 @@ export const followKey = (spec: FollowSpec): string => {
 }
 
 /** A collection window: decoded rows in the server's order. */
-export interface WindowValue {
-  readonly items: readonly DecodedResource[]
+export interface WindowValue<TResource = DecodedResource> {
+  readonly items: readonly TResource[]
   readonly hasMore: boolean
   readonly snapshot: ProcessedWindow<Resource>['snapshot']
   readonly rawItems: readonly unknown[]
@@ -304,6 +300,9 @@ export class St3 extends Context.Service<
     readonly followWindow: (
       spec: Extract<FollowSpec, { _tag: 'Window' }>,
     ) => Stream.Stream<FollowEvent<WindowValue>>
+    /** Typed descriptors share the existing scoped window ingest and multiplexed socket. */
+    readonly watch: <TResource>(descriptor: FollowDescriptor<TResource>) =>
+      Stream.Stream<FollowEvent<WindowValue<TResource>>>
     readonly followConversation: (
       spec: Extract<FollowSpec, { _tag: 'Conversation' }>,
     ) => Stream.Stream<FollowEvent<ConversationChunk>>
@@ -325,21 +324,55 @@ export class St3 extends Context.Service<
   }
 >()('@fractal/sdk/St3') {}
 
+/** A caller-owned socket that can answer an identical initial subscribe without another send. */
+export interface AdoptedCollections {
+  readonly consume: () => CollectionSocket | undefined
+  readonly close: (code?: number) => void
+  readonly wouldAdopt: (command: Readonly<Record<string, unknown>>) =>
+    { readonly traceparent: string; readonly subscribeSentAt: number } | undefined
+}
+
+/** Optional host policy. The neutral SDK neither reads browser globals nor evicts hidden views. */
+export class St3Platform extends Context.Service<St3Platform, {
+  readonly socket?: CollectionSocketFactory
+  readonly takeEarlyCollections?: () => AdoptedCollections | undefined
+  readonly admission?: (options: { readonly cap: number; readonly conversationSlots?: number }) => Admission<string>
+}>()('@fractal/sdk/St3Platform') {}
+
+/** A typed decoder and an existing collection selector; no new wire collection or transport. */
+export interface FollowDescriptor<TResource> {
+  /** Set spec.descriptor when multiple decoders follow the same selector independently. */
+  readonly spec: Extract<FollowSpec, { _tag: 'Window' }>
+  readonly decodeRow: (row: ResourceWire) => {
+    readonly value?: TResource
+    readonly undecodable: readonly Undecodable[]
+  }
+}
+
+/** Existing collection descriptors use the same tolerant decoder as followWindow. */
+export const collectionWindow = (
+  spec: Extract<FollowSpec, { _tag: 'Window' }>,
+): FollowDescriptor<DecodedResource> => ({ spec, decodeRow: decodeResourceRow })
+
 /** Gateway configuration and transport seams for the scoped SDK layer. */
 export interface St3Options {
   /** Gateway origin; the browser passes its own origin (the dev proxy or the serving gateway). */
   readonly baseUrl: string
+  /** Bearer credential resolved for every HTTP request and socket open; never an actor selector. */
+  readonly credential?: () => string | undefined | Promise<string | undefined>
+  /** Reported client/build label only, never authenticated identity or authority. */
+  readonly client?: string
   /** Socket slots: the daemon's subscription cap (8 on current daemons). */
   readonly maxFollows: number
   /**
-   * Conversation follows' dedicated subscription slots, LRU-evicted by view recency with a
-   * real unsubscribe; window and terminal follows own the remaining slots, so neither side
+   * Conversation follows' dedicated subscription slots; window and terminal follows own
+   * the remaining slots, so neither side
    * can starve the other. Undefined shares one pool across every follow; `'advertised'`
    * derives the whole budget from the daemon's advertised collections capability once the
    * connect probe answers (v1 raises the cap to 16), before the first follow can open.
    */
   readonly conversationSlots?: number | 'advertised'
-  /** Test seam: the WebSocket the collections socket opens (default: the browser `WebSocket`). */
+  /** Collections transport; non-browser hosts supply a factory that honors credential headers. */
   readonly socket?: CollectionSocketFactory
   /** Test seam: HTTP reads and actions. */
   readonly fetch?: typeof fetch
@@ -356,11 +389,6 @@ export interface St3Options {
   readonly traceContext?: () => TraceContext | undefined
   /** The caller's active span; SDK spans (follow subscribes, HTTP reads/actions) become its children. */
   readonly parentSpan?: () => Tracer.Span | undefined
-  /**
-   * Adopt the collections socket the `index.html` early-connect script opened, for the life of
-   * this layer: its roster subscribe answers the SDK's identical one, buffered frames replay.
-   */
-  readonly adoptEarlyCollections?: boolean
 }
 
 
@@ -490,10 +518,13 @@ const tracedStream = (
 
 const make = (options: St3Options) =>
   Effect.gen(function* () {
+    const platform = Option.getOrUndefined(yield* Effect.serviceOption(St3Platform))
     /** A subscribe's own attempt context while the client issues it; otherwise the caller's. */
     let outbound: TraceContext | undefined
     const client = new FractalClient({
       baseUrl: options.baseUrl,
+      ...(options.credential === undefined ? {} : { credential: options.credential }),
+      ...(options.client === undefined ? {} : { client: options.client }),
       // Remove the browser receiver workaround after smalltalk#1040 / #1247 lands.
       fetchImpl: options.fetch ?? globalThis.fetch.bind(globalThis),
       traceContext: () => outbound ?? options.traceContext?.(),
@@ -518,17 +549,21 @@ const make = (options: St3Options) =>
           Effect.withSpan(name, parent === undefined ? {} : { parent }),
         )
       })
+    // A page-bootstrap socket cannot establish the identity of an explicit bearer credential.
     // Owned by this layer's scope from the take: released (closed) unless the client adopted it.
-    const early = options.adoptEarlyCollections === true
-      ? yield* Effect.acquireRelease(
-          Effect.sync(() => takeEarlyCollections()),
+    const early = platform?.takeEarlyCollections === undefined || options.credential !== undefined
+      ? undefined
+      : yield* Effect.acquireRelease(
+          Effect.sync(platform.takeEarlyCollections),
           (taken) => Effect.sync(() => taken?.close()),
         )
-      : undefined
-    const freshSocket = traceQuerySocket(options.socket ?? browserSocket)
+    const freshSocket = options.socket ?? platform?.socket
     let currentSocket: CollectionSocket | undefined
     const socket: CollectionSocketFactory = (url, protocols, headers) => {
-      currentSocket = early?.consume() ?? freshSocket(url, protocols, headers)
+      const adopted = early?.consume()
+      if (adopted !== undefined) currentSocket = adopted
+      else if (freshSocket !== undefined) currentSocket = freshSocket(url, protocols, headers)
+      else throw new TypeError('St3 requires a collections socket factory or a St3Platform layer')
       return currentSocket
     }
     const followKeys = new Map<string, string>()
@@ -545,7 +580,7 @@ const make = (options: St3Options) =>
     const syncRef = yield* SubscriptionRef.make<ReadonlyMap<string, SyncStatus>>(new Map())
     const publishSync = () => Effect.runFork(SubscriptionRef.set(syncRef, new Map(syncTable)))
     const syncObservers = new Map<string, number>()
-    const admission = makeAdmission<string>({
+    const admission = (platform?.admission ?? makeAdmission<string>)({
       cap: options.conversationSlots === 'advertised' ? 8 : options.maxFollows,
       ...(options.conversationSlots === 'advertised'
         ? { conversationSlots: 4 }
@@ -898,11 +933,12 @@ const make = (options: St3Options) =>
     })
     let lastReadAgents: readonly DecodedAgent[] = []
 
-    const followWindow = (spec: Extract<FollowSpec, { _tag: 'Window' }>) =>
-      follow<WindowValue>({
-        spec,
+    const watch = <TResource>(descriptor: FollowDescriptor<TResource>) =>
+      follow<WindowValue<TResource>>({
+        spec: descriptor.spec,
         makeProtocol: (observe) => {
-          const ingest = makeWindowIngest<DecodedResource>({
+          const spec = descriptor.spec
+          const ingest = makeWindowIngest<TResource>({
             publish: (window) => observe(window, window.snapshot),
             ...(options.onDiagnostics === undefined
               ? {}
@@ -915,9 +951,9 @@ const make = (options: St3Options) =>
                       rowId: row.id, revision: row.revision,
                     }),
                 }),
-            decode: (row) => decodeResourceRow(row).value,
+            decode: (row) => descriptor.decodeRow(row).value,
             decodeDetailed: (row) => {
-              const decoded = decodeResourceRow(row)
+              const decoded = descriptor.decodeRow(row)
               reportDecode(spec.collection, decoded.undecodable)
               return decoded
             },
@@ -933,6 +969,9 @@ const make = (options: St3Options) =>
           }
         },
       })
+
+    const followWindow = (spec: Extract<FollowSpec, { _tag: 'Window' }>) =>
+      watch(collectionWindow(spec))
 
     const followConversation = (spec: Extract<FollowSpec, { _tag: 'Conversation' }>) =>
       follow<ConversationChunk>({
@@ -1172,6 +1211,7 @@ const make = (options: St3Options) =>
           ),
         ),
       followWindow,
+      watch,
       followConversation,
       followTerminal,
       setVisible: (spec, visible) =>
