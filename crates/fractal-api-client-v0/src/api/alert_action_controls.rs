@@ -485,7 +485,7 @@ async fn attention_history_filters_foreign_missing_sources_before_reporting_omis
         .connection
         .batched(|tx| -> anyhow::Result<()> {
             tx.execute(
-                "UPDATE claims SET body=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-hd8b59075b6d2 owner=fractal_api_client_v0::api::alert_action_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id=?2",
                 rusqlite::params![wide_original.to_string(), denial.id],
             )?;
             Ok(())
@@ -509,7 +509,7 @@ async fn attention_history_filters_foreign_missing_sources_before_reporting_omis
         .connection
         .batched(|tx| -> anyhow::Result<()> {
             tx.execute(
-                "UPDATE claims SET body=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-h740f21cfe211 owner=fractal_api_client_v0::api::alert_action_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id=?2",
                 rusqlite::params![denial.body.to_string(), denial.id],
             )?;
             Ok(())
@@ -527,7 +527,7 @@ async fn attention_history_filters_foreign_missing_sources_before_reporting_omis
         .connection
         .batched(|tx| -> anyhow::Result<()> {
             tx.execute(
-                "UPDATE claims SET body=?1,predecessors=?2 WHERE id=?3",
+                /* sqlite-large-value: allow-for-now lv-h7f11c35a3d7d owner=fractal_api_client_v0::api::alert_action_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1,predecessors=?2 WHERE id=?3",
                 rusqlite::params![
                     body.to_string(),
                     json!(["claim/history-missing-original"]).to_string(),
@@ -623,7 +623,7 @@ async fn attention_history_omits_wide_and_malformed_rows_and_advances_to_retaine
             // The native expression index rejects this state. Never drop it to
             // claim malformed-BODY admission or malformed-JSON history coverage.
             let error = tx
-                .execute("UPDATE claims SET body='{malformed' WHERE id=?1", [&filler.id])
+                .execute(/* sqlite-large-value: allow-for-now lv-hd89be48726c7 owner=fractal_api_client_v0::api::alert_action_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{malformed' WHERE id=?1", [&filler.id])
                 .unwrap_err();
             assert!(error.to_string().contains("malformed JSON"), "{error}");
             assert_eq!(row()?, original);
@@ -661,7 +661,7 @@ async fn attention_history_omits_wide_and_malformed_rows_and_advances_to_retaine
             .connection
             .batched(|tx| -> anyhow::Result<()> {
                 tx.execute(
-                    "UPDATE claims SET body=?1,predecessors=?2 WHERE id=?3",
+                    /* sqlite-large-value: allow-for-now lv-h9d8043c14754 owner=fractal_api_client_v0::api::alert_action_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1,predecessors=?2 WHERE id=?3",
                     rusqlite::params![body, predecessors, filler.id],
                 )?;
                 Ok(())

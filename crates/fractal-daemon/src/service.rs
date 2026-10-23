@@ -1453,6 +1453,7 @@ mod tests {
             github: crate::config::GithubConfig::default(),
             changes: crate::changes::config::Config::default(),
             checkpoint: crate::config::CheckpointConfig::default(),
+            trim: crate::config::TrimConfig::default(),
             limits: crate::config::LimitsConfig::default(),
             reconcile: crate::config::ReconcileConfig::default(),
             codex_work_without_asking: None,

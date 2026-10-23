@@ -6,6 +6,24 @@ export type SidebarUsageScope = '24h-root-and-subagents' | 'lifetime-incl-subage
 export const usageScopeLabel = (scope: SidebarUsageScope): string => scope === '24h-root-and-subagents' ? '24h root and subagents' : scope === 'lifetime-incl-subagents' ? 'Lifetime including subagents' : 'Reported by agent'
 export type SidebarDuration = { readonly _tag: 'Known'; readonly scope: '24h-activity-span' | 'lifetime'; readonly ms: number } | { readonly _tag: 'Unknown' }
 export type SidebarLastTurn = { readonly _tag: 'Known'; readonly kind: 'turn-completed' | 'activity'; readonly at: number } | { readonly _tag: 'Unknown' }
+/** `done`/`total` exactly as the run reports them (cancelled steps count toward `total`); Unknown when the run summary is not hydrated, never `0/0`. */
+export type SidebarMissionProgress = { readonly _tag: 'Known'; readonly done: number; readonly total: number } | { readonly _tag: 'Unknown' }
+/** The agent's current step: its name, a question waiting on you (with its decision handle when the bridge reports one), or Unknown. */
+export type SidebarMissionStep = { readonly _tag: 'Step'; readonly name: string } | { readonly _tag: 'Waiting'; readonly question: string; readonly handle?: string } | { readonly _tag: 'Unknown' }
+/** The mission the agent currently works on, plus missions queued behind it; None when the agent has no current mission. */
+export type SidebarMissionContext =
+  | { readonly _tag: 'Mission'; readonly id: string; readonly slug: string; readonly progress: SidebarMissionProgress; readonly step: SidebarMissionStep; readonly queued: readonly { readonly id: string; readonly slug: string }[] }
+  | { readonly _tag: 'Unavailable' }
+  | { readonly _tag: 'None' }
+/**
+ * Freshness of `missionContext`. Live: the current observation. Stale: the last observation, retained while the source
+ * catches up. Failed: the last refresh failed and the retained value is shown. `updatedAt` is the real time of the retained
+ * observation when the source reports one, never an invented time. Absent means Live.
+ */
+export type SidebarMissionInfo =
+  | { readonly _tag: 'Live' }
+  | { readonly _tag: 'Stale'; readonly updatedAt?: number }
+  | { readonly _tag: 'Failed'; readonly updatedAt?: number }
 export interface SidebarReported {
   readonly model?: string
   /** Producers may provide both scoped observations; the row prefers an explicit lifetime fact. */
@@ -27,7 +45,12 @@ export interface SidebarAgentRow extends SidebarReported {
   readonly subagent?: SidebarSubagent
   readonly harness?: string
   readonly terminal?: string
+  /** Mission ref for navigation and filtering; `missionContext` carries what line 2 draws. */
   readonly mission?: string
+  /** Absent or None: line 2 reads `status · host`. */
+  readonly missionContext?: SidebarMissionContext
+  /** Absent: Live. Stale or Failed mutes the retained mission and keeps its popover reachable to say why. */
+  readonly missionInfo?: SidebarMissionInfo
   readonly status: AgentStatus
   readonly statusLabel: string
   readonly host: string

@@ -2599,7 +2599,7 @@ impl Store {
         // denial answer or a new grant-dependent side effect.
         let previous = {
             let connection = self.readers.get();
-            connection.query_row(&canonical_sql(
+            connection.query_row(/* sqlite-large-value: allow-for-now lv-hf9df02d62f06 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
                  FROM claims INDEXED BY claims_operation_index
                  WHERE json_extract(body, '$._operation.id') IS NOT NULL

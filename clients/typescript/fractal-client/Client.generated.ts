@@ -5,7 +5,7 @@ import { API_VERSION } from './Models.generated.ts';
 import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
-    ResourcesFilter, ResourcesPage, DirectiveNotes,
+    ResourcesFilter, ResourcesPage, DirectiveNotes, SchedulesPage,
     Arrangement, ArrangementId, ArrangementPage,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -306,6 +306,13 @@ export class FractalClient {
             method, headers, ...(body === undefined ? {} : { body: raw ? (body as BodyInit) : JSON.stringify(body) }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
+        // Old routers can return an empty 404 for this collection; do not parse it as JSON
+        // or try a history endpoint. This route has no missing-item 404 meaning.
+        if (response.status === 404 && path.split('?')[0] === '/v1/client/schedules') {
+            throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
+                request_id: '', code: 'unsupported-capability', message: 'This server does not support schedules.list; upgrade the server',
+                retryable: false, details: {} }, 404);
+        }
         let payload: unknown;
         if (readAuthorization) {
             const bytes = new Uint8Array(await response.arrayBuffer());
@@ -646,6 +653,7 @@ export class FractalClient {
     async launchVariantsList(id: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get(`/v1/client/launches/${encodeURIComponent(routedId(id))}/variants` + query(options), undefined, requestOptions); }
     async launchDecisionsList(id: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get(`/v1/client/launches/${encodeURIComponent(routedId(id))}/decisions` + query(options), undefined, requestOptions); }
     async launchApprovalsList(id: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get(`/v1/client/launches/${encodeURIComponent(routedId(id))}/approvals` + query(options), undefined, requestOptions); }
+    async schedulesList(options: { cursor?: string; limit?: number; unheard_after_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SchedulesPage>> { return this.get('/v1/client/schedules' + query(options), undefined, requestOptions); }
     async missionsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/missions' + query(options), undefined, requestOptions); }
     async missionsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/missions/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async workList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/work' + query(options), undefined, requestOptions); }
@@ -667,6 +675,7 @@ export class FractalClient {
     async lanesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/lanes' + query(options), undefined, requestOptions); }
     async lanesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/lanes/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async terminalsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/terminals' + query(options), undefined, requestOptions); }
+    async runtimeStartsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/runtime-starts' + query(options), undefined, requestOptions); }
     async operationsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/operations' + query(options), undefined, requestOptions); }
     async operationsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/operations/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async historyList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/history' + query(options), undefined, requestOptions); }

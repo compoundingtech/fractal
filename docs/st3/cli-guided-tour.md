@@ -420,6 +420,18 @@ exit status, evidence, remediation, stable repair classes, approval token, and z
 Why: transport reachability and immutable-record convergence need explicit diagnostics rather than
 being mistaken for mission health.
 
+For transport preference, inspect `st fleet transports add fabric --help`.
+On an intentionally selected listening member, `st fleet transports add fabric --prefer`
+enables Fabric or moves an existing Fabric route first without changing its exposure.
+Omit `--prefer` to preserve existing transport order; see
+[automatic transport selection](replication.md#automatic-transport-selection) for
+explicit peer override precedence and the loopback-last fallback.
+Use `st fleet transports prefer tailscale` to restore Tailscale-first routing,
+or `st fleet transports prefer fabric` to prefer Fabric without enabling it.
+Both require the carrier to be enabled and leave exposure unchanged; an already
+preferred carrier is a no-op. With `--no-service`, restart both the daemon and
+replication worker when instructed.
+
 ```sh
 st replication --help
 st replication status --help

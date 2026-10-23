@@ -234,7 +234,7 @@ impl Store {
         let limit = limit.clamp(1, MAX_CANDIDATES) + 1;
         let connection = self.readers.get();
         let sql = candidates_sql();
-        let mut statement = connection.prepare_cached(&sql)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h358bb354e623 owner=fractal_store::store::attention_history TODO=trace-statement-and-value-representation */ &sql)?;
         decode_rows(
             statement.query(params![cut, before.min(i64::MAX as u64), limit])?,
             person,
@@ -254,7 +254,7 @@ impl Store {
             "FROM (SELECT * FROM claims WHERE id=?1 AND store_index<=?2) c",
             "?2",
         );
-        let mut statement = connection.prepare_cached(&sql)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9a9dc65c6b0e owner=fractal_store::store::attention_history TODO=trace-statement-and-value-representation */ &sql)?;
         Ok(decode_rows(statement.query(params![id, cut])?, person)?.pop())
     }
 }
@@ -262,7 +262,7 @@ impl Store {
 #[cfg(any(test, feature = "test-support"))]
 pub fn candidate_query_plan(store: &Store, cut: u64) -> Result<Vec<(i64, i64, String)>> {
     let connection = store.readers.get();
-    let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", candidates_sql()))?;
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8a4656fb13fe owner=fractal_store::store::attention_history TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {}", candidates_sql()))?;
     Ok(statement
         .query_map(params![cut, i64::MAX, MAX_CANDIDATES + 1], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(3)?))

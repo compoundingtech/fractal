@@ -55,7 +55,7 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
         .batched(|tx| -> Result<()> {
             for row in &noise {
                 tx.execute(
-                    "UPDATE claims SET body=?1 WHERE id=?2",
+                    /* sqlite-large-value: allow-for-now lv-h7229f7eb4ce2 owner=fractal_attention::store::alert_action_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id=?2",
                     params![large_noise, row.id],
                 )?;
             }
@@ -76,7 +76,7 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
         .batched(|tx| -> Result<()> {
             for row in &noise {
                 tx.execute(
-                    "UPDATE claims SET body=?1 WHERE id=?2",
+                    /* sqlite-large-value: allow-for-now lv-h7df7f085502e owner=fractal_attention::store::alert_action_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id=?2",
                     params![serde_json::to_string(&row.body)?, row.id],
                 )?;
             }
@@ -95,7 +95,7 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
         .connection
         .batched(|tx| -> Result<()> {
             tx.execute(
-                "UPDATE claims SET body=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-hd60f51383124 owner=fractal_attention::store::alert_action_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id=?2",
                 params![wide, latest.id],
             )?;
             Ok(())
@@ -122,7 +122,7 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
         .connection
         .batched(|tx| -> Result<()> {
             tx.execute(
-                "UPDATE claims SET body=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-he9754fb25c5a owner=fractal_attention::store::alert_action_controls TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE id=?2",
                 params![serde_json::to_string(&latest.body)?, latest.id],
             )?;
             Ok(())
@@ -162,7 +162,7 @@ fn history_query_plan_bounds_each_kind_scan_before_sorting_a_large_fixture() {
     // Authored claims-table fixture only, not signed/native evidence. One transaction
     // creates a busy kind without turning the control into 10,000 source actions.
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute(r#"WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000)
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h1d6571766949 owner=fractal_attention::store::alert_action_controls TODO=prepare-body-and-predecessor-values */ r#"WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000)
             INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
             SELECT 'history-plan-'||i,?1,?2,'harness.diagnostic','alder',?2,
             '{"fields":{"code":"history-fixture"}}','[]','1' FROM n"#,
@@ -256,11 +256,11 @@ fn mission_owned_person_walk_matches_the_public_run_requester() {
                 .connection
                 .batched(|tx| -> Result<()> {
                     tx.execute(
-                        "UPDATE desired SET owner_run=?1 WHERE subject='agent/alder.asker'",
+                        /* sqlite-large-value: allow-for-now lv-ha12f3c5a0196 owner=fractal_attention::store::alert_action_controls TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run=?1 WHERE subject='agent/alder.asker'",
                         [&owner_run],
                     )?;
                     tx.execute(
-                        "UPDATE mission_runs SET status=?1 WHERE id=?2",
+                        /* sqlite-large-value: allow-for-now lv-h0ea7fe605db0 owner=fractal_attention::store::alert_action_controls TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?1 WHERE id=?2",
                         params![status, run_id],
                     )?;
                     Ok(())
@@ -286,7 +286,7 @@ fn mission_owned_person_walk_matches_the_public_run_requester() {
     // mission_run's inner join cannot return a header without its current
     // generation; the ownership walk must take its original writer fallback.
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute("UPDATE mission_runs SET current_generation_id='missing-fixture-generation' WHERE id=?1", [run_id])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h00a84a128fb3 owner=fractal_attention::store::alert_action_controls TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET current_generation_id='missing-fixture-generation' WHERE id=?1", [run_id])?;
         Ok(())
     }).unwrap().unwrap();
     assert!(store.mission_run(run_id).unwrap().is_none());
@@ -788,7 +788,7 @@ fn delegated_dismissal_fences_a_restarted_runtime_and_changed_person() {
 fn a_failed_denial_notice_rolls_back_the_delegated_close_and_operation() {
     let (store, denial, proof) = denial_fixture(&["close-item"]);
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute_batch("CREATE TEMP TRIGGER refuse_denial_notice BEFORE INSERT ON claims WHEN NEW.kind='message.sent' BEGIN SELECT RAISE(ABORT,'authored notice failure'); END")?;
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hb23e0f185d17 owner=fractal_attention::store::alert_action_controls TODO=prepare-body-and-predecessor-values */ "CREATE TEMP TRIGGER refuse_denial_notice BEFORE INSERT ON claims WHEN NEW.kind='message.sent' BEGIN SELECT RAISE(ABORT,'authored notice failure'); END")?;
         Ok(())
     }).unwrap().unwrap();
     assert!(
@@ -800,7 +800,7 @@ fn a_failed_denial_notice_rolls_back_the_delegated_close_and_operation() {
     store
         .connection
         .batched(|tx| -> Result<()> {
-            tx.execute_batch("DROP TRIGGER refuse_denial_notice")?;
+            tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h990742740f3e owner=fractal_attention::store::alert_action_controls TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER refuse_denial_notice")?;
             Ok(())
         })
         .unwrap()

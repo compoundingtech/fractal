@@ -7243,6 +7243,7 @@ mod tests {
                 word,
                 system: false,
                 updated_at: at,
+                state: String::new(),
                 ..template.clone()
             })
             .collect();
