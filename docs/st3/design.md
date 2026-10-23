@@ -31,8 +31,8 @@ public subject and claim vocabulary.
 
 The graph is its own crate, `crates/smallclaims`: the claim log and its batches, envelopes and
 their admission, the canonical order, projection digests, replication between members,
-fleet membership, checkpoints, documents and blobs. It depends on nothing of smalltalk's, so agents,
-missions, seats, delivery, drivers, the CLI and the terminal UI stay out of it. smalltalk's store wraps the
+fleet membership, checkpoints, documents and blobs. It depends on nothing of Fractal's, so agents,
+missions, seats, delivery, drivers, the CLI and the terminal UI stay out of it. Fractal's store wraps the
 graph's and plugs in through `smallclaims::store::Runtime`: its tables and their migration, claim
 kind validation, local writes, projection and replay, cache invalidation, the digested tables, and
 the checkpoint rules and proof answers. A runtime may call the graph freely; the graph reaches a
