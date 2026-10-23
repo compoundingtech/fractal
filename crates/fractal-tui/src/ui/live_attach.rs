@@ -21,14 +21,18 @@ pub(super) async fn phase<T>(name: &str, budget: Duration, future: impl Future<O
     tokio::time::timeout(budget, future).await.map_err(|_| format!("{name} timed out"))?
 }
 
-/// This base's Ui::focus projects the sidebar list, not the focused glass subject.
-/// Attach fencing must follow the visible terminal, including shells absent from that list.
+/// On this base the sidebar selection is not the subject taking terminal input.
+/// Keep global sidebar navigation unchanged; fence against the visible terminal instead.
 pub(super) fn selected_subject(ui: &Ui) -> Option<String> {
-    if !ui.home_open() {
-        match ui.focused_pane() {
-            Some(crate::ui::Pane::Terminal(id) | crate::ui::Pane::Agent(Some(id))) => return Some(id),
-            _ => {}
-        }
+    if !ui.home_open()
+        && let Some(crate::ui::Pane::Terminal(id) | crate::ui::Pane::Agent(Some(id))) = ui.focused_pane()
+    {
+        return Some(id);
+    }
+    if ui.glasses.is_none() && ui.terminal_focused()
+        && let Some(view) = ui.terminal.as_ref()
+    {
+        return Some(view.agent.clone());
     }
     ui.focus().1
 }
@@ -300,12 +304,79 @@ mod tests {
         assert_eq!(selected_subject(&ui), ui.focus().1, "Home does not inherit the hidden terminal");
     }
 
+    #[test]
+    fn shell_pane_and_unlisted_agent_accept_their_own_attach_results() {
+        for agent in ["terminal/not-a-sidebar-row", "agent/not-in-the-sidebar"] {
+            let (mut state, mut ui, tx, mut rx) = selected(agent);
+            assert_ne!(ui.focus().1.as_deref(), Some(agent), "exercise the older sidebar projection mismatch");
+            assert_eq!(selected_subject(&ui).as_deref(), Some(agent));
+            let generation = state.generation;
+            state.apply_fetched(&mut ui, Fetched::NativeFailed {
+                agent: agent.into(), generation, runtime_ids: vec![],
+                reason: "raw terminal stream timed out".into(),
+            }, &tx);
+            assert_eq!(ui.terminal.as_ref().unwrap().stale.as_deref(), Some("failed: raw terminal stream timed out · Ctrl+R to retry"));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_terminal_view_accepts_results_with_or_without_session_focus() {
+        for session in [None, Some("session/not-a-sidebar-row".to_owned())] {
+            let mut ui = Ui::new(crate::ui::demo::world());
+            assert!(ui.glasses.is_none(), "exercise the actual default legacy layout");
+            ui.live = true;
+            ui.tab = 1;
+            ui.session_focus = session;
+            let agent = "terminal/legacy-shell";
+            ui.terminal = Some(view(agent));
+            assert!(ui.terminal_focused());
+            assert_eq!(selected_subject(&ui).as_deref(), Some(agent));
+            let mut state = State::default();
+            let (generation, _, _) = state.begin(&mut ui, agent);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            state.apply_fetched(&mut ui, Fetched::NativeFailed {
+                agent: agent.into(), generation, runtime_ids: vec![],
+                reason: "raw terminal stream timed out".into(),
+            }, &tx);
+            assert_eq!(ui.terminal.as_ref().unwrap().stale.as_deref(), Some("failed: raw terminal stream timed out · Ctrl+R to retry"));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn unrelated_selection_rejects_attach_results_in_glass_and_legacy_layouts() {
+        for legacy in [false, true] {
+            let agent = "terminal/no-longer-visible";
+            let (mut state, mut ui, tx, mut rx) = selected(agent);
+            let generation = state.generation;
+            if legacy {
+                ui.glasses = None;
+                ui.tab = 2;
+            } else {
+                ui.open_in_glass(Pane::Mission(None), Open::Here);
+            }
+            assert!(!ui.terminal_focused());
+            assert_ne!(selected_subject(&ui).as_deref(), Some(agent));
+            state.apply_fetched(&mut ui, Fetched::NativeFailed {
+                agent: agent.into(), generation, runtime_ids: vec!["runtime/old".into()],
+                reason: "stale refusal must not be applied".into(),
+            }, &tx);
+            assert_eq!(ui.terminal.as_ref().unwrap().stale.as_deref(), Some("failed: selection changed · Ctrl+R to retry"));
+            assert!(state.started.is_none());
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
     fn selected(agent: &str) -> (State, Ui, mpsc::UnboundedSender<Command>, mpsc::UnboundedReceiver<Command>) {
         let mut ui = Ui::new(crate::ui::demo::world());
         ui.glasses = Some(crate::ui::glass::Glasses::open(None, None));
         ui.live = true;
         ui.open_in_glass(Pane::Terminal(agent.into()), Open::Here);
         ui.terminal = Some(view(agent));
+        assert_eq!(ui.focused_pane(), Some(Pane::Terminal(agent.into())));
+        assert!(ui.terminal_focused());
+        assert_eq!(selected_subject(&ui).as_deref(), Some(agent));
         let (tx, rx) = mpsc::unbounded_channel();
         let mut state = State::default();
         let _ = state.begin(&mut ui, agent);

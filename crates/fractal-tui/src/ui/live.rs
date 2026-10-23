@@ -3696,6 +3696,8 @@ mod tests {
             ended: None,
             native: None,
         });
+        assert!(ui.terminal_focused(), "Ctrl+R must target the visible terminal");
+        assert_eq!(attach::selected_subject(&ui).as_deref(), Some(agent));
         ui.effects.clear();
         ui.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert!(matches!(ui.effects.as_slice(), [Effect::OpenTerminal { agent: opened }] if opened == agent));
