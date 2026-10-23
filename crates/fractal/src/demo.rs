@@ -1041,6 +1041,11 @@ fn scrub(command: &mut Command) {
         "ST3_ENDPOINT",
         "ST3_PERSON",
         "ST_WORKSPACE",
+        "FRACTAL_AGENT",
+        "FRACTAL_INCARNATION",
+        "FRACTAL_ENDPOINT",
+        "FRACTAL_PERSON",
+        "FRACTAL_WORKSPACE",
     ] {
         command.env_remove(name);
     }
