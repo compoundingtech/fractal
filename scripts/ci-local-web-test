@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""scripts/ci-local-web: the web lane runs as one shard that covers everything, in a home of its own on the account's disk, with no
+st, GitHub or SSH agent variable and none of the account's tool wrappers. The two lane scripts are stubs that record what they saw."""
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parent.parent
+RECORD = '''#!/usr/bin/env bash
+python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ), "umask": u}))' "$@" >> "$CI_LOCAL_WEB_TEST_LOG"
+'''
+
+
+class CiLocalWeb(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.work = root / 'work'
+        (self.work / 'scripts').mkdir(parents=True)
+        shutil.copy(ROOT / 'scripts/ci-local-web', self.work / 'scripts/ci-local-web')
+        (self.work / 'scripts/ci-fractal-web').write_text(RECORD)  # run with bash
+        (self.work / 'scripts/ci-web-shell-test').write_text(  # run with python3
+            'import json, os, sys\nu = os.umask(0)\n'
+            'open(os.environ["CI_LOCAL_WEB_TEST_LOG"], "a").write(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ), "umask": u}) + "\\n")\n')
+        env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', GIT_AUTHOR_NAME='t',
+                   GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
+        for args in (['init', '-q'], ['add', '.'], ['commit', '-q', '-m', 'one']):
+            subprocess.run(['git', *args], cwd=self.work, env=env, check=True, capture_output=True)
+        self.head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.work, capture_output=True, text=True).stdout.strip()
+        self.home = root / 'account home'
+        self.wrappers = self.home / '.local/bin'
+        self.wrappers.mkdir(parents=True)
+        self.log = root / 'log.jsonl'
+
+    def run_web(self, **extra):
+        recorder = self.home / '.local/state/st3/recorder/bin'
+        env = {'PATH': f'{recorder}:{self.wrappers}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_WEB_TEST_LOG': str(self.log),
+               'TMPDIR': self.tmp.name, 'ST_AGENT': 'agent/x', 'FRACTAL_AGENT': 'agent/x', 'GH_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x',
+               'LD_PRELOAD': '/nix/store/x-jemalloc/lib/libjemalloc.so.2', 'KIT_PLAY_MAX_SECONDS': '100', 'APP_TEST_SET': 'related',
+               'FRACTAL_WEB_BUCK_ROOT': '/nix/store/x-buck-root', 'FRACTAL_WEB_OTHER': '/home/elsewhere', **extra}
+        done = subprocess.run(['bash', 'scripts/ci-local-web'], cwd=self.work, env=env, capture_output=True, text=True,
+                              preexec_fn=lambda: os.umask(0o002))
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+        return done, calls
+
+    def test_one_shard_covers_every_play_and_test_in_a_home_of_its_own(self):
+        done, calls = self.run_web()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(calls), 2)  # the web shell's own tests, then the lane
+        for call in calls:
+            env = call['env']
+            self.assertEqual({key: env.get(key) for key in ('KIT_INPUTS', 'KIT_SHARD_INDEX', 'KIT_SHARD_COUNT', 'KIT_PLAY_SET',
+                                                             'KIT_PLAY_A11Y', 'APP_TEST_SET', 'BASE_SHA', 'HEAD_SHA')},
+                             {'KIT_INPUTS': 'true', 'KIT_SHARD_INDEX': '0', 'KIT_SHARD_COUNT': '1', 'KIT_PLAY_SET': 'all',
+                              'KIT_PLAY_A11Y': 'on', 'APP_TEST_SET': 'all', 'BASE_SHA': self.head, 'HEAD_SHA': self.head})
+            self.assertNotIn('KIT_PLAY_MAX_SECONDS', env)  # no per-play time cap
+            scratch = Path(env['HOME']).parent
+            self.assertTrue(str(scratch).startswith(f'{self.home}/.cache/ci-local/web.'), scratch)
+            for name in ('TMPDIR', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY', 'XDG_STATE_HOME', 'KIT_RECEIPT_DIRECTORY'):
+                self.assertTrue(env[name].startswith(str(scratch)), (name, env[name]))
+            self.assertEqual(env['pnpm_config_store_dir'], f'{self.home}/.cache/ci-local-pnpm-store')  # kept between runs
+            for name in ('ST_AGENT', 'FRACTAL_AGENT', 'GH_TOKEN', 'SSH_AUTH_SOCK', 'LD_PRELOAD', 'FRACTAL_WEB_OTHER', 'WATCHMAN_SOCK'):
+                self.assertNotIn(name, env)
+            self.assertEqual(env['FRACTAL_WEB_BUCK_ROOT'], '/nix/store/x-buck-root')  # the web dev shell's own
+            entries = env['PATH'].split(':')
+            self.assertNotIn(str(self.wrappers), entries)  # the account's nix/npm/cargo front doors
+            self.assertFalse([entry for entry in entries if entry.startswith(f'{self.home}/.local/state/st3')])
+            self.assertEqual(call['umask'], 0o022)
+        self.assertEqual(list((self.home / '.cache/ci-local').glob('web.*')), [], 'the scratch is removed afterwards')
+
+    def test_the_host_watchman_service_is_named_by_its_socket(self):
+        user = subprocess.run(['id', '-un'], capture_output=True, text=True, check=True).stdout.strip()
+        state = self.home / '.local/state/watchman' / f'{user}-state'
+        state.mkdir(parents=True)
+        listener = socket.socket(socket.AF_UNIX)
+        self.addCleanup(listener.close)
+        listener.bind(str(state / 'sock'))
+        done, calls = self.run_web()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual({call['env'].get('WATCHMAN_SOCK') for call in calls}, {str(state / 'sock')})
+
+    def test_a_failing_lane_is_the_exit_status(self):
+        (self.work / 'scripts/ci-fractal-web').write_text(RECORD + 'exit 7\n')
+        done, calls = self.run_web()
+        self.assertEqual(done.returncode, 7, done.stderr)
+        self.assertEqual(list((self.home / '.cache/ci-local').glob('web.*')), [])
+
+
+if __name__ == '__main__':
+    unittest.main()

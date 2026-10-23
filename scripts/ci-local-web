@@ -26,16 +26,27 @@ pnpm_store=${pnpm_config_store_dir:-$HOME/.cache/ci-local-pnpm-store}
 mkdir -p "$pnpm_store"
 while IFS='=' read -r -d '' name value; do
   case "$name" in
+    # The web dev shell's own settings (nix/web-shell.nix: the Buck root) stay when they name a store path; a seat's do not.
+    FRACTAL_WEB_*) [[ "$value" == /nix/store/* && "$value" != *..* ]] || unset "$name" ;;
     ST_*|ST2_*|ST3_*|FRACTAL_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*|LD_PRELOAD|KIT_*|APP_TEST_SET) unset "$name" ;;
   esac
 done < <(env -0)
+# Neither a seat's command recorder (inside the account's st state) nor the account's own tool wrappers (~/.local/bin: the host's
+# build admission front doors for nix, npm and cargo) stay on PATH: a CI runner has neither, and a wrapper that execs "the next
+# nix on PATH" loops forever under a test that puts its own nix stub first (scripts/ci-web-shell-test). The run is already
+# governed: st-test starts it under one heavy-slot ticket in builds.slice.
 st_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
+account_bin=$HOME/.local/bin
 kept=()
 IFS=':' read -r -a entries <<< "$PATH"
 for entry in "${entries[@]}"; do
-  case "$entry" in "$st_state"|"$st_state"/*) ;; *) kept+=("$entry") ;; esac
+  case "$entry" in "$st_state"|"$st_state"/*|"$account_bin"|"$account_bin"/) ;; *) kept+=("$entry") ;; esac
 done
 PATH=$(IFS=':'; printf '%s' "${kept[*]}")
+# Buck's file watcher is the host's Watchman service (.buckconfig file_watcher = watchman), found by its socket under the account's
+# state: the stages' HOME below would hide it, so it is named.
+watchman_sock=${XDG_STATE_HOME:-$HOME/.local/state}/watchman/$(id -un)-state/sock
+if [ -S "$watchman_sock" ]; then export WATCHMAN_SOCK="$watchman_sock"; fi
 export HOME="$scratch/home" TMPDIR="$scratch/tmp" pnpm_config_store_dir="$pnpm_store"
 export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
 export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md"
