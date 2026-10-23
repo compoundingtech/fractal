@@ -27,7 +27,16 @@ for stage in "$@"; do
     *) echo "ci-local: stage $stage has no local lane" >&2; exit 2 ;;
   esac
 done
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/ci-local.XXXXXX")
+# The scratch, and the stages' TMPDIR inside it, are on the account's disk as a CI runner's temporary directory is, never the
+# caller's TMPDIR: a dev shell puts that under /tmp, which on some build hosts is a small tmpfs (tests that need tens of GB of
+# scratch are refused there) or holds a stray /tmp/.git (tests that look for the enclosing repository find it).
+# A CI runner's umask is 022: a host whose umask is 002 would make the stages' directories group-writable, and tests that
+# refuse a directory others can change (the secrets gateway's) fail there.
+umask 022
+scratch_root=${CI_LOCAL_SCRATCH_ROOT:-$HOME/.cache/ci-local}
+mkdir -p "$scratch_root"
+chmod go-w "$scratch_root"
+scratch=$(mktemp -d "$scratch_root/run.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
@@ -66,8 +75,11 @@ done
 PATH=$(IFS=':'; printf '%s' "${kept[*]}")
 export HOME="$scratch/home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" CARGO_REAL="$cargo_real"
 export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
-export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md"
-mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP"
+export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md" TMPDIR="$scratch/tmp"
+mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP" "$TMPDIR"
+# A host may preload an allocator into every process (jemalloc); a CI runner preloads nothing, and tests that measure the allocator
+# (malloc_trim) fail under one.
+unset LD_PRELOAD
 touch "$GITHUB_STEP_SUMMARY"
 # clippy's ratchet compares with the base, as CI compares with the event's base: CLIPPY_BASE_SHA when given (scripts/st-test
 # gives the base it just fetched and records it in the note), otherwise main as fetched now, never a local ref that may be old.

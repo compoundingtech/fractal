@@ -74,6 +74,7 @@ use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
 mod cli_help;
+mod demo;
 mod setup;
 mod onboarding;
 mod change_cli;
@@ -213,6 +214,16 @@ enum Command {
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
     #[command(version = fractal_drivers::version::display_version())]
     Ui(fractal_tui::Args),
+    /// Play a scripted demo of st in the terminal interface, in its own instance.
+    ///
+    /// A demo is one KDL file: the agents, missions, conversations and documents it starts
+    /// from, and beats that each do one visible thing after a delay or when you press the
+    /// advance key. Its agents are scripted, so it costs no tokens and plays the same every
+    /// time. See docs/st3/demos.md and examples/demos.
+    Demo {
+        #[command(subcommand)]
+        command: DemoCommand,
+    },
     /// Inspect Git-backed changes and their separate ref/index/evidence freshness.
     Changes(change_cli::ChangesArgs),
     /// Validate and publish KDL files containing seats, missions and schedules.
@@ -426,6 +437,36 @@ enum Command {
     ReplicationWorker(ReplicationWorkerArgs),
     #[command(hide = true)]
     Driver(DriverArgs),
+}
+
+#[derive(Subcommand)]
+enum DemoCommand {
+    /// Reset the instance, seed the demo, and play it in the terminal interface.
+    ///
+    /// Needs an instance, so your own fleet is never touched: st --instance demo demo play
+    /// FILE. Each run erases that instance's graph and starts from the beginning. It refuses
+    /// an instance that holds a graph or config a demo did not make, unless --reset. Press the
+    /// advance key (F8 unless the file names another) for each beat that waits for a key, and
+    /// Ctrl+Q to end; the demo's daemon and agents stop with it.
+    Play {
+        /// The demo file.
+        file: PathBuf,
+        /// Erase an instance a demo did not make: its graph, its interface cache and its
+        /// config. Without it, a demo plays only in a new instance or one a demo made.
+        #[arg(long)]
+        reset: bool,
+    },
+    /// Check a demo file and list its beats, without playing it.
+    Check {
+        /// The demo file.
+        file: PathBuf,
+    },
+    /// The process a scripted agent runs: it waits for the demo player to end.
+    #[command(hide = true)]
+    Seat {
+        #[arg(long)]
+        player: u32,
+    },
 }
 
 #[derive(Args)]
@@ -4598,6 +4639,9 @@ fn cli_main() -> ExitCode {
     if let Command::Ui(options) = cli.command {
         return run_terminal_ui(options, cli.endpoint.as_deref());
     }
+    if let Command::Demo { command } = cli.command {
+        return run_demo(command);
+    }
     // Set the CLI identity only after the TUI path has chosen its stui client identity.
     fractal_client::set_client_name(format!("st {}", fractal_drivers::version::machine_version()));
     if let Command::Up(args) = &cli.command {
@@ -4643,6 +4687,60 @@ fn run_terminal_ui(mut options: fractal_tui::Args, endpoint: Option<&str>) -> Ex
             }
         }
         fractal_tui::run(options)
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("st: {}", plain_error(&error));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `st demo`: like the terminal interface, it runs before the CLI runtime, because it opens one.
+fn run_demo(command: DemoCommand) -> ExitCode {
+    let result = (|| -> Result<()> {
+        match command {
+            DemoCommand::Check { file } => {
+                let demo = demo::load(&file)?;
+                println!(
+                    "{}: {} agents, {} seed actions, {} beats; advance key {}",
+                    demo.title.as_deref().unwrap_or(&demo.name),
+                    demo.agents.len(),
+                    demo.seed.len(),
+                    demo.beats.len(),
+                    demo.advance.to_uppercase()
+                );
+                for (index, beat) in demo.beats.iter().enumerate() {
+                    let wait = match beat.wait {
+                        demo::Wait::Key => "key".to_owned(),
+                        demo::Wait::For(delay) => format!("{:.1}s", delay.as_secs_f64()),
+                    };
+                    println!(
+                        "{:>3}  line {:<4} {wait:>6}  {}",
+                        index + 1,
+                        beat.line,
+                        beat.action.describe()
+                    );
+                }
+                Ok(())
+            }
+            DemoCommand::Seat { player } => demo::seat(player),
+            DemoCommand::Play { file, reset } => {
+                let instance = fractal_daemon::instance::current().context(
+                    "a demo plays in its own instance, so your fleet is never touched: st --instance demo demo play FILE",
+                )?;
+                let demo = demo::load(&file)?;
+                // The demo acts as its own people and agents; a seat's identity must not leak in.
+                for name in ["ST_AGENT", "ST3_PERSON", "ST3_ENDPOINT", "ST3_INCARNATION"] {
+                    // SAFETY: no other thread exists yet; the player starts after this.
+                    unsafe { std::env::remove_var(name) };
+                }
+                demo::play(demo, &instance, reset, |playback| {
+                    fractal_tui::run(fractal_tui::Args::default().with_playback(playback))
+                })
+            }
+        }
     })();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -5073,6 +5171,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
+        Command::Demo { .. } => unreachable!("a demo runs before the CLI runtime"),
         Command::Up(_) => unreachable!(),
         Command::Skill(_) => unreachable!(),
         Command::Evidence(_) => unreachable!(),
