@@ -123,6 +123,7 @@ pub async fn pin(State(state): State<AppState>, Extension(session): Extension<Cl
     }
     let previous = effective(&state, &granted)?;
     let mut value = fields(&previous)?.clone();
+    value["principal"] = json!(principal(fields(&granted)?)?);
     value["read_trust"] = serde_json::to_value(trust).map_err(ApiError::internal)?;
     value["policy_revision"] = json!(value["policy_revision"].as_u64().unwrap_or(0) + 1);
     value["timestamp"] = json!(client_timestamp(client_now_ms()));
@@ -208,8 +209,9 @@ pub fn verify(state: &AppState, session: &ClientSession, path: &str, parameters:
     validate_trust(&trust)?;
     let payload = &authorization.payload;
     let requested = budget(parameters,&trust)?;
-    if payload.issuer!=trust.issuer || payload.key_id!=trust.key_id || payload.identity!="chatgpt"
-        || payload.assistant_id!=PRINCIPAL || payload.grant_id!=source["grant_id"].as_str().unwrap_or("")
+    let principal = principal(source)?;
+    if payload.issuer!=trust.issuer || payload.key_id!=trust.key_id || payload.identity!=principal.strip_prefix("assistant/").unwrap_or("")
+        || payload.assistant_id!=principal || payload.grant_id!=source["grant_id"].as_str().unwrap_or("")
         || payload.policy_revision!=source["policy_revision"].as_u64().unwrap_or(0)
         || payload.projection!=projection || payload.parameters!=*parameters
         || payload.max_response_bytes!=requested || payload.request_digest!=request_digest(path,parameters)?
@@ -292,6 +294,7 @@ pub async fn read_inner(State(state): State<AppState>, Extension(session): Exten
         if !current.allows(scope) { return Err(forbidden("assistant projection scope is not granted")); }
         let receipt_subject = format!("custom/client/assistant-v1-read-{}", uuid::Uuid::new_v4());
         let consumed = append(&state, receipt_subject.clone(), USED, &current.actor, json!({
+            "principal":current.authority_actor,
             "grant_id": fields(&policy)?["grant_id"], "mode":"caller-bound-allow",
             "projection":projection, "request_digest":request_digest(uri.path(), &parameters)?,
             "max_response_bytes":requested, "timestamp":client_timestamp(client_now_ms())
@@ -310,6 +313,7 @@ pub async fn read_inner(State(state): State<AppState>, Extension(session): Exten
     // Consumption precedes any source access and is fenced in the durable authority namespace.
     let consumed = append(&state,receipt.subject.clone(),USED,&receipt.actor,json!({
         "version":1,"grant_id":authorization.payload.grant_id,"policy_revision":receipt.policy_revision,
+        "principal":authorization.payload.assistant_id,
         "issuer":authorization.payload.issuer,"attestor_key_id":authorization.payload.key_id,
         "approval_id":authorization.payload.approval_id,"execution_id":authorization.payload.execution_id,
         "request_digest":authorization.payload.request_digest,"nonce_digest":credential_digest(&authorization.payload.nonce),
@@ -322,6 +326,7 @@ pub async fn read_inner(State(state): State<AppState>, Extension(session): Exten
         Ok(result) => result,
         Err(error) => {
             append(&state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,
+                "principal":authorization.payload.assistant_id,
                 "outcome":"denied-projection","denial_code":error.code,"returned_bytes":0,
                 "timestamp":client_timestamp(client_now_ms())}),Some(&consumed))?;
             return Err(error);
@@ -349,6 +354,7 @@ pub async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
     if consumed.id!=receipt.consumed_claim {return Err(forbidden("read consent receipt changed"));}
     let delivered=within_budget && authorization.is_ok();
     append(state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,
+        "principal":consumed.body["fields"].get("principal").cloned().unwrap_or_else(|| json!(PRINCIPAL)),
         "policy_revision":receipt.policy_revision,"transport":receipt.transport,
         "max_response_bytes":receipt.max_response_bytes,
         "returned_bytes":if delivered {bytes.len()} else {0},"budget_used":bytes.len(),

@@ -741,7 +741,7 @@ export type AssistantPairingBegin = {
   scopes: Array<AssistantScope>;
 };
 
-export type AssistantPrincipal = "assistant/chatgpt";
+export type AssistantPrincipal = "assistant/chatgpt" | "assistant/mcp";
 
 export type AssistantProjection = 
   "summary"
@@ -2583,7 +2583,7 @@ export type ScgReadAuthorizationPayload = {
   execution_id: string;
   expires_at_unix_ms: number;
   grant_id: Id;
-  identity: "chatgpt";
+  identity: "chatgpt" | "mcp";
   issuer: PersonId;
   key_id: string;
   max_response_bytes: AssistantResponseBytes;

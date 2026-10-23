@@ -19,6 +19,9 @@ pub async fn propose(State(state): State<AppState>, Extension(snapshot): Extensi
     let _guard = TRANSITIONS.lock().await;
     let granted = latest(&state,grant_subject,GRANTED)?.ok_or_else(|| forbidden("assistant grant absent"))?;
     let current_session = super::session(&state,&granted,session.transport)?;
+    if current_session.actor != session.actor || current_session.authority_actor != session.authority_actor {
+        return Err(forbidden("assistant session does not match its grant"));
+    }
     if !current_session.allows(required_scope) {
         return Err(forbidden("proposal scope is absent"));
     }
@@ -35,7 +38,7 @@ pub async fn propose(State(state): State<AppState>, Extension(snapshot): Extensi
             return Err(forbidden("assistant writes cannot supply person signatures"));
         }
         if request.action_type == "message.send"
-            && ["from", "actor", "sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|field| request.parameters.get(*field).is_some())
+            && ["from", "actor", "principal", "sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|field| request.parameters.get(*field).is_some())
         {
             return Err(forbidden("assistant message identity and provenance are server-owned"));
         }

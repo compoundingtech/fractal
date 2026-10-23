@@ -2,7 +2,7 @@
 //! This is client state, never a graph replica or a peer configuration.
 mod grant_proof;
 pub(crate) mod transport;
-use crate::{AssistantPairedSession, AssistantPrincipal, Client, DeviceSignature, MessageSendParameters, PersonPairedSession, PairingComplete};
+use crate::{AssistantPairedSession, Client, DeviceSignature, MessageSendParameters, PersonPairedSession, PairingComplete};
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
@@ -430,13 +430,12 @@ impl AssistantDevice {
         ensure!(
             self.session.kind == "assistant-paired-session"
                 && matches!(self.session.api_version.as_str(), "st3.client.v0" | "fractal.client.v0")
-                && self.session.principal == AssistantPrincipal::Chatgpt
                 && self.session.credential.len() >= 32
                 && self.session.device_id == grant.device_id
                 && self.session.principal == grant.principal
                 && self.session.sender_class == grant.sender_class
                 && self.session.session_actor == grant.session_actor
-                && grant.session_actor == format!("assistant/chatgpt/session/{}", grant.id)
+                && grant.session_actor == format!("{}/session/{}", grant.principal.as_str(), grant.id)
                 && self.session.scopes == grant.scopes
                 && self.session.expires_at == grant.expires_at
                 && issuer.is_some_and(|person| {
@@ -990,6 +989,43 @@ mod tests {
             assert!(!supports_device_key_proofs(&advertisement));
         }
         assert!(!supports_device_key_proofs(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn assistant_session_principal_and_actor_are_grant_bound() {
+        for fixture in [
+            include_str!("../../../docs/st3/client-v0/fixtures/assistant-pairing.json"),
+            include_str!("../../../docs/st3/client-v0/fixtures/assistant-mcp-pairing.json"),
+        ] {
+            let paired: crate::Envelope<AssistantPairedSession> =
+                serde_json::from_str(fixture).unwrap();
+            let mut device = AssistantDevice {
+                endpoint: "https://member.example".into(),
+                allow_public_http: false,
+                session: paired.value,
+                signing_key: SigningKey::generate(KeyAlgorithm::Ed25519).unwrap(),
+            };
+            device.session.grant.key_id = format!(
+                "{:x}",
+                Sha256::digest(device.signing_key.public_key().unwrap().as_bytes())
+            );
+            device.validate().unwrap();
+
+            let principal = device.session.principal.clone();
+            device.session.principal = match principal {
+                crate::AssistantPrincipal::Chatgpt => crate::AssistantPrincipal::Mcp,
+                crate::AssistantPrincipal::Mcp => crate::AssistantPrincipal::Chatgpt,
+            };
+            assert!(device.validate().is_err());
+            device.session.principal = principal;
+
+            device.session.session_actor = format!(
+                "assistant/other/session/{}",
+                device.session.grant.id
+            );
+            device.session.grant.session_actor = device.session.session_actor.clone();
+            assert!(device.validate().is_err());
+        }
     }
 
 

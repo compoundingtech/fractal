@@ -102,7 +102,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
     if !matches!(request.minimal_read_mode.as_str(), "approval-once" | "caller-bound-allow") {
         return Err(forbidden("unsupported assistant read mode"));
     }
-    if request.assistant_id != PRINCIPAL || request.device_name.trim().is_empty()
+    if !matches!(request.assistant_id.as_str(), PRINCIPAL | MCP_PRINCIPAL) || request.device_name.trim().is_empty()
         || request.device_name.len() > 120 {
         return Err(validation("invalid assistant principal or device name"));
     }
@@ -117,7 +117,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
     let expires = now + u128::from(request.expires_in_seconds) * 1000;
     let scopes: BTreeSet<_> = request.scopes.into_iter().collect();
     append(&state, subject(&id)?, BEGUN, issuer, json!({
-        "version":1,"grant_id":grant_id,"principal":PRINCIPAL,"sender_class":"external-assistant",
+        "version":1,"grant_id":grant_id,"principal":request.assistant_id,"sender_class":"external-assistant",
         "issuer":issuer,"device_name":request.device_name,"scopes":scopes,
         "expires_at_unix_ms":expires,"challenge_expires_at_unix_ms":now + 300_000,
         "code_hash":credential_digest(&code),"policy_revision":1,
@@ -128,7 +128,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
     signal_changed(&state);
     Ok(Json(json!({"kind":"pairing-challenge","pairing_id":format!("pairing/{id}"),
         "code":code,"expires_at":client_timestamp(now + 300_000),"grant_kind":"assistant",
-        "grant_id":grant_id,"principal":PRINCIPAL,"grant_expires_at":client_timestamp(expires),
+        "grant_id":grant_id,"principal":request.assistant_id,"grant_expires_at":client_timestamp(expires),
         "policy_revision":1,"minimal_read_mode":request.minimal_read_mode})))
 }
 
@@ -155,7 +155,8 @@ async fn complete_inner(state: &AppState, id: &str, request: &PairingComplete,
     let hash = credential_digest(key);
     let device_id = format!("device/{}", &hash[..24]);
     let grant_id = source["grant_id"].as_str().ok_or_else(|| forbidden("invalid assistant grant"))?;
-    let actor = format!("{PRINCIPAL}/session/{grant_id}");
+    let principal = principal(source)?;
+    let actor = format!("{principal}/session/{grant_id}");
     let mut random = [0_u8; 32];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
     let credential = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random);
@@ -163,6 +164,7 @@ async fn complete_inner(state: &AppState, id: &str, request: &PairingComplete,
     let object = grant.as_object_mut().ok_or_else(|| forbidden("invalid assistant grant"))?;
     object.remove("code_hash");
     object.remove("challenge_expires_at_unix_ms");
+    object.insert("principal".into(), json!(principal));
     object.insert("credential_hash".into(), json!(credential_digest(&credential)));
     object.insert("key_id".into(), json!(hash));
     object.insert("device_public_key".into(), json!(key));
@@ -174,7 +176,7 @@ async fn complete_inner(state: &AppState, id: &str, request: &PairingComplete,
     let claim = append(state, subject, GRANTED, issuer, grant, Some(&begun))?;
     let projection = projection(state, &claim)?;
     signal_changed(state);
-    Ok(Some(Json(json!({"kind":"assistant-paired-session","api_version":CLIENT_API_VERSION,"principal":PRINCIPAL,
+    Ok(Some(Json(json!({"kind":"assistant-paired-session","api_version":CLIENT_API_VERSION,"principal":principal,
         "sender_class":"external-assistant","device_id":device_id,"session_actor":actor,
         "credential":credential,"scopes":projection["scopes"],"expires_at":projection["expires_at"],
         "grant":projection}))))
@@ -201,7 +203,7 @@ async fn revoke_inner(State(state): State<AppState>, Extension(session): Extensi
     if latest(&state, &subject, REVOKED)?.is_none() {
         let previous = effective(&state, &granted)?;
         append(&state, subject, REVOKED, issuer, json!({"version":1,"grant_id":fields(&granted)?["grant_id"],
-            "principal":PRINCIPAL,"issuer":issuer,"transport":session.transport,
+            "principal":principal(fields(&granted)?)?,"issuer":issuer,"transport":session.transport,
             "timestamp":client_timestamp(client_now_ms()),"outcome":"revoked"}), Some(&previous))?;
         signal_changed(&state);
     }
@@ -231,6 +233,7 @@ async fn update_policy_inner(State(state): State<AppState>, Extension(session): 
         return Err(forbidden("assistant grant expired; begin a new grant instead of renewing it"));
     }
     let mut value = fields(&previous)?.clone();
+    value["principal"] = json!(principal(fields(&granted)?)?);
     value["scopes"] = json!(request.scopes.into_iter().collect::<BTreeSet<_>>());
     value["minimal_read_mode"] = json!(request.minimal_read_mode);
     if request.recipient_allowlist.iter().any(|id| !id.starts_with("agent/") || id.len() > 256 || id.chars().any(char::is_whitespace)) {
@@ -251,20 +254,123 @@ async fn update_policy_inner(State(state): State<AppState>, Extension(session): 
 mod tests {
     use super::*;
 
-    const ISSUER: &str = "person/operator";
+    const ISSUER: &str = "person/robin";
 
-    fn state(root: &Path) -> AppState { super::super::tests::test_state_named(root, "assistant-tests") }
+    fn state(root: &Path) -> AppState {
+        let mut state = super::super::tests::test_state_named(root, "assistant-tests");
+        state.owning_person = Some(ISSUER.into());
+        state
+    }
 
     fn request() -> AssistantPairingBegin { serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
         "device_name":"assistant","assistant_id":PRINCIPAL,"scopes":SCOPES[..4],
         "expires_in_seconds":3600,"disclosure_consent":true,"consent_evidence":"axe decision ask recorded by the owning person"})).unwrap() }
 
     async fn paired(state: &AppState) -> Value {
-        let Json(challenge) = begin(state.clone(), ClientSession::local(Some(ISSUER)).unwrap(), request()).await.unwrap();
+        paired_principal(state, PRINCIPAL).await
+    }
+
+    async fn paired_principal(state: &AppState, principal: &str) -> Value {
+        let mut request = request();
+        request.assistant_id = principal.into();
+        let Json(challenge) = begin(state.clone(), ClientSession::local(Some(ISSUER)).unwrap(), request).await.unwrap();
         let request: PairingComplete = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
             "code":challenge["code"],"device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32])})).unwrap();
         complete(state, challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap(),
                  &request, "fabric-loopback").await.unwrap().unwrap().0
+    }
+
+    #[tokio::test]
+    async fn supported_principals_bind_grants_to_the_same_owner_and_origin() {
+        for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+            let root = tempfile::tempdir().unwrap();
+            let mut state = state(root.path());
+            state.owning_person = Some("person/robin".into());
+            for actor in ["person/blair", "agent/example-other"] {
+                let mut request = request();
+                request.assistant_id = principal.into();
+                assert!(begin(state.clone(), ClientSession::local(Some(actor)).unwrap(), request).await.is_err());
+            }
+            let mut request = request();
+            request.assistant_id = principal.into();
+            let Json(challenge) = begin(state.clone(), ClientSession::local(Some("person/robin")).unwrap(), request).await.unwrap();
+            let completion = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
+                "code":challenge["code"],"device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32])})).unwrap();
+            let paired = complete(&state, challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap(),
+                &completion, "fabric-loopback").await.unwrap().unwrap().0;
+            assert_eq!(paired["principal"], principal);
+            let mut granted = latest(&state, &subject(paired["grant"]["id"].as_str().unwrap()).unwrap(), GRANTED).unwrap().unwrap();
+            let session = super::session(&state, &granted, "unix").unwrap();
+            assert_eq!(session.authority_actor, principal);
+            assert_eq!(session.actor, format!("{principal}/session/{}", paired["grant"]["id"].as_str().unwrap()));
+            let mut forged = granted.clone();
+            forged.origin = "other-origin".into();
+            assert!(super::session(&state, &forged, "unix").is_err());
+            forged = granted.clone();
+            forged.actor = Some("person/blair".into());
+            assert!(super::session(&state, &forged, "unix").is_err());
+            forged = granted.clone();
+            forged.body["fields"]["issuer"] = json!("person/blair");
+            assert!(super::session(&state, &forged, "unix").is_err());
+            forged = granted.clone();
+            forged.body["fields"]["session_actor"] = json!("assistant/chatgpt/session/assistant-grant/forged");
+            assert!(super::session(&state, &forged, "unix").is_err());
+            granted.body["fields"].as_object_mut().unwrap().remove("principal");
+            if principal == PRINCIPAL {
+                assert_eq!(super::session(&state, &granted, "unix").unwrap().authority_actor, PRINCIPAL);
+            } else {
+                assert!(super::session(&state, &granted, "unix").is_err());
+            }
+            granted.body["fields"]["principal"] = Value::Null;
+            assert!(super::session(&state, &granted, "unix").is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_absent_and_explicit_chatgpt_principals_authenticate_after_restart() {
+        for principal in [None, Some(PRINCIPAL)] {
+            let root = tempfile::tempdir().unwrap();
+            let state = state(root.path());
+            let paired = paired(&state).await;
+            let digest = credential_digest(paired["credential"].as_str().unwrap());
+            let granted = latest(&state, &subject(paired["grant"]["id"].as_str().unwrap()).unwrap(), GRANTED).unwrap().unwrap();
+            let mut value = fields(&granted).unwrap().clone();
+            match principal {
+                Some(principal) => { value["principal"] = json!(principal); }
+                None => { value.as_object_mut().unwrap().remove("principal"); }
+            }
+            let legacy = append(&state, granted.subject.clone(), GRANTED, ISSUER, value.clone(), Some(&granted)).unwrap();
+            // Exercise both the original grant and an old policy with no principal.
+            for previous in [None, Some(&legacy)] {
+                if let Some(previous) = previous {
+                    value["policy_revision"] = json!(2);
+                    append(&state, granted.subject.clone(), POLICY, ISSUER, value.clone(), Some(previous)).unwrap();
+                }
+                let reopened = self::state(root.path());
+                let session = authenticate(&reopened, &digest, "fabric-loopback").unwrap().unwrap();
+                assert_eq!(session.authority_actor, PRINCIPAL);
+                assert_eq!(session.actor, paired["session_actor"].as_str().unwrap());
+                assert_eq!(projection(&reopened, &legacy).unwrap()["principal"], PRINCIPAL);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn grant_policy_cannot_replace_the_issued_principal() {
+        for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+            for replacement in [PRINCIPAL, MCP_PRINCIPAL, "assistant/other", "person/other"] {
+                if replacement == principal { continue; }
+                let root = tempfile::tempdir().unwrap();
+                let state = state(root.path());
+                let paired = paired_principal(&state, principal).await;
+                let granted = latest(&state, &subject(paired["grant"]["id"].as_str().unwrap()).unwrap(), GRANTED).unwrap().unwrap();
+                let mut value = fields(&granted).unwrap().clone();
+                value["principal"] = json!(replacement);
+                value["session_actor"] = json!(format!("{replacement}/session/{}", paired["grant"]["id"].as_str().unwrap()));
+                append(&state, granted.subject.clone(), POLICY, ISSUER, value, Some(&granted)).unwrap();
+                assert!(authenticate(&state, &credential_digest(paired["credential"].as_str().unwrap()), "fabric-loopback").is_err());
+            }
+        }
     }
 
     #[test]
@@ -299,12 +405,12 @@ mod tests {
                 let mut request = Request::builder().uri(path)
                     .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap();
                 match peer {
-                    0 => { request.extensions_mut().insert(super::super::super::BoundAgent("agent/test".into())); }
+                    0 => { request.extensions_mut().insert(super::super::super::BoundAgent("agent/example-worker".into())); }
                     1 => { request.extensions_mut().insert(super::super::super::LocalPeer {
-                        pid: 7, ancestor: Some("agent/test".into()),
+                        pid: 7, ancestor: Some("agent/example-worker".into()),
                     }); }
                     _ => { request.extensions_mut().insert(super::super::super::NativeDeliveryPeer {
-                        agent: "agent/test".into(), transport: "omp-channel", pid: 7, archives_inbox: false,
+                        agent: "agent/example-worker".into(), transport: "omp-channel", pid: 7, archives_inbox: false,
                     }); }
                 }
                 assert_eq!(app.clone().oneshot(request).await.unwrap().status(), StatusCode::FORBIDDEN, "{path}");
@@ -319,8 +425,8 @@ mod tests {
         }
         for path in ["/v1/client/agents", "/v1/client/devices"] {
             let mut read = Request::builder().uri(path)
-                .header(LOCAL_PERSON_HEADER, "agent/test").body(Body::empty()).unwrap();
-            read.extensions_mut().insert(super::super::super::BoundAgent("agent/test".into()));
+                .header(LOCAL_PERSON_HEADER, "agent/example-worker").body(Body::empty()).unwrap();
+            read.extensions_mut().insert(super::super::super::BoundAgent("agent/example-worker".into()));
             let response = app.clone().oneshot(read).await.unwrap();
             assert_eq!(response.status(), if path == "/v1/client/devices" { StatusCode::FORBIDDEN } else { StatusCode::OK });
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -339,7 +445,7 @@ mod tests {
             kind: "custom.client.pairing-completed".into(), actor: Some(ISSUER.into()),
             fields: serde_json::from_value(json!({
                 "credential_hash": credential_digest(credential),
-                "session_actor": "person/operator/session/phone", "person_id": ISSUER,
+                "session_actor": "person/robin/session/phone", "person_id": ISSUER,
                 "scopes": ALL_SCOPES, "expires_at_unix_ms": u64::MAX,
             })).unwrap(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
@@ -355,22 +461,42 @@ mod tests {
 
     #[tokio::test]
     async fn assistant_issuance_rejects_remote_agents_and_non_owner() {
-        let root = tempfile::tempdir().unwrap(); let state = state(root.path());
-        for (actor, transport) in [(ISSUER,"fabric-loopback"),("agent/test","unix"),("person/other","unix")] {
-            let session = ClientSession::for_tests(actor,actor,transport);
-            assert_eq!(begin(state.clone(),session,request()).await.unwrap_err().status,StatusCode::FORBIDDEN);
+        for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+            let root = tempfile::tempdir().unwrap(); let state = state(root.path());
+            for (actor, transport) in [(ISSUER,"fabric-loopback"),("agent/example-worker","unix"),("person/other","unix")] {
+                let mut request = request();
+                request.assistant_id = principal.into();
+                let session = ClientSession::for_tests(actor,actor,transport);
+                assert_eq!(begin(state.clone(),session,request).await.unwrap_err().status,StatusCode::FORBIDDEN);
+            }
+            for session in [
+                ClientSession { local_peer: true, ..ClientSession::local(Some(ISSUER)).unwrap() },
+                ClientSession { pairing_grant: Some("custom/client/paired-owner".into()), ..ClientSession::local(Some(ISSUER)).unwrap() },
+                ClientSession::for_tests(ISSUER, "person/other", "unix"),
+            ] {
+                let mut request = request();
+                request.assistant_id = principal.into();
+                assert_eq!(begin(state.clone(),session,request).await.unwrap_err().status,StatusCode::FORBIDDEN);
+            }
         }
     }
 
     #[tokio::test]
     async fn assistant_issuance_rejects_expiry_scope_and_consent_escalation() {
-        let root = tempfile::tempdir().unwrap(); let state = state(root.path());
-        for seconds in [0,2_592_001] { let mut req=request(); req.expires_in_seconds=seconds;
-            assert!(begin(state.clone(),ClientSession::local(Some(ISSUER)).unwrap(),req).await.is_err()); }
-        let mut req=request(); req.scopes.push("control.messages".into());
-        assert!(begin(state.clone(),ClientSession::local(Some(ISSUER)).unwrap(),req).await.is_err());
-        let mut req=request(); req.disclosure_consent=false;
-        assert!(begin(state,ClientSession::local(Some(ISSUER)).unwrap(),req).await.is_err());
+        for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+            let root = tempfile::tempdir().unwrap(); let state = state(root.path());
+            let request = || {
+                let mut request = request();
+                request.assistant_id = principal.into();
+                request
+            };
+            for seconds in [0,2_592_001] { let mut req=request(); req.expires_in_seconds=seconds;
+                assert!(begin(state.clone(),ClientSession::local(Some(ISSUER)).unwrap(),req).await.is_err()); }
+            let mut req=request(); req.scopes.push("control.messages".into());
+            assert!(begin(state.clone(),ClientSession::local(Some(ISSUER)).unwrap(),req).await.is_err());
+            let mut req=request(); req.disclosure_consent=false;
+            assert!(begin(state,ClientSession::local(Some(ISSUER)).unwrap(),req).await.is_err());
+        }
     }
 
     #[tokio::test]
@@ -453,7 +579,7 @@ mod tests {
             kind:POLICY.into(),actor:Some(ISSUER.into()),fields:BTreeMap::new(),evidence:Vec::new(),
             expected_subject:None,idempotency_key:None};
         assert_eq!(state.store.append_client_claim(&forged).unwrap_err().code,"claim-write-forbidden");
-        let _=begin(state.clone(),ClientSession::for_tests("agent/test","agent/test","unix"),request()).await;
+        let _=begin(state.clone(),ClientSession::for_tests("agent/example-worker","agent/example-worker","unix"),request()).await;
         let audits=state.store.claims_for_kind_at("custom.client.assistant.v1.audit",None,true,100).unwrap().claims;
         assert!(audits.iter().any(|claim| claim.body["fields"]["outcome"]=="denied"));
         let serialized=serde_json::to_string(&audits).unwrap();
@@ -490,7 +616,7 @@ mod tests {
         let policy=|| serde_json::from_value::<AssistantGrantPolicy>(json!({
             "api_version":CLIENT_API_VERSION,"scopes":SCOPES,"expires_in_seconds":86400,
             "disclosure_consent":true,"consent_evidence":"axe decision ask recorded by the owning person","minimal_read_mode":"approval-once"})).unwrap();
-        for (actor,transport) in [(ISSUER,"fabric-loopback"),("agent/test","unix"),("person/other","unix")] {
+        for (actor,transport) in [(ISSUER,"fabric-loopback"),("agent/example-worker","unix"),("person/other","unix")] {
             let session=ClientSession::for_tests(actor,actor,transport);
             assert_eq!(update_policy(State(state.clone()),Extension(session.clone()),AxumPath(id.clone()),Json(policy())).await.unwrap_err().status,StatusCode::FORBIDDEN);
             assert_eq!(revoke(State(state.clone()),Extension(session),AxumPath(id.clone())).await.unwrap_err().status,StatusCode::FORBIDDEN);

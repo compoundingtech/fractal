@@ -473,7 +473,7 @@ impl Registry {
             output.push_str(&format!(
                 "| `{}` | `{}` | {} | {} |\n",
                 spec.family,
-                spec.pattern,
+                markdown_cell(&spec.pattern),
                 if spec.client_writable { "yes" } else { "no" },
                 markdown_cell(&spec.description)
             ));
@@ -568,12 +568,13 @@ impl Registry {
                 "a subject needs a non-empty path after its registered family",
             ));
         }
-        if spec.family == "assistant" && subject != "assistant/chatgpt" {
-            let grant = subject.strip_prefix("assistant/chatgpt/session/assistant-grant/");
+        if spec.family == "assistant" && !matches!(subject, "assistant/chatgpt" | "assistant/mcp") {
+            let grant = ["assistant/chatgpt/session/assistant-grant/", "assistant/mcp/session/assistant-grant/"]
+                .iter().find_map(|prefix| subject.strip_prefix(prefix));
             if !grant.is_some_and(|id| id.len() == 24 && id.bytes().all(|byte| byte.is_ascii_hexdigit())) {
                 return Err(error(
                     "invalid-claim-subject",
-                    "an assistant subject must be assistant/chatgpt or its exact grant session",
+                    "an assistant subject must be assistant/chatgpt, assistant/mcp or its exact grant session",
                 ));
             }
         }
@@ -1056,7 +1057,7 @@ fn build_registry() -> Registry {
         ("person", "person/IDENTITY", "A human actor.", false),
         (
             "assistant",
-            "assistant/chatgpt[/session/assistant-grant/ID]",
+            "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]",
             "An external assistant principal or its grant-bound audit session, never a person.",
             false,
         ),
@@ -4537,7 +4538,18 @@ mod tests {
     }
 
     #[test]
+    fn assistant_principal_registry_digest_transition() {
+        let current = registry();
+        assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
+        let mut previous = current.clone();
+        previous.subjects.get_mut("assistant").unwrap().pattern =
+            "assistant/chatgpt[/session/assistant-grant/ID]".into();
+        assert_eq!(previous.digest(), "264f8c8f4252e828035e93e3964e65047678d8c0c3d2233026a71c767600c3a6");
+        assert_eq!(current.digest(), "921b65fe6121e068a183eb384c79ca5a8b6699be3b52b6f53c1ed99d195e13d2");
+        println!("assistant principal registry digest: {} -> {}", previous.digest(), current.digest());
+    }
 
+    #[test]
     fn registry_rejects_the_removed_plan_names() {
         let registry = registry();
         for subject in ["plan/example", "plan-run/example"] {
@@ -4627,6 +4639,15 @@ mod tests {
             .unwrap();
         registry().validate_subject("assistant/chatgpt").unwrap();
         registry().validate_subject("assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567").unwrap();
+        registry().validate_subject("assistant/mcp").unwrap();
+        registry().validate_subject("assistant/mcp/session/assistant-grant/0123456789abcdef01234567").unwrap();
+        for subject in [
+            "assistant/mcp/session/person/robin",
+            "assistant/mcp/session/assistant-grant/not-a-grant",
+            "assistant/mcp/session/assistant-grant/0123456789abcdef01234567/extra",
+        ] {
+            assert!(registry().validate_subject(subject).is_err(), "{subject}");
+        }
     }
 
     #[test]
