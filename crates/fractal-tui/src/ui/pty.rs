@@ -1205,7 +1205,10 @@ mod tests {
         let plain_a = protocol_key(key(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
         assert_eq!(encode_key(&term, &plain_a, false), b"a");
         let composed = protocol_key(key(KeyCode::Char('\u{e5}'), KeyModifiers::ALT)).unwrap();
-        assert!(!encode_key(&term, &composed, false).starts_with(b"\x1b"));
+        // The narrowing is the macOS rule above; elsewhere the encoder's own Alt handling stands.
+        if cfg!(target_os = "macos") {
+            assert!(!encode_key(&term, &composed, false).starts_with(b"\x1b"));
+        }
     }
 
     #[test]
