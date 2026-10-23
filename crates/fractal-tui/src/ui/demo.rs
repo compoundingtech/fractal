@@ -792,6 +792,7 @@ fn agents() -> Vec<Agent> {
     });
     let detail =
         |goal: &str, claimed: &str, next: Option<&str>, queue: &[&str], state: &str| AgentDetails {
+            mail_custody: None,
             goal: Some(s(goal)),
             claimed: Some(s(claimed)),
             next: next.map(s),
@@ -822,6 +823,7 @@ fn agents() -> Vec<Agent> {
         "idle, waiting for feedback",
     );
     list[2].details = AgentDetails {
+        mail_custody: None,
         goal: Some(s("Tag this week's release.")),
         claimed: Some(s("1h ago")),
         next: Some(s("Weekly release › publish")),
@@ -1008,6 +1010,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: Some(s(ATLAS_KDL)),
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -1043,6 +1046,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -1086,6 +1090,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -1121,6 +1126,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -1166,6 +1172,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -1193,6 +1200,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -1228,6 +1236,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
     ]

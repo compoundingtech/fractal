@@ -85,6 +85,7 @@ pub use smallclaims::{performance, profile};
 pub use fractal_kernel::projection;
 pub use fractal_store::provenance;
 pub use fractal_reconcile::reconcile;
+pub use fractal_reconcile::schedule_standby;
 pub use fractal_kernel::rules;
 #[cfg(test)]
 pub(crate) use fractal_kernel::publication;

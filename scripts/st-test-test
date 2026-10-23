@@ -196,9 +196,11 @@ class StTest(unittest.TestCase):
         self.lane_file()
         self.commit('scripts/lane.sh', 'lane, but fewer tests\n')
         code, out, err = self.run_st_test('--check', 'demo')
-        self.assertNotEqual(code, 0)
+        # Not a failure: nothing failed, the check is not signed and CI runs it (exit 4).
+        self.assertEqual(code, 4, err)
         self.assertEqual(self.statements(), [])
-        self.assertIn('FAILED', out)  # the wrapper's own message goes to the child's stderr, not to this capture
+        self.assertRegex(out, r'demo +not signed +0s +this tree edits its lane \(scripts/lane\.sh\); CI runs it')
+        self.assertNotIn('FAILED', out)
 
     def test_without_a_lane_file_at_the_base_the_note_carries_no_digest_as_before(self):
         self.commit('b.txt', 'two')
@@ -206,6 +208,24 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         statement, = self.statements()
         self.assertNotIn('lane_definition_sha256', statement['predicate']['observed']['inputs'])
+
+    def test_a_check_that_depends_on_the_base_is_given_the_fetched_base_and_records_it(self):
+        self.commit('b.txt', 'two')
+        seen = self.home / 'clippy-base'
+        base = git(self.work, 'rev-parse', 'origin/main')
+        with mock.patch.object(st_test, 'BASE_BOUND', frozenset({'demo'})):
+            code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', f'printf %s "$CLIPPY_BASE_SHA" > {seen}'])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen.read_text(), base)
+        statement, = self.statements()
+        self.assertEqual(statement['predicate']['observed']['inputs']['clippy_base_sha'], base)
+        # A check that does not depend on the base records no base and is given none.
+        self.commit('b.txt', 'three')
+        code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', f'printf %s "${{CLIPPY_BASE_SHA-unset}}" > {seen}'])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen.read_text(), 'unset')
+        self.assertFalse([s for s in self.statements() if 'clippy_base_sha' in s['predicate']['observed']['inputs']
+                          and s['subject'][0]['digest']['gitTree'] == git(self.work, 'rev-parse', 'HEAD^{tree}')])
 
     def test_untracked_and_ignored_files_in_the_checkout_cannot_change_the_result(self):
         self.commit('b.txt', 'two')
@@ -337,6 +357,25 @@ class StTest(unittest.TestCase):
         self.commit('d.txt', 'another change')
         self.assertEqual(self.run_st_test('--check', 'demo', '--status')[0], 3)
 
+    def test_a_heavy_check_builds_in_the_kept_target_and_a_light_one_does_not(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "${{CARGO_TARGET_DIR:-none}}" >> {seen}']
+        target = self.home / '.cache/st-test-target'
+        with mock.patch.object(st_test, 'HEAVY', frozenset({'demo'})):
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+            (target / 'junk').write_bytes(b'x' * 4096)
+            with mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
+                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+                self.assertTrue((target / 'junk').exists())  # not a directory cargo made: never emptied
+                (target / 'CACHEDIR.TAG').write_text('Signature: 8a477f597d28d172789f06886806bc55\n')
+                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # cargo's, past the cap: emptied
+            self.assertFalse((target / 'junk').exists())
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': 'off'})[0], 0)
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'CARGO_TARGET_DIR': '/elsewhere'})[0], 0)
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # not heavy: no kept target
+        self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', 'none'])
+
     def test_a_worktree_left_by_a_killed_run_is_removed_by_the_next_run(self):
         self.commit('b.txt', 'two')
         stale = Path(tempfile.mkdtemp(prefix='st-test-'))
@@ -451,12 +490,51 @@ class StTest(unittest.TestCase):
     def test_the_real_table_lists_only_checks_with_a_command_and_prints_them(self):
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list'], capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['genie-freshness', 'typescript-client'])
+        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness'])
+
+    def test_a_heavy_check_runs_under_one_heavy_slot_ticket_and_a_builds_slice_scope(self):
+        self.commit('b.txt', 'two')
+        tmp = Path(self.tmp.name)
+        calls = tmp / 'calls'
+        bin_dir, runtime = tmp / 'bin', tmp / 'runtime'
+        bin_dir.mkdir()
+        runtime.mkdir()
+        (runtime / 'bus').touch()
+        (self.home / '.local/bin').mkdir(parents=True)
+        # A shim that supports --stage-slot and a systemd-run: each records its arguments and runs what follows its `--`.
+        recorder = '#!/bin/sh\n# --stage-slot\nprintf "%s\\n" "$(basename "$0") $*" >> {calls}\nwhile [ "$1" != -- ]; do shift; done; shift; exec "$@"\n'
+        for path in (self.home / '.local/bin/cargo', bin_dir / 'systemd-run'):
+            path.write_text(recorder.format(calls=calls))
+            path.chmod(0o755)
+        env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime)}
+        with mock.patch.object(st_test, 'HEAVY', frozenset({'demo'})):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
+            self.assertEqual(code, 0, err)
+            first, second = calls.read_text().splitlines()
+            self.assertTrue(first.startswith('cargo --stage-slot st-test-demo -- systemd-run '), first)  # the ticket, then the scope
+            self.assertTrue(second.startswith('systemd-run --user --scope --quiet --collect --slice=builds.slice -- '), second)
+            self.assertIn('evidence-wrap --check demo', second)
+            statement, = self.statements()
+            self.assertEqual(statement['predicate']['observed']['checks']['demo']['command'], ['sh', '-c', 'echo ran'])  # what is signed is unchanged
+            calls.unlink()
+            self.commit('c.txt', 'three')
+            self.assertEqual(self.run_st_test('--check', 'demo', extra_env=dict(env, ST_EVIDENCE_GOVERN='off'))[0], 0)
+            self.assertFalse(calls.exists())
+            self.commit('d.txt', 'four')
+            (tmp / 'no-bus').mkdir()
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'XDG_RUNTIME_DIR': str(tmp / 'no-bus')})  # no user bus: runs anyway, and says so
+            self.assertEqual(code, 0, err)
+            self.assertIn('st-test: demo runs without the host build cap (no user systemd bus for a builds.slice scope)', err)
+            self.assertEqual(calls.read_text().split()[:3], ['cargo', '--stage-slot', 'st-test-demo'])  # the ticket alone
+            calls.unlink()
+        self.commit('e.txt', 'five')
+        self.assertEqual(self.run_st_test('--check', 'demo', extra_env=env)[0], 0)
+        self.assertFalse(calls.exists())  # a light check is not wrapped
 
     def test_a_heavy_check_runs_only_when_named_or_with_all(self):
         # The pre-push hook runs st-test with no --check: a check that builds the whole workspace must not start on every push.
-        for args, names in (([], ['genie-freshness', 'typescript-client']),
-                            (['--all'], ['genie-freshness', 'typescript-client', 'mail-redelivery-canaries']),
+        for args, names in (([], ['typescript-client', 'genie-freshness']),
+                            (['--all'], ['typescript-client', 'genie-freshness', 'mail-redelivery-canaries', 'linux-gate', 'isolation-vm']),
                             (['--check', 'mail-redelivery-canaries'], ['mail-redelivery-canaries'])):
             done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)

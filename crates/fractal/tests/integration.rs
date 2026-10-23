@@ -18,6 +18,7 @@ mod binary_payloads;
 mod boot_canaries;
 mod broken_gates;
 mod claude_idle;
+mod claude_primary_hooks;
 mod claude_statusline;
 mod client_creation;
 mod client_glasses;
@@ -27,6 +28,7 @@ mod client_v0_cli;
 mod client_v0_contract;
 mod cli_inventory_process;
 mod cli_output;
+mod demo_play;
 
 // Invoked only by cli_inventory_process's bounded-capture test. Keeping this
 // outside that module preserves its five selected fixture names.

@@ -86,11 +86,12 @@ until a separately planned recovery accounts for writes since the snapshot.
 
 ## Format and verification
 
-The archive is UTF-8 JSON Lines, format `st3.claim-backup`, version `1`. Each record is limited
+The archive is UTF-8 JSON Lines, format `st3.claim-backup`, version `1`, `2` or `3`. Each record is limited
 to 128 MiB; export refuses a larger record before publishing a file:
 
 - `header`: format version, exporting build, database schema and claim registry digest, fleet ID
-  and public anchor, complete admitted envelope-log digest, graph digest, and each shared table's digest and row count.
+  and public anchor, complete admitted envelope-log digest, graph digest, each shared table's digest and row count,
+  and from version `3` each permanent ledger's digest and row count.
 - `envelope`: the unchanged `ReplicaEnvelope` sync wire record, including writer, sequence,
   previous batch hash, payload hash, accept time, base64 CBOR claims and document bytes, and the
   writer's public key and signature when present. Envelopes sort by writer, sequence, hash;
@@ -99,7 +100,30 @@ to 128 MiB; export refuses a larger record before publishing a file:
 - `checkpoint`: the sync manifest of the newest applied or in-progress trim, including older
   tombstones. Restore initializes empty checkpoint state through the normal certificate checks,
   even if the source knew a newer certificate it had not applied yet.
+- `ledger`: one page of one permanent ledger, in its primary-key order (see below).
 - `end`: envelope count and SHA-256 of all preceding bytes, including line endings.
+
+An archive that carries the long-message texts of its member is version `2`. An archive that
+carries permanent ledger rows is version `3`. A build that predates a version refuses its
+archives cleanly instead of restoring part of them; an archive with neither keeps version `1`,
+so every build restores it.
+
+### Permanent ledgers
+
+A trim deletes claims, records and batches, but keeps what readers still need of them in
+ledgers that only grow: the retired claim IDs and envelope identities, with the checkpoint that
+withdrew each legacy tombstone; the retired claims' operation receipts and ancestry; each
+writer's highest batch; and which claim replaced each repaired original. Restoring the envelope
+log and the newest checkpoint manifest rebuilds only the rows that manifest and those batches
+still imply, so an earlier checkpoint's withdrawn tombstone or a trimmed writer head would be
+lost. Version `3` carries every ledger row except the writer heads and repair replacements that
+a retained batch or repaired record still implies, which restore rebuilds from the log.
+
+The header records each nonempty ledger's row count and digest. Restore adds the archived rows
+by union: an identity is never removed and a writer head never lowered. After admission and the
+checkpoint manifest add their own rows, each ledger's digest has to equal the header's; a missing
+row would forget a deletion, an extra one would invent one. The checkpoint manifest is still
+restored through its certificate checks, as before.
 
 Restore verifies signatures, envelope and claim hashes through normal admission, checks writer
 chains, reapplies replicated repairs, and replays projections with the current code. Pre-membership envelopes retain their
@@ -125,8 +149,8 @@ that exact value before starting it. The database refuses another writer at star
 state directory, generate new local keys, and join the fleet as that new member. This avoids ever
 signing a sequence that the original writer already used, including writes after the backup.
 
-The archive contains durable shared claims, their referenced blobs, public signature material and
-checkpoint tombstones. It does not contain private node keys, invite secrets, device capabilities,
+The archive contains durable shared claims, their referenced blobs, public signature material,
+checkpoint tombstones and the permanent ledgers. It does not contain private node keys, invite secrets, device capabilities,
 driver state, active terminals, local observations, lease renewals, transcripts, staged blobs,
 configuration, or other local caches. Protect the file like the original graph: claims and document
 bytes can contain private information. A restored standalone graph can be inspected immediately;

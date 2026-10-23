@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use fractal_schema::custom::{self as schema, Authority, Basis, Expr, Manifest, Predicate, Select};
 
 // Explicit UPSERTs in triggers keep an outer admission UPSERT from overriding IGNORE.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h39b9d437e23f owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1d667f8424b8 owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS custom_registrations (
  subject TEXT PRIMARY KEY, kind TEXT NOT NULL, version INTEGER NOT NULL,
  prefix TEXT NOT NULL, hash TEXT NOT NULL, manifest TEXT NOT NULL,
@@ -27,6 +27,21 @@ CREATE TABLE IF NOT EXISTS custom_dependencies (
 );
 CREATE INDEX IF NOT EXISTS custom_dependencies_input ON custom_dependencies(dependency,source);
 CREATE TABLE IF NOT EXISTS local_custom_dirty (subject TEXT PRIMARY KEY);
+-- Map canonical-order changes to everything flush can consume, not the whole log.
+-- Registry subjects trigger prefix expansion; dependencies and document bindings
+-- must reach their consumers even when the changed claim is not custom/.
+CREATE VIEW IF NOT EXISTS custom_claim_invalidations AS
+ SELECT id,subject FROM claims
+ WHERE (subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%')
+ OR EXISTS(SELECT 1 FROM custom_dependencies WHERE source=claims.subject)
+ UNION ALL
+ SELECT claims.id,custom_dependencies.source FROM claims JOIN custom_dependencies
+ ON custom_dependencies.dependency IN (claims.subject,claims.id)
+ UNION ALL
+ SELECT binding.id,registration.subject FROM claims AS binding JOIN claims AS registration
+ ON registration.kind='custom.st3-kinds.registered'
+ AND substr(json_extract(registration.body,'$.fields.document'),1,length(binding.subject)+1)=binding.subject||'@'
+ WHERE binding.kind='doc.bound';
 CREATE TRIGGER IF NOT EXISTS custom_document_insert AFTER INSERT ON documents BEGIN
  INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency=NEW.name ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document')=NEW.name||'@'||NEW.hash ON CONFLICT(subject) DO NOTHING;
@@ -35,38 +50,45 @@ CREATE TRIGGER IF NOT EXISTS custom_document_delete AFTER DELETE ON documents BE
  INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency=OLD.name ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document')=OLD.name||'@'||OLD.hash ON CONFLICT(subject) DO NOTHING;
 END;
-CREATE TRIGGER IF NOT EXISTS custom_document_update AFTER UPDATE OF name,hash ON documents BEGIN
+CREATE TRIGGER IF NOT EXISTS custom_document_update AFTER UPDATE OF name,hash ON documents
+WHEN OLD.name IS NOT NEW.name OR OLD.hash IS NOT NEW.hash BEGIN
  INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (OLD.name,NEW.name) ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document') IN (OLD.name||'@'||OLD.hash,NEW.name||'@'||NEW.hash) ON CONFLICT(subject) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_claim_insert AFTER INSERT ON claims BEGIN
  INSERT INTO local_custom_dirty SELECT NEW.subject WHERE NEW.subject LIKE 'custom/%' AND NEW.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE batch_id=NEW.batch_id AND store_index>NEW.store_index AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id) ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (SELECT id FROM claims WHERE batch_id=NEW.batch_id AND store_index>NEW.store_index AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id)) ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (NEW.subject,NEW.id) ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE NEW.kind='doc.bound' AND kind='custom.st3-kinds.registered' AND substr(json_extract(body,'$.fields.document'),1,length(NEW.subject)+1)=NEW.subject||'@' ON CONFLICT(subject) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_claim_delete AFTER DELETE ON claims BEGIN
  INSERT INTO local_custom_dirty SELECT OLD.subject WHERE OLD.subject LIKE 'custom/%' AND OLD.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE batch_id=OLD.batch_id AND store_index>OLD.store_index AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id) ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (SELECT id FROM claims WHERE batch_id=OLD.batch_id AND store_index>OLD.store_index AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id)) ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (OLD.subject,OLD.id) ON CONFLICT(subject) DO NOTHING;
 END;
-CREATE TRIGGER IF NOT EXISTS custom_claim_update AFTER UPDATE ON claims BEGIN
+CREATE TRIGGER IF NOT EXISTS custom_claim_update AFTER UPDATE ON claims
+WHEN OLD.id IS NOT NEW.id OR OLD.subject IS NOT NEW.subject OR OLD.kind IS NOT NEW.kind
+ OR OLD.body IS NOT NEW.body OR OLD.actor IS NOT NEW.actor OR OLD.origin IS NOT NEW.origin
+ OR OLD.predecessors IS NOT NEW.predecessors OR OLD.accepted_at_unix_ms IS NOT NEW.accepted_at_unix_ms
+ OR OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index BEGIN
  INSERT INTO local_custom_dirty SELECT OLD.subject WHERE OLD.subject LIKE 'custom/%' AND OLD.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT NEW.subject WHERE NEW.subject LIKE 'custom/%' AND NEW.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (OLD.subject,NEW.subject,OLD.id,NEW.id) ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE (OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index) AND ((batch_id=OLD.batch_id AND store_index>OLD.store_index) OR (batch_id=NEW.batch_id AND store_index>NEW.store_index)) AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id) ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE (OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index) AND id IN (SELECT id FROM claims WHERE ((batch_id=OLD.batch_id AND store_index>OLD.store_index) OR (batch_id=NEW.batch_id AND store_index>NEW.store_index)) AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id)) ON CONFLICT(subject) DO NOTHING;
 END;
-CREATE TRIGGER IF NOT EXISTS custom_batch_update AFTER UPDATE OF origin,replica_sequence ON batches BEGIN
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE batch_id=NEW.id ON CONFLICT(subject) DO NOTHING;
+CREATE TRIGGER IF NOT EXISTS custom_batch_update AFTER UPDATE OF origin,replica_sequence ON batches
+WHEN OLD.origin IS NOT NEW.origin OR OLD.replica_sequence IS NOT NEW.replica_sequence BEGIN
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (SELECT id FROM claims WHERE batch_id=NEW.id) ON CONFLICT(subject) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_record_insert AFTER INSERT ON replica_records WHEN NEW.claim_id IS NOT NULL BEGIN
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE id=NEW.claim_id ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id=NEW.claim_id ON CONFLICT(subject) DO NOTHING;
 END;
-CREATE TRIGGER IF NOT EXISTS custom_record_update AFTER UPDATE OF position,claim_id,state ON replica_records BEGIN
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE id IN (OLD.claim_id,NEW.claim_id) ON CONFLICT(subject) DO NOTHING;
+CREATE TRIGGER IF NOT EXISTS custom_record_update AFTER UPDATE OF position,claim_id,state ON replica_records
+WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id OR OLD.state IS NOT NEW.state BEGIN
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (OLD.claim_id,NEW.claim_id) ON CONFLICT(subject) DO NOTHING;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_record_delete AFTER DELETE ON replica_records BEGIN
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE id=OLD.claim_id ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id=OLD.claim_id ON CONFLICT(subject) DO NOTHING;
 END;
 "#;
 
@@ -109,6 +131,30 @@ pub fn registration(
         .transpose()
 }
 pub fn create_schema(connection: &Connection) -> Result<()> {
+    // Upgrade installed definitions once without changing the schema cookie on reopen.
+    for name in [
+        "custom_document_update",
+        "custom_claim_insert",
+        "custom_claim_delete",
+        "custom_claim_update",
+        "custom_batch_update",
+        "custom_record_insert",
+        "custom_record_update",
+        "custom_record_delete",
+    ] {
+        let marker = format!(/* sqlite-large-value: allow-for-now lv-hd7fe9167a5d9 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {name}");
+        let start = SCHEMA.find(&marker).context("missing custom trigger definition")?;
+        let end = SCHEMA[start..].find("\nEND;").context("unterminated custom trigger definition")?;
+        let expected = SCHEMA[start..start + end + 5].replace("IF NOT EXISTS ", "");
+        let installed: Option<String> = connection.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+            [name], |row| row.get(0),
+        ).optional()?;
+        let tokens = |sql: &str| sql.trim().trim_end_matches(';').split_whitespace().collect::<Vec<_>>().join(" ");
+        if installed.as_deref().is_some_and(|sql| tokens(sql) != tokens(&expected)) {
+            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-hd59916c2a014 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER {name}"))?;
+        }
+    }
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3f6849b90a68 owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ SCHEMA)?;
     Ok(())
 }

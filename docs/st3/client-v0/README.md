@@ -836,8 +836,31 @@ waiting episode. `source_kind`, `episode`, `source_id`, `priority`, `requested_a
 `action_parameters` describe the source and its current remedy. Completed, cancelled, removed,
 retired, or replaced sources disappear before cleanup; a failed run can retain its own fault.
 Pending held subscription requests are not attention sources. Historical `attention.*` claims
-remain audit data. Both raw legacy mutation routes and `attention.resolve` return
-`attention-migrated`; capabilities mark that action unsupported.
+remain audit data. `attention.resolve` returns `attention-migrated`; capabilities mark
+that client action unsupported. The raw resolve and withdraw routes support only the
+narrow source adapters in [person delegation](../person-delegation.md).
+
+`GET /v1/client/attention?history=true` (also `/alerts`) and
+`GET /v1/client/now?history=true` without `actor` or `owner_run` now return **only closed
+source resolutions**, separate from open Home. Previously the history flag was ignored
+and these reads returned the open list; older daemons still do so. An older daemon's
+open result is not closed-history evidence. No in-repository caller currently sends
+these history requests. Attention history returns 422 `validation-failed` for `actor`, `owner_run`, `status`,
+`owner`, `native_only=true`, or a `state` other than `resolved`. Unfiltered Now history
+returns 422 `validation-failed` for `status`, `owner`, `native_only=true`, or a non-resolved state. Now with
+`actor` or `owner_run` keeps the existing work-filtered open/combined behavior and its
+validation even with `history=true`; that request does not enter the closed-history path.
+
+Only closed history sends the optional `page.omitted_items`. This count is approximate:
+it can undercount decoded rows that fail to bind to their original, and overcount damaged
+rows whose owner or relevance is unknown. Zero does not establish complete history.
+Sparse pages can be empty with `has_more=true`; follow the bounded cursor and preserve
+incomplete-history information. SQL still classifies bounded JSON per candidate, while
+known noise rows skip Rust body decoding; the existing indexed plan is not a measured
+SQL-cost guarantee. A known owner's oversized original returns 503 on exact detail,
+while another person's detail is 404; an unreadable row with no established owner is
+also 404 for a person session. The [delegation guide](../person-delegation.md) gives
+the row, byte, cursor and all-receiver Operations rollout boundaries.
 
 An agent asks through `work.ask` (`person_id`, `title`, `reason`, and exactly one of `step_id` or
 `new_run`). Claimed work requires its current generation, definition, attempt, readiness, and
@@ -880,7 +903,7 @@ wording) gets a new card, so an action through the old one returns `stale-fence`
 nothing. A client then re-reads attention and, if a card of the same `attention_kind` for the
 same `source_id` is open, acts once more through it; it does not retry the old card. A review st
 no longer asks returns `validation-failed`, and its message says why: who already answered it
-and how, or what moved on since it was asked. The terminal UI does both on its live and classic screens.
+and how, or what moved on since it was asked. The terminal UI does both.
 
 Clients must evict removed source cards and replace their window from fresh snapshots on
 reconnect. The iOS cache version is 4 and the terminal UI's is 3; older cached cards are discarded. Offline
@@ -2628,6 +2651,8 @@ as waiting records until upgrade; see [rolling upgrades](../replication.md#rolli
 
 `agent.retire` permanently retires the identity at its declaring host. It requires `{ "agent": "agent/example/worker", "reason": "Work finished" }`, a selected desired claim ID in `fence.runtime_desired_revision`, and a stable idempotency key. Optional `runtime_incarnation` fences a selected process. Rust provides `agent_retire`; Swift and TypeScript provide `agentRetire`. See [terminal retirement](../agent-retirement.md) for the coordinated registry rollout and locally known retirement rule. Fresh sends to a known retired agent return 409 `recipient-retired` with `applied: "none"` and a typed `details.refusal.variant: "Retired"`. Exact accepted retries return their receipt; a lost reply remains unconfirmed. `lifecycle-unavailable` concerns incomplete/conflicting local evidence, never an offline owner alone.
 
+`agent.retire.parameters.successor` optionally names an existing eligible agent. It is recorded in the signed retirement claim after the all-member registry gate. The successor's read and close claims carry `acting_for` and the retirement claim as evidence; `Agent.mail_custody` reports `{ successor, state: "pending" }` for OLD. Numeric unread counts and completion are not available in this increment.
+
 ### Exchange carrier observations
 
 `SyncPeer` may include `last_successful_exchange` and `last_failed_exchange`, each
@@ -2645,3 +2670,28 @@ them. Idle receipts outside the sync notice set do not notify client streams;
 repeated same-carrier failures likewise stay quiet when the graph is unchanged. Existing sync notice conditions
 remain the same. Older servers omit these optional fields; older clients ignore
 the additions. No API version, scope, operation or claim shape changes.
+
+## Schedule standby public read change set
+
+Compatibility **changed**: the optional standby declaration adds an optional
+`schedule_standby` local observation to CLI subject show/history. The exact legacy
+status route exposes it inside the existing open JSON `SubjectStatus.actual`
+object as `actual.schedule_standby`; it does not add a required generated-client
+resource or operation. Existing occurrence scheduled/reached claim bodies gain
+optional `standby` detail and `reason`. These additions keep the same claim kinds.
+
+Fields: `primary_host`, `standby_host`, `after_ms`, `eligibility`, `reason`,
+nullable `primary_heartbeat_age_ms`, `heartbeat_basis`, `observed_primary_view`,
+`run_twice_warning` and `cold_standby_limit`. A current local observation is not
+a converged eligibility assertion or exclusive lease. Historical reads label
+eligibility unknown and do not inject a current heartbeat age. History remains
+JSON lines of original claims/events with the optional observation field; an
+empty history still has no claims. Use subject show to read its current warnings.
+
+Jobs must be safe to run twice. The declaration guide, subject show (structured
+and text), history and release note expose the same cold-standby limitation:
+
+If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
+
+Hosted validation must run `cargo run -p st3-client-codegen -- --check`. Generated
+files remain generated; do not hand-edit clients for open JSON observation detail.

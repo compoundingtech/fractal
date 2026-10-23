@@ -311,6 +311,8 @@
           "--exclude"
           "fractal-schema"
           "--exclude"
+          "fractal-tiles-registry"
+          "--exclude"
           "fractal-tui"
         ];
 
@@ -549,6 +551,8 @@
             "fractal-migrate"
             "-p"
             "fractal-schema"
+            "-p"
+            "fractal-tiles-registry"
             "-p"
             "fractal-tui"
             "-p"

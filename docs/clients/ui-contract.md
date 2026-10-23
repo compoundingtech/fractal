@@ -414,9 +414,16 @@ card carries one read without agents. The first roster refolds every card. At st
 the roster head at once; after the projections are replaced it waits until something reads the
 agents list, so no bound on that wait is promised.
 
+The terminal UI reads it: `fractal-ui-model::missions::adapt` takes each mission's and step's word,
+owner and note from the presentation and derives none of them. A row without a presentation, or
+with a word the client does not know, reads `unknown` (in `words.json`), and the list shows the
+row's raw `state` with "st does not say", which is true of an older st and of a card st leaves
+unsaid until its first agents roster. The summary's count of active missions reads
+`missions::row_word`, the word from the row and its gates alone.
+
 | Field | Meaning |
 |---|---|
-| `word` | The mission word: one of the thirteen `mission` ids in `words.json`. |
+| `word` | The mission word: one of the thirteen `mission` ids in `words.json` that st serves. The fourteenth, `unknown`, is the client's own, for a row without a presentation it can read. |
 | `system` | The mission is st's own or a standing observer (see [Graph flags](#graph-flags)). |
 | `who` | Who must act now: `{kind, person, agent, label}`. `kind` is `person` (with `person`), `agent` (with `agent`), `st` or `nobody`. Every reader sees the same row; a client says "you" when the person is its reader. |
 | `steps[]` | The steps of the open runs, or of the latest run when none is open, in display order: `{id, path, title, word, owner, note, attempts, blockers[], keep_open}`. The step `word` is one of `needs_you`, `done`, `working`, `ready`, `waiting`, `cancelled`, `failed` or `pending`. `owner` is shaped like `who`. |
@@ -451,8 +458,8 @@ changing in a newer roster. A roster publication wakes the refresher.
 
 | | Derivation | Differs from this contract |
 |---|---|---|
-| Terminal UI | `crates/fractal-ui-model/src/missions.rs` (496 lines); `crates/fractal-tui/src/ui/screens.rs` `display_rank` and `what_you_can_do` | Sorts working before needs you. Finds the stuck agent only among agents already working on the mission, so an unstaffed mission's idle agent never appears. Retry and restart print CLI hints. |
-| Phone | `apps/ios/missionsView.ts` (163 lines) and parts of `presentation.ts` | Calls decision "alert", has no `not_started`, reads every run's steps, has no who-must-act, stuck step or actions. |
+| Terminal UI | Moved: reads the presentation. `crates/fractal-tui/src/ui/screens.rs` `display_rank` and `what_you_can_do` remain | Sorts working before needs you. Finds the stuck agent only among agents already working on the mission, so an unstaffed mission's idle agent never appears. Retry and restart print CLI hints. |
+| Phone | Moved: `apps/ios/missionsView.ts` reads the presentation; a row without one reads `unknown` and shows its raw `state` with "st does not say" | Has no stuck step or actions yet. |
 | Fractal | None live; the unmounted `shell/Sidebar.tsx` groups by `must_act` | Nothing to delete; reads the projection when it adds Missions. |
 
 Settled: the word for decision is "needs you"; `not_started` is a word; steps come from the open
@@ -503,10 +510,10 @@ never infer it.
 
 | Field | Meaning |
 |---|---|
-| `tier` | The Now group: `stopped`, `alert`, `today`, `later` (`words.json` `tier`), or `null` for a row that is not a Now card (an unread message stays in its conversation). |
-| `kind` | The card: `review`, `feedback`, `request`, `update`, `launch`, `revision`, `prompt`, `login` or `fault`. |
-| `agent` | Who **Chat about this** reaches, `{id, label}`: the conversation, else the step's claimant, else an agent working in the mission, else the requester. `null` means the chief of staff. |
-| `raised_by`, `waiting` | Who raised it, with st's own actors named "st"; and the step it holds, `{step, path}`. |
+| `tier` | The Now group: `stopped`, `alert`, `today`, `later` (`words.json` `tier`), or `null` for a row that is not on Now (an unread message stays in its conversation; a fault goes to its agent). `null` means not on Now, never "unknown". No card is in `alert` yet. |
+| `kind` | The card: `review`, `feedback`, `request`, `update`, `launch`, `revision`, `prompt`, `login` or `fault`, or `null` for a row that is no card at all (an unread message). |
+| `agent` | Who **Chat about this** reaches, `{id, label}`: the conversation, else the step's claimant, else an agent working in the mission (the first in the agents roster's order, when several are), else the requester. `null` means the chief of staff. |
+| `raised_by`, `waiting` | Who raised it, `{id, label}`: the requester, else the agent behind it, with st's own actors (`daemon/…`, `agent/st3/reconciler`) labeled "st", else "the … mission" it came from; and the step it holds, `{step, path}`. A person's label is their id. |
 | `launch` | On a launch card: the newest variant's mission as `{variant, goals[], steps[], agents[], asks_you}`. Each step is `{path, title, assignee, after[], asks_you}`, in display order without `finally` steps. `assignee` is `{kind, agent, label}`, with `kind` one of `agent`, `any`, `st` or `none`. Each agent is `{id, label, harness, host}`. `asks_you` counts the steps that stop for a person. With no previewable variant it is `{unavailable: {reason, diagnostics[]}}`, with up to three diagnostics. |
 | `revision` | On a revision card: the changes (see [Revision changes](#revision-changes)). |
 | `prompt` | On a harness-prompt card: `{calls[], answers[], allow}`. Each call is a tool call without a result in the seat's conversation: `{call_id, tool, input, input_complete}`, at most five, each input within 4 KiB. `answers` come from `action_parameters["prompt.respond"]`. `allow` is true only when exactly one call is pending and its input is complete. When st cannot read the timeline, `calls` is `null` with `unknown_reason` and `allow` is false: the card says to answer in the terminal. |
@@ -515,7 +522,16 @@ Kinds come from `attention_kind`: a human gate is `stopped` · `review` (`feedba
 mode); a person step or agent request is `stopped` · `request`, or `later` · `update` when it
 carries an update; a launch approval is `today` · `launch`; a revision approval is `today` ·
 `revision`; a `custom.*` kind is `today` · `request`; a harness prompt is `stopped` · `prompt`;
-a harness login is `stopped` · `login`.
+a harness login is `stopped` · `login`. A fault is a `fault` card with no tier: st sends each
+fault to the agent that owns it, and neither client shows one on Now. An unread message has
+neither.
+
+An agent's label is its name's last segment in title case, without its own host's prefix
+(`fractal_ui_model::agents::label`, which the terminal UI also uses); an agent st does not know reads
+as its id without `agent/`. The refresher presents each row when it folds the list, and again
+when the agents roster it reads changes; while no roster is available it keeps the agents it
+last read. Every route copies the row's presentation from that list. A `history` read returns the
+same open rows (st keeps no resolved attention rows), so it carries the same presentations.
 
 **Inputs:** the attention row; for a launch, its newest variant; for a prompt, the seat's
 conversation timeline at the observation; for `agent`, the step's claimant and the mission's

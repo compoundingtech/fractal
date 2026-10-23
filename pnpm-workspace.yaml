@@ -3,11 +3,11 @@
 
 packages:
   - apps/fractal-web
-  - apps/fractal-web/packages/fractal-sdk
   - apps/ios
   - clients/typescript/fractal-client
   - clients/typescript/fractal-scenarios
   - clients/typescript/fractal-views
+  - packages/fractal-sdk
   - packages/fractal-ui
 
 overrides:
