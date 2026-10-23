@@ -538,6 +538,8 @@
             "-p"
             "fractal-api-mailbox"
             "-p"
+            "fractal-drivers"
+            "-p"
             "fractal-client"
             "-p"
             "fractal-client-codegen"
