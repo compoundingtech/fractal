@@ -989,6 +989,12 @@ struct UpArgs {
     /// Separate paired-only client gateway socket suitable for a tailnet HTTPS proxy.
     #[arg(long)]
     client_gateway_socket: Option<PathBuf>,
+    /// Local browser UI address, or `off` to disable it.
+    #[arg(long, default_value = fractal_daemon::web::DEFAULT_LISTEN)]
+    web_listen: String,
+    /// Built dist/web directory (defaults to ../share/fractal-web next to the executable).
+    #[arg(long)]
+    web_dist: Option<PathBuf>,
     #[arg(long)]
     peer_listen: Option<String>,
     /// Let --peer-listen bind a non-loopback, non-Tailscale address; traffic is plain HTTP.
@@ -6293,6 +6299,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
             );
         }
     };
+    let web_dist = args.web_dist.unwrap_or(std::env::current_exe()?
+        .parent().context("executable directory")?.join("../share/fractal-web"));
+    let web_state = state.clone();
+    let web_person = config.person.clone();
     tokio::try_join!(
         fractal_daemon::api::serve_reserved_unix_with_ready(
             local_reserved,
@@ -6301,6 +6311,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             ready
         ),
         fractal_daemon::api::serve_reserved_unix_with_ready(gateway_reserved, fabric_router(state), None, ready),
+        fractal_daemon::web::serve(&args.web_listen, web_dist, web_state, web_person),
     )?;
     telemetry.shutdown();
     Ok(())

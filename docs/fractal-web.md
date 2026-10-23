@@ -98,6 +98,46 @@ roster with no results offers Clear filters. A failed roster read exposes Retry 
 Those actions reacquire failed or ended follows without restarting healthy follows.
 Authorization and capability refusals retain their distinct explanations.
 
+## Option D local embedded-host spike
+
+This branch prototypes a default-on daemon listener at `127.0.0.1:7410` (the
+existing hosting example's port). Start with `fractal up --web-dist /path/to/dist/web`,
+or disable it with `--web-listen off`. A configured concrete `person` is required.
+The default asset location is `../share/fractal-web` relative to the executable;
+missing assets/person or an occupied port fail daemon startup rather than silently
+leaving a dead UI. Existing unbundled installations must opt out during this spike.
+
+`fractal web [--state-dir DIR]` reads the daemon's owner-only `web-launch-url`.
+The daemon consumes that token once, issues a 12-hour HttpOnly SameSite=Strict
+cookie, redirects to `/`, and atomically rotates the launch token. Up to 32 sessions
+survive until expiry or daemon restart. The launch token is not printed by the daemon.
+`FRACTAL_WEB_URL` remains an explicit override. Do not publish this listener through
+Tailscale Serve: it is a same-machine browser boundary, not the tailnet host.
+
+Only `/v1/client/*` reaches the existing API in-process. Caller credentials/person
+headers are replaced by the configured person after cookie admission. Host must
+be exactly `127.0.0.1:PORT` or `localhost:PORT`; unsafe methods and WebSocket
+upgrades need the exact matching HTTP Origin. Static paths support SPA fallback,
+HEAD, MIME types, traversal/symlink escape refusal, and `build-identity.json`.
+Inline script/style CSP hashes mirror trusted Vite output plus React Aria's fixed
+hashes. This is not a general HTML parser or proven browser-policy parity.
+
+Prototype limits: no runtime deployment-ID injection, br/gzip, conditional/range responses, per-asset caching,
+session revocation, token expiry, or live session expiry enforcement on an already
+open WebSocket. Static files are read into memory per request. Trusted Unix
+person-session semantics are reused behind the new boundary, so audit transport
+still says Unix. CSP should become a shared build artifact before production.
+Cookie transport is plain loopback HTTP, and same-user processes can read the
+launch rendezvous. Assets and the daemon restart together; any listener/asset
+startup error takes down both API listeners.
+
+Shipping proposal (not wired into releases here): put the built dist contents at
+`share/fractal-web/` beside `bin/fractal` in tarballs and teach the installer to
+preserve that layout. Nix should build a separate immutable web-assets output and
+pass `--web-dist ${webAssets}` from the upstream service module. Avoid compiling
+the dist into Rust: a UI change should not rebuild/relink the daemon. Dotfiles
+can compose those upstream outputs and separately own tailnet publishing.
+
 ## Hosting the web app on a tailnet
 
 `apps/fractal-web/server/main.mts` runs the built app for one person. It listens on loopback
