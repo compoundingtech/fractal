@@ -111,6 +111,7 @@ export type Agent = ResourceHeader & {
   kind: "agent";
   last_activity_at?: (Timestamp | null);
   lifecycle?: AgentLifecycle;
+  mail_custody?: AgentMailCustody;
   name: string;
   next_work?: (WorkLabel | null);
   next_work_id?: (Id | null);
@@ -198,6 +199,11 @@ export type AgentHandoff = {
 export type AgentId = string;
 
 export type AgentLifecycle = ("standing" | "owner" | "bounded" | string);
+
+export type AgentMailCustody = {
+  state: "pending";
+  successor: AgentId;
+};
 
 export type AgentMessageDay = {
   calibrated_messages: number;
@@ -310,6 +316,7 @@ export type AgentResumeParameters = {
 export type AgentRetireParameters = {
   agent: Id;
   reason: string;
+  successor?: Id;
 };
 
 export type AgentStartParameters = {
@@ -883,6 +890,7 @@ export type Attention = ResourceHeader & {
   mission_id?: Id;
   mission_run_id?: Id;
   person_id: Id;
+  presentation?: AttentionPresentation;
   preview?: (LaunchPreview | null);
   preview_token?: string | null;
   priority: "critical" | "high" | "normal" | "low";
@@ -902,6 +910,11 @@ export type Attention = ResourceHeader & {
   what?: string;
 };
 
+export type AttentionActor = {
+  id: Id;
+  label: string;
+};
+
 export type AttentionBlocked = {
   attempt: number;
   goal: string;
@@ -909,10 +922,34 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionPresentation = {
+  agent: (AttentionActor | null);
+  kind: 
+  "review"
+  | "feedback"
+  | "request"
+  | "update"
+  | "launch"
+  | "revision"
+  | "prompt"
+  | "login"
+  | "fault"
+  | null
+;
+  raised_by: (AttentionActor | null);
+  tier: "stopped" | "alert" | "today" | "later" | null;
+  waiting: (AttentionWaiting | null);
+};
+
 export type AttentionTargetState = {
   id: Id;
   since?: Timestamp;
   state: string;
+};
+
+export type AttentionWaiting = {
+  path: string;
+  step: StepRunId;
 };
 
 export type BlobChunk = {
@@ -1310,6 +1347,14 @@ export type DecisionResponse = ({
   value: Array<string>;
 });
 
+export type DelegationProof = {
+  episode: string;
+  message: string;
+  person: string;
+  policy: string;
+  quote: string;
+};
+
 export type Device = ResourceHeader & {
   expires_at: Timestamp;
   grant_expires_at?: Timestamp;
@@ -1429,6 +1474,8 @@ export type ErrorCode = (
   | "identity-unknown"
   | "lifecycle-unavailable"
   | "retirement-upgrade-required"
+  | "invalid-custody-successor"
+  | "custody-pending"
   | "attention-migrated"
   | "arrangement-exists"
   | "arrangement-folder-exists"
@@ -2182,6 +2229,7 @@ export type PageInfo = {
   has_more: boolean;
   limit: number;
   next_cursor?: string | null;
+  omitted_items?: number | null;
 };
 
 export type PairedSession = (PersonPairedSession | AssistantPairedSession);
@@ -2354,6 +2402,7 @@ export type ProjectionEvent = Omit<{
 
 export type PromptRespondParameters = {
   answer: string;
+  delegation?: DelegationProof;
   episode: string;
   target_id: Id;
 };

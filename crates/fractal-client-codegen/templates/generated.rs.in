@@ -70,6 +70,8 @@ pub enum ErrorCode {
     IdentityUnknown,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
+    InvalidCustodySuccessor,
+    CustodyPending,
     AttentionMigrated,
     ArrangementExists,
     ArrangementFolderExists,
@@ -220,6 +222,9 @@ pub struct PageInfo {
     pub next_cursor: Option<String>,
     #[serde(default)]
     pub cursor_expires_at: Option<String>,
+    /// Unreadable history candidates skipped on this page. Nonzero means incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_items: Option<usize>,
 }
 
 
@@ -509,6 +514,9 @@ pub struct Attention {
     /// The mission step waiting on this ask, on an ask a mission step made.
     #[serde(default)]
     pub blocked: Option<AttentionBlocked>,
+    /// st's presentation of this row; absent from older daemons.
+    #[serde(default)]
+    pub presentation: Option<AttentionPresentation>,
     pub title: String,
     pub detail: String,
     pub priority: String,
@@ -520,6 +528,37 @@ pub struct Attention {
     pub target_states: Vec<AttentionTargetState>,
     #[serde(default)]
     pub actions: Vec<String>,
+}
+/// st's presentation of an attention row (docs/clients/ui-contract.md, Attention row). Words
+/// are fixtures/clients/words.json ids.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionPresentation {
+    /// The Now group; `None` for a row that is not a Now card.
+    #[serde(default)]
+    pub tier: Option<String>,
+    /// The card; `None` for a row that is no card.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Who Chat about this reaches; `None` means the chief of staff.
+    #[serde(default)]
+    pub agent: Option<AttentionActor>,
+    #[serde(default)]
+    pub raised_by: Option<AttentionActor>,
+    #[serde(default)]
+    pub waiting: Option<AttentionWaiting>,
+}
+/// An agent or other actor, with the name a person reads.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionActor {
+    pub id: String,
+    pub label: String,
+}
+/// The step an attention row holds.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionWaiting {
+    pub step: String,
+    /// The step's name within its mission.
+    pub path: String,
 }
 /// The mission step that asked and waits for the answer.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1418,6 +1457,11 @@ pub struct AgentRelationship {
     pub agent_id: String,
     pub reason: Option<String>,
 }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentMailCustody {
+    pub successor: String,
+    pub state: String,
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentEndReason {
     pub kind: String,
@@ -1437,6 +1481,8 @@ pub struct Agent {
     pub name: String,
     pub state: String,
     pub reachability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_custody: Option<AgentMailCustody>,
     #[serde(default)]
     pub runtime_ids: Vec<String>,
     #[serde(default)]
@@ -2953,6 +2999,8 @@ pub struct PersonAnswerRecord {
 pub struct AgentRetireParameters {
     pub agent: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -4092,10 +4140,23 @@ pub struct AgentRepository {
     pub agent_ids: Vec<String>,
 }
 
+/// Exact prior person instruction and current policy; authentication selects the actor.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationProof {
+    pub person: String,
+    pub policy: String,
+    pub message: String,
+    pub quote: String,
+    pub episode: String,
+}
+
 /// A person's answer to a native harness prompt alert.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptRespondParameters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DelegationProof>,
     pub target_id: String,
     pub episode: String,
     pub answer: String,

@@ -187,6 +187,7 @@ pub use runtime_starts::RuntimeStartOperation;
 pub mod roster_admission;
 
 pub mod adhoc_work;
+pub mod attention_history;
 pub mod attention_snapshot;
 pub use attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
@@ -5052,18 +5053,7 @@ impl Store {
     ) -> Result<Option<(DesiredSubject, Option<String>)>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        connection
-            .query_row(
-                "SELECT desired.subject, desired.kind, desired.body, desired.member,
-                        desired.owner_run, desired.owner_generation, desired.owner_step,
-                        claims.actor
-                 FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
-                 WHERE desired.subject = ?1",
-                [subject],
-                |row| Ok((desired_from_row(row)?, row.get::<_, Option<String>>(7)?)),
-            )
-            .optional()
-            .map_err(Into::into)
+        desired_subject_with_writer_at(&connection, subject)
     }
 
     /// Among `subjects`, each declaration whose member this build cannot read, with the reason.
@@ -9325,7 +9315,8 @@ fn validate_message_transition(
             .filter(|kind| *kind == "message")
             .map(|_| "sent")
     };
-    if requested != "sent" && current == Some(requested) {
+    if requested != "sent" && current == Some(requested)
+        && !(requested == "read" && input.fields.contains_key("acting_for")) {
         if input.fields.contains_key("delegation") {
             return Err(St3Error::new(
                 "delegation-refused",
@@ -9363,6 +9354,23 @@ fn validate_message_transition(
             | (Some("delivered"), "read")
             | (Some("read"), "closed")
     );
+    let custody_read = requested == "read"
+        && input.fields.contains_key("acting_for")
+        && matches!(current, Some("sent" | "staged" | "read"));
+    if custody_read && current == Some("read") {
+        // OLD may have read the mail before retirement. NEW still needs its own signed
+        // receipt, but a different key must not create unlimited duplicate NEW reads.
+        let prior: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+             WHERE subject=?1 AND kind='message.read' AND actor=?2
+               AND json_extract(body,'$.fields.acting_for')=?3)",
+            params![input.subject, input.actor, input.fields.get("acting_for").and_then(Value::as_str)],
+            |row| row.get(0),
+        ).map_err(internal)?;
+        if prior {
+            return Err(St3Error::new("invalid-message-transition", "custody read is already recorded"));
+        }
+    }
     // A person's displayed message has no native harness handoff. Its explicit read receipt
     // is also delivery evidence; only the actual person recipient may skip that boundary.
     let person_read = if requested == "read"
@@ -9397,7 +9405,7 @@ fn validate_message_transition(
         && requested == "closed"
         && input.actor.as_deref() == Some("daemon/runtime");
     let delegated_close = requested == "closed" && input.fields.contains_key("delegation");
-    if !valid && !person_read && !daemon_withdrawal && !delegated_close {
+    if !valid && !custody_read && !person_read && !daemon_withdrawal && !delegated_close {
         return Err(St3Error::new(
             "invalid-message-transition",
             format!(
@@ -9523,6 +9531,9 @@ pub fn append_claim_tx_with_assistant_answer(
         || fields.contains_key("delegation")
         || fields.contains_key("acted_for")
         || (kind == "work.person-done" && actor.is_some_and(|actor| actor.starts_with("agent/")))
+        || (kind == "harness.diagnostic"
+            && fields.get("code") == Some(&json!("native-prompt-answered"))
+            && actor.is_some_and(|actor| actor.starts_with("agent/")))
     {
         let evidence = serde_json::from_value::<Vec<String>>(
             body.get("evidence").cloned().unwrap_or_else(|| json!([])),
@@ -11391,6 +11402,108 @@ pub fn mission_definition_token_tx(
         .optional()?
         .into_iter()
         .collect())
+}
+
+fn desired_subject_with_writer_at(
+    connection: &Connection,
+    subject: &str,
+) -> Result<Option<(DesiredSubject, Option<String>)>> {
+    smallclaims::touched::note_read(|| subject.to_owned());
+    connection
+        .query_row(
+            "SELECT desired.subject, desired.kind, desired.body, desired.member,
+                        desired.owner_run, desired.owner_generation, desired.owner_step,
+                        claims.actor
+                 FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
+                 WHERE desired.subject = ?1",
+            [subject],
+            |row| Ok((desired_from_row(row)?, row.get::<_, Option<String>>(7)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+/// The new writer's ownership lookup stays on its transaction. Its requester
+/// query uses the same authoritative header join as the existing public view.
+pub fn agent_person_at(connection: &Connection, agent: &str) -> Result<Option<String>> {
+    agent_person_walk(
+        agent,
+        |subject| desired_subject_with_writer_at(connection, subject),
+        |run| {
+            smallclaims::touched::note_read(|| {
+                format!(
+                    "mission-run/{}",
+                    run.strip_prefix("mission-run/").unwrap_or(run)
+                )
+            });
+            connection
+                    .query_row(
+                        // Match mission_run_header_tx's current-generation join: a
+                        // header with no generation has no requester to follow.
+                        "SELECT mission_runs.requester FROM mission_runs
+                         JOIN run_generations ON run_generations.id=mission_runs.current_generation_id
+                         WHERE mission_runs.id=?1",
+                        [run.strip_prefix("mission-run/").unwrap_or(run)],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional().map_err(Into::into)
+        },
+    )
+}
+
+/// One bounded ownership precedence/cycle walk. Public reads retain their original
+/// full-view resolver; writer admission supplies its same-transaction resolver.
+fn agent_person_walk<D, R>(
+    agent: &str,
+    mut lookup_desired: D,
+    mut lookup_requester: R,
+) -> Result<Option<String>>
+where
+    D: FnMut(&str) -> Result<Option<(DesiredSubject, Option<String>)>>,
+    R: FnMut(&str) -> Result<Option<String>>,
+{
+    let mut actor = agent.to_owned();
+    let mut seen = BTreeSet::new();
+    for _ in 0..16 {
+        if actor.starts_with("person/") {
+            return Ok(Some(actor));
+        }
+        if !seen.insert(actor.clone()) {
+            return Ok(None);
+        }
+        let Some((desired, writer)) = lookup_desired(&actor)? else {
+            return Ok(None);
+        };
+        if actor == agent {
+            let owner = match crate::accounts::harness_binding(&desired.desired)
+                .map(|binding| binding.binding)
+            {
+                Some(crate::accounts::Binding::Pool(person)) => Some(person),
+                Some(crate::accounts::Binding::Account(account)) => {
+                    lookup_desired(&format!("account/{account}"))?
+                        .and_then(|(account, _)| {
+                            crate::accounts::parse_account(&account.subject, &account.desired)
+                        })
+                        .and_then(|account| account.owner)
+                }
+                None => None,
+            };
+            if let Some(owner) = owner.filter(|owner| owner.starts_with("person/")) {
+                return Ok(Some(owner));
+            }
+        }
+        let requester = desired
+            .owner_run
+            .as_deref()
+            .map(&mut lookup_requester)
+            .transpose()?
+            .flatten();
+        let Some(next) = requester.or(writer) else {
+            return Ok(None);
+        };
+        actor = next;
+    }
+    Ok(None)
 }
 
 pub fn desired_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DesiredSubject> {
@@ -19865,6 +19978,7 @@ pub fn append_claim_with_commit_context(
                 input.fields.get("to").and_then(Value::as_str),
             )?;
         }
+        retirements::admit_mail_claim(connection, input)?;
         Ok(())
     };
     if context.assistant.is_none() {
@@ -19872,7 +19986,12 @@ pub fn append_claim_with_commit_context(
             input.fields.get("from").and_then(Value::as_str),
             ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| input.fields.contains_key(*key)))?;
     }
-    validate_claim_input(input)?;
+    // Retirement alone validates in its serialized admission after the operation replay
+    // check. Its successor eligibility refusal must win over a generic field-reference
+    // error, while a changed idempotency key must still report a mismatch first.
+    if !context.retirement_writer {
+        validate_claim_input(input)?;
+    }
     if local_retention(&input.kind)
         || (input.actor.is_none() && system_local_retention(&input.kind))
     {

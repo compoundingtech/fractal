@@ -17,6 +17,7 @@ import tempfile
 PATTERNS = (
     "apps/fractal-web/**",
     "packages/fractal-ui/**",
+    "packages/fractal-sdk/**",
     # Export graph consumed by the app/SDK and Buck's client typecheck inputs.
     "clients/typescript/fractal-client/index.ts",
     "clients/typescript/fractal-client/Models.generated.ts",
@@ -78,7 +79,7 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/coldOpen.fixtures.ts",
     # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
     "apps/fractal-web/.changelog/**",
-    "apps/fractal-web/packages/fractal-sdk/src/**",
+    "packages/fractal-sdk/src/**",
     "clients/typescript/fractal-views/**",
     # The rest of its module closure inside the app, named file by file so other app-only changes still skip kit plays.
     "apps/fractal-web/src/command-palette/fuzzy.ts",
@@ -176,6 +177,7 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/ui-compat/tokens.stylex.ts",
     "apps/fractal-web/src/web/AgentActions.tsx",
     "apps/fractal-web/src/web/AgentDetailsPanel.tsx",
+    "apps/fractal-web/src/web/AlertsPopover.tsx",
     "apps/fractal-web/src/web/AttentionControls.tsx",
     "apps/fractal-web/src/web/capturedChanges.ts",
     "apps/fractal-web/src/web/ChangesInspector.tsx",
@@ -222,7 +224,7 @@ KIT_PATTERNS = (
     ".github/workflows/fleet.yml*",
     ".github/workflows/workspace-ci.ts",
     # The roster decode story replays captured daemon payloads through the SDK decode and the roster projection.
-    "apps/fractal-web/packages/fractal-sdk/src/**",
+    "packages/fractal-sdk/src/**",
     "apps/fractal-web/src/data/attention.ts",
     "apps/fractal-web/src/data/projections.ts",
     "apps/fractal-web/src/data/source.ts",

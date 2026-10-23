@@ -35,10 +35,6 @@ fn alerts_out_of_date(world: &World) -> Option<String> {
     Some(why.join("; "))
 }
 
-/// The tabs everyone sees. Worktrees stays hidden until the graph models worktrees: its screens
-/// only have invented data to show (Nathan, 2026-09-28).
-pub const TABS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
-
 pub enum Item {
     Header {
         title: String,
@@ -2764,6 +2760,9 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
             theme::fg(harness_color(agent.harness)),
         );
         doc.field("host", &agent.host, width, theme::soft());
+        if let Some(custody) = &agent.details.mail_custody {
+            doc.field("mail", custody, width, theme::text());
+        }
         if let Some(tree) = &agent.worktree {
             doc.field("worktree", tree, width, theme::soft());
         }
@@ -2908,6 +2907,9 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
         inner.wrap(&text::inline(fault, theme::text()), width.saturating_sub(4));
         doc.card("broken", theme::FAULT, true, inner, width);
         doc.blank();
+    }
+    if let Some(custody) = &details.mail_custody {
+        doc.field("mail", custody, width, theme::text());
     }
     if agent.state == AgentState::NeedsLogin {
         let mut inner = Doc::new();
