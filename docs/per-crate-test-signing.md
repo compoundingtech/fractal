@@ -19,7 +19,9 @@ by itself.
    current tree. A crate whose manifest is the repository root (`fractal-legacy-runner`) contributes its target source dirs
    (`src`, `tests`, `build.rs`, `benches`), never `.`. Because manifests are inside the keyed paths, an edge added or removed
    changes the key.
-2. **Global paths** (change them and every crate re-runs): `Cargo.toml`, `Cargo.lock`, `.cargo`, `flake.lock`, the toolchain pin
+2. **Global paths** (change them and every crate re-runs): `Cargo.toml`, `Cargo.lock`, **every workspace member's `Cargo.toml`** (the
+   tests run on one `--workspace` build, so a feature one member turns on changes a shared dependency's build for all; found in
+   skip-ci-sigs-2's read), the `[patch]` paths, `.cargo`, `flake.lock`, the toolchain pin
    (`rust-toolchain` if present, else `flake.nix` and `nix/`), `.config/nextest.toml`, `.config/daily-only.filterset`, and the test-stage
    scripts: `scripts/ci-local`, `ci-linux`, `ci-nextest`, `ci-nextest-targets`, `ci-nextest-flaky`, `st3_test_process.py`, plus the
    new per-crate runner. Not the whole of `scripts`: that is the largest source of unrelated churn.
@@ -35,7 +37,7 @@ migration is monotone: shrinking a crate's extras is a reviewed change with its 
 What a change then costs (workspace of 52 members; "reruns" counts crates whose closure holds the changed one, dev deps included):
 a change in a leaf such as `fractal-tui` or `fractal-daemon` re-runs 1 to 5 crates; in `fractal-store` about 17; in `fractal-kernel`
 or `fractal-runtime` about 23. Honest limits: `fractal` (1,219 tests, 41-crate closure) re-runs on nearly every non-leaf change, and
-a change to `Cargo.lock` or `.config/nextest.toml` re-runs everything. The saving is the tests of every crate outside the changed crate's dependents (by a source-line count: `fractal-drivers` 1,220, `smallclaims` 937, `fractal-store` 795,
+a change to `Cargo.lock`, any member's `Cargo.toml` or `.config/nextest.toml` re-runs everything. The saving is the tests of every crate outside the changed crate's dependents (by a source-line count: `fractal-drivers` 1,220, `smallclaims` 937, `fractal-store` 795,
 `fractal-reconcile` 620, `fractal-tui` 495), and a no-op re-run (a docs, TypeScript or script-only change) costs nothing.
 
 ## 2. Notes and records
@@ -108,3 +110,24 @@ and a stale pass is reused. Four controls, in order of when they bite:
 3. Verifier + policy (`rust-tests` check, `--crates` projection, batched prefix fetch) + gate (test stage skip, pull_request only, shadow
    first, then enforced). Needs skip-ci-sigs-2 (trust) and skip-ci-lead-2 (gate).
 4. Shrink the extras crate by crate with traces; optional per-crate clippy and run-only-the-missing-crates in the shards.
+
+## 7. As built in step 2
+
+- `scripts/rust-test-keys` (keys, `--paths`, `--json`; reads `.st/rust-test-inputs.json` from the base with `--inputs-from`) and
+  `scripts/rust-test-inputs-scan` (the textual first pass of the extras: `--write` produced the committed file, a policy test fails when a
+  crate's scan names a path its entry does not cover). `.st/rust-test-inputs.json` starts from that scan; the daily trace of section 5
+  is what lets a crate's extras shrink or grow after review. Test file: `scripts/rust-test-keys-test`.
+- `scripts/st-test --check rust-tests` (opt-in; `--all` still signs `linux-gate` until the gate accepts per-crate notes): computes the keys,
+  fetches the per-crate index refs in one fetch, asks the verifier (`evidence-verify --crate-key CRATE=KEY`) for each crate, runs ONE
+  `scripts/ci-local tests` for the missing crates (`CI_TEST_PACKAGES`, `CI_TEST_JUNIT`; the workspace build, so features unify as in CI), and
+  signs each crate with `scripts/evidence-wrap --check rust-tests` over `scripts/ci-rust-test-result`, which reads that crate's part of the
+  JUnit report. The record signs `crate`, `source_inputs`, `tests_run`, `test_list_sha256` (the exact test list) and `run_command_sha256`.
+  A run that did not complete (build failure, timeout, a nextest exit other than 0, 4 or 100, no report) signs nothing. A failing crate is
+  signed as a failure and the others are still signed. `--status` names the crates it would run.
+- `evidence-wrap` also indexes a record that signs `source_inputs` under `refs/notes/evidence-input/<check>/<key>/<record>` and
+  `refs/tags/evidence/input/<check>/<key>/<record>` and pushes them with `--push`. Until now only CI's signer made those. Whether an agent
+  seat's identity may create them on the remote is a repository rule that has not been confirmed (as for `refs/tags/evidence/*`).
+- Not in this step: the skip-policy entry, the lane definition and the gate job (step 3, with skip-ci-sigs-2 and skip-ci-lead-2): adding the
+  check to `.st/evidence-skip-policy.json` makes `evidence-verify-test` and `ci-evidence-gate-test` expect a gate job and lane for it. Until
+  the policy names the check at the base, `st-test` judges coverage by signature, crate and key alone (a local convenience), and the notes
+  carry no lane digest, so step 3's notes are signed again.

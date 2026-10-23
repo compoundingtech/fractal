@@ -8,7 +8,9 @@ A crate's key is `source_inputs` (the git tree of exactly the declared paths, sc
   1. the directory of the crate and of every crate in its dependency closure: every `path` dependency, normal, dev, build and target
      specific, `workspace = true` resolved through [workspace.dependencies], and the [patch] paths (they replace registry crates for the
      whole workspace); read from the manifests of the tree being keyed, so no toolchain is needed and an edge that appears changes the key;
-  2. the global paths of `.st/rust-test-inputs.json` (the manifests, lock, toolchain, test runner configuration and stage scripts);
+  2. the global paths of `.st/rust-test-inputs.json` (the root manifest, lock, toolchain, test runner configuration and stage scripts) and
+     the manifest of EVERY workspace member: the tests run on one workspace build, so a member that turns on a feature of a shared
+     dependency changes that dependency's build for every crate;
   3. the crate's own `extra` paths from the same file: what its tests read outside the closure.
 
 A crate the file does not list has the extra `.`, whose key is the whole tree: it is run on every change (it fails closed), so an
@@ -134,7 +136,8 @@ def declared_paths(repo, tree, inputs):
     """crate name -> sorted declared paths, for every workspace member of `tree`."""
     members, patched, root = layout(repo, tree)
     workspace_deps = (root.get('workspace') or {}).get('dependencies') or {}
-    global_paths = list(inputs.get('global') or []) + patched
+    manifests = [posixpath.normpath(posixpath.join(directory, 'Cargo.toml')) for directory in members.values()]
+    global_paths = list(inputs.get('global') or []) + patched + manifests
     crates = inputs.get('crates') or {}
     cache = {}
     result = {}
@@ -163,6 +166,10 @@ def read_inputs(repo, treeish):
 
 def keys(repo, tree, inputs, project, only=()):
     """crate name -> (key, paths). The key is None when no declared path exists in the tree (nothing can match by it)."""
+    resolved = subprocess.run(['git', '-C', str(repo), 'rev-parse', '--verify', '--end-of-options', f'{tree}^{{tree}}'], capture_output=True, text=True)
+    if resolved.returncode != 0:
+        raise Failure(f'{tree} is not a tree')
+    tree = resolved.stdout.strip()
     paths = declared_paths(repo, tree, inputs)
     unknown = [name for name in only if name not in paths]
     if unknown:
