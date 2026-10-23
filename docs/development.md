@@ -236,9 +236,9 @@ captured changes, composer, arrangements, roster and terminal attachment.
 
 ## Continuous integration
 
-Workspace CI runs on pull requests and merge groups. The five required checks are `linux-gate`,
-`isolation-vm`, `genie-freshness`, `typescript-client`, and `mail-redelivery-canaries`.
-A ready pull request lands through GitHub’s merge queue after review and all five required checks
+Workspace CI runs on pull requests and merge groups. The four required checks are `linux-gate`,
+`genie-freshness`, `typescript-client` and `fractal-web`; the VM tests and the mail redelivery canaries
+run once a day (`daily-long.yml`). A ready pull request lands through GitHub’s merge queue after review and all four required checks
 pass. Keep the approved head fixed; a new head requires review of its own changes before queueing.
 
 The queue checks the exact commit that lands. Main upkeep verifies those checks, runs `perf-cost`,
