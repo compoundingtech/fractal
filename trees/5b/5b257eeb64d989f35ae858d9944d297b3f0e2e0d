@@ -1,0 +1,7 @@
+record 4053d04037ed7854466f66c10665554c05d7b563 mail-redelivery-canaries 0 fleet/ci 2026-10-23T09:32:09Z
+record 52be171809065f94705a65b60b1d8cd43611d877 linux-gate 1 fleet/ci 2026-10-23T09:33:08Z
+record 7ba5774cd0cdb5e525b6678b043db0ceed4f8785 genie-freshness 0 fleet/ci 2026-10-23T09:23:42Z
+record b4d0814ad980bfdd4c8c5895a6536ee91eeaa1fd linux-fleet-compat 0 fleet/ci 2026-10-23T09:22:26Z
+record bcf3f71f652bba0f8cda7e89148a7dc57f349bca linux-clippy 0 fleet/ci 2026-10-23T09:21:00Z
+record c09ad814aa9dea04111b9c09423cc33c45f40807 isolation-vm 0 fleet/ci 2026-10-23T09:31:34Z
+record eb94e5ddd5c5d6cd277c35a81fe00c7f085e2e61 linux-tests 100 fleet/ci 2026-10-23T09:29:44Z
