@@ -64,6 +64,9 @@ pub mod observer_subscription_detail_tests;
 #[path = "client_v0/published_attention_tests.rs"]
 mod published_attention_tests;
 #[cfg(test)]
+#[path = "client_v0/alert_action_tests.rs"]
+mod alert_action_tests;
+#[cfg(test)]
 mod stream_start_tests;
 
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
@@ -3815,6 +3818,7 @@ pub async fn missions(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(&state),
         replicated: None,
@@ -7399,13 +7403,21 @@ async fn dispatch_action(
         ))),
         // A person's answer to a native harness prompt, which the prompt's hook delivers.
         "prompt.respond" => {
+            let delegation = p
+                .get("delegation")
+                .map(|value| {
+                    serde_json::from_value::<crate::model::DelegationProof>(value.clone())
+                        .map_err(|_| validation("invalid delegation proof"))
+                })
+                .transpose()?;
             let answered = state
                 .store
-                .answer_native_prompt(
+                .respond_native_prompt(
                     &parameter_string(p, "target_id")?,
                     &parameter_string(p, "episode")?,
                     &parameter_string(p, "answer")?,
                     authority_actor,
+                    delegation.as_ref(),
                 )
                 .map_err(ApiError::bad)?;
             signal_changed(state);

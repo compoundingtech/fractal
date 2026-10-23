@@ -222,6 +222,16 @@ pub trait PersonWorkStore {
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
         ) -> Result<StepRunView, St3Error>;
+    /// A sender withdraws only its own informational update, through the same
+    /// cancellation claim and transaction as an ask. It never releases the sender's work.
+    fn withdraw_person_update(&self, input: &PersonStepResponse) -> Result<StepRunView, St3Error>;
+    fn finish_person_step_kind(
+            &self,
+            input: &PersonStepResponse,
+            cancel: bool,
+            authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
+            update_only: bool,
+        ) -> Result<StepRunView, St3Error>;
     /// The images an ask's request carries, found by the ask's person step, with who asked and
     /// whom it asks: what a blob read needs to authorize the person looking at them.
     fn ask_images(&self, step_subject: &str) -> Result<Option<AskImages>>;
@@ -353,11 +363,25 @@ impl PersonWorkStore for Store {
         self.finish_person_step_authorized(input, cancel, None)
     }
 
+    fn withdraw_person_update(&self, input: &PersonStepResponse) -> Result<StepRunView, St3Error> {
+        self.finish_person_step_kind(input, true, None, true)
+    }
+
     fn finish_person_step_authorized(
             &self,
             input: &PersonStepResponse,
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
+        ) -> Result<StepRunView, St3Error> {
+        self.finish_person_step_kind(input, cancel, authorization, false)
+    }
+
+    fn finish_person_step_kind(
+            &self,
+            input: &PersonStepResponse,
+            cancel: bool,
+            authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
+            update_only: bool,
         ) -> Result<StepRunView, St3Error> {
         if let Some(authorization) = authorization
             && (authorization.scope != "write.assistant.answers" || authorization.owner != input.actor || cancel)
@@ -383,6 +407,9 @@ impl PersonWorkStore for Store {
             let mut view = step(tx, &subject).map_err(internal)?
                 .ok_or_else(|| St3Error::new("missing-step-run", "the person step does not exist"))?;
             let ask = request(tx, &subject).map_err(internal)?;
+            if update_only && ask.as_ref().is_none_or(|ask| !is_update(ask)) {
+                return Err(St3Error::new("invalid-update-withdrawal", "withdraw names an informational update, not an ask or authored work"));
+            }
             if let Some(authorization) = authorization {
                 let ask = ask.as_ref().filter(|ask| ask.kind == "work.person-asked"
                     && ask.body["fields"]["person"] == authorization.owner

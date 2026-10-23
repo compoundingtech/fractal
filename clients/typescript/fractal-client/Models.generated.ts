@@ -1317,6 +1317,14 @@ export type DecisionResponse = ({
   value: Array<string>;
 });
 
+export type DelegationProof = {
+  episode: string;
+  message: string;
+  person: string;
+  policy: string;
+  quote: string;
+};
+
 export type Device = ResourceHeader & {
   expires_at: Timestamp;
   grant_expires_at?: Timestamp;
@@ -2191,6 +2199,7 @@ export type PageInfo = {
   has_more: boolean;
   limit: number;
   next_cursor?: string | null;
+  omitted_items?: number | null;
 };
 
 export type PairedSession = (PersonPairedSession | AssistantPairedSession);
@@ -2363,6 +2372,7 @@ export type ProjectionEvent = Omit<{
 
 export type PromptRespondParameters = {
   answer: string;
+  delegation?: DelegationProof;
   episode: string;
   target_id: Id;
 };

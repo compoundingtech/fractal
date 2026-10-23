@@ -577,6 +577,7 @@ async fn act_on_card(
                     idem,
                     fence,
                     fractal_client::PromptRespondParameters {
+                        delegation: None,
                         target_id: source,
                         episode: attention.episode.clone(),
                         answer,

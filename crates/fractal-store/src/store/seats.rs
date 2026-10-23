@@ -275,48 +275,16 @@ impl Store {
     /// Prefer a bound account person, then follow declaration authors and mission requesters.
     /// Missing or cyclic ownership remains unknown; it never selects a global operator.
     pub fn agent_person(&self, agent: &str) -> Result<Option<String>> {
-        let mut actor = agent.to_owned();
-        let mut seen = BTreeSet::new();
-        for _ in 0..16 {
-            if actor.starts_with("person/") {
-                return Ok(Some(actor));
-            }
-            if !seen.insert(actor.clone()) {
-                return Ok(None);
-            }
-            let Some((desired, writer)) = self.desired_subject_with_writer(&actor)? else {
-                return Ok(None);
-            };
-            if actor == agent {
-                let owner = match crate::accounts::harness_binding(&desired.desired)
-                    .map(|binding| binding.binding)
-                {
-                    Some(crate::accounts::Binding::Pool(person)) => Some(person),
-                    Some(crate::accounts::Binding::Account(account)) => self
-                        .desired_subject_with_writer(&format!("account/{account}"))?
-                        .and_then(|(account, _)| {
-                            crate::accounts::parse_account(&account.subject, &account.desired)
-                        })
-                        .and_then(|account| account.owner),
-                    None => None,
-                };
-                if let Some(owner) = owner.filter(|owner| owner.starts_with("person/")) {
-                    return Ok(Some(owner));
-                }
-            }
-            let requester = desired
-                .owner_run
-                .as_deref()
-                .map(|run| self.mission_run(run))
-                .transpose()?
-                .flatten()
-                .map(|run| run.requester);
-            let Some(next) = requester.or(writer) else {
-                return Ok(None);
-            };
-            actor = next;
-        }
-        Ok(None)
+        // Keep the existing public read's full mission view, errors and touched
+        // dependencies. Only the new writer path uses a bounded header lookup.
+        agent_person_walk(
+            agent,
+            |subject| self.desired_subject_with_writer(subject),
+            |run| {
+                self.mission_run(run)
+                    .map(|view| view.map(|view| view.requester))
+            },
+        )
     }
 
     pub fn current_harness(

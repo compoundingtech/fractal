@@ -95,6 +95,7 @@ pub mod read_deadline;
 pub mod response_body;
 mod owned_sets;
 pub mod published_attention;
+pub mod attention_history;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
 pub use published_attention::{published_attention_rows, refresh_attention_list};
@@ -1876,7 +1877,9 @@ pub fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> 
 }
 
 pub fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
-    if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
+    if cursor.starts_with(attention_history::CURSOR_PREFIX) {
+        attention_history::cursor_snapshot(cursor)
+    } else if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
         client_v0::native_page_cursor_snapshot(cursor)
     } else {
         decode_client_cursor(cursor).map(|cursor| cursor.snapshot)
@@ -2122,6 +2125,7 @@ fn client_page_read_projected(
                 has_more,
                 next_cursor,
                 cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+                omitted_items: None,
             },
             sync: client_sync_notice(state),
             replicated: None,
@@ -5173,6 +5177,7 @@ fn client_work_published_page(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,

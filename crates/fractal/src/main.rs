@@ -3449,9 +3449,9 @@ enum AttentionCommand {
     Discuss(AttentionDiscussArgs),
     /// Legacy mutation: returns attention-migrated. Use work ask or remedy the source.
     Request(AttentionRequestArgs),
-    /// Legacy mutation: returns attention-migrated. Complete a person step with work done.
+    /// Read an informational update, or dismiss a denied call under exact delegation proof.
     Resolve(AttentionResolveArgs),
-    /// Legacy mutation: returns attention-migrated. Cancel your ask with work cancel-ask.
+    /// Withdraw an informational update you sent. Use work cancel-ask for a question.
     Withdraw(AttentionWithdrawArgs),
     /// Approve one person-owned gate or launch review.
     Approve(ReviewArgs),
@@ -3536,6 +3536,11 @@ struct AttentionResolveArgs {
 struct AttentionWithdrawArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Attention)))]
     subject: String,
+    /// The update's original work.person-asked claim; required for an attention card ID.
+    #[arg(long)]
+    episode: Option<String>,
+    #[arg(long)]
+    idempotency_key: Option<String>,
     #[arg(long)]
     reason: String,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
