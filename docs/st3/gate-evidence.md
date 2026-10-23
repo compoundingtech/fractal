@@ -1413,7 +1413,9 @@ The heavy checks (`linux-gate`, `mail-redelivery-canaries`) build in one cargo t
 `~/.cache/st-test-target` (`ST_EVIDENCE_TARGET` names another; `off` builds in the throwaway worktree as before; a `CARGO_TARGET_DIR` you set is
 left alone), so a run does not start cold: the dependencies are reused, the workspace's own crates rebuild because every run's worktree is new.
 Operations' terms: it is removed before a run once it passes 25 GB, only while no other run holds it (a lock), it is never pinned, and the host's
-scratch sweep may reclaim it when idle (then the next run is cold). Concurrent runs share it; cargo's own lock orders their builds.
+scratch sweep may reclaim it when idle (then the next run is cold). One run at a time builds and tests in it: the lock is exclusive for the whole run (cargo's own lock orders builds, not one
+run's builds against another run's tests, and two runs on different trees once relinked binaries under each other's tests), so a
+second run waits, and says so.
 **The host's build cap governs the heavy checks.** Each heavy check runs inside a `builds.slice` scope (`systemd-run --user --scope
 --slice=builds.slice`), so everything it starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own
 cargo, the dev shell's sccache client), and each cargo command inside takes the host's build slots through the cargo admission shim like any
