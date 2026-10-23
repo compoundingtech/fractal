@@ -10,6 +10,7 @@ pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
 pub mod retention;
+pub mod slo_breaches;
 pub mod review;
 
 use std::collections::BTreeMap;
@@ -1847,6 +1848,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["gate"],
         ),
         (
+            slo_breaches::KIND,
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("slo-breaches"),
+            true,
+            &[],
+        ),
+        (
             "resource.observed",
             &["resource"],
             WritePolicy::OrdinaryClient,
@@ -2839,6 +2849,7 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
             ("launch_id", required_string()),
