@@ -53,11 +53,12 @@ class FakeGitHub:
         self.empty_window = 0  # the created= listing answers an empty page this many times (True: always)
         self.short_window = 0  # ... or a page one run short of its total_count
 
-    def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK, members=None, actor='otter-bot'):
+    def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK, members=None, actor='otter-bot', base=None):
         """One run whose gate job for `check` printed `lines`; `real` is the conclusion of the check's own job, `members` those
         of other jobs in the same attempt (an aggregate's members)."""
         if run_id not in self.jobs:
-            self.runs.append({'id': run_id, 'status': 'completed', 'created_at': stamp(created), 'actor': {'login': actor}})
+            self.runs.append({'id': run_id, 'status': 'completed', 'created_at': stamp(created), 'actor': {'login': actor},
+                              'pull_requests': [{'base': {'sha': base}}] if base else []})
             self.jobs[run_id] = []
         job_id = run_id * 100 + len(self.jobs[run_id])
         self.jobs[run_id].append({'id': job_id, 'name': f'evidence-gate-{check}', 'status': 'completed', 'conclusion': 'success', 'run_attempt': attempt})
@@ -148,7 +149,7 @@ class FlipReady(unittest.TestCase):
         self.assertEqual((code, result['window_s'], result['as_of']), (0, 86400, '2026-10-22T12:00:00Z'))
         entry = result['checks'][CHECK]
         self.assertEqual(entry, {'enforce': False, 'lines': 29, 'satisfied_log_ok': 29, 'log_missing': 0, 'unlogged_pass_unexplained': 0,
-                                 'hidden_red': [], 'visible_red': [], 'log_window_start': stamp(at(25)), 'ready': False,
+                                 'hidden_red': [], 'visible_red': [], 'log_window_start': stamp(at(25)), 'old_base_lines': {}, 'ready': False,
                                  'why_not': ['29 satisfied lines with log=ok, fewer than 30']})  # the first run is in the lookback, not the window
         self.gh.run(2000, at(1), [decision()], real='success')
         self.assertEqual(self.check()['why_not'], [])
@@ -197,17 +198,45 @@ class FlipReady(unittest.TestCase):
         gh = FakeGitHub()
         gh.run(1, at(1), ['evidence-decision v1 check=genie-freshness decision=run outcome=unavailable reason=no-gate-at-base run=1'])
         self.gh = gh
-        self.assertEqual(self.check()['why_not'][:1], ['no line with a log value'])
+        self.assertEqual(self.check()['why_not'][:2], ['1 lines with log=-', 'no line with a log value'])
 
-    def test_an_old_bases_unverified_line_neither_counts_as_unpinned_nor_restarts_the_window(self):
+    def commit_beside_main(self, change):
+        """A commit off main where `change(repo)` was applied; main stays where it was."""
+        change(self.repo)
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-q', '-m', 'old base')
+        sha = git(self.repo, 'rev-parse', 'HEAD').strip()
+        git(self.repo, 'reset', '-q', '--hard', 'HEAD~1')
+        return sha
+
+    def test_a_line_from_a_base_without_the_gate_or_the_entry_is_set_aside_and_counted_and_a_gate_fault_is_not(self):
+        main = git(self.repo, 'rev-parse', 'HEAD').strip()  # has the entry for CHECK, and no gate script
+        def drop_entry(repo):
+            policy = json.loads((repo / flip.POLICY).read_text())
+            del policy['checks'][CHECK]
+            (repo / flip.POLICY).write_text(json.dumps(policy))
+        no_entry = self.commit_beside_main(drop_entry)
+        with_gate = self.commit_beside_main(lambda repo: (repo / flip.GATE).parent.mkdir(exist_ok=True) or (repo / flip.GATE).write_text('#'))
+        no_policy = f'evidence-decision v1 check={CHECK} decision=run outcome=unavailable reason=no_policy record=- base=%s gate_sha256=abc'
+        no_gate = f'evidence-decision v1 check={CHECK} decision=run outcome=unavailable reason=no-gate-at-base run=3001'
         self.ready_history(count=40)
         before = self.check()
-        self.gh.run(3000, at(1), [f'evidence-decision v1 check={CHECK} decision=run outcome=unavailable reason=no_policy record=- gate_sha256=abc'])
-        self.gh.run(3001, at(1), [f'evidence-decision v1 check={CHECK} decision=run outcome=unavailable reason=no-gate-at-base run=3001'])
+        self.gh.run(3000, at(1), [no_policy % no_entry])
+        self.gh.run(3001, at(1), [no_gate], base=main)
         entry = self.check()
         self.assertEqual((entry['ready'], entry['log_window_start'], entry['why_not']), (True, before['log_window_start'], []))
-        self.gh.run(3002, at(1), [decision(log='-')])  # a verified line without the log still restarts it
-        self.assertEqual(self.check()['why_not'][0], '1 lines with log=-')
+        self.assertEqual(entry['old_base_lines'], {'no_policy': 1, 'no-gate-at-base': 1})
+        for name, run, base in (('a base that has the entry', [no_policy % main], None),
+                                ('a base that has the gate: a gate fault', [no_gate], with_gate),
+                                ('an unknown base', [no_policy % ('f' * 40)], None),
+                                ('no base', [no_gate], None),
+                                ('a verified line without the log', [decision(log='-')], None)):
+            with self.subTest(name):
+                self.gh = FakeGitHub()
+                self.ready_history(count=40)
+                self.gh.run(3002, at(1), run, base=base)
+                entry = self.check()
+                self.assertEqual((entry['why_not'][0], entry['old_base_lines']), ('1 lines with log=-', {}))
 
     def test_missing_and_unexplained_unlogged_passes_block_and_latency_explains_one(self):
         self.ready_history(count=40)

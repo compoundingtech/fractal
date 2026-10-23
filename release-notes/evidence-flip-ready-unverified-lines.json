@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "scripts/evidence-flip-ready no longer lets a decision line that carries no information about the evidence log (outcome=unavailable with no log field: an old base without a gate or without a policy entry for the check, or a gate that could not run) count as log=- or restart a check's 24 h log window; a verified line without the log still restarts it. Such a run never skips.",
+  "summary": "scripts/evidence-flip-ready sets aside a decision line from a pull request whose base predates the gate or the check's policy entry (outcome=unavailable, reason no_policy or no-gate-at-base, no log field, and git shows the base lacks scripts/ci-evidence-gate or the entry): it no longer counts as log=- or restarts the 24 h log window, and the report counts such lines per check by reason (old_base_lines). Any other unavailable line, or one whose base is unknown or has the gate and entry (a gate fault), still restarts the window.",
   "replay": {
     "status": "none",
     "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
