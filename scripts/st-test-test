@@ -699,7 +699,7 @@ class StTest(unittest.TestCase):
     def test_the_real_table_lists_only_checks_with_a_command_and_prints_them(self):
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list'], capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'linux-gate'])
+        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate'])
 
     def test_a_check_that_builds_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
@@ -742,7 +742,7 @@ class StTest(unittest.TestCase):
     def test_every_check_of_the_per_pr_suite_runs_by_default_and_all_means_the_same(self):
         # No subset for signing: with no flag st-test runs the whole per-PR suite; --all is an accepted alias; --check selects.
         # The VM tests and the mail redelivery canaries run daily, not here.
-        suite = ['typescript-client', 'genie-freshness', 'linux-gate']
+        suite = ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate']
         for args, names in (([], suite), (['--all'], suite), (['--check', 'linux-gate'], ['linux-gate'])):
             done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)

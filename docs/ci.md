@@ -16,7 +16,8 @@ The five required queue checks and complete test partitions are retained.
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
-on `main` are `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web`,
+on `main` are `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (`ci-script-tests`, the CI scripts' own tests on their
+declared inputs, runs beside `genie-freshness` and joins the required list once it has run green on `main`),
 and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)). The VM tests
 (`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
 requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
@@ -738,7 +739,7 @@ the check (`enforce: true`); under a shadow entry the line reads `decision=run r
 and names the record. `fractal-web` has such a shadow entry; `fractal-web-kit` has none, so
 its decision is `run` with `reason=no-record`. `claims PATH…` and
 `inputs CHECK` print the plugin's path ownership and declared inputs.
-`scripts/web-skip-proof-test` (in `genie-freshness`) covers key stability, the app/kit
+`scripts/web-skip-proof-test` (in `ci-script-tests`) covers key stability, the app/kit
 split, base-pinned rules and the policy path.
 
 The strict kit play lane runs every indexed story at both 440/1440 widths and

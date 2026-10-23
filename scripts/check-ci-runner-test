@@ -188,7 +188,7 @@ for job in ("linux-clippy", "linux-fleet-compat"):
 # The VM tests and the mail redelivery canaries run once a day (daily-long.yml), never per pull request or in the merge queue.
 for job in ('isolation-vm', 'mail-redelivery-canaries', 'evidence-gate-isolation-vm', 'evidence-gate-mail-redelivery-canaries'):
     assert job not in blocks, (job, 'daily only')
-for job in ('genie-freshness', 'typescript-client'):
+for job in ('genie-freshness', 'ci-script-tests', 'typescript-client'):
     assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'light checks must not consume reserved or Namespace capacity')
     assert 'namespace-profile-' not in blocks[job] and 'namespace-features:' not in blocks[job] and 'cargo-cache' not in blocks[job], job
     assert 'Keep valid same-source build outputs' not in blocks[job] and 'build-snapshot' not in blocks[job], job
@@ -368,7 +368,7 @@ for raw in cache_conditions:
                             'vars.CI_OUTAGE_FAST_QUEUE': switch,
                             'env.CI_LOCAL_CACHES': local,
                             **{f'needs.evidence-gate-{gate}.outputs.skip': skip for gate in (
-                                'genie-freshness', 'typescript-client', 'linux-gate')},
+                                'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate')},
                         }.items():
                             expression = expression.replace(token, repr(value))
                         expression = expression.replace('!(', 'not (')
