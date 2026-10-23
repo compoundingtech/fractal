@@ -10478,6 +10478,9 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                     for subject in &item.affected_subjects {
                         println!("  affected\t{subject}");
                     }
+                    if item.class == "revoked-legacy-runtime-start" {
+                        println!("  evidence\t{}", serde_json::to_string(&item.details)?);
+                    }
                 }
                 println!("Apply this exact plan with: st repair apply {}", plan.token);
             }

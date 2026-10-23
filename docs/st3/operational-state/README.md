@@ -169,10 +169,35 @@ is not part of the token.
 `st repair apply TOKEN` applies only that exact recomputed plan. A changed plan fails with
 `stale-repair-plan`; callers must inspect a new dry-run. Registered classes are terminal
 descendants, orphaned readiness, expired claims, superseded attention, contradicted wake failures,
-and impossible run/generation state. Apply appends normal graph transition claims and one
+impossible run/generation state, and owner-proven revoked legacy runtime starts. Apply appends normal graph transition claims and one
 `repair.applied` receipt. It never deletes or rewrites claims. Repeating an accepted token returns
 the replicated receipt with zero changes, and a new dry-run is clean once all listed contradictions
 have converged.
+
+The `revoked-legacy-runtime-start` class is local-owner Linux repair, not a relaxation of native
+launch retirement. The returned revoked start must be unresolved and already administratively
+applied; its retained PTY must be `vanished` with no PID, and it must lack operation-owned native
+producer metadata. The owner daemon must positively enumerate no matching seat/work/server
+systemd units and no live owner-user process carrying the exact start-operation label.
+Unreadable or incomplete evidence refuses repair. A null PID or an older operation tag alone
+never authorizes cleanup.
+
+Dry-run includes the physical evidence in the item and token. Apply captures fresh evidence,
+keeps the runtime spawn lock through the normal writer transaction, and refuses a changed token
+or changed eligibility. It records the same producer-closed cleanup transition used by normal
+reconciliation plus the repair receipt; registry rows and history are preserved.
+
+Run on the owning host after deploying the daemon:
+
+```sh
+st repair dry-run --json
+st repair apply orpv0:REVIEWED_DIGEST --json
+st repair dry-run --json
+```
+
+Review every item in the plan before using its exact token: apply authorizes the whole listed
+plan, not just one seat. If the target legacy start is not listed, proof is missing; do not edit
+the ledger or remove its PTY row to force eligibility.
 
 ## Regression fixtures
 

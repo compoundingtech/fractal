@@ -14,6 +14,9 @@ use pty_core::registry::SessionInfo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+mod legacy_start_closure;
+pub use legacy_start_closure::{LegacyStartClosureEvidence, LegacyStartClosureProof};
+
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PTY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);

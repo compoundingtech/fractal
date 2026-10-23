@@ -248,7 +248,7 @@ fn instance_scope_environment(
     }
 }
 
-fn systemctl() -> Command {
+pub(crate) fn systemctl() -> Command {
     let mut command = Command::new("systemctl");
     if std::env::var_os("ST_INSTANCE").is_some_and(|name| !name.is_empty()) {
         match std::env::var_os("ST_INSTANCE_HOST_XDG_RUNTIME_DIR").filter(|value| !value.is_empty())
