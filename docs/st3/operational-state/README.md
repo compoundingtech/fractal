@@ -191,6 +191,11 @@ Dry-run includes the physical evidence in the item and token. Apply captures fre
 keeps the runtime spawn lock through the normal writer transaction, and refuses a changed token
 or changed eligibility. It records the same producer-closed cleanup transition used by normal
 reconciliation plus the repair receipt; registry rows and history are preserved.
+The replicated `repair.applied` schema is unchanged: legacy operation IDs and native evidence
+are JSON text appended to its existing `reason` string. Older peers can admit this receipt
+without knowing the new repair class; unknown fields would instead quarantine it. Repairs
+without legacy closures retain the original reason and never emit an extra field.
+
 
 Run on the owning host after deploying the daemon:
 

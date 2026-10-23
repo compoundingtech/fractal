@@ -200,9 +200,14 @@ fn scope_not_loaded(scope: &str) -> Result<bool> {
 
 #[cfg(target_os = "linux")]
 fn operation_processes(owner_uid: u32, operation: &str) -> Result<Vec<u32>> {
+    operation_processes_in(Path::new("/proc"), owner_uid, operation)
+}
+
+#[cfg(target_os = "linux")]
+fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str) -> Result<Vec<u32>> {
     use std::os::unix::fs::MetadataExt as _;
     let mut matching = BTreeSet::new();
-    for entry in std::fs::read_dir("/proc").context("enumerate legacy operation processes")? {
+    for entry in std::fs::read_dir(proc_root).context("enumerate legacy operation processes")? {
         let entry = entry?;
         let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
             continue;
@@ -330,13 +335,19 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn native_proc_scan_finds_current_process_exact_label() {
+    fn native_proc_scan_finds_owned_child_exact_label() {
         let variable = "FRACTAL_START_OPERATION";
         let operation = "fractal-runtime-legacy-proof-native-test";
         let mut child = Command::new("sleep").arg("60").env(variable, operation).spawn().unwrap();
+        // Limit enumeration to this test's child. Sandboxed CI can expose
+        // unrelated same-UID processes whose environ is deliberately unreadable.
+        let proc_root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            format!("/proc/{}", child.id()), proc_root.path().join(child.id().to_string()),
+        ).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let result = loop {
-            match operation_processes(unsafe { libc::geteuid() }, operation) {
+            match operation_processes_in(proc_root.path(), unsafe { libc::geteuid() }, operation) {
                 Ok(pids) if !pids.contains(&child.id()) && Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
                 }

@@ -4286,6 +4286,21 @@ impl Store {
         }
         affected_subjects.sort();
         affected_subjects.dedup();
+        // Keep the replicated receipt within the existing closed field schema.
+        // Older peers quarantine unknown fields, so legacy evidence is encoded
+        // in the already-defined reason string, not a new receipt field.
+        let closures = plan.items.iter()
+            .filter(|item| item.class == "revoked-legacy-runtime-start")
+            .map(|item| json!({
+                "operation_id": item.details["operation"]["id"],
+                "native_evidence": item.details["native_evidence"],
+            })).collect::<Vec<_>>();
+        let reason = if closures.is_empty() {
+            "applied the exact graph-authorized operational repair plan".to_owned()
+        } else {
+            format!("applied the exact graph-authorized operational repair plan; legacy runtime start closures: {}",
+                serde_json::to_string(&closures).map_err(internal)?)
+        };
         let receipt = append_claim_tx(
             &transaction,
             &self.origin,
@@ -4295,14 +4310,8 @@ impl Store {
             &json!({"fields": {
                 "token": token,
                 "item_count": plan.items.len(),
-                "legacy_runtime_start_closures": plan.items.iter()
-                    .filter(|item| item.class == "revoked-legacy-runtime-start")
-                    .map(|item| json!({
-                        "operation_id": item.details["operation"]["id"],
-                        "native_evidence": item.details["native_evidence"],
-                    })).collect::<Vec<_>>(),
                 "affected_subjects": affected_subjects,
-                "reason": "applied the exact graph-authorized operational repair plan",
+                "reason": reason,
             }}),
             &claim_ids,
             None,
