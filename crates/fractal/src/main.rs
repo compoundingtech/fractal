@@ -951,6 +951,14 @@ enum FleetTransportsCommand {
         #[arg(long)]
         no_service: bool,
     },
+    /// Prefer an enabled transport without changing exposure or removing any carrier.
+    Prefer {
+        #[arg(value_parser = ["tailscale", "fabric"])]
+        transport: String,
+        /// Leave the daemon and replication worker restarts to the operator.
+        #[arg(long)]
+        no_service: bool,
+    },
 }
 
 #[derive(Args)]

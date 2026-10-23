@@ -31,6 +31,12 @@ front, or to prefer an already enabled Fabric route without changing its saved
 protocol or exposure. An add without `--prefer` appends a new carrier and leaves
 an existing list unchanged. `st fleet transports remove fabric` keeps the relative
 order of remaining carriers and refuses to remove the last usable transport.
+Use `st fleet transports prefer tailscale` or `st fleet transports prefer fabric`
+to move an already enabled carrier first while preserving the remaining order.
+Preference only reorders: it never exposes, unexposes, enables, or removes a
+transport, and rejects a carrier absent from the list. An already-first carrier
+is a no-op, including no service restart. Changes are locked, saved atomically,
+and publish the existing enabled endpoints before refreshing services.
 These are local settings: choose the preference on each member independently.
 Installed services restart automatically; otherwise restart both `st3 daemon` and
 `st3 replication-worker` as instructed, including when using `--no-service`.

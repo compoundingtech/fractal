@@ -115,7 +115,8 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         FleetCommand::Migrate(args) => !args.no_service,
         FleetCommand::Transports { command } => match command {
             FleetTransportsCommand::Add { no_service, .. }
-            | FleetTransportsCommand::Remove { no_service, .. } => !*no_service,
+            | FleetTransportsCommand::Remove { no_service, .. }
+            | FleetTransportsCommand::Prefer { no_service, .. } => !*no_service,
         },
         _ => false,
     };
@@ -679,12 +680,23 @@ async fn run_fleet_transports(
     );
     let transport = match &command {
         FleetTransportsCommand::Add { transport, .. }
-        | FleetTransportsCommand::Remove { transport, .. } => transport,
+        | FleetTransportsCommand::Remove { transport, .. }
+        | FleetTransportsCommand::Prefer { transport, .. } => transport,
     };
     let enabled = file
         .transports
         .iter()
         .any(|configured| configured == transport);
+    if matches!(&command, FleetTransportsCommand::Prefer { .. }) {
+        anyhow::ensure!(
+            enabled,
+            "{transport} is not enabled on this member; preference only reorders enabled transports"
+        );
+        if file.transports.first() == Some(transport) {
+            println!("{transport} is already preferred.");
+            return Ok(());
+        }
+    }
     // Re-adding can change local preference, but never reconfigures the exposure.
     if let FleetTransportsCommand::Add {
         prefer, no_service, ..
@@ -717,6 +729,20 @@ async fn run_fleet_transports(
         .clone()
         .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
     let no_service = match command {
+        FleetTransportsCommand::Prefer {
+            transport,
+            no_service,
+        } => {
+            let index = file
+                .transports
+                .iter()
+                .position(|configured| configured == &transport)
+                .expect("preferred transport was checked as enabled");
+            file.transports[..=index].rotate_right(1);
+            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            println!("{transport} is now preferred; transport exposure is unchanged.");
+            no_service
+        }
         FleetTransportsCommand::Add {
             fabric_protocol,
             prefer,
