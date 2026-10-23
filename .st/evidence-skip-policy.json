@@ -78,7 +78,8 @@
           "trust_levels": [
             "fleet",
             "host",
-            "agent"
+            "agent",
+            "queue"
           ],
           "by_level": {
             "host": {
@@ -134,6 +135,34 @@
               },
               "events": [
                 "pull_request"
+              ],
+              "lane": true
+            },
+            "queue": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "tests",
+                "clippy",
+                "fleet-compat",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt",
+                "clippy_base_sha"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "merge_group"
               ],
               "lane": true
             }
@@ -198,7 +227,8 @@
           "trust_levels": [
             "fleet",
             "host",
-            "agent"
+            "agent",
+            "queue"
           ],
           "by_level": {
             "host": {
@@ -247,6 +277,31 @@
               },
               "events": [
                 "pull_request"
+              ],
+              "lane": true
+            },
+            "queue": {
+              "command": [
+                "nix",
+                "develop",
+                ".#web",
+                "-c",
+                "bash",
+                "-c",
+                "pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "merge_group"
               ],
               "lane": true
             }
@@ -326,7 +381,8 @@
           "trust_levels": [
             "fleet",
             "host",
-            "agent"
+            "agent",
+            "queue"
           ],
           "by_level": {
             "host": {
@@ -374,6 +430,30 @@
               },
               "events": [
                 "pull_request"
+              ],
+              "lane": true
+            },
+            "queue": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "isolation-vm"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "merge_group"
               ],
               "lane": true
             }
@@ -421,7 +501,8 @@
           "trust_levels": [
             "fleet",
             "host",
-            "agent"
+            "agent",
+            "queue"
           ],
           "by_level": {
             "host": {
@@ -468,6 +549,30 @@
               },
               "events": [
                 "pull_request"
+              ],
+              "lane": true
+            },
+            "queue": {
+              "command": [
+                "nix",
+                "develop",
+                ".#genie",
+                "-c",
+                "bash",
+                "scripts/ci-genie-freshness"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "merge_group"
               ],
               "lane": true
             }
@@ -545,7 +650,8 @@
           "trust_levels": [
             "fleet",
             "host",
-            "agent"
+            "agent",
+            "queue"
           ],
           "by_level": {
             "host": {
@@ -593,6 +699,30 @@
               },
               "events": [
                 "pull_request"
+              ],
+              "lane": true
+            },
+            "queue": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "merge_group"
               ],
               "lane": true
             }
