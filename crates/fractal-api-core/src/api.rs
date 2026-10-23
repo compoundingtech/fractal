@@ -1,3 +1,4 @@
+use crate::RetirementsStore;
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
 use crate::ConversationReadsStore;
@@ -391,6 +392,7 @@ impl ApiError {
             | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
+            | "custody-pending"
             | "stale-subject"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -1720,6 +1722,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         "recipient-retired"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
+        | "invalid-custody-successor"
+        | "custody-pending"
         | "not-found"
         | "forbidden"
         | "attention-migrated"
@@ -3662,6 +3666,13 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            // Fold the point read into a cached card. Presentation of a warm roster page
+            // must not repeat one retirement query for every retired row.
+            if state == "retired"
+                && let Some(custody) = store.mail_custody_status(&subject.subject).map_err(anyhow::Error::new)?
+            {
+                value["mail_custody"] = custody;
+            }
             if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));
