@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Pre-push: an agent's push goes only when its tree is covered by signed evidence; anyone else's is signed here, then goes.
 
-An agent (ST_AGENT set) on a machine whose signer is listed on main runs the tests deliberately, with `scripts/st-test --all
---push REMOTE`, before it pushes: that runner signs what it ran. This hook only asks `scripts/st-test --status --all` whether
+An agent (ST_AGENT set) on a machine whose signer is listed on main runs the tests deliberately, with `scripts/st-test
+--push REMOTE`, before it pushes: that runner signs what it ran. This hook only asks `scripts/st-test --status` whether
 HEAD's tree is covered for every check. Covered (a note, a lane edit CI runs, a check with no local command) and the push goes,
 silently; otherwise the push is REFUSED (git sees exit 1) with the uncovered checks and the command to run. The hook never runs signing
 for an agent. ST_EVIDENCE_OVERRIDE='reason' lets such a push go anyway: one line is printed and the receipt records outcome
@@ -32,7 +32,7 @@ machine we trust (cooperative trust, known defect 22); it is not something the b
     is stopped (TERM, then KILL of the whole process group), that is printed, and the push goes. ST_EVIDENCE_STATUS_TIMEOUT
     bounds the "is it covered" question (default 60 s).
   * A push with no terminal on stderr (a script, or an agent on a machine whose signer is not listed) runs inside a call with a
-    short timeout, so there the hook waits at most ST_EVIDENCE_AGENT_LIMIT seconds (default 300: the light checks' 90th percentile, under the agents'
+    short timeout, so there the hook waits at most ST_EVIDENCE_AGENT_LIMIT seconds (default 300, under the agents'
     600 s tool timeout), prints that signing continues in the background with its log path, and lets the push go; the notes
     are pushed when the run finishes. Each note is pushed as soon as its check is signed, so a note signed within the wait is
     on the remote before git sends the branch: the first CI run sees it.
@@ -184,16 +184,16 @@ def has_signer():
 
 
 def refuse_unless_covered(script, top, remote, base, tree, pushed):
-    """An agent's push: it goes when st-test --status --all says HEAD's tree is covered (or on a logged override), else it is
+    """An agent's push: it goes when st-test --status says HEAD's tree is covered (or on a logged override), else it is
     refused with what to run. Nothing is signed here: the agent runs the tests itself."""
     reason = (os.environ.get('ST_EVIDENCE_OVERRIDE') or '').strip()
     if reason:
         say(f'ST_EVIDENCE_OVERRIDE: pushing a tree that may not be covered ({reason}); recorded')
         receipt(tree, pushed, 'override', reason=reason)
         return 0
-    command = f'scripts/st-test --all --push {remote}'
+    command = f'scripts/st-test --push {remote}'
     try:
-        status = subprocess.run([sys.executable, str(script), '--status', '--all', '--base', base], capture_output=True, text=True,
+        status = subprocess.run([sys.executable, str(script), '--status', '--base', base], capture_output=True, text=True,
                                 cwd=top, env=clean_environment(), timeout=positive('ST_EVIDENCE_STATUS_TIMEOUT', STATUS_LIMIT))
     except subprocess.TimeoutExpired:
         status = None
@@ -210,7 +210,7 @@ def refuse_unless_covered(script, top, remote, base, tree, pushed):
     say(f'refused: this tree ({tree[:12]}) is not covered for: {", ".join(uncovered) or "(see below)"}')
     print(status.stdout.rstrip(), file=sys.stderr)
     say(f'run the tests here, which signs what they ran, then push again:\n\n    {command}\n\n'
-        'It is a long command (the heavy checks build and test the Rust workspace; this machine\'s build cap queues it): run it '
+        'It is a long command (it builds and tests the Rust workspace; this machine\'s build cap queues it): run it '
         'as a normal long or background shell command and wait for it to finish. Only in an emergency: '
         "ST_EVIDENCE_OVERRIDE='why' on the push lets it go and records the reason.")
     receipt(tree, pushed, 'refused', uncovered=uncovered)
