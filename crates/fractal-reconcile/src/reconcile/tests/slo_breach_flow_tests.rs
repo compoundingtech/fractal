@@ -27,7 +27,7 @@ fn source() -> Store {
 
 
 fn declare_owner(store: &Store) {
-    let source = "version 2\nagent \"fleet/smalltalk/speed\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }";
+    let source = "version 2\nagent \"fleet/fixture-slo/owner\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }";
     let intent = crate::graph::parse_test_intent(source, "alder").unwrap();
     let planned = store.mission(&intent, IntentInput { kdl: source.into(), source_name: None }).unwrap();
     store.apply(&intent, &planned.subject_tokens, "declare-owner").unwrap();
@@ -254,7 +254,7 @@ fn initial_owner_block_is_positive_only_after_unblock_and_does_not_flap() {
     declare_owner(&source);
     source.unblock_slo_owner(&episode).unwrap();
     assert!(super::slo_breach_tests::gate_passes(source.clone(), &episode));
-    let intent = crate::graph::parse_internal_intent("version 2\nstop \"agent/fleet/smalltalk/speed\"", "alder").unwrap();
+    let intent = crate::graph::parse_internal_intent("version 2\nstop \"agent/fleet/fixture-slo/owner\"", "alder").unwrap();
     let planned = source.mission(&intent, IntentInput { kdl: "stop owner".into(), source_name: None }).unwrap();
     source.apply(&intent, &planned.subject_tokens, "owner-went-away").unwrap();
     let before = claims(&source).len();
@@ -376,7 +376,7 @@ fn admitted_claim_history_and_gate_survive_both_delivery_orders_reopen_and_owner
         let fix = source.work(Some(DEFAULT_OWNER), true).unwrap().into_iter().find(|step| step.step == "fix").unwrap();
         source.work_action(&fix.subject, "claim", &request("history-positive")).unwrap();
         let stop = || {
-            let intent = crate::graph::parse_internal_intent("version 2\nstop \"agent/fleet/smalltalk/speed\"", "alder").unwrap();
+            let intent = crate::graph::parse_internal_intent("version 2\nstop \"agent/fleet/fixture-slo/owner\"", "alder").unwrap();
             let planned = source.mission(&intent, IntentInput { kdl: "stop fixture owner".into(), source_name: None }).unwrap();
             source.apply(&intent, &planned.subject_tokens, "history-owner-stop").unwrap();
         };

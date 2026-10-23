@@ -10,7 +10,8 @@ pub const MAX_RECORD_BYTES: usize = 8 * 1024;
 /// Conservative sub-ceiling: full groups plus transition receipts stay below the approved daily ceilings.
 pub const MAX_DAILY_OPENINGS: usize = 700;
 pub const MAX_DAILY_ONSETS: usize = 832;
-pub const DEFAULT_OWNER: &str = "agent/fleet/smalltalk/speed";
+/// A placeholder seat: the change that activates this source names the deployment's owner.
+pub const DEFAULT_OWNER: &str = "agent/fleet/fixture-slo/owner";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

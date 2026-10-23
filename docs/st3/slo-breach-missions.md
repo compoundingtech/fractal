@@ -2,7 +2,8 @@
 
 This first source change adds the canonical transition and ordinary mission-opening
 seams. It starts no evaluator, timer, collector, profile, network publication or
-runtime writer. The standing owner is `agent/fleet/smalltalk/slo`; the existing
+runtime writer. The default owner is the placeholder seat `agent/fleet/fixture-slo/owner`; the
+change that activates this source names the deployment's real owner. The existing
 implementation claim remains `01a1413009c97c3096561687d4993f8b/implement-source`.
 The source anchor is `5ab05fb7a3b28cf6ecb4f99ec17583b76078f731`.
 
@@ -81,12 +82,12 @@ workspace explicitly; this seam does not invent a relative checkout or inspect t
 host filesystem. Publication revalidates the exact onset
 claim, episode head and member credential under the existing writer, then opens one
 ordinary owner-assigned mission in one transaction. The default owner is
-`agent/fleet/smalltalk/speed`; an explicit owner is retained. Owner lookup is a
+`agent/fleet/fixture-slo/owner`; an explicit owner is retained. Owner lookup is a
 point read. The source consumes the existing membership certificate only when its
 fleet generation is current; it does not trigger a membership fold or snapshot
 build. The same generation, fleet binding, first-sync state and projection health
 are revalidated by point reads under the writer. Normal seat capacity and queue admission still apply to execution;
-this code never calls `start_work` as the owner or chooses a person/CoS fallback.
+this code never calls `start_work` as the owner or chooses a person fallback.
 An absent owner remains named pending work. Later owner flaps use ordinary owner
 facts, with at most one block and first-unblock receipt per episode.
 
