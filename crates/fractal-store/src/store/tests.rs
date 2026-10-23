@@ -4908,59 +4908,61 @@ fn a_replicated_repair_replaces_a_record_that_the_source_had_accepted() {
     assert_eq!(source_status.graph_digest, target_status.graph_digest);
 }
 
-proptest! {
-    #[test]
-    fn envelope_sets_converge_after_sparse_duplicate_delivery(
-        reverse in any::<bool>(),
-        copies in 1usize..4,
-        split_seed in 0usize..8,
-    ) {
-        let source = Store::open_memory("source").unwrap();
-        for index in 0..4 {
-            source
-                .append_claim(&ClaimInput {
-                    subject: format!("host/source-{index}"),
-                    kind: "transport.observed".into(),
-                    actor: None,
-                    fields: BTreeMap::from([("status".into(), Value::String("up".into()))]),
-                    evidence: Vec::new(),
-                    expected_subject: None,
-                    idempotency_key: Some(format!("source-{index}")),
-                })
-                .unwrap();
-        }
-        let complete = exchange_from(&source, &ReplicationInventory::default());
-        let mut delivered = complete.envelopes.clone();
-        if reverse {
-            delivered.reverse();
-        }
-        let split = split_seed % (delivered.len() + 1);
-        let second = delivered.split_off(split);
-        let duplicate = |part: &[ReplicaEnvelope]| {
-            let mut envelopes = Vec::new();
-            for envelope in part {
-                envelopes.extend(std::iter::repeat_n(envelope.clone(), copies));
-            }
-            ReplicationExchange {
-                envelopes,
-                ..complete.clone()
-            }
-        };
-        let target = Store::open_memory("target").unwrap();
-        receive_and_project(&target, "source", &duplicate(&delivered));
-        receive_and_project(&target, "source", &duplicate(&second));
-        receive_and_project(&target, "source", &complete);
-        let source_status = source
-            .replication_status(true, Some(TEST_FLEET), &[])
+/// Every delivery of four envelopes: either order, each sent once to three times, split into two
+/// exchanges at every point, and then the complete exchange. Thirty cases, all of them.
+#[test]
+fn envelope_sets_converge_after_sparse_duplicate_delivery() {
+    let source = Store::open_memory("source").unwrap();
+    for index in 0..4 {
+        source
+            .append_claim(&ClaimInput {
+                subject: format!("host/source-{index}"),
+                kind: "transport.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([("status".into(), Value::String("up".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("source-{index}")),
+            })
             .unwrap();
-        let target_status = target
-            .replication_status(true, Some(TEST_FLEET), &[])
-            .unwrap();
-        prop_assert_eq!(source_status.authority_digest, target_status.authority_digest);
-        prop_assert_eq!(source_status.graph_digest, target_status.graph_digest);
-        prop_assert_eq!(target_status.pending_records, 0);
-        prop_assert_eq!(target_status.invalid_records, 0);
-        prop_assert_eq!(target_status.unknown_records, 0);
+    }
+    let complete = exchange_from(&source, &ReplicationInventory::default());
+    let source_status = source
+        .replication_status(true, Some(TEST_FLEET), &[])
+        .unwrap();
+    for reverse in [false, true] {
+        for copies in 1..4 {
+            for split in 0..=complete.envelopes.len() {
+                let mut delivered = complete.envelopes.clone();
+                if reverse {
+                    delivered.reverse();
+                }
+                let second = delivered.split_off(split);
+                let duplicate = |part: &[ReplicaEnvelope]| {
+                    let mut envelopes = Vec::new();
+                    for envelope in part {
+                        envelopes.extend(std::iter::repeat_n(envelope.clone(), copies));
+                    }
+                    ReplicationExchange {
+                        envelopes,
+                        ..complete.clone()
+                    }
+                };
+                let target = Store::open_memory("target").unwrap();
+                receive_and_project(&target, "source", &duplicate(&delivered));
+                receive_and_project(&target, "source", &duplicate(&second));
+                receive_and_project(&target, "source", &complete);
+                let target_status = target
+                    .replication_status(true, Some(TEST_FLEET), &[])
+                    .unwrap();
+                let case = (reverse, copies, split);
+                assert_eq!(source_status.authority_digest, target_status.authority_digest, "{case:?}");
+                assert_eq!(source_status.graph_digest, target_status.graph_digest, "{case:?}");
+                assert_eq!(target_status.pending_records, 0, "{case:?}");
+                assert_eq!(target_status.invalid_records, 0, "{case:?}");
+                assert_eq!(target_status.unknown_records, 0, "{case:?}");
+            }
+        }
     }
 }
 
