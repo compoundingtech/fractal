@@ -1,3 +1,4 @@
 record 7eaac65bf831ff089186c1ba079fed74c6ff382c typescript-client 0 host/anvil 2026-10-23T16:18:48Z
 record 2e87b914ade486de98562b1430d63d30d98657c0 genie-freshness 0 host/anvil 2026-10-23T16:25:48Z
 record 5c7a4594de19f5e88403f9a614ea583f6ea453dc mail-redelivery-canaries 0 host/anvil 2026-10-23T16:36:03Z
+record ac3386336340ae2a0d1525a5c50770a5ed5dc5b0 linux-gate 100 host/anvil 2026-10-23T17:20:43Z
