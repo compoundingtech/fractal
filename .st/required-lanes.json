@@ -175,8 +175,6 @@
         ".config/daily-only.filterset",
         ".config/nextest.toml",
         ".st",
-        "Cargo.lock",
-        "Cargo.toml",
         "flake.lock",
         "flake.nix",
         "scripts"
