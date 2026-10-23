@@ -65,26 +65,28 @@ def build_dist(dist, source, marker):
     dist.mkdir()
     sums = []
     for target in TARGETS:
-        package = f'smalltalk-{target}'
-        with tarfile.open(dist / f'{package}.tar.gz', 'w:gz') as archive:
-            def add(name, data=b'', mode=0o755, link=None):
-                info = tarfile.TarInfo(f'{package}/{name}')
-                info.mode = mode
-                if link:
-                    info.type, info.linkname = tarfile.SYMTYPE, link
-                    archive.addfile(info)
-                else:
-                    info.size = len(data)
-                    archive.addfile(info, io.BytesIO(data))
-            add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
-            add('bin/st3', marker.encode())
-            add('bin/pty', b'pty')
-            add('bin/st', link='st3')
-            add('install.sh'); add('install-macos.py'); add('macos-installation.md', b'', 0o644)
-        digest = hashlib.sha256((dist / f'{package}.tar.gz').read_bytes()).hexdigest()
-        line = f'{digest}  {package}.tar.gz\n'
-        (dist / f'{package}.tar.gz.sha256').write_text(line)
-        sums.append(line)
+        for prefix in ('fractal', 'smalltalk'):
+            package = f'{prefix}-{target}'
+            with tarfile.open(dist / f'{package}.tar.gz', 'w:gz') as archive:
+                def add(name, data=b'', mode=0o755, link=None):
+                    info = tarfile.TarInfo(f'{package}/{name}')
+                    info.mode = mode
+                    if link:
+                        info.type, info.linkname = tarfile.SYMTYPE, link
+                        archive.addfile(info)
+                    else:
+                        info.size = len(data)
+                        archive.addfile(info, io.BytesIO(data))
+                add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
+                add('bin/st3', marker.encode())
+                add('bin/pty', b'pty')
+                add('bin/st', link='st3')
+                add('bin/fractal', link='st3')
+                add('install.sh'); add('install-macos.py'); add('macos-installation.md', b'', 0o644)
+            digest = hashlib.sha256((dist / f'{package}.tar.gz').read_bytes()).hexdigest()
+            line = f'{digest}  {package}.tar.gz\n'
+            (dist / f'{package}.tar.gz.sha256').write_text(line)
+            sums.append(line)
     (dist / 'SHA256SUMS').write_text(''.join(sums))
     (dist / 'RELEASE.json').write_text('{}')
     (dist / 'RELEASE-NOTES.md').write_text('the long guide is not an edge asset')
@@ -137,7 +139,7 @@ with tempfile.TemporaryDirectory() as temporary:
     assert 'First edge release' in first['release']['notes'] and 'first change' in first['release']['notes']
     assert f'`{commits[0]}`' in first['release']['notes'] and 'example.invalid/run/1' in first['release']['notes']
     assert sorted(first['release']['assets']) == sorted(
-        [f'smalltalk-{t}.tar.gz' for t in TARGETS] + [f'smalltalk-{t}.tar.gz.sha256' for t in TARGETS] + ['SHA256SUMS', 'RELEASE.json']), first
+        [f'{p}-{t}.tar.gz{s}' for p in ('fractal', 'smalltalk') for t in TARGETS for s in ('', '.sha256')] + ['SHA256SUMS', 'RELEASE.json']), first
     assert 'RELEASE-NOTES.md' not in first['release']['assets']
 
     # A later commit replaces the assets in place, moves the tag and lists only the new commits.
@@ -145,7 +147,7 @@ with tempfile.TemporaryDirectory() as temporary:
     done = publish(commits[2], 'three')
     assert done.returncode == 0, done
     second = current()
-    assert second['tag'] == commits[2] and len(second['release']['assets']) == 6, second
+    assert second['tag'] == commits[2] and len(second['release']['assets']) == 10, second
     notes = second['release']['notes']
     assert 'second change' in notes and 'third change' in notes and 'first change' not in notes, notes
     assert sum(1 for call in second['calls'] if call[:2] == ['release', 'create']) == 1, 'one release, not one per commit'
@@ -179,6 +181,21 @@ with tempfile.TemporaryDirectory() as temporary:
     assert done.returncode != 0 and len(current()['calls']) == calls, done
     build_dist(root / 'dist-wrong-source', commits[0], 'wrong')
     done = subprocess.run(['python3', 'scripts/release-smalltalk-edge', '--source', commits[2], '--dist', str(root / 'dist-wrong-source')],
+                          cwd=checkout, env=env, text=True, capture_output=True)
+    assert done.returncode != 0 and len(current()['calls']) == calls, done
+
+    # A checksummed compatibility copy with different payload bytes is not publishable.
+    mismatch = root / 'dist-legacy-mismatch'
+    build_dist(mismatch, commits[2], 'canonical')
+    other = root / 'dist-other'
+    build_dist(other, commits[2], 'different')
+    name = f'smalltalk-{TARGETS[0]}.tar.gz'
+    shutil.copy(other / name, mismatch / name)
+    lines = (mismatch / 'SHA256SUMS').read_text().splitlines()
+    digest = hashlib.sha256((mismatch / name).read_bytes()).hexdigest()
+    (mismatch / 'SHA256SUMS').write_text('\n'.join(
+        f'{digest}  {name}' if line.endswith('  ' + name) else line for line in lines) + '\n')
+    done = subprocess.run(['python3', 'scripts/release-smalltalk-edge', '--source', commits[2], '--dist', str(mismatch)],
                           cwd=checkout, env=env, text=True, capture_output=True)
     assert done.returncode != 0 and len(current()['calls']) == calls, done
 

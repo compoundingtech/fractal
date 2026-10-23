@@ -23,6 +23,6 @@ done
 while pgrep -x xcodebuild >/dev/null; do sleep 10; done
 rm -rf ios/build/StFabricRust.xcframework
 xcodebuild -create-xcframework \
-  -library rust/target/aarch64-apple-ios/release/libst_fabric_bridge.a -headers build/headers \
-  -library rust/target/aarch64-apple-ios-sim/release/libst_fabric_bridge.a -headers build/headers \
+  -library rust/target/aarch64-apple-ios/release/libfractal_fabric_bridge.a -headers build/headers \
+  -library rust/target/aarch64-apple-ios-sim/release/libfractal_fabric_bridge.a -headers build/headers \
   -output ios/build/StFabricRust.xcframework > build/xcframework.log 2>&1

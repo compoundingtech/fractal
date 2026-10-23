@@ -1,9 +1,9 @@
-# Smalltalk client UI contract
+# Fractal client UI contract
 
 For package choices and a runnable client, see [Build your own client](build-your-own.md).
 
-What every Smalltalk client shows and does. Three clients implement it: the terminal UI
-(`crates/stui/src/ui`), the iOS app (`apps/ios`, the Expo way) and the web app, Fractal
+What every Fractal client shows and does. Three clients implement it: the terminal UI
+(`crates/fractal-tui/src/ui`), the iOS app (`apps/ios`, the Expo way) and the web app, Fractal
 (`apps/fractal-web`). Each part of the contract has one lead:
 
 - **Screens and navigation:** the terminal UI is the reference.
@@ -16,9 +16,9 @@ What every Smalltalk client shows and does. Three clients implement it: the term
 When a client disagrees with this document, fix the client, or change this document first.
 
 The machine-checked half of the contract lives in `fixtures/clients/`. The terminal UI writes
-most of it (`STUI_UPDATE_CONTRACT=1 cargo test -p stui contract`) and fails its tests when it
+most of it (`STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract`) and fails its tests when it
 drifts. The iOS app tests `conversation-style.json`, the device-signing and pairing vectors, and
-the shared transcripts through `@smalltalk/st3-views`. The transcripts are the conversation
+the shared transcripts through `@fractal/views`. The transcripts are the conversation
 view's contract; the web app updates them (see below).
 
 | File | What it pins |
@@ -33,6 +33,7 @@ view's contract; the web app updates them (see below).
 | `device-pairing-proofs-v1.json` | Pairing proof and fingerprint vectors. |
 | `transcripts/*.json` | Real Claude and Codex timelines, scrubbed of private names. |
 | `transcripts/*.expected.json` | The conversation a client must derive from each (display times omitted). |
+| `documents-v1.json` | Document links, the link-cycle trail, and the error states a document view shows. |
 
 ## Definition of good
 
@@ -43,7 +44,7 @@ Every screen is judged by these.
    why, and offers no approval.
 2. **The conversation is the product.** One stream per agent, rendered like pi: the person's
    messages as tinted blocks, replies as real Markdown, tool calls as small boxes tinted by
-   outcome and collapsed to their last lines, Smalltalk mail in the same stream. It is stable:
+   outcome and collapsed to their last lines, Fractal mail in the same stream. It is stable:
    a refresh that changes nothing moves nothing, new content only appends, and the view follows
    the end only while the reader is at the end.
 3. **Everything visible is actionable.** Every tab, row, name and button responds to a tap.
@@ -164,7 +165,7 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
     the real message (load it by the item's source id: the attention item carries only a
     generic title); Reply, Mark read, Remind me later (kept on the device only).
 - Confirm destructive or binding actions (approve, cancel, reject, resolve) with a second tap.
-- **Chat about this** sends a *new* Smalltalk message to the agent involved (or the chief of
+- **Chat about this** sends a *new* Fractal message to the agent involved (or the chief of
   staff when no agent is), titled `About: <item title>`, with the item's id, title and mission
   as context. The card shows that thread's replies.
 
@@ -180,7 +181,7 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
 - Selecting an agent shows its conversation (see below) and a composer. A details panel shows
   what it holds now (mission › step, the step's goal, since when), its subagents, what is queued
   next, and how it runs (harness and state, runtime, host, worktree, parent, fault).
-- An agent on another host may show only its Smalltalk mail, not its transcript; say so.
+- An agent on another host may show only its Fractal mail, not its transcript; say so.
 - An agent not started by st: show its saved transcript when st can identify it; otherwise
   explain in plain words why there is no conversation. A found process whose native session
   is unidentified opens into this explanatory state, not a missing-session error. OMP internal
@@ -241,8 +242,8 @@ The web app is the most capable display, so it leads the conversation view:
    each. A PR that changes how a conversation reads updates those fixtures in the same PR, adding
    a scrubbed timeline when no existing one shows the change. A behavior change without a fixture
    change is not done.
-3. **Every derivation runs the fixtures.** Rust runs them in `crates/st3-conversation-ui` and
-   `crates/stui` (`contract`), the phone through `@smalltalk/st3-views`
+3. **Every derivation runs the fixtures.** Rust runs them in `crates/fractal-conversation-ui` and
+   `crates/fractal-tui` (`contract`), the phone through `@fractal/views`
    (`tests/transcripts.test.mjs`), and Fractal in its own unit tests, either by importing
    `st3-views` or by running the fixtures through its own derivation
    (`apps/fractal-web/src/conversation/*.unit.test.ts`). A fixture change fails every derivation
@@ -263,7 +264,7 @@ fixtures pin, and a Fractal PR that changes the fixtures changes the projection 
 
 Rules every client follows; `transcripts/*.expected.json` checks the cleaning.
 
-- Merge the harness timeline and the agent's Smalltalk messages, ordered by time.
+- Merge the harness timeline and the agent's Fractal messages, ordered by time.
 - Claude and Codex add markup for the model. Turn it into what it means:
   - `<task-notification>` → one event line: `background task <status>: <summary>`.
   - `<channel …>` (an st delivery) → `delivered to the agent: <subject> · from <sender>`; the
@@ -288,6 +289,64 @@ Rules every client follows; `transcripts/*.expected.json` checks the cleaning.
 - Read a fresh snapshot right before every action and retry once on `StaleFence`: a graph that
   moved is not the person's problem.
 
+### Images
+
+An image is shown as it was sent, wherever it appears: a message's attachments, an image in a
+harness transcript, a card or a request. The bytes stay with the owner of the message
+([attachments](../st3/attachments.md)), so before they arrive the image is a placeholder that
+names its type and real size and says it is loading. An owner that cannot be reached says so on
+the image itself, never a blank and never a spinner that does not end. The placeholder never
+shows a file path. Its open action opens the image in the person's own viewer or saves it where
+they choose. A terminal that draws images draws it inline; any other terminal shows half blocks
+or the placeholder, never raw escape bytes.
+
+#### Audit, 2026-10-13
+
+`scripts/conversation-images-audit/run` reproduces every case on an isolated instance. It
+seeds the cases, joins a second host that owns one image, and opens stui under a pseudo-terminal
+that answers stui's capability query as kitty, iTerm2 or a sixel terminal would, or not at all,
+both inside and outside tmux. `run capture` writes the timelines a client reads to
+`fixtures/clients/conversation-images/`. `ios-views.mjs` feeds those timelines to the view model
+the iOS feed draws (`conversationEntries`). The iOS app was not built: the iOS column comes
+from that view model, the components that draw it, `tsc` and the existing view tests. The st
+under test is release `ed31cfe`; main at `4f763ce` has no change to any path below.
+
+| Case | Terminal UI | iOS | Cause of each miss |
+|---|---|---|---|
+| Message with images (`st conversations send --attach`) | One line per image, `▣ garden.png · 71 KB  open`. Never drawn inline, in any terminal. | 200×150 box loaded at once; `🖼 name · size…` until then. | stui: the mail renderer draws no pictures (`fractal-conversation-ui/src/conversation.rs`, "a terminal draws no pictures here"), so no inline load exists for mail. iOS: `MailImageView` loads on mount, not when visible (FlatList overscan reads too), unlike transcript images. |
+| Open a message image | Saves to `$XDG_STATE_HOME/st3/stui/attachments/received/<sha>.png` and flashes the path. It runs `xdg-open` only when `DISPLAY` or `WAYLAND_DISPLAY` is set. | No open or save action. | stui: `attach::show` opens only on a local display; the person cannot choose where it is saved. iOS: `MailImageView` has no press or share action. |
+| Agent sends a person an image | Refused: `people do not have inboxes`, for `send` and `reply` alike. | Same. | By design, mail goes to agents. An agent shows a person an image only through its transcript (see the tool-result rows). |
+| Discord-bridge import (`external/discord/user/…` → agent) | Text only, no image line, until the person clicks the mail open. | Image shown, as for any message. | stui: mail between two others folds to two lines (`conversation.rs:124`, `mail_lines`), which drop its images with no marker. |
+| Claude transcript, image in the person's turn | `image · Ctrl+Enter details · Ctrl+U load inline` row, then `[image application/octet-stream, size unknown]`. Loads with Ctrl+Up then Ctrl+U, or by itself in kitty and iTerm2. | A `[image · load from owner]` text row, then a box: `Image`, `Loading image…`, the image. | Both: the server's continuation names `application/octet-stream` and no size (`conversation_blocks.rs`, `image_media`), though the native block names its type and its bytes are at hand. iOS: the fallback text is shown as the person's words besides the box. |
+| Claude tool result with an image (`Read` of a PNG) | `[image]` under the call; Ctrl+U and Ctrl+Enter load nothing. | Box under the call; loads when visible. | stui: the tool result's block is `tool_output` with `body_ref`; the image reference is in `body.content[].content`, which `Content::index` (`stui/src/ui/content.rs`) never reads, since it reads only block payloads, continuations and metadata. This is how an agent shows a person an image. |
+| Codex transcript (`input_image`, `view_image` result) | Both are `image` rows inside a "3 tool calls" bundle; each loads with Ctrl+U. | `[image · load from owner]` text rows with boxes. | stui: a person's pasted image counts and folds as a tool call. Both: type and size unknown before load, as above. |
+| st delivery echoed in a transcript (`<attachment path=…/>`) | The raw element, file path included. | The same raw text in the mail body. | Neither client reads the `attachment` element of the delivery envelope (`docs/st3/attachments.md`, "Delivery to a seat"). The path is private and the image is not offered. |
+| Huge image (6000×4000 PNG, 623 KB) in a transcript | Drawn; stui grows from 36 MB to 108 MB resident (200 MB peak) and keeps it after the tab is left. | Whole file as a base64 data URI in a 200×150 box. | stui: the decoded image is held at full size (`Loaded::Image`). The draw path clones it to build the terminal protocol (`Content::draw_image`) at each new size. It is released on hide, collapse or eviction, not when it leaves the screen. iOS: no downscale; mail images keep up to 24 data URIs. |
+| Alert card, decision or feedback form | Subjects are text: `north bed sketch  message/…`, `blob/<sha>`; Markdown `![alt](url)` reads `!north bed`. | Same text; `![alt](url)` reads `!` and a link. | The request schema has no image field (`person_request.rs`: `attachments` is refused, and no subject kind is an image). Neither Markdown renderer draws images. |
+| Image owned by another host, reachable | Same line as a local image; `open` fetches it from the owner. | Same box; the claim's size is shown before it loads. | Both drop `origin`, so neither can say whose it is. |
+| Image owned by another host, unreachable | `Not done: pond cannot be reached right now` flashes for about two seconds; the line itself does not change. | `🖼 name · size` and the server's message, with no retry; transcript images get Retry. | stui: the failure is a transient flash, not a state of the image. iOS: `MailImageView` reads again only when its row mounts again; remote-unavailable and expired are not told apart. |
+
+Terminals: each profile answers the query as that terminal does. Outside tmux, the pseudo-terminal
+is the terminal. Inside tmux, tmux 3 runs inside it with `allow-passthrough` set by
+ratatui-image.
+
+| Terminal answer | Outside tmux | Inside tmux |
+|---|---|---|
+| kitty (`TERM=xterm-kitty`, answers the graphics query) | Queried; kitty graphics; the first visible image loads by itself | Queried through passthrough; kitty Unicode placeholders; loads by itself |
+| iTerm2 (`TERM_PROGRAM=iTerm.app`) | Queried; one iTerm2 inline image; loads by itself | Not queried; half blocks after Ctrl+U |
+| sixel (DA1 lists attribute 4) | Not queried; half blocks after Ctrl+U | Not queried; half blocks after Ctrl+U |
+| Answers nothing | Half blocks after Ctrl+U; no escape bytes in the conversation | The same |
+
+Cause: stui sends the capability query only to terminals it knows by name
+(`attach::graphics_terminal`: `TERM` names kitty, Ghostty or WezTerm, `TERM_PROGRAM` names
+iTerm2, WezTerm or Ghostty, or `KITTY_WINDOW_ID` is set). A sixel terminal is never asked, and
+neither is iTerm2 inside tmux, where `TERM_PROGRAM` is `tmux`. No kitty, iTerm2 or sixel terminal
+was installed on the audit host, so each was checked by its answer to the query.
+
+Typing and key-to-redraw were not measured here. `st ui --slo` printed no samples for the
+isolated instance after a clean quit, because the counters are written hourly. The terminal-UI
+change measures them before and after with an image on screen.
+
 ## Presentation projections
 
 Today the terminal UI derives mission words, agent states and Now cards in Rust, the phone
@@ -306,7 +365,7 @@ same answer and one place is measured and optimized
   the roster's overlay settles on each read, so it is computed with them (see [Agent](#agent)). Before a list's first publication, its windows get a retryable `resync` and wait,
   as work windows do; the missions list adopts that rule when its projection ships. Serving them
   on existing rows adds no subscriptions to a socket's sixteen.
-- **One derivation, in Rust.** The refresher calls `st3-ui-model`, which the summary already
+- **One derivation, in Rust.** The refresher calls `fractal-ui-model`, which the summary already
   uses for mission counts. Each client deletes its own derivation when it moves onto the
   projection.
 - **Refold when any input changes.** Each projection below lists its inputs. A change to any of
@@ -331,7 +390,13 @@ same answer and one place is measured and optimized
 projection ships; agents and attention are already in it. A new `projection-fresh` target
 covers the time from the commit that changes an input to the publication that carries it:
 p99 1500 ms, since refreshers fold at most once a second. Its paths are `publish missions`,
-`publish agents` and `publish attention`, timed by the refresher. Both targets appear on
+`publish agents` and `publish attention`, timed by the refresher: each publication that advances
+its cut is one sample, from the first claim this node committed after the previous cut to the
+new publication. Replicated claims carry another node's clock and start no sample, a
+publication more than 10,000 claims after the previous one (a catch-up) is none (the
+`st.slo.projection_fresh.skipped` counter counts each, by collection), and
+attention's first publication after no window read it (attention folds only while one does)
+is none either. Both targets appear on
 `GET /v1/client/request-latency` and in `st doctor`. `daemon_load` keeps its 300 ms
 first-snapshot budget for every window, now with projections on its rows, and stays under
 twice main's baseline. Bounds per row: a mission projection stays within 4 KiB, an agent
@@ -339,22 +404,36 @@ projection within 2 KiB, and an attention projection within 16 KiB including its
 
 ### Mission
 
-Served on the `missions` collection as `Mission.presentation`, on `GET /v1/client/missions` and
-on `GET /v1/client/missions/{*id}`. The summary's mission counts read the same projection.
+Served on the `missions` collection as `Mission.presentation`, and on `GET /v1/client/missions`
+and `GET /v1/client/missions/{*id}`. The missions refresher computes it with
+`fractal-ui-model::missions::present` as it folds each card. A mission detail read copies the
+published card's presentation and computes none. Until st has published an agents roster (an
+empty published roster counts), nothing says which agent queues a ready step: a card whose word
+would hinge on that (`unclaimed`, `queued`, `unstaffed`) carries no presentation, and every other
+card carries one read without agents. The first roster refolds every card. At startup it follows
+the roster head at once; after the projections are replaced it waits until something reads the
+agents list, so no bound on that wait is promised.
+
+The terminal UI reads it: `fractal-ui-model::missions::adapt` takes each mission's and step's word,
+owner and note from the presentation and derives none of them. A row without a presentation, or
+with a word the client does not know, reads `unknown` (in `words.json`), and the list shows the
+row's raw `state` with "st does not say", which is true of an older st and of a card st leaves
+unsaid until its first agents roster. The summary's count of active missions reads
+`missions::row_word`, the word from the row and its gates alone.
 
 | Field | Meaning |
 |---|---|
-| `word` | The mission word: one of the thirteen `mission` ids in `words.json`. |
+| `word` | The mission word: one of the thirteen `mission` ids in `words.json` that st serves. The fourteenth, `unknown`, is the client's own, for a row without a presentation it can read. |
 | `system` | The mission is st's own or a standing observer (see [Graph flags](#graph-flags)). |
-| `who` | Who must act now: `{kind, agent, label}`. `kind` is `you`, `agent`, `st` or `nobody`. |
-| `steps[]` | The steps of the open runs, or of the latest run when none is open, in display order: `{id, path, title, word, owner, note, attempts, blockers[], keep_open}`. The step `word` is one of `needs_you`, `done`, `working`, `ready`, `waiting`, `cancelled`, `failed` or `pending`. `owner` is `{kind, agent, label}`, as in `who`. |
+| `who` | Who must act now: `{kind, person, agent, label}`. `kind` is `person` (with `person`), `agent` (with `agent`), `st` or `nobody`. Every reader sees the same row; a client says "you" when the person is its reader. |
+| `steps[]` | The steps of the open runs, or of the latest run when none is open, in display order: `{id, path, title, word, owner, note, attempts, blockers[], keep_open}`. The step `word` is one of `needs_you`, `done`, `working`, `ready`, `waiting`, `cancelled`, `failed` or `pending`. `owner` is shaped like `who`. |
 | `stuck` | For stalled, failed, unstaffed and queued missions: `{step, word, attempts, blockers[], agent}`. The step is the first one that is failed, ready or waiting. `agent` is that step's seat (its claimant, else the agent queuing it) as `{id, label, state}`. Otherwise `null`. |
 | `queued_behind` | For a ready step waiting on a busy agent: `{agent, label, busy_with}`, where `busy_with` is the `{mission, path, label}` it holds. When the agent is not busy, `state` replaces `busy_with`. Otherwise `null`. |
 | `card` | `what-you-can-do` (stalled, failed, unstaffed), `nothing-to-do` (queued), or `null`. |
 | `actions[]` | What a person can do: `{id, action, target, confirm}`. `id` is `retry-step` (`work.retry`), `restart-agent` (`agent.start`, or `runtime.restart` for a running seat), `cancel-run` (`mission.cancel`, `confirm: true`) or `chat` (`message.send` to the stuck agent). Clients run these actions instead of printing CLI hints. |
 | `progress`, `last_progress`, `settled_at` | `{done, total}`; the latest progress summary of a step in hand; and the time it completed, failed or was cancelled (else `null`). |
 
-Precedence is the one in `st3-ui-model::missions::adapt` today, first match wins: an open human
+Precedence (`fractal-ui-model::missions::word`, shared with the terminal UI's own adapter), first match wins: an open human
 gate on the mission (decision); no runs (not_started); a blocked mission or step (stalled);
 completed (done); a failed mission or step (failed); cancelled; only keep-open steps still
 running (watching); a step claimed, working or verifying (working); a ready unclaimed step,
@@ -362,23 +441,25 @@ which is unstaffed when its queuing agent is stopped, failed or faulted, queued 
 queues it, and unclaimed otherwise; a waiting or pending step (held); standing, running, ready or
 draft (idle); otherwise done.
 
-`who` is `you` for decision; the stuck or working step's seat (its claimant, else the agent
-queuing it) for working, queued, unstaffed, stalled and failed; `st` when only agentless steps
-are open; and `nobody` otherwise.
+`who` is the person the open gate waits on for decision; the working step's owner for working
+and watching (`st` for an agentless step); the stuck step's seat for queued, unstaffed, stalled
+and failed; and `nobody` otherwise.
 
 The existing `must_act` (`you`, `agent`, `system`, `blocked`, `nobody`) stays on the row for
 older clients. `who` replaces it for display.
 
-**Inputs:** the mission's runs, steps and worker leases; open human-gate attention on it; and the
-state, fault and queue of every agent that claims or queues one of its steps. The missions
-refresher refolds on the first two today, and must also refold when one of those agents changes.
+**Inputs:** the mission's runs, steps and worker leases; the open human gates on it; and the
+state, fault, held step and queue of every agent that claims, is assigned or queues one of its
+steps, from the newest published agents roster. The missions refresher refolds a mission when any
+of these change: its claims and leases as before, a gate opening or closing, and an agent of its
+changing in a newer roster. A roster publication wakes the refresher.
 
 **Today, and what the projection settles:**
 
 | | Derivation | Differs from this contract |
 |---|---|---|
-| Terminal UI | `crates/st3-ui-model/src/missions.rs` (496 lines); `crates/stui/src/ui/screens.rs` `display_rank` and `what_you_can_do` | Sorts working before needs you. Finds the stuck agent only among agents already working on the mission, so an unstaffed mission's idle agent never appears. Retry and restart print CLI hints. |
-| Phone | `apps/ios/missionsView.ts` (163 lines) and parts of `presentation.ts` | Calls decision "alert", has no `not_started`, reads every run's steps, has no who-must-act, stuck step or actions. |
+| Terminal UI | Moved: reads the presentation. `crates/fractal-tui/src/ui/screens.rs` `display_rank` and `what_you_can_do` remain | Sorts working before needs you. Finds the stuck agent only among agents already working on the mission, so an unstaffed mission's idle agent never appears. Retry and restart print CLI hints. |
+| Phone | Moved: `apps/ios/missionsView.ts` reads the presentation; a row without one reads `unknown` and shows its raw `state` with "st does not say" | Has no stuck step or actions yet. |
 | Fractal | None live; the unmounted `shell/Sidebar.tsx` groups by `must_act` | Nothing to delete; reads the projection when it adds Missions. |
 
 Settled: the word for decision is "needs you"; `not_started` is a word; steps come from the open
@@ -390,7 +471,7 @@ client, applied to `system`, `word` and `settled_at`.
 ### Agent
 
 Served on the `agents` collection as `Agent.presentation`, and on `GET /v1/client/agents` and
-`GET /v1/client/agents/{*id}`. `st3-ui-model::agents::present` computes it from the row alone.
+`GET /v1/client/agents/{*id}`. `fractal-ui-model::agents::present` computes it from the row alone.
 
 | Field | Meaning |
 |---|---|
@@ -416,7 +497,7 @@ roster refresher already folds.
 
 | | Derivation | Differs from this contract |
 |---|---|---|
-| Terminal UI | Reads `presentation.state` and `because` (`crates/stui/src/ui/adapt.rs`); its derivation moved to `st3-ui-model::agents` | Its labels still use mission titles from the missions window. |
+| Terminal UI | Reads `presentation.state` and `because` (`crates/fractal-tui/src/ui/adapt.rs`); its derivation moved to `fractal-ui-model::agents` | Its labels still use mission titles from the missions window. |
 | Phone | `apps/ios/agentsView.ts` `agentState` (file 294 lines) | Ignores `blocked_on`, so every blocked seat reads as needs you; calls needs you "alert"; shows no next. |
 | Fractal | `apps/fractal-web/src/data/projections.ts` `activityOf`, `statusOf`; `web/sidebarRow.ts` | Its own status line and activity words; no shared states. |
 
@@ -446,7 +527,7 @@ fault to the agent that owns it, and neither client shows one on Now. An unread 
 neither.
 
 An agent's label is its name's last segment in title case, without its own host's prefix
-(`st3_ui_model::agents::label`, which the terminal UI also uses); an agent st does not know reads
+(`fractal_ui_model::agents::label`, which the terminal UI also uses); an agent st does not know reads
 as its id without `agent/`. The refresher presents each row when it folds the list, and again
 when the agents roster it reads changes; while no roster is available it keeps the agents it
 last read. Every route copies the row's presentation from that list. A `history` read returns the
@@ -458,8 +539,8 @@ agents.
 
 | | Derivation | Differs from this contract |
 |---|---|---|
-| Terminal UI | Reads `tier`, `kind`, `agent`, `raised_by` and `waiting` (`crates/stui/src/ui/adapt.rs` `attention()`); a row without a presentation (an older st, or one not presented yet), or with a group or card it does not know, shows st's text as an unplaced card where its `alert` flag puts it, with no answer of its own; a message or a fault stays off Now. Still its own: `preview()`, `alerts.rs` `unanswered_calls`, the variants fetch in `live.rs` | Fills launch agents' harness and host as unknown. Withholds allow when a call runs past four lines, instead of when its input is incomplete. |
-| Phone | `clients/typescript/st3-views/homeView.ts` (225 lines) `homeKind`, `pendingCalls`, `offeredAnswers` | Drops `custom.*` kinds. Shows launch variants and diagnostics, with no step preview. |
+| Terminal UI | Reads `tier`, `kind`, `agent`, `raised_by` and `waiting` (`crates/fractal-tui/src/ui/adapt.rs` `attention()`); a row without a presentation (an older st, or one not presented yet), or with a group or card it does not know, shows st's text as an unplaced card where its `alert` flag puts it, with no answer of its own; a message or a fault stays off Now. Still its own: `preview()`, `alerts.rs` `unanswered_calls`, the variants fetch in `live.rs` | Fills launch agents' harness and host as unknown. Withholds allow when a call runs past four lines, instead of when its input is incomplete. |
+| Phone | `clients/typescript/fractal-views/homeView.ts` (225 lines) `homeKind`, `pendingCalls`, `offeredAnswers` | Drops `custom.*` kinds. Shows launch variants and diagnostics, with no step preview. |
 | Fractal | None live; `projections.ts` `attentionRefs` only | Nothing to delete. |
 
 Settled: `custom.*` kinds are Today requests, as in the terminal UI. Allow depends on
@@ -494,18 +575,18 @@ Today no client reads a declaration: the terminal UI shows one only in the demo,
 
 Two declared flags replace name heuristics:
 
-- **`keep-open #true` on a step** compiles to `StepSpec.keep_open`. It marks st's own steps that
-  stay open while a mission watches; the mission projection's `watching` word and its step rows'
-  `keep_open` read it.
-- **`system #true` on a mission** compiles to `MissionSpec.system`. Missions under
-  `mission/__st3/` are system without declaring it. The mission projection's `system` reads it.
+- **A bare `keep-open` node on a step** compiles to `StepSpec.keep_open`. It marks st's own steps
+  that stay open while a mission watches. Mission rows carry it on each step as `keep_open`, and
+  the `watching` word reads it.
+- **A bare `system` node in a mission** compiles to `MissionSpec.system`. Missions under
+  `mission/__st3/` are system without declaring it. Mission rows carry it as `system`.
 
 For revisions published before the flags existed, the refresher treats an unset flag with
 today's name rule: steps named `keep-watch`, `retire`, `steward-intake`, `standing`,
 `keep-open` or `*-retirement`, and missions with a `ci` path segment. That one copy lives in the
-daemon and goes once published missions declare their flags. Today the rule is copied in
-`crates/st3-ui-model/src/missions.rs` (`keeps_open`, `is_system_mission`) and
-`apps/ios/missionsView.ts`; Fractal has none.
+daemon (`crate::mission::step_keeps_open` and `is_system`) and goes once published missions
+declare their flags. The terminal UI, the phone and Fractal read the served flags and keep no name
+rule.
 
 ### Sidebar identity
 
@@ -526,7 +607,7 @@ Sidebar:
 A client edits the Sidebar it picked and never copies a legacy one, so an older client still
 editing it loses nothing. When two clients create the reserved subject at once, the second gets
 `arrangement-exists` and adopts the first, and replicas converge under last-writer-wins. The
-terminal UI (`crates/stui/src/ui/resource_sidebar.rs`), the phone (`apps/ios/sidebarEdits.ts`)
+terminal UI (`crates/fractal-tui/src/ui/resource_sidebar.rs`), the phone (`apps/ios/sidebarEdits.ts`)
 and Fractal (`apps/fractal-web/src/data/arrangements.ts`) follow this rule.
 
 ### Conversation stream
@@ -534,13 +615,13 @@ and Fractal (`apps/fractal-web/src/data/arrangements.ts`) follow this rule.
 The conversation follow (`stream conversation`, `GET /v1/client/sessions/{*id}` and
 `conversation.changes`) gains `entries`: the cleaned conversation, in the `*.expected.json`
 shape `{id, body: {kind, value}}` plus its time. The daemon derives it with
-`st3-conversation-ui`'s `adapt::conversation` as it joins the timeline and the Smalltalk mail,
+`fractal-conversation-ui`'s `adapt::conversation` as it joins the timeline and the Fractal mail,
 and revises entries by id. A delta carries only the entries it changes. Raw frames stay for
 clients that have not moved. The transcript fixtures pin `entries`, and the web app leads it as
 [above](#who-leads-the-conversation). It is a `person-read` path already. It ships last, after a
 Fractal test runs the fixtures.
 
-Today the terminal UI cleans with `st3-conversation-ui`, the phone with `st3-views`
+Today the terminal UI cleans with `fractal-conversation-ui`, the phone with `st3-views`
 (`conversationView.ts`, 1032 lines), and Fractal with its own
 `apps/fractal-web/src/conversation/` modules.
 
@@ -578,3 +659,36 @@ Same capabilities, native idioms:
 | New mission control | A New mission button opening a composer sheet |
 
 iOS demo screenshots use `apps/ios/demoGateway.mjs`: invented data, nothing real.
+
+## Documents
+
+A document view shows one version of a named document (`doc/NAME@HASH`), read-only, as its
+author wrote it. Every client reads it the same way: `document.get` on
+`/v1/client/documents/content` for the text and `documents.list` on `/v1/client/documents` for
+the list ([client API](../st3/client-v0/README.md#documents)); there is no second path to a
+document. The shared model is `fractal_ui_model::documents` (Rust) and `@fractal/views`
+`documentView.ts` (TypeScript); `fixtures/clients/documents-v1.json` pins both.
+
+- **What the view needs:** the name; the Markdown text exactly as stored, rendered and never
+  filtered or rewritten; the version (its hash, shown as its first twelve characters); when that
+  version was bound to its name; whether it is the latest; and its outgoing `doc/…` links, in
+  order, each once.
+- **Links:** a link is `doc/NAME` (the latest version) or `doc/NAME@HASH`, found wherever `doc/`
+  starts a word in the text, including Markdown links, tables and code blocks. Following a link
+  opens that document in the same view; following one back to a document already on the trail
+  returns to it, so a cycle of links never grows the trail. Back returns one document.
+- **The list:** documents under a prefix in name order, a page at a time (`next_cursor`), each
+  row the name, short version and changed time. Loading, empty and failed are three states:
+  "Loading…", "No documents under PREFIX.", or why it could not be read.
+- **When a document cannot be shown, say why**, never a blank page: *not found* (no document
+  has that name on this host, 404 `not-found`), *not synced yet* (a pinned version this host has
+  not received, 404 `document-not-synced`; it shows once it syncs), *remote unavailable* (the
+  host did not answer), or *not text* (the bytes are not UTF-8).
+- **References:** `document-references.get` names the documents a message, mission or step
+  refers to, so a message, mission or step view can link to them.
+- Nothing here edits or publishes a document.
+- **Who may read:** every session with `read.projections` may list every document and read
+  any version, as the CLI already does (`st documents ls`, `st documents get doc/NAME`). Only a
+  message subject in `document-references.get` is gated by who may read that message.
+  Per-agent document privacy, if it comes, belongs to the agent isolation work and would gate
+  these routes and the CLI together.

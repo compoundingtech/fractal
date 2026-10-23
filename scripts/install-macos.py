@@ -12,6 +12,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 
 CERTIFICATE = os.environ.get('ST_MACOS_SIGNING_IDENTITY') or None
@@ -26,8 +27,25 @@ if INSTANCE and not (len(INSTANCE) <= 24 and re.fullmatch(r'[a-z0-9]+(-[a-z0-9]+
     raise SystemExit('invalid instance name: lowercase letters, digits and single hyphens, at most 24 characters')
 IDENTIFIER = os.environ.get('ST_MACOS_BUNDLE_ID') or (
     'com.compoundingtech.smalltalk.instance.' + INSTANCE if INSTANCE else 'com.compoundingtech.smalltalk')
+# arn:lmig:smalltalk:2026-10-16-service-labels-fractal — service writers retain old labels.
 SERVICES = (['com.compoundingtech.st3.instance.' + INSTANCE, 'com.compoundingtech.st3.instance.' + INSTANCE + '.replication']
             if INSTANCE else ['com.compoundingtech.st3', 'com.compoundingtech.st3.replication'])
+FRACTAL_SERVICES = ['com.compoundingtech.fractal', 'com.compoundingtech.fractal.replication']
+
+
+def service_labels(stage_fractal=False):
+    return FRACTAL_SERVICES if stage_fractal else SERVICES + ([] if INSTANCE else FRACTAL_SERVICES)
+
+
+def require_unloaded(label):
+    target = 'gui/' + str(os.getuid()) + '/' + label
+    try:
+        command(['launchctl', 'print', target])
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 113:
+            return
+        raise
+    raise RuntimeError('refusing to replace or stage loaded launchd service: ' + target)
 LSREGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 
 
@@ -162,10 +180,10 @@ def prepare(home, job, built):
             'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1', 'LSUIElement': True}
     if HELPER in built:
         # macOS asks on behalf of the outermost app, so its name and usage strings are the ones shown.
-        info['CFBundleDisplayName'] = 'Small Talk'
+        info['CFBundleDisplayName'] = 'Fractal'
         info['NSMicrophoneUsageDescription'] = (
-            'Small Talk listens while you dictate a message in the terminal interface, and transcribes it on this Mac.')
-        info['NSSpeechRecognitionUsageDescription'] = 'Small Talk transcribes your dictated messages on this Mac.'
+            'Fractal listens while you dictate a message in the terminal interface, and transcribes it on this Mac.')
+        info['NSSpeechRecognitionUsageDescription'] = 'Fractal transcribes your dictated messages on this Mac.'
 
     (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     metadata = resources / 'deploy-payload.json'
@@ -184,7 +202,38 @@ def prepare(home, job, built):
     return app, dict(identity, payload_unchanged=False), payload
 
 
-def backup(home, job):
+def owns_fractal(path):
+    return path.is_symlink() and os.readlink(path) in ('st3', str(path.parent / 'st3'))
+
+def foreign_fractal_on_path(destination):
+    for directory in os.environ.get('PATH', '').split(os.pathsep):
+        candidate = Path(directory or '.').absolute() / 'fractal'
+        if candidate.parent.resolve() == destination.parent.resolve():
+            continue
+        if candidate.exists() or candidate.is_symlink():
+            if not (candidate.is_symlink() and os.readlink(candidate) == str(destination.parent / 'st3')):
+                return True
+    return False
+
+
+def point_direct_service_at_app(plist, executable):
+    # Home Manager owns wrapper argv (including guards, config and state paths).
+    # Only known direct CLI daemon commands can safely have argv[0] replaced.
+    args = plist.get('ProgramArguments') or []
+    if len(args) < 2 or args[1] not in ('up', 'daemon', 'replication-worker'):
+        return False
+    if plist.get('Program', args[0]) != args[0]:
+        return False
+    if args[0] == executable:
+        return False
+    if 'Program' in plist:
+        plist['Program'] = executable
+    args[0] = executable
+    return True
+
+
+
+def backup(home, job, stage_fractal=False):
     previous = Path(job) / 'previous-app'
     current = fixed(home)
     if current.exists():
@@ -193,15 +242,34 @@ def backup(home, job):
         command(['/usr/bin/ditto', current, previous])
     plists = Path(job) / 'previous-launchd'
     plists.mkdir(exist_ok=True)
-    for service in SERVICES:
+    disabled = {}
+    if stage_fractal:
+        output = command(['launchctl', 'print-disabled', 'gui/' + str(os.getuid())])
+        disabled = {label: value == 'true' for label, value in
+                    re.findall(r'^\s*"([^"]+)"\s*=>\s*(true|false)\s*$', output, re.M)}
+    definitions = {}
+    for service in service_labels(stage_fractal):
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
-        if path.exists():
+        if path.is_symlink():
+            definitions[service] = {'present': True, 'link': os.readlink(path)}
+        elif path.exists():
             shutil.copy2(path, plists / path.name)
+            definitions[service] = {'present': True}
+        else:
+            definitions[service] = {'present': False}
+        if stage_fractal:
+            # No override means enabled by default. launchctl has no per-label
+            # unset operation; restore that effective state with `enable`.
+            definitions[service]['disabled'] = disabled.get(service)
+    write_atomic(Path(job) / 'previous-launchd.json', json.dumps(definitions).encode())
     entries = {}
     previous_bin = Path(job) / 'previous-bin'
     previous_bin.mkdir(exist_ok=True)
-    for name in ['st3', 'stui', 'st']:
+    for name in ['st3', 'stui', 'st', 'fractal']:
         path = bin_dir(home) / name
+        # A foreign fractal command is outside this transaction, including rollback.
+        if name == 'fractal' and (path.exists() or path.is_symlink()) and not owns_fractal(path):
+            continue
         if path.is_symlink():
             entries[name] = {'link': os.readlink(path)}
         elif path.exists():
@@ -245,34 +313,71 @@ def swap(app, home, job, suffix, expected=None):
         shutil.rmtree(staged)
 
 
-def install(app, home, job):
+def install(app, home, job, stage_fractal=False):
+    if stage_fractal:
+        if INSTANCE:
+            raise RuntimeError('--stage-fractal supports only the default host, not --instance')
+        for label in FRACTAL_SERVICES:
+            require_unloaded(label)
+    else:
+        # A fixed app swap does not restart a process, but rewriting its loaded
+        # definition would make disk and launchd disagree. Require an explicit stop.
+        for label in service_labels():
+            path = Path(home) / 'Library/LaunchAgents' / (label + '.plist')
+            if not path.exists():
+                continue
+            plist = plistlib.loads(path.read_bytes())
+            if point_direct_service_at_app(plist, str(binaries(fixed(home))['st3'])):
+                require_unloaded(label)
     retired = bin_dir(home) / 'stui'
     if retired.is_dir():
         raise RuntimeError('refusing to remove directory: ' + str(retired))
     swap(app, home, job, 'install')
-    links = dict(binaries(fixed(home)), st=Path('st3'))
+    links = dict(binaries(fixed(home)))
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    links['st'] = Path('st3')
+    # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
     for name, path in links.items():
         link = bin_dir(home) / name
         link.parent.mkdir(parents=True, exist_ok=True)
         staged = link.parent / ('.' + name + '-' + Path(job).name)
         staged.unlink(missing_ok=True); staged.symlink_to(path); os.replace(staged, link)
     retired.unlink(missing_ok=True)
-    for service in SERVICES:
+    alias = bin_dir(home) / 'fractal'
+    if owns_fractal(alias):
+        staged = alias.parent / ('.fractal-' + Path(job).name)
+        staged.unlink(missing_ok=True)
+        staged.symlink_to('st3')
+        os.replace(staged, alias)
+    else:
+        try:
+            if foreign_fractal_on_path(alias):
+                raise FileExistsError('foreign fractal on PATH')
+            alias.symlink_to('st3')
+        except FileExistsError:
+            print('install: leaving fractal unchanged: destination ' + str(alias) + ' or PATH contains a foreign command; use st, or move the foreign fractal and reinstall to enable the alias.', file=sys.stderr)
+    for service in ([] if stage_fractal else service_labels()):
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
         if not path.exists():
             continue
         plist = plistlib.loads(path.read_bytes())
-        if plist.get('ProgramArguments'):
-            plist['ProgramArguments'][0] = str(binaries(fixed(home))['st3'])
-        elif 'Program' in plist:
-            plist['Program'] = str(binaries(fixed(home))['st3'])
-        else:
-            raise RuntimeError('launchd service has no executable: ' + str(path))
-        write_atomic(path, plistlib.dumps(plist))
+        if point_direct_service_at_app(plist, str(binaries(fixed(home))['st3'])):
+            write_atomic(path, plistlib.dumps(plist))
     command([LSREGISTER, '-f', fixed(home)])
+    if stage_fractal:
+        # Native staging renders complete future-state definitions and disables
+        # their labels. It never bootstraps; host cutover exclusively owns that.
+        command(['/usr/bin/env', 'HOME=' + str(home),
+                 'XDG_CONFIG_HOME=' + str(home / '.config'),
+                 'XDG_STATE_HOME=' + str(home / '.local/state'),
+                 binaries(fixed(home))['st3'], 'service', 'install', '--stage-fractal'])
 
 
 def restore(home, job, had_app):
+    definitions = json.loads((Path(job) / 'previous-launchd.json').read_text())
+    for service, prior in definitions.items():
+        if 'disabled' in prior:
+            require_unloaded(service)
     if had_app:
         previous = Path(job) / 'previous-app'
         metadata = json.loads((previous / 'Contents/Resources/deploy-payload.json').read_text())
@@ -285,13 +390,26 @@ def restore(home, job, had_app):
             if moved.exists():
                 shutil.rmtree(moved)
             os.replace(current, moved)
-    for service in SERVICES:
-        original = Path(job) / 'previous-launchd' / (service + '.plist')
-        if original.exists():
-            write_atomic(Path(home) / 'Library/LaunchAgents' / original.name, original.read_bytes())
+    for service, prior in definitions.items():
+        path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')
+        if 'link' in prior:
+            staged = path.parent / ('.' + path.name + '-' + Path(job).name + '-restore')
+            staged.unlink(missing_ok=True)
+            staged.symlink_to(prior['link'])
+            os.replace(staged, path)
+        elif prior['present']:
+            original = Path(job) / 'previous-launchd' / path.name
+            write_atomic(path, original.read_bytes())
+        else:
+            path.unlink(missing_ok=True)
+        if 'disabled' in prior:
+            command(['launchctl', 'disable' if prior['disabled'] else 'enable',
+                     'gui/' + str(os.getuid()) + '/' + service])
 
     for name, prior in json.loads((Path(job) / 'previous-bin.json').read_text()).items():
         path = bin_dir(home) / name
+        if name == 'fractal' and (path.exists() or path.is_symlink()) and not owns_fractal(path):
+            continue
         if prior is None:
             path.unlink(missing_ok=True)
         elif 'link' in prior:
@@ -314,6 +432,8 @@ def main():
     parser.add_argument('--identity', default=CERTIFICATE)
     parser.add_argument('--team-id', default=TEAM)
     parser.add_argument('--identifier', default=IDENTIFIER)
+    parser.add_argument('--stage-fractal', action='store_true',
+                        help='stage default-host Fractal service labels disabled, without loading them')
     parser.add_argument('--job', type=Path)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--prepare-only', action='store_true')
@@ -322,6 +442,8 @@ def main():
     modes.add_argument('--backup-only', action='store_true')
     modes.add_argument('--restore-app', action='store_true')
     args = parser.parse_args()
+    if args.stage_fractal and INSTANCE:
+        parser.error('--stage-fractal supports only the default host, not --instance')
     CERTIFICATE, TEAM, APP, BIN_DIR, IDENTIFIER = args.identity or None, args.team_id or None, args.app, args.bin_dir, args.identifier
     home = args.home.expanduser().absolute() if args.home is not None else Path.home()
     lock_root = state_root(home)
@@ -346,7 +468,7 @@ def main():
             args.job = Path(tempfile.mkdtemp(prefix='install-', dir=root))
         args.job.mkdir(parents=True, exist_ok=True)
         if args.backup_only:
-            had_app = backup(home, args.job)
+            had_app = backup(home, args.job, args.stage_fractal)
             write_atomic(args.job / 'previous.json', json.dumps({'had_app': had_app}).encode())
             print(json.dumps({'had_app': had_app}))
             return
@@ -356,7 +478,7 @@ def main():
             return
         if args.install_app:
             identity = verify(args.install_app)
-            install(args.install_app, home, args.job)
+            install(args.install_app, home, args.job, args.stage_fractal)
             print(json.dumps(identity, sort_keys=True))
             return
         if args.source is None:
@@ -371,10 +493,10 @@ def main():
         if args.prepare_only:
             print(json.dumps({'app': str(app), 'identity': identity, 'payload_hashes': payload}, sort_keys=True))
             return
-        had_app = backup(home, args.job)
+        had_app = backup(home, args.job, args.stage_fractal)
         write_atomic(args.job / 'previous.json', json.dumps({'had_app': had_app}).encode())
         try:
-            install(app, home, args.job)
+            install(app, home, args.job, args.stage_fractal)
         except Exception:
             restore(home, args.job, had_app)
             raise
