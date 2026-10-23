@@ -77,12 +77,7 @@ mod tests {
 
     fn requests() -> Ui {
         let mut world = demo::world();
-        let mut item = world.attention.items().iter()
-            .find(|item| matches!(item.kind, AttentionKind::Request { .. }))
-            .expect("demo has a request").clone();
-        item.id = "attention/first".into();
-        item.tier = Tier::Stopped;
-        item.kind = AttentionKind::Request {
+        let kind = AttentionKind::Request {
             from: "Asker".into(), from_id: "agent/example/asker".into(),
             question: "Choose".into(), images: Vec::new(),
             structured: Some(Box::new(fractal_client::StructuredRequest {
@@ -94,6 +89,21 @@ mod tests {
                     id: "yes".into(), label: "Yes".into(), ..Default::default()
                 }],
             })),
+        };
+        let item = Attention {
+            id: "attention/first".into(),
+            tier: Tier::Stopped,
+            title: "Choose".into(),
+            waiting: None,
+            age: "1h".into(),
+            mission: None,
+            agent: Some("agent/example/asker".into()),
+            kind,
+            actions: vec!["work.done".into()],
+            related: Vec::new(),
+            raised_by: None,
+            blocked: None,
+            conversations: Vec::new(),
         };
         let mut next = item.clone();
         next.id = "attention/next".into();
