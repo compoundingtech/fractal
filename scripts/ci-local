@@ -16,7 +16,13 @@
 # inside the account's st state (a seat's command recorder) stays. Two things are kept:
 # the account's cargo and rustup homes (the dependency cache), and XDG_RUNTIME_DIR with the session bus, because the build
 # admission shim queues there. RUNNER_TEMP and GITHUB_STEP_SUMMARY, which CI provides, are scratch files too.
+#
+# Every time is measured and printed: the setup before the stages, each stage's start, end and seconds, and the time each stage spent
+# waiting in the build admission queue (the shim's "cargo: waiting in order" ... "cargo: got build slot" lines, which also get a UTC
+# stamp of their own), in a table at the end. Each stage's output is also kept in CI_LOCAL_LOG_DIR (default
+# ~/.cache/ci-local-logs/run-TIME-PID/STAGE.log; the latest 10 runs stay), after the scratch above is gone.
 set -euo pipefail
+real_home=$HOME  # the account's own, before the stages get a home of their own
 if [ "$#" -eq 0 ]; then
   echo "usage: scripts/ci-local STAGE..." >&2
   exit 2
@@ -99,6 +105,29 @@ else
   echo "ci-local: no rustc to name the host target; the tests share one TMPDIR" >&2
 fi
 touch "$GITHUB_STEP_SUMMARY"
+stamp() { date -u +%FT%TZ; }
+log_root=${CI_LOCAL_LOG_DIR:-$real_home/.cache/ci-local-logs}
+log_dir=$log_root/run-$(date -u +%Y%m%dT%H%M%SZ)-$$
+mkdir -p "$log_dir"
+echo "ci-local: stage logs in $log_dir"
+# Keep the latest 10 runs' logs (CI_LOCAL_LOG_DIR itself, when given, is the caller's and is not pruned).
+if [ -z "${CI_LOCAL_LOG_DIR:-}" ]; then
+  # shellcheck disable=SC2012
+  ls -1dt "$log_root"/run-* 2>/dev/null | tail -n +11 | while IFS= read -r old; do rm -rf "$old"; done
+fi
+# Passes a stage's output through, stamping the build admission queue's lines and adding up the time spent in the queue.
+queue_times() {
+  local stage=$1 line waiting=-1 count=0 total=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'cargo: waiting in order'*) waiting=$SECONDS; count=$((count + 1)); printf 'ci-local: [%s] %s: waiting for a build slot\n' "$(stamp)" "$stage" ;;
+      'cargo: got build slot'*) if [ "$waiting" -ge 0 ]; then total=$((total + SECONDS - waiting)); waiting=-1; fi; printf 'ci-local: [%s] %s: got a build slot\n' "$(stamp)" "$stage" ;;
+    esac
+    printf '%s\n' "$line"
+  done
+  echo "$count $total" > "$log_dir/$stage.queue"
+}
+setup_started=$(stamp); setup_began=$SECONDS
 # clippy's ratchet compares with the base, as CI compares with the event's base: CLIPPY_BASE_SHA when given (scripts/st-test
 # gives the base it just fetched and records it in the note), otherwise main as fetched now, never a local ref that may be old.
 if [[ " $* " == *" clippy "* && -z "${CLIPPY_BASE_SHA:-}" ]]; then
@@ -126,6 +155,7 @@ if [[ " $* " == *" tests "* ]]; then
 fi
 cargo build --locked -p fractal-drivers --bin ci-hooks-install
 bash scripts/ci-install-built-hooks
+setup_ended=$(stamp); setup_seconds=$((SECONDS - setup_began))
 # A build host is shared and test binaries run outside the build admission gate: the stages' tests run 6 at a time unless
 # CI_TEST_THREADS says otherwise (CI's runners use 8 on a machine of their own), at low CPU and IO priority.
 export CI_TEST_THREADS=${CI_TEST_THREADS:-6}
@@ -133,14 +163,26 @@ low=()
 if command -v ionice >/dev/null 2>&1; then low+=(ionice -c 3); fi
 if command -v nice >/dev/null 2>&1; then low+=(nice -n 10); fi
 status=0
+table=()
 for stage in "$@"; do
   code=0
+  started=$(stamp); began=$SECONDS
+  # Both streams into one pipe: stamped and tallied, kept in the stage's log, and passed on. PIPESTATUS[0] is the stage's own status.
+  set +e
   if [ "$stage" = isolation-vm ]; then
-    "${low[@]}" bash scripts/ci-local-isolation-vm || code=$?
+    { "${low[@]}" bash scripts/ci-local-isolation-vm; } 2>&1 | queue_times "$stage" | tee "$log_dir/$stage.log"
   else
-    "${low[@]}" bash scripts/ci-linux "$stage" || code=$?
+    { "${low[@]}" bash scripts/ci-linux "$stage"; } 2>&1 | queue_times "$stage" | tee "$log_dir/$stage.log"
   fi
+  code=${PIPESTATUS[0]}
+  set -e
+  seconds=$((SECONDS - began))
+  read -r queued waited < "$log_dir/$stage.queue" 2>/dev/null || { queued=0; waited=0; }
   echo "ci-local: $stage exit $code"
+  table+=("$(printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss' "$stage" "$started" "$(stamp)" "$seconds" "$code" "${queued:-0}" "${waited:-0}")")
   if [ "$status" -eq 0 ]; then status=$code; fi
 done
+echo "ci-local: timing (UTC)"
+printf 'ci-local:   %s\n' "$(printf '%-26s %s  %s  %6ss' setup "$setup_started" "$setup_ended" "$setup_seconds")"
+for row in "${table[@]}"; do printf 'ci-local:   %s\n' "$row"; done
 exit "$status"
