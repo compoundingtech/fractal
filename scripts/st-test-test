@@ -357,6 +357,22 @@ class StTest(unittest.TestCase):
         self.commit('d.txt', 'another change')
         self.assertEqual(self.run_st_test('--check', 'demo', '--status')[0], 3)
 
+    def test_a_heavy_check_builds_in_the_kept_target_and_a_light_one_does_not(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "${{CARGO_TARGET_DIR:-none}}" >> {seen}']
+        target = self.home / '.cache/st-test-target'
+        with mock.patch.object(st_test, 'HEAVY', frozenset({'demo'})):
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+            (target / 'junk').write_bytes(b'x' * 4096)
+            with mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):  # past the cap: emptied before the next run
+                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+            self.assertFalse((target / 'junk').exists())
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': 'off'})[0], 0)
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'CARGO_TARGET_DIR': '/elsewhere'})[0], 0)
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # not heavy: no kept target
+        self.assertEqual(seen.read_text().split(), [str(target), str(target), 'none', '/elsewhere', 'none'])
+
     def test_a_worktree_left_by_a_killed_run_is_removed_by_the_next_run(self):
         self.commit('b.txt', 'two')
         stale = Path(tempfile.mkdtemp(prefix='st-test-'))

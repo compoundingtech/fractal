@@ -1360,6 +1360,11 @@ run with `--push` then starts that unit without waiting (`systemctl --user start
 2-minute pull. The pull itself is the unit's, with the log key's grant; st-test never signs the log. Asking is best effort and never
 changes the result.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not).
+The heavy checks (`linux-gate`, `mail-redelivery-canaries`) build in one cargo target per host kept between runs,
+`~/.cache/st-test-target` (`ST_EVIDENCE_TARGET` names another; `off` builds in the throwaway worktree as before; a `CARGO_TARGET_DIR` you set is
+left alone), so a run does not start cold: the dependencies are reused, the workspace's own crates rebuild because every run's worktree is new.
+Operations' terms: it is removed before a run once it passes 25 GB, only while no other run holds it (a lock), it is never pinned, and the host's
+scratch sweep may reclaim it when idle (then the next run is cold). Concurrent runs share it; cargo's own lock orders their builds.
 
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
 one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing
