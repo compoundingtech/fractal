@@ -4169,6 +4169,18 @@ impl Ui {
             return;
         }
         self.sync_terminal_slot();
+        // Retrying a failed initial attach uses the same path as opening its terminal.
+        if self.terminal_focused()
+            && key.code == KeyCode::Char('r')
+            && key.modifiers == KeyModifiers::CONTROL
+            && let Some(agent) = self.terminal.as_ref().filter(|view| {
+                view.native.is_none()
+                    && view.stale.as_deref().is_some_and(|status| status.starts_with("failed: "))
+            }).map(|view| view.agent.clone())
+        {
+            self.attach_terminal(&agent);
+            return;
+        }
         // Listening takes every key until the words are sent, kept or dropped.
         if self.voice_key(key) {
             return;
