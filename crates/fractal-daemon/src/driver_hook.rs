@@ -132,7 +132,19 @@ pub fn run(
                     return 0;
                 }
             };
-            if env.var("ST3_MAILBOX_TRANSPORT").as_deref() == Some("push") {
+            let ownership = fractal_drivers::claude_process::with_caller(
+                &paths.agent_dir,
+                &hook_var(env, fractal_drivers::claude_session::SESSION_ENV).unwrap_or_default(),
+                hook_var(env, fractal_drivers::claude_session::SESSION_SEQ_ENV)
+                    .and_then(|v| v.parse().ok()).unwrap_or(0),
+                std::process::id(), None, fractal_drivers::claude_process::Caller::Hook {
+                    trampoline: "\"$ST_HOOKS/claude-statusline.sh\"",
+                }, |_| Ok(()),
+            );
+            if let Err(error) = &ownership {
+                eprintln!("st: {}", fractal_drivers::claude_process::diagnostic(error));
+            }
+            if ownership.is_ok() && env.var("ST3_MAILBOX_TRANSPORT").as_deref() == Some("push") {
                 // Every render reads graph authority; no display-name environment snapshot.
                 if let Ok(label) = live_claude_label(env, &identity) {
                     use std::io::Write as _;
@@ -294,6 +306,23 @@ fn claude_observe(
     }
     let runtime_id = hook_var(env, fractal_drivers::claude_session::RUNTIME_ID_ENV)
         .unwrap_or_else(|| identity.clone());
+    if native
+        || fractal_drivers::claude_process::recorded(&paths.agent_dir).unwrap_or(true) {
+        let session = hook_var(env, fractal_drivers::claude_session::SESSION_ENV).unwrap_or_default();
+        let sequence = hook_var(env, fractal_drivers::claude_session::SESSION_SEQ_ENV)
+            .and_then(|v| v.parse().ok()).unwrap_or(0);
+        let command = format!("\"$ST_HOOKS/claude-observe.sh\" {event}");
+        if let Err(error) = fractal_drivers::claude_process::with_caller(&paths.agent_dir, &session,
+            sequence, std::process::id(), None,
+            fractal_drivers::claude_process::Caller::Hook { trampoline: &command }, |_| Ok(())) {
+            eprintln!("st: {}", fractal_drivers::claude_process::diagnostic(&error));
+            // A proven secondary is harmless and unscoped. A primary whose proof cannot be
+            // read must expose failed SessionStart/mandatory binding, not pretend it succeeded.
+            return u8::from((session_start || mandatory)
+                && fractal_drivers::claude_process::failure_kind(&error)
+                    != Some(fractal_drivers::claude_process::FailureKind::Refused));
+        }
+    }
     let observed = if native {
         fractal_drivers::claude_session::run_observe_payload_paths(
             &paths,
@@ -319,6 +348,12 @@ fn claude_observe(
             return 1;
         }
         eprintln!("st: Claude {event} was not recorded: {error:#}");
+        return if session_start {
+            match session_start_binding(&paths.agent_dir, env, &raw) {
+                Ok(()) => 0,
+                Err(reason) => unbound(env, report, &reason),
+            }
+        } else { 0 };
     }
     if event == "PermissionRequest" {
         answer_permission_from_st(env, &identity, &paths.agent_dir, &raw);
