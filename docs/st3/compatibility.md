@@ -9,7 +9,7 @@ Downloading or installing an archive does not replace a running daemon.
 ## Upgrade starting points and limits
 
 These are the current documented evidence boundaries, as of 2026-10-07. Use the
-[upgrade procedure](../upgrading-st.md) and every intervening release's impact notes when your
+[upgrade procedure](../site/guides/upgrading.md) and every intervening release's impact notes when your
 starting source is older than the previous published release.
 
 | Starting state | Guidance and evidence |
