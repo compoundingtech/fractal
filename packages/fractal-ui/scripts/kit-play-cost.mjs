@@ -21,7 +21,8 @@ for (const { name, shardIndex, attempt } of shards.values()) {
   }
   const receipt = await optional('receipt.json')
   const lane = await optional('lane-seconds')
-  costs.push({ shardIndex, attempt, laneSeconds: lane === undefined ? undefined : Number(lane), receipt: receipt === undefined ? undefined : JSON.parse(receipt) })
+  const cpu = await optional('runner-cpu.json')
+  costs.push({ shardIndex, attempt, laneSeconds: lane === undefined ? undefined : Number(lane), runnerCpu: cpu === undefined ? undefined : JSON.parse(cpu), receipt: receipt === undefined ? undefined : JSON.parse(receipt) })
 }
 const table = costTable(costs.sort((a, b) => a.shardIndex - b.shardIndex))
 if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, table)
