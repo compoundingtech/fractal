@@ -772,6 +772,19 @@ struct RecordLockEntry {
     file: Arc<tokio::sync::Mutex<Option<fs::File>>>,
 }
 
+static RECORD_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<RecordLockEntry>>>> =
+    LazyLock::new(Mutex::default);
+
+fn cached_record_lock(lock_path: &Path) -> anyhow::Result<Option<Arc<RecordLockEntry>>> {
+    // Relative spellings are not stable identities if a synchronous caller changes cwd.
+    if !lock_path.is_absolute() {
+        return Ok(None);
+    }
+    Ok(RECORD_LOCKS.lock()
+        .map_err(|_| anyhow::anyhow!("record lock registry poisoned"))?
+        .get(lock_path).and_then(Weak::upgrade))
+}
+
 fn record_lock_entry(lock_path: &Path) -> anyhow::Result<Arc<RecordLockEntry>> {
     record_lock_entry_with(lock_path, crate::flock::Open::Create)
 }
@@ -780,18 +793,22 @@ fn record_lock_entry_with(
     lock_path: &Path,
     create: crate::flock::Open,
 ) -> anyhow::Result<Arc<RecordLockEntry>> {
-    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<RecordLockEntry>>>> =
-        LazyLock::new(Mutex::default);
+    if let Some(entry) = cached_record_lock(lock_path)? {
+        return Ok(entry);
+    }
     let parent = lock_path.parent().context("record lock requires a parent")?;
     if matches!(create, crate::flock::Open::Create) {
         fs::create_dir_all(parent)?;
     }
     // Canonicalize the parent, NOT the leaf: open must still reject symlinked lock files.
     let path = parent.canonicalize()?.join(lock_path.file_name().context("record lock name")?);
-    let mut entries = LOCKS.lock()
+    let mut entries = RECORD_LOCKS.lock()
         .map_err(|_| anyhow::anyhow!("record lock registry poisoned"))?;
     entries.retain(|_, entry| entry.strong_count() != 0);
     if let Some(entry) = entries.get(&path).and_then(Weak::upgrade) {
+        if lock_path.is_absolute() {
+            entries.insert(lock_path.to_path_buf(), Arc::downgrade(&entry));
+        }
         return Ok(entry);
     }
     let entry = Arc::new(RecordLockEntry {
@@ -801,6 +818,9 @@ fn record_lock_entry_with(
         )?))),
     });
     entries.insert(path, Arc::downgrade(&entry));
+    if lock_path.is_absolute() {
+        entries.insert(lock_path.to_path_buf(), Arc::downgrade(&entry));
+    }
     Ok(entry)
 }
 
@@ -815,7 +835,23 @@ pub struct RecordLockAdmission {
 
 pub async fn record_lock_admission(agent_dir: &Path) -> anyhow::Result<RecordLockAdmission> {
     let path = agent_dir.join(LOCK_NAME);
-    let entry = tokio::task::spawn_blocking(move || record_lock_entry(&path)).await??;
+    let entry = if let Some(entry) = cached_record_lock(&path)? {
+        entry
+    } else {
+        // Single-flight filesystem setup as well: slow canonicalize/open must not turn
+        // a burst of first-use callers into a blocking-pool-sized queue.
+        static INITIALIZING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let initializing = INITIALIZING.lock().await;
+        if let Some(entry) = cached_record_lock(&path)? {
+            entry
+        } else {
+            tokio::task::spawn_blocking(move || {
+                // Retain initialization admission across cancellation of this future.
+                let _initializing = initializing;
+                record_lock_entry(&path)
+            }).await??
+        }
+    };
     let permit = entry.admission.clone().lock_owned().await;
     Ok(RecordLockAdmission { _entry: entry, _permit: permit })
 }
