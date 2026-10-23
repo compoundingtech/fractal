@@ -20,6 +20,8 @@ struct TabBadge {
     alerts: Option<usize>,
     ask: bool,
     needs_person: bool,
+    /// The original agent/mission needs-person projection, independent of alert volume.
+    attention_marker: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -121,6 +123,10 @@ impl TabStatuses {
 }
 
 impl TabBadge {
+    fn activity_label(self) -> &'static str {
+        if self.attention_marker && self.activity == "◆" { "" } else { self.activity }
+    }
+
     fn width(self, title: &str, counts: bool) -> usize {
         let count = if counts {
             match self.alerts {
@@ -128,16 +134,17 @@ impl TabBadge {
                 None if !self.kind.is_empty() => 3,
                 _ => 0,
             }
-        } else if self.needs_person && !self.ask { 2 } else { 0 };
-        let prefix = text::width(self.kind) + text::width(self.activity)
-            + if self.ask { 2 } else { 0 } + count;
+        } else if self.needs_person && !self.ask && !self.attention_marker { 2 } else { 0 };
+        let prefix = text::width(self.kind) + text::width(self.activity_label())
+            + if self.ask { 2 } else { 0 } + count
+            + if self.attention_marker { 2 } else { 0 };
         // Keep the pre-badge title budget (26 cells plus padding). Status chrome must not
         // consume the last distinguishing characters of a title that previously fitted.
         1 + prefix + usize::from(prefix > 0) + text::width(title).min(26) + 1
     }
 
     fn label(self, title: &str, width: usize, counts: bool) -> String {
-        let mut label = format!(" {}{}", self.kind, self.activity);
+        let mut label = format!(" {}{}", self.kind, self.activity_label());
         if self.ask {
             label.push_str(" ?");
         }
@@ -147,7 +154,12 @@ impl TabBadge {
                 None if !self.kind.is_empty() => label.push_str(" ◆?"),
                 _ => {}
             }
-        } else if self.needs_person && !self.ask {
+        } else if self.needs_person && !self.ask && !self.attention_marker {
+            label.push_str(" ◆");
+        }
+        // Preserve the existing standalone marker next to the subject's name. A count
+        // diamond or a type/activity glyph is not a replacement for this projection.
+        if self.attention_marker {
             label.push_str(" ◆");
         }
         if label.len() > 1 {
@@ -2580,6 +2592,7 @@ impl Ui {
             alerts: statuses.loaded.then_some(subject.alerts),
             ask: subject.ask,
             needs_person: subject.needs_person || subject.alerts > 0 || subject.ask,
+            attention_marker: subject.needs_person,
         }
     }
 
@@ -4689,6 +4702,32 @@ mod tests {
         let ui = tab_badge_world();
         assert_eq!(tab_badge_strip(&ui, 120),
             "A> ? ◆2 Atlas A- Idle Ax Stopped M ? ◆2 Mission I ? ◆2 Inbox +");
+    }
+
+    #[test]
+    fn tab_badge_keeps_projected_needs_person_marker_adjacent_to_agent_and_mission_names() {
+        for state in [AgentState::NeedsYou, AgentState::NeedsLogin] {
+            let mut ui = tab_badge_world();
+            let mut next = ui.world.clone();
+            if let Load::Ready(agents) = &mut next.agents {
+                agents[0].state = state;
+            }
+            if let Load::Ready(missions) = &mut next.missions {
+                missions[0].id = "mission/m".into();
+                missions[0].decision = Some("attention/a".into());
+            }
+            ui.set_world(next);
+            for (key, title) in [("agent:agent/a", "Atlas"), ("mission:mission/m", "Mission")] {
+                let tab = Tab::pane(key);
+                let badge = ui.tab_badge(&tab, Pane::parse(key).as_ref());
+                let wide = badge.label(title, 80, true);
+                assert!(wide.contains("◆2"), "{wide}");
+                assert!(wide.contains(&format!("◆ {title}")), "{wide}");
+                let compact = badge.label(title, 80, false);
+                assert!(!compact.contains("◆2"), "{compact}");
+                assert!(compact.contains(&format!("◆ {title}")), "{compact}");
+            }
+        }
     }
 
     #[test]

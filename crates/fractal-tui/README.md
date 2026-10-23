@@ -39,6 +39,8 @@ Tab prefixes identify **A**gent (including its terminal), **M**ission, and **I**
 cards. Agent activity follows the type: `>` working/compacting, `-` idle, `x`
 down/stopped/retired, `◆` waiting on a person or a login, `!` fault, `~` starting/unknown.
 `◆N` counts open alerts for the subject (zero is quiet; `◆?` means not loaded).
+The existing standalone `◆` stays immediately before the agent or mission name when
+its reported state needs a person; the alert count is separate and does not replace it.
 A separate `?` marks a current question prompt from live attention, including questions
 that can only be answered in the terminal or whose client-answer window expired.
 Question identity comes from the native question kind or the exact named question
