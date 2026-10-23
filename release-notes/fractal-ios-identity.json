@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
   "schema": {"status": "none", "detail": "No daemon schema changes or data rewrites."},
   "rules": {"status": "none", "detail": "No wire protocol or checkpoint rule changes."},
-  "compatibility": {"status": "changed", "detail": "Daily and development apps use com.compoundingtech.fractal and com.compoundingtech.fractal.starter, with matching URL schemes. Generated Xcode projects and schemes use fractal. Device keys use com.compoundingtech.fractal.device-key without an old-service fallback."},
+  "compatibility": {"status": "changed", "detail": "Daily and development apps use com.compoundingtech.fractal and com.compoundingtech.fractal.starter, with matching URL schemes. Generated Xcode projects and schemes use fractal. Delivery selects the current generated workspace's product from persistent DerivedData, ignoring older app products while still validating the bundle and build identity. Device keys use com.compoundingtech.fractal.device-key without an old-service fallback."},
   "downtime": {"status": "none", "detail": "No daemon interruption; the newly installed phone app must be paired before use."},
   "manual": {"status": "changed", "detail": "Install the new app, pair it once, delete the old app by hand, and revoke the old device's grant. The new bundle identifier cannot read the old app's Keychain."},
   "recovery": {"status": "none", "detail": "No daemon recovery changes; app identities retain separate local storage and device grants."}

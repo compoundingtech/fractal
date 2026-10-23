@@ -1369,6 +1369,17 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.install_commands()), 2)
         self.assertEqual(len(self.prebuild_commands()), 4)
 
+    def test_stale_product_from_previous_app_identity_does_not_block_delivery(self):
+        products = self.state / "build-cache/derived/Build/Products/Release-iphoneos"
+        # A previous generated workspace can leave its product in persistent DerivedData.
+        legacy = products / "smalltalk.app"  # Historical product fixture for identity cutover.
+        legacy.mkdir(parents=True)
+        (legacy / "Info.plist").write_bytes(b"stale legacy product; never inspected")
+        self.reconcile()
+        self.assert_installed(self.initial_commit)
+        self.assertTrue((self.state / "artifacts" / self.initial_commit / "fractal.app").is_dir())
+        self.assertTrue(legacy.is_dir())
+
     def test_failed_build_preserves_partial_cache_and_appends_retry_logs(self):
         self.configure(build_exit=65, artifact_on_failure=True)
         self.invoke()

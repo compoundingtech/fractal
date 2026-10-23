@@ -227,7 +227,10 @@ def build_release(args):
          "CODE_SIGN_STYLE=Automatic", f"DEVELOPMENT_TEAM={args.team}",
          "CODE_SIGN_IDENTITY=Apple Development", "-allowProvisioningUpdates", "build"],
         cwd=app, env=env)
-    apps = list((derived / "Build/Products/Release-iphoneos").glob("*.app"))
+    # DerivedData survives native identity changes. Select only the current Expo
+    # product; unrelated products from earlier generated workspaces may remain.
+    # Bundle ID, native commit and embedded JS stamp are still verified below.
+    apps = list((derived / "Build/Products/Release-iphoneos").glob(f"{workspace.stem}.app"))
     if len(apps) != 1:
         raise ValueError("Expected one successful Release app")
     with (apps[0] / "Info.plist").open("rb") as file:
