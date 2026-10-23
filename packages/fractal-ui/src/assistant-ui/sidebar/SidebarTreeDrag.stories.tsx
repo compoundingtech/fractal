@@ -69,7 +69,7 @@ function FilingDrawer() {
     </DialogTrigger>
   </main>
 }
-const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'Host-owned RAC drag hooks and drag-slot content on the production SidebarTree. Pinned visuals are pointer-transparent during any drag session, including external drags with no local dragstart; drop targets and autoscroll belong to the real tree. Local-drag plays disable filing, prove the same move check rejects, restore it, and perform a real RAC move; the external play first proves the pinned copy owns the band outside a drag session.' } } } } satisfies Meta
+const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { scenario: { _tag: 'contract-fixture', reason: "Controlled local drag sessions and filing callbacks exercise pointer, keyboard and external-drop contracts." }, layout: 'fullscreen', docs: { description: { component: 'Host-owned RAC drag hooks and drag-slot content on the production SidebarTree. Pinned visuals are pointer-transparent during any drag session, including external drags with no local dragstart; drop targets and autoscroll belong to the real tree. Local-drag plays disable filing, prove the same move check rejects, restore it, and perform a real RAC move; the external play first proves the pinned copy owns the band outside a drag session.' } } } } satisfies Meta
 export default meta
 type Story = StoryObj
 const frames = async (count = 6) => { for (let index = 0; index < count; index++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }

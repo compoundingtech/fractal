@@ -59,13 +59,13 @@ or an explicit `--sha256 HEX`.
 
 ```sh
 scripts/onboarding-mac-test --scenario first-run \
-  --archive /tmp/smalltalk-aarch64-apple-darwin.tar.gz \
+  --archive /tmp/fractal-aarch64-apple-darwin.tar.gz \
   --tart-image studio-clean --ssh-key ~/.ssh/st-onboarding-test \
   --strict-release --keep --out /tmp/onboarding-mac-first-run
 
 # A second fresh clone tests setup flags and config merge rather than first-run answers.
 scripts/onboarding-mac-test --scenario setup \
-  --archive /tmp/smalltalk-aarch64-apple-darwin.tar.gz \
+  --archive /tmp/fractal-aarch64-apple-darwin.tar.gz \
   --tart-image studio-clean --ssh-key ~/.ssh/st-onboarding-test \
   --strict-release --out /tmp/onboarding-mac-setup
 ```

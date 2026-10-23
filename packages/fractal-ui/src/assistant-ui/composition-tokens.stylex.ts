@@ -95,6 +95,8 @@ export const typeVars = stylex.defineVars({
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
   trackingWide: '0.1em', trackingEyebrow: '0.2em',
   headingSize: '16px', headingLeading: '24px',
+  /** Text fields on a phone: below 16px, iOS Safari zooms the page when the field takes focus. */
+  touchInputSize: '16px',
 })
 
 /** Radius scale; slab is the composer surface, control is buttons and inputs. */
@@ -118,6 +120,8 @@ export const geometryVars = stylex.defineVars({
   sidebarMin: '208px', sidebarDefault: '256px',
   panelDefault: '540px', panelMin: '360px',
   controlSm: '24px', controlMd: '28px', controlLg: '32px',
+  /** Minimum hit target for every control in the narrow (phone) layout. */
+  touchTarget: '44px',
   toolRow: '24px',
   menuRow: '28px', checkbox: '14px',
   gutter: 'clamp(12px, 1.25vw, 20px)',
@@ -138,6 +142,7 @@ export const geometryVars = stylex.defineVars({
   focusOffset: '1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
   specimenAside: '340px', specimenSidebar: '250px', commandMaxHeight: 'min(28rem, 60vh)',
   modalMax: '448px', tooltipMax: '320px', descriptionColumns: 'minmax(90px, auto) minmax(0, 1fr)',
+  detailsValueMin: '120px',
   statusWord: '80px',
   switchWidth: '32px', switchHeight: '18px', iconSm: '12px', statusDot: '6px',
   emptyMark: '36px', avatar: '32px', fileMax: '192px', emptyHintMax: '288px',
@@ -164,6 +169,7 @@ export const geometryNumbers = {
   sidebarDefault: 256,
   panelDefault: 540,
   panelMin: 360,
+  detailsColumnsMin: 360,
   drawerDefault: 220,
   footer: 40,
   drawerMin: 120, drawerMax: 600,
@@ -172,6 +178,7 @@ export const geometryNumbers = {
   estimatedMessageHeight: 160,
   threadViewportMin: 96,
 } as const
+
 
 export const motionVars = stylex.defineVars({
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',

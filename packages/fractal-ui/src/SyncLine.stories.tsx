@@ -4,13 +4,14 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
 import { Button } from 'react-aria-components'
 import { SyncLine } from './assistant-ui/st3-views/SyncLine'
+import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
 import { syncLine, observeSyncStatus } from './assistant-ui/st3-views/sync-line'
 import { syncObservations, syncNow } from './assistant-ui/st3-views/sync-fixtures'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
 import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
-interface SyncArgs { scheme: Scheme; sequence: number }
+interface SyncArgs { scheme: Scheme; sequence: number; sync?: string }
 const surfaces = ['agents', 'conversation', 'terminal', 'missions', 'usage'] as const
 function TransitionPreview({ scheme, sequence, next, retry }: { scheme: Scheme; sequence: number; next: () => void; retry: () => void }) {
   const current = syncObservations[sequence % syncObservations.length]!
@@ -71,7 +72,8 @@ const meta = {
 } satisfies Meta<SyncArgs>
 export default meta
 type Story = StoryObj<SyncArgs>
-export const AllStates: Story = { tags: ['critical'], render: AllStatesStory, play: async ({ canvasElement }) => {
+const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local sync observations and clock transitions exercise status vocabulary and geometry.' } } } satisfies Story
+export const AllStates: Story = { ...contractFixture, tags: ['critical'], render: AllStatesStory, play: async ({ canvasElement }) => {
   const lines = canvasElement.querySelectorAll<HTMLElement>('[data-testid="sync-line"]')
   if (lines.length === 0) throw new Error('Expected the full synchronization state matrix')
   for (const line of lines) {
@@ -82,17 +84,32 @@ export const AllStates: Story = { tags: ['critical'], render: AllStatesStory, pl
     if (lineBounds.width <= 0 || lineBounds.left < rowBounds.left || lineBounds.right > rowBounds.right + 1) throw new Error('Each sync line must fit inside its observation row and theme surface')
   }
 } }
-export const UnknownReason: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown') } }
-export const UnknownReasonLastLive: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown · last live') } }
-export const LocalFailure: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · cap') } }
-export const LocalFailureWithoutCap: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · no cap') } }
-export const LocalFailureZeroCap: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · zero cap') } }
-export const UnknownFailure: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Unknown') } }
-export const ServerFailure: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed') } }
-export const ServerFailureSubscriptionLimit: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Server · subscription limit') } }
-export const SubscriptionLimitsDark: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'dark' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
-export const SubscriptionLimitsLight: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'light' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
-export const TransitionSequence: Story = { tags: ['critical'],
+export const UnknownReason: Story = { ...contractFixture, args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown') } }
+export const UnknownReasonLastLive: Story = { ...contractFixture, args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown · last live') } }
+export const LocalFailureWithoutCap: Story = { ...contractFixture, args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · no cap') } }
+export const LocalFailureZeroCap: Story = { ...contractFixture, args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · zero cap') } }
+export const ServerFailureSubscriptionLimit: Story = { ...contractFixture, args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Server · subscription limit') } }
+export const SubscriptionLimitsDark: Story = { ...contractFixture, tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'dark' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
+export const SubscriptionLimitsLight: Story = { ...contractFixture, tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'light' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
+/** A host-owned pane header must not reserve standalone hidden retry/detail width. */
+export const InlineHeader: Story = { ...contractFixture, tags: ['critical'], render: ({ scheme }) => <main {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+  {(['Live', 'Failed'] as const).map(id => <div key={id} data-testid={`inline-${id}`} {...stylex.props(styles.band)}>
+    <strong>{id}</strong><SyncLine inline status={syncObservations.find(row => row.id === id)!.status} label="conversation" now={syncNow} observedAt={syncNow} onRetry={() => {}} />
+  </div>)}
+  <div data-testid="standalone-live" {...stylex.props(styles.band)}><SyncLine status={{ _tag: 'Live', since: syncNow }} label="conversation" now={syncNow} observedAt={syncNow} /></div>
+</main>, play: async ({ canvasElement }) => {
+  const live = canvasElement.querySelector<HTMLElement>('[data-testid="inline-Live"] [data-testid="sync-line"]')!
+  if (live.getBoundingClientRect().width !== 0 || live.getBoundingClientRect().height !== 0) throw new Error('Live inline status must not reserve header space')
+  const standalone = canvasElement.querySelector<HTMLElement>('[data-testid="standalone-live"] [data-testid="sync-line"]')!
+  if (standalone.getBoundingClientRect().height !== 24) throw new Error('Standalone live status must retain its existing slot')
+  const failed = canvasElement.querySelector<HTMLElement>('[data-testid="inline-Failed"] [data-testid="sync-line"]')!
+  for (const name of ['Retry loading conversation', 'Sync details for conversation']) {
+    const button = failed.querySelector<HTMLButtonElement>(`[aria-label="${name}"]`)!
+    if (button.disabled || button.getBoundingClientRect().width === 0) throw new Error(`Inline failure lost ${name}`)
+  }
+} }
+export const InlineHeaderLight: Story = { ...InlineHeader, args: { scheme: 'light' } }
+export const TransitionSequence: Story = { ...contractFixture, tags: ['critical'],
   render: StoryRender,
   play: async ({ canvasElement }) => {
     const next = canvasElement.querySelector<HTMLButtonElement>('button')!
@@ -150,7 +167,22 @@ export const TransitionSequence: Story = { tags: ['critical'],
     } finally { observer.disconnect() }
   },
 }
-export const TransitionSequenceLight: Story = { tags: ['critical'], args: { scheme: 'light' }, play: TransitionSequence.play }
+export const TransitionSequenceLight: Story = { ...contractFixture, tags: ['critical'], args: { scheme: 'light' }, play: TransitionSequence.play }
+export const NarrowFailure: Story = {
+  ...contractFixture,
+  render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><ThemePortal><NarrowLayoutContext.Provider value={true}><SyncLine status={{ _tag: 'Failed', cause: { _tag: 'Server', code: 'subscription-limit', message: 'Retained conversation diagnostics remain reachable.' } }} label="conversation" now={syncNow} observedAt={syncNow} onRetry={() => {}} /></NarrowLayoutContext.Provider></ThemePortal></main>,
+  play: async ({ canvasElement }) => {
+    for (const name of ['Retry loading conversation', 'Sync details for conversation']) {
+      const button = canvasElement.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!
+      const rect = button.getBoundingClientRect()
+      if (rect.width < 44 || rect.height < 44) throw new Error(`${name} must retain a 44px touch target`)
+    }
+    canvasElement.querySelector<HTMLButtonElement>('button[aria-label="Sync details for conversation"]')!.click()
+    for (let frame = 0; frame < 120 && !document.querySelector('[role="dialog"]'); frame++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    if (!document.querySelector('[role="dialog"]')?.textContent?.includes('Retained conversation diagnostics remain reachable.')) throw new Error('Touch Details must open real diagnostics')
+  },
+}
+export const NarrowFailureLight: Story = { ...NarrowFailure, args: { scheme: 'light' } }
 const styles = stylex.create({
   root: { height: '100vh', overflow: 'auto', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: s.md, padding: s.md, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading }, allRoot: { height: '100vh', overflow: 'auto', boxSizing: 'border-box', padding: s.md, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading }, title: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading }, heading: { display: 'flex', alignItems: 'center', gap: s.lg, minHeight: g.band, flexShrink: 0 },
   stateName: { width: g.tooltipMax, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },

@@ -3,11 +3,17 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as Atom from 'effect/reactivity/Atom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { gatewayResources } from '../resources/agent/source.ts'
-import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
+import { ConversationHeaderActions, retainedResourceAtoms } from './ConversationHeaderActions.tsx'
+import { AgentTodos } from '../conversation/todos/AgentTodos.tsx'
+import { todoAgent, todoAgentRef } from '../conversation/todos/fixtures.ts'
+import { projectTodos } from '../conversation/todos/model.ts'
+import { observed } from '../data/source.ts'
+import { PortalContainerRegistrationContext } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const snapshot = { id: 'snapshot/example', host_id: 'host/example', store_index: 1, projection_version: 'client-projection.v0', created_at: '2026-10-09T00:00:00Z' }
@@ -48,7 +54,7 @@ beforeEach(() => {
 })
 afterEach(async () => { await act(async () => root.unmount()); registry.dispose(); host.remove(); vi.unstubAllGlobals(); vi.useRealTimers() })
 it('adds no serial HTTP requests to a seat switch while Resources is closed', async () => {
-  await show('agent/example')
+  await show('agent/example-details')
   await settle()
   await show('agent/other')
   await settle()
@@ -56,13 +62,157 @@ it('adds no serial HTTP requests to a seat switch while Resources is closed', as
   await click('Resources')
   expect(requests).toEqual(['/v1/client/capabilities', '/v1/client/resources'])
 })
-it('ends the resource poll when its inspector closes, not on the next seat switch', async () => {
+it('keeps the authoritative poll alive for 60 seconds after closing, then releases it', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-  await show('agent/example')
+  await show('agent/example-details')
   await click('Resources')
   await click('Close resources')
   requests.length = 0
   await act(async () => vi.advanceTimersByTimeAsync(30_000))
   await settle()
+  expect(requests.filter(path => path === '/v1/client/resources').length).toBeGreaterThan(0)
+  await act(async () => vi.advanceTimersByTimeAsync(31_000))
+  await settle()
+  requests.length = 0
+  await act(async () => vi.advanceTimersByTimeAsync(30_000))
+  await settle()
   expect(requests).toEqual([])
+})
+it('reopens within the TTL with the retained Observed value and no second read', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  let reads = 0
+  const resource = Atom.make(() => {
+    reads++
+    return observed({ value: { items: [], nextCursor: null } })
+  })
+  const retainedSource = { ...source, resources: { ...source.resources, byAgent: () => resource } }
+  const atom = retainedResourceAtoms(retainedSource).resources('agent/example-negative-control')
+  let release = registry.mount(atom)
+  const first = registry.get(atom)
+  expect(first._tag).toBe('Observed')
+  release()
+  await vi.advanceTimersByTimeAsync(1000)
+  release = registry.mount(atom)
+  expect(registry.get(atom)).toBe(first)
+  expect(reads).toBe(1)
+  release()
+})
+it('prefetches on explicit focus while keeping the sheet closed', async () => {
+  await show('agent/example-details')
+  await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Resources"]')!.focus())
+  await settle()
+  expect(document.querySelector('aside[aria-label="Agent resources"]')).toBeNull()
+  expect(requests).toEqual(['/v1/client/capabilities', '/v1/client/resources'])
+})
+it('shows the agent Todos as the first Resources section, naming a missing snapshot', async () => {
+  await show('agent/example-details')
+  await click('Resources')
+  const sections = [...document.querySelectorAll('aside[aria-label="Agent resources"] section[aria-label]')]
+  expect(sections.map(section => section.getAttribute('aria-label'))).toEqual(['To-dos', 'Agent queue', 'Observed resources'])
+  expect(sections[0]!.textContent).toBe('To-dosThis session has not shared a to-do list.')
+})
+it('keeps the To-dos disclosure with phase and progress without developer identity fields', async () => {
+  const state = projectTodos({ feed: observed({ value: [todoAgent] }), agentRef: todoAgentRef })
+  expect(state._tag).toBe('Observed')
+  await act(async () => root.render(<AgentTodos state={state} placement="resources" />))
+  const disclosure = host.querySelector('details[aria-label="To-dos"]') as HTMLDetailsElement
+  expect(disclosure.open).toBe(false)
+  const summary = disclosure.querySelector('summary')!.textContent!
+  if (state._tag !== 'Observed') return
+  expect(summary).toContain(`${state.completed}/${state.total}`)
+  expect(summary).toContain('To-dos')
+  expect(host.textContent).not.toMatch(/Source:|fact\.todo|Claim |incarnation|current binding|Tasks shared by this session/)
+  expect(host.querySelector('time[data-human-time="relative"]')?.textContent).toMatch(/^Updated /)
+})
+it('keeps the Resources panel inside its owning scheme root', async () => {
+  host.dataset.scheme = 'light'
+  await show(todoAgentRef)
+  await click('Resources')
+  const panel = document.querySelector('aside[aria-label="Agent resources"]')!
+  expect(panel.closest('[data-scheme]')).toBe(host)
+  expect(panel.closest('[aria-hidden="true"]')).toBeNull()
+})
+it('opens Resources as a non-modal complementary panel that returns focus on Escape', async () => {
+  await show(todoAgentRef)
+  const trigger = host.querySelector<HTMLButtonElement>('button[aria-label="Resources"]')!
+  await act(async () => trigger.focus())
+  await click('Resources')
+  const panel = document.querySelector<HTMLElement>('aside[aria-label="Agent resources"]')!
+  // A labelled complementary landmark, never a dialog: nothing outside it is inerted or hidden.
+  expect(panel.getAttribute('role')).toBeNull()
+  expect(panel.getAttribute('aria-modal')).toBeNull()
+  expect(document.querySelector('[role="dialog"]')).toBeNull()
+  expect(document.querySelectorAll('[inert]').length).toBe(0)
+  expect(trigger.closest('[aria-hidden="true"]')).toBeNull()
+  expect(document.querySelectorAll('body > [aria-hidden="true"]').length).toBe(0)
+  expect(trigger.getAttribute('aria-expanded')).toBe('true')
+  expect(trigger.getAttribute('aria-controls')).toBe(panel.id)
+  // Opening focuses the panel heading, a programmatic-only target; the region itself is not focusable.
+  expect(document.activeElement).toBe(panel.querySelector('h2[tabindex="-1"]'))
+  expect(document.activeElement!.textContent).toBe('Resources')
+  expect(panel.hasAttribute('tabindex')).toBe(false)
+  await act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+  // React Aria restores focus on the frame after the scope unmounts.
+  await act(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+  expect(document.querySelector('aside[aria-label="Agent resources"]')).toBeNull()
+  expect(document.activeElement).toBe(trigger)
+  expect(trigger.getAttribute('aria-expanded')).toBe('false')
+})
+it('registers the docked Resources host for input-to-paint while the dock is mounted', async () => {
+  const dock = document.createElement('div')
+  document.body.append(dock)
+  const registered: Element[] = []
+  const released: Element[] = []
+  const register = (container: Element) => { registered.push(container); return () => { released.push(container) } }
+  const render = (dockHost: HTMLElement | null) => act(async () => root.render(<PortalContainerRegistrationContext.Provider value={register}>
+    <DataSourceProvider source={source} registry={registry}><ConversationHeaderActions agentRef={todoAgentRef} resourcesDock={{ host: dockHost, open: true, onOpenChange: () => {} }} /></DataSourceProvider>
+  </PortalContainerRegistrationContext.Provider>))
+  await render(dock)
+  await settle()
+  // React delegates portal events at the dock host, so the telemetry must observe it like any other portal container.
+  expect(dock.querySelector('aside[aria-label="Agent resources"]')).not.toBeNull()
+  expect(registered.filter(container => container === dock)).toEqual([dock])
+  expect(released.filter(container => container === dock)).toEqual([])
+  await render(null)
+  expect(released.filter(container => container === dock)).toEqual([dock])
+  dock.remove()
+})
+
+it('shows Checking rather than an out-of-date warning while the roster request is pending', async () => {
+  const state = projectTodos({
+    feed: observed({ value: [todoAgent], freshness: 'stale' }),
+    agentRef: todoAgentRef,
+    sync: { _tag: 'Requested', since: 0 },
+  })
+  await act(async () => root.render(<AgentTodos state={state} placement="resources" />))
+  const summary = host.querySelector('summary')!
+  expect(summary.textContent).toContain('Checking')
+  expect(summary.textContent).not.toContain('May be out of date')
+  expect(host.textContent).toContain('Checking to-dos…')
+  expect(host.textContent).not.toContain('binding verification pending')
+})
+
+it.each([
+  [{ _tag: 'Waiting' } as const, 'Loading to-dos…'],
+  [{ _tag: 'Unavailable', detail: 'Source: fact.todo · incarnation unavailable' } as const, "To-dos aren't available right now."],
+  [{ _tag: 'Missing' } as const, 'This session has not shared a to-do list.'],
+] as const)('uses plain To-dos availability copy (%j)', async (state, copy) => {
+  await act(async () => root.render(<AgentTodos state={state} placement="resources" />))
+  expect(host.textContent).toBe(copy)
+  expect(host.textContent).not.toMatch(/fact\.todo|incarnation|harness/)
+})
+
+it('names out-of-date and partial to-do lists without exposing transport or identity fields', async () => {
+  const state = projectTodos({ feed: observed({ value: [todoAgent], freshness: 'stale' }), agentRef: todoAgentRef })
+  expect(state._tag).toBe('Observed')
+  if (state._tag !== 'Observed') return
+  const partial = { ...state, total: state.total + 2, todo: { ...state.todo, snapshot: {
+    ...state.todo.snapshot, truncated: true, totals: { ...state.todo.snapshot.totals, abandoned: 2 },
+  } } }
+  await act(async () => root.render(<AgentTodos state={partial} placement="resources" />))
+  expect(host.querySelector('summary')?.textContent).toContain('May be out of date · Some shown')
+  expect(host.textContent).toContain('These to-dos may be out of date.')
+  expect(host.textContent).toContain('Only some to-dos are shown. Progress counts the full list.')
+  expect(host.textContent).toContain('2 abandoned, not counted as done.')
+  expect(host.textContent).not.toMatch(/Source:|fact\.todo|Claim |incarnation|stale snapshot|full-source/)
 })

@@ -99,7 +99,10 @@ def account_home(explicit):
 
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('--name', required=True, help='an ALIAS for this host in the signer, host/ALIAS; the line is for a public file, so never the real host name')
+    parser.add_argument('--name', required=True, help='an ALIAS in the signer, LEVEL/ALIAS; the line is for a public file, so never the real host or account name')
+    # host: a machine's own key (cooperative trust in the machine). agent: one agent signing account's key, revocable on its own;
+    # the skip policy holds agent notes to the lane definition of the accepted base (by_level "lane": true).
+    parser.add_argument('--level', choices=('host', 'agent'), default='host', help='the trust level the principal names (default host)')
     parser.add_argument('--home', help='the home directory to use instead of this account\'s (for tests and special accounts)')
     args = parser.parse_args(argv)
     if not NAME.fullmatch(args.name):
@@ -110,7 +113,7 @@ def main(argv):
     home = account_home(args.home)
     directory = home / '.config/st'
     key, scratch, config = directory / 'evidence-sign-key', directory / 'evidence-sign-scratch.git', directory / 'evidence-sign.json'
-    wanted = {'signer': f'host/{args.name}', 'ssh_key': str(key), 'scratch_repo': str(scratch)}
+    wanted = {'signer': f'{args.level}/{args.name}', 'ssh_key': str(key), 'scratch_repo': str(scratch)}
 
     require(directory, stat.S_ISDIR)
     if lstat(config) is not None:

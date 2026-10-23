@@ -64,7 +64,7 @@ function RunStopStory({ scheme, refuse, onStopRequest }: { scheme: Scheme; refus
 const meta = {
   title: 'Fractal UI/Run stop',
   component: RunStopStory,
-  parameters: { layout: 'fullscreen' },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Controlled stop acknowledgement, refusal and IME events require local host lifecycle state." }, layout: 'fullscreen' },
   args: { scheme: 'dark', refuse: false, onStopRequest: fn() },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, refuse: { control: 'boolean' } },
 } satisfies Meta<typeof RunStopStory>

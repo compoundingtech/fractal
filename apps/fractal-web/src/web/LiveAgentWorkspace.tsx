@@ -1,27 +1,28 @@
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
-import { sidebarRow } from './sidebarRow.ts'
+import { sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
+import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
-import { retainPane, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
-import { MISSIONS_REF } from './workspaceView.ts'
+import { retainPane, workspaceHref, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
+import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
-import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import * as React from 'react'
-import { createPortal } from 'react-dom'
+import { RegisteredPortal, usePortalContainerRegistration } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import * as Aria from 'react-aria-components'
 import { UNSAFE_PortalProvider } from 'react-aria'
 import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
+import { ChromeControl, MilestoneAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, PhoneTerminalToggle, ResizableSplit, DockedSplit, NarrowSheet, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@fractal/ui/assistant-ui/shell'
+import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
-import { useFleet, useAgent, useSubjectList, useConnection, useNow, useFeedInterest, useDataSource } from '../data/react.tsx'
+import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
@@ -29,52 +30,95 @@ import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
 import { useGatewaySync } from '../data/react.tsx'
+import { NarrowLayoutContext } from '@fractal/ui/assistant-ui/shell'
+import { PhoneAgentDrawer, type PhoneAgentDrawerHandle } from './PhoneAgentDrawer.tsx'
+import { PhoneWorkspaceTabs } from './PhoneWorkspaceTabs.tsx'
 import { AgentFolders } from '../shell/AgentFolders.tsx'
 import { useSidebarFolders, type SidebarFoldersBinding } from '../folders/useSidebarFolders.ts'
 import { fixtureFolders } from '../folders/fixture.ts'
 import { defaultFilters, fixtureSidebarState, sidebarState } from '../shell/sidebar/state.ts'
+import { useMachineMemory, withRememberedMachines } from '../shell/sidebar/show.ts'
 import { parseSidebarQuery } from '../shell/sidebar/filter.ts'
 import { SidebarToolbar, type SidebarToolbarProps } from '../shell/sidebar/Toolbar.tsx'
 import type { Agent } from '../data/source.ts'
 import { sidebarAttention } from './sidebarAttention.ts'
 import { FolderAttentionSignal } from './AttentionControls.tsx'
-import { liveSidebarTree } from './liveSidebarTree.ts'
-import { SidebarEmptyState } from './SidebarEmptyState.tsx'
+import { liveShowRows, liveSidebarTree } from './liveSidebarTree.ts'
+import { RosterLoading, RosterStaleNotice, RosterUnavailable, SidebarEmptyState } from './SidebarEmptyState.tsx'
+import { useAgentsLastObservedAt } from './lastObserved.tsx'
+import { RosterDecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
 
 const emptyAgents: readonly Agent[] = []
-const sidebarExtraSignals = [] as const
+
+/** A last-observed roster's observation instant: its row times stop there instead of ticking on as if live. */
+const RosterFrozenAt = React.createContext<number | undefined>(undefined)
 
 /** Clock ticks reach SidebarTime leaves, never the Aria row or its collection. */
 const LiveSidebarAgentRow = React.memo((props: {
   readonly agentRef: string
+  readonly childId?: string
   readonly active: boolean
+  readonly needsMe: boolean
+  readonly openRef?: string
+  readonly touchDisclosure?: React.ReactNode
   readonly select: (ref: string) => void
+  readonly actions: SidebarActions
 }) => {
   const feed = useAgent(props.agentRef)
+  const source = useDataSource()
+  const missionAtom = React.useMemo(() => sidebarMissionFeedsAtom(source), [source])
+  const mission = useAtomValue(missionAtom)
   const connection = useConnection()
   const agent = feed._tag === 'Observed' ? feed.value : undefined
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
-  const item = React.useMemo(() => agent === undefined ? undefined : sidebarRow({ agent, stale }), [agent, stale])
-  const onOpen = React.useCallback(() => props.select(props.agentRef), [props.select, props.agentRef])
-  return item === undefined ? null : <SidebarAgentRow inTree item={item} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} onOpen={onOpen} />
+  const frozenAt = React.useContext(RosterFrozenAt)
+  const item = React.useMemo(() => {
+    if (agent === undefined) return undefined
+    if (props.childId === undefined) return sidebarRow({ agent, stale, needsMe: props.needsMe, ...mission })
+    const child = agent.subagents?.find(child => child.id === props.childId)
+    return child === undefined ? undefined : sidebarSubagentRow({ parent: agent, child, stale })
+  }, [agent, stale, props.needsMe, props.childId, mission])
+  const onOpen = React.useCallback(() => { if (props.openRef !== undefined) props.select(props.openRef) }, [props.openRef, props.select])
+  return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
 const LiveSidebarTreeView = React.memo((props: {
   readonly binding: SidebarFoldersBinding
   readonly tree: SidebarFoldersBinding['tree']
-  readonly accessibleNames: ReadonlyMap<string, string>
+  readonly agents: readonly Agent[]
+  readonly stale: boolean
   readonly needsYou: ReadonlySet<string>
   readonly current: string
   readonly query: string
   readonly revealKey: string
   readonly select: (ref: string) => void
+  readonly actions: SidebarActions
 }) => {
-  const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
-    <LiveSidebarAgentRow agentRef={node.subject} active={props.current === node.subject} select={props.select} />, [props.current, props.select])
+  const source = useDataSource()
+  const previousAccessibleNames = React.useRef<ReadonlyMap<string, string>>(new Map())
+  const namesAtom = React.useMemo(() => {
+    const mission = sidebarMissionFeedsAtom(source)
+    return Atom.make(get => {
+      const observation = props.agents.some(agent => (agent.currentWork?.length ?? 0) > 0 || agent.mission !== undefined)
+        ? get(mission)
+        : undefined
+      const next = new Map(props.agents.flatMap(agent => [
+        [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale: props.stale, needsMe: props.needsYou.has(agent.ref), ...observation }))] as const,
+        ...(agent.subagents ?? []).map(child => [subagentRowId({ parent: agent.ref, id: child.id }), sidebarRowAccessibleName(sidebarSubagentRow({ parent: agent, child, stale: props.stale }))] as const),
+      ]))
+      const previous = previousAccessibleNames.current
+      if (previous.size === next.size && [...next].every(([ref, name]) => previous.get(ref) === name)) return previous
+      previousAccessibleNames.current = next
+      return next
+    })
+  }, [source, props.agents, props.stale, props.needsYou])
+  const accessibleNames = useAtomValue(namesAtom)
+  const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>, touchDisclosure?: React.ReactNode) =>
+    <LiveSidebarAgentRow agentRef={node.parent ?? node.subject} childId={node.childId} active={node.parent === undefined && props.current === node.subject} needsMe={node.parent === undefined && props.needsYou.has(node.subject)} openRef={node.parent === undefined ? node.subject : undefined} touchDisclosure={touchDisclosure} select={props.select} actions={props.actions} />, [props.current, props.needsYou, props.select, props.actions])
   const renderFolderSignal = React.useCallback((folder: Exclude<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
     <FolderAttentionSignal folder={folder} refs={props.needsYou} />, [props.needsYou])
-  return <SidebarQueryContext.Provider value={props.query}><AgentFolders {...props.binding} tree={props.tree} accessibleNames={props.accessibleNames} selectedId={props.current} revealKey={props.revealKey} onSelect={props.select} renderFolderSignal={renderFolderSignal} renderAgent={renderAgent} /></SidebarQueryContext.Provider>
+  return <SidebarQueryContext.Provider value={props.query}><AgentFolders {...props.binding} tree={props.tree} accessibleNames={accessibleNames} selectedId={props.current} revealKey={props.revealKey} onSelect={props.select} renderFolderSignal={renderFolderSignal} renderAgent={renderAgent} /></SidebarQueryContext.Provider>
 })
 LiveSidebarTreeView.displayName = 'LiveSidebarTreeView'
 
@@ -139,7 +183,8 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
   }
 }
 
-// The kit diff viewer imports Markdown; keep it outside the shell's eager graph too.
+// Details, its measured resource tabs and Changes import the rich kit; keep them outside the eager shell.
+const AgentDetailsPanel = React.lazy(() => import('./AgentDetailsPanel.tsx').then(module => ({ default: module.AgentDetailsPanel })))
 const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
 // The terminal grid, fonts and native key encoder load only when a terminal pane opens.
 const TerminalDetail = React.lazy(() => import('../terminal/TerminalDetail.tsx').then((module) => ({ default: module.TerminalDetail })))
@@ -152,11 +197,23 @@ const sidebarClosed = persistedAtom({ key: 'round2.sidebarClosed', schema: Schem
 const palette = persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['dark', 'light']), defaultValue: 'dark' })
 const workspacePanes = Atom.family((ref: string) => persistedAtom({ key: `round2.panes.${ref}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }))
 const selectedAgent = persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' })
+const phoneAgentTabs = persistedAtom({ key: 'round2.phoneAgentTabs', schema: Schema.Array(Schema.String), defaultValue: [] })
 const viewportWidth = () => window.innerWidth
+/** Below 900px the thread is the only thing on screen: agents open as a sheet from the left, the agent's actions and Details from the right. Same width as the sidebar drawer breakpoint. */
+export const narrowLayoutQuery = '(max-width: 899px)'
 const subscribeViewport = (callback: () => void) => {
   window.addEventListener('resize', callback)
   return () => window.removeEventListener('resize', callback)
 }
+// Mobile keyboards resize the visual viewport, not necessarily the layout viewport.
+const phoneViewportHeight = () => window.visualViewport?.height ?? window.innerHeight
+const subscribePhoneViewport = (callback: () => void) => {
+  window.visualViewport?.addEventListener('resize', callback)
+  window.addEventListener('resize', callback)
+  return () => { window.visualViewport?.removeEventListener('resize', callback); window.removeEventListener('resize', callback) }
+}
+const narrowLayoutMatches = () => window.matchMedia(narrowLayoutQuery).matches
+const serverNarrow = () => false
 const locationState = () => `${window.location.pathname}${window.location.search}`
 const subscribeLocation = (callback: () => void) => {
   window.addEventListener('popstate', callback)
@@ -180,16 +237,27 @@ const initialAgentFromUrl = () => {
 export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
   const overlayHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => overlayHost.current, [])
+  usePortalContainerRegistration(getContainer)
   return <UNSAFE_PortalProvider getContainer={getContainer}><Workspace {...props} overlayHost={overlayHost} /></UNSAFE_PortalProvider>
 }
 
 /** One authoritative agent thread per workspace; local geometry never grants backend authority. */
 function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void; readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
-  const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection()
+  const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), rosterDecode = useRosterDecode()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
+  const [phoneAgents, setPhoneAgents] = useAtom(phoneAgentTabs)
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
+  const agentsDrawer = React.useRef<PhoneAgentDrawerHandle>(null)
+  const subscribeNarrow = React.useCallback((callback: () => void) => {
+    const query = window.matchMedia(narrowLayoutQuery)
+    query.addEventListener('change', callback)
+    return () => query.removeEventListener('change', callback)
+  }, [])
+  const narrow = React.useSyncExternalStore(subscribeNarrow, narrowLayoutMatches, serverNarrow)
   React.useLayoutEffect(() => setTheme(scheme), [scheme])
   const viewport = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
+  const phoneHeight = React.useSyncExternalStore(subscribePhoneViewport, phoneViewportHeight, phoneViewportHeight)
+  const phoneViewportStyle = narrow ? { height: `calc(${phoneHeight}px - var(--wf-devbar-space, 0px))`, '--wf-phone-height': `${phoneHeight}px` } : undefined
   const location = React.useSyncExternalStore(subscribeLocation, locationState, locationState)
   const hoverOwner = React.useRef<HTMLElement | null>(null)
   const rememberHoverOwner = (event: React.SyntheticEvent<HTMLElement>) => {
@@ -231,28 +299,36 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const terminalRef = terminalDisabledReason === undefined ? agent?.terminal : undefined
   const [headerSlot, setHeaderSlot] = React.useState<HTMLDivElement | null>(null)
   const [paneHost, setPaneHost] = React.useState<HTMLDivElement | null>(null)
+  const [resourcesHost, setResourcesHost] = React.useState<HTMLDivElement | null>(null)
+  const [resourcesAgent, setResourcesAgent] = React.useState<string>()
   const [panes, setPanes] = useAtom(workspacePanes(current))
   const query = new URLSearchParams(location.split('?')[1])
   const selectedPane = query.get('open') ?? 'thread'
   const [resourcePanel, setResourcePanel] = React.useState<ResourcePanelState>({ expanded: false, size: 288 })
   const [diffOpen, setDiffOpen] = React.useState(false)
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
+  // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
+  const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
+  const sidebarActions = React.useMemo<SidebarActions>(() => ({ declaration: setDeclarationRef }), [])
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
   const navigate = (ref: string, pane = 'thread') => {
     setStoredAgent(ref)
-    window.history.pushState(null, '', `/w/${ref.split('/').map(encodeURIComponent).join('/')}?open=${encodeURIComponent(pane)}`)
+    window.history.pushState(null, '', workspaceHref(ref, pane, window.location.search))
     window.dispatchEvent(new PopStateEvent('popstate'))
   }
   const select = (ref: string) => {
+    if (narrow) setPhoneAgents(refs => [...new Set([...refs, current, ref])].filter(Boolean))
     if (ref !== current) {
       cancelMeasure('open_transcript')
       markStart('switch_to_tail', { key: ref })
       onSelectConversation?.(ref)
     }
     setDiffOpen(false)
+    setResourcesAgent(undefined)
     setOpenedTool(undefined)
+    agentsDrawer.current?.close()
     navigate(ref)
   }
   const open = (request: OpenRequest) => {
@@ -269,9 +345,24 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   openLatest.current = open
   const openDocument = React.useCallback((ref: string) => openLatest.current({ ref, presentation: 'detail' }), [])
   const stale = fleet._tag === 'Observed' && (fleet.freshness === 'stale' || connection._tag !== 'Live')
+  const rosterObservedAt = useAgentsLastObservedAt()
+  const frozenAt = stale ? rosterObservedAt : undefined
   const folderSource = useDataSource()
   const sidebarSettings = (folderSource.mode === 'fixtures' ? fixtureSidebarState : sidebarState)(folderSource.gateway ?? folderSource.mode)
   const [filters, setFilters] = useAtom(sidebarSettings.filters)
+  const machineMemory = useMachineMemory()
+  const asking = useAskingAgents()
+  // The query is the only Show state; live gateways start from this browser's remembered machines.
+  React.useLayoutEffect(() => {
+    const query = withRememberedMachines({ query: filters.query, remembered: machineMemory.remembered })
+    if (query !== filters.query) setFilters({ ...filters, query })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- seed once per gateway's filters, not on every edit.
+  }, [sidebarSettings.filters])
+  const hosts = React.useMemo(() => [...new Set(agents.map(row => row.host))].toSorted(), [agents])
+  const updateFilters = React.useCallback((value: typeof filters) => {
+    setFilters(value)
+    machineMemory.remember(value.query, hosts)
+  }, [setFilters, machineMemory, hosts])
   // Typing stays urgent; filtering and the tree collection follow at transition priority.
   const deferredFilters = React.useDeferredValue(filters)
   const sidebarQuery = React.useMemo(() => parseSidebarQuery(deferredFilters.query), [deferredFilters.query])
@@ -281,9 +372,25 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     const previous = previousRoster.current
     if (previous !== undefined && previous.length === agents.length && agents.every((agent, index) => {
       const row = previous[index]!
-      return row.id === agent.ref && row.subject === agent.ref && row.label === agent.name && row.host === agent.host
+      return row.id === agent.ref && row.subject === agent.ref && row.label === agent.name && row.host === agent.host &&
+        row.project === (agent.checkout._tag === 'Known' ? agent.checkout.value.repository : undefined) &&
+        (row.children?.length ?? 0) === (agent.subagents?.length ?? 0) &&
+        (agent.subagents ?? []).every((child, index) => {
+          const old = row.children?.[index]
+          return old?.childId === child.id && old.label === (child.description ?? child.id)
+        })
     })) return previous
-    const next = agents.map(row => ({ id: row.ref, subject: row.ref, label: row.name, host: row.host }))
+    const next = agents.map(row => ({
+      id: row.ref, subject: row.ref, label: row.name, host: row.host,
+      project: row.checkout._tag === 'Known' ? row.checkout.value.repository : undefined,
+      children: row.subagents?.map(child => ({
+        _tag: 'Agent' as const, id: subagentRowId({ parent: row.ref, id: child.id }),
+        subject: row.ref, parent: row.ref, childId: child.id,
+        // Roster AgentSubagent has only the parent session_id; the child reference exists
+        // only in SubagentSummary.conversation (conversation_blocks.rs), so this row cannot open.
+        label: child.description ?? child.id,
+      })),
+    }))
     previousRoster.current = next
     return next
   }, [agents])
@@ -302,18 +409,14 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     return next
   }, [agents, subjects])
   // Filtering uses observed status, not wall time; ticking cannot change membership.
-  const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, deferredFilters, stale])
-  const previousAccessibleNames = React.useRef<ReadonlyMap<string, string> | undefined>(undefined)
-  const accessibleNames = React.useMemo(() => {
-    const next = new Map(agents.map(agent => [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale }))] as const))
-    const previous = previousAccessibleNames.current
-    if (previous !== undefined && next.size === previous.size && [...next].every(([ref, name]) => previous.get(ref) === name)) return previous
-    previousAccessibleNames.current = next
-    return next
-  }, [agents, stale])
+  const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, asking, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, asking, deferredFilters, stale])
+  const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
   const selectLatest = React.useRef(select)
   selectLatest.current = select
-  const selectAgent = React.useCallback((ref: string) => selectLatest.current(ref), [])
+  const selectAgent = React.useCallback((ref: string) => {
+    if (previousRoster.current?.some(seat => seat.children?.some(child => child.id === ref))) return
+    selectLatest.current(ref)
+  }, [])
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
   const separator = selectedPane.lastIndexOf(':')
   const urlPresentation = selectedPane.slice(separator + 1)
@@ -323,73 +426,107 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
       : undefined
   const chosen = panes.find((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ?? urlPane
   const visiblePanes = chosen && !panes.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ? [...panes, chosen] : panes
+  const phoneTabs = React.useMemo(() => {
+    const names = new Map(agents.map(agent => [agent.ref, agent.name]))
+    return [
+      ...[...new Set([...phoneAgents, current])]
+        .filter(ref => ref === current || names.has(ref))
+        .map(ref => ({ id: ref, label: ref === current ? 'Thread' : names.get(ref)! })),
+      { id: 'changes', label: 'Changes' },
+      ...visiblePanes.map(pane => ({ id: `${pane.ref}:${pane.presentation ?? 'detail'}`, label: paneTabLabel(pane.ref, byRef.get(pane.ref)?.title) })),
+    ]
+  }, [agents, phoneAgents, current, visiblePanes, byRef])
   const address = { ref: chosen?.ref ?? current, presentation: chosen?.presentation ?? 'detail' }
   const width = dragWidth ?? Math.round(ratio * viewport)
   const maxPanel = Math.max(240, viewport - (collapsed ? 40 : Math.min(width, Math.max(208, Math.min(440, viewport - 640)))) - 640)
   const panelSize = dragPanel ?? Math.min(maxPanel, Math.max(240, Math.round(panelFraction * viewport)))
   const maxSidebar = Math.max(208, Math.min(440, viewport - 640))
   const agentName = agent?.name ?? current.split('/').at(-1) ?? 'Conversation'
-  // The panes are portalled from outside the shell providers: those values change on every
-  // switch, and React then scans every fiber below a memoized pane for consumers, which costs
-  // O(retained turns) per click. No pane reads these shell contexts.
-  return (<>
+  const changesWorkspace = agent?.workspace._tag === 'Known' ? JSON.stringify([agent.host, agent.workspace.value]) : current
+  const terminalOpen = selectedPane.includes('terminal/')
+  const toggleTerminal = () => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }
+  const resourcesDockOpen = !narrow && current !== '' && resourcesAgent === current
+  // The dock separator names the inspector view on screen. Every panel mount starts on Details, so the stored
+  // view resets whenever the mounted inspector changes or goes away, before this render paints the label.
+  const dockedInspector = !resourcesDockOpen && !narrow && diffOpen && openedTool === undefined && current !== '' ? current : undefined
+  const [inspectorView, setInspectorView] = React.useState<{ readonly mount: string | undefined; readonly view: 'changes' | 'details' }>({ mount: undefined, view: 'details' })
+  if (inspectorView.mount !== dockedInspector) setInspectorView({ mount: dockedInspector, view: 'details' })
+  const dockLabel = resourcesDockOpen ? 'Resize resources' : inspectorView.view === 'changes' ? 'Resize Changes' : 'Resize Details'
+  const agentHeaderActions = current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} ux={ux} {...(narrow ? {} : { resourcesDock: { host: resourcesHost, open: resourcesDockOpen, onOpenChange: (open: boolean) => { setResourcesAgent(open ? current : undefined); if (open) { setDiffOpen(false); setOpenedTool(undefined) } } } })} /></>
+  // Below the breakpoint Details is a sheet over the thread, never an inline panel beside it.
+  const narrowDetailsOpen = narrow && current !== '' && (diffOpen || openedTool !== undefined)
+  const closeDetails = () => { setDiffOpen(false); setOpenedTool(undefined) }
+  const openDetailsUri = (uri: string) => {
+    const ref = uri.startsWith('agent:') ? `agent/${uri.slice('agent:'.length)}` : uri
+    open({ ref })
+  }
+  const toolDetail = (call: WorkLogCall, width: number | undefined) => <aside aria-label="Tool detail" style={width === undefined ? undefined : { width }} {...stylex.props(styles.changesPanel, width === undefined && styles.sheetPanel)}>
+    <header {...stylex.props(styles.toolDetailHeader)}>
+      <strong {...stylex.props(styles.toolDetailTitle)}>{call.title}{call.argsSummary === undefined ? '' : ` ${call.argsSummary}`}</strong>
+      <Aria.Button aria-label="Close tool detail" onPress={() => setOpenedTool(undefined)} {...stylex.props(styles.iconButton)}>×</Aria.Button>
+    </header>
+    <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
+  </aside>
+  // One roster for both presentations: docked beside the thread, or the agents sheet below the breakpoint.
+  const sidebarBody = <>
+    <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
+    {fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
+      : fleet._tag !== 'Observed' ? null
+      : <>
+        {stale ? <RosterStaleNotice decodeStale={rosterDecode.decodeStale} observedAt={rosterObservedAt} partial={fleet.coverage?._tag === 'Partial'} refreshFailed={fleet.error?.reason === 'failed'} onRetry={folderSource.retryAgents} /> : null}
+        {agents.length === 0 ? <SidebarEmptyState kind="empty" />
+          : visibleSidebarTree.length === 0 ? <SidebarEmptyState kind="no-match" query={deferredFilters.query} onClear={() => setFilters({ ...defaultFilters, sort: filters.sort })} />
+          : null}
+      </>}
+    <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
+      {fleet._tag === 'Waiting' ? <>
+        <RosterLoading />
+        <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
+          {Array.from({ length: 8 }, (_, index) => <div key={index} data-wf-skeleton-row="" {...stylex.props(styles.skeletonRow)}>
+            <span {...stylex.props(styles.skeletonGlyph)} />
+            <span data-wf-skeleton-line="name" {...stylex.props(styles.skeletonLine, styles.skeletonName)} />
+            <span data-wf-skeleton-line="host" {...stylex.props(styles.skeletonLine, styles.skeletonHost)} />
+          </div>)}
+        </div>
+      </> : null}
+      <RosterFrozenAt.Provider value={frozenAt}>
+        <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} agents={agents} stale={stale} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} actions={sidebarActions} />
+      </RosterFrozenAt.Provider>
+    </nav>
+    {fleet._tag === 'Observed' ? <RosterDecodeNotice decode={rosterDecode} shown={shownRosterRefs(fleet)} /> : null}
+    <footer {...stylex.props(styles.footer)}>
+      <ChromeControl icon="swap" label="Toggle color scheme" tooltipPlacement="top" onPress={() => setScheme(scheme === 'dark' ? 'light' : 'dark')} />
+      <ChromeControl icon="checklist" label="Missions" tooltipPlacement="top" onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} />
+      <ChromeControl icon="gauge" label="Usage" tooltipPlacement="top" onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} />
+    </footer>
+  </>
+  // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
+  // Only the stable header DOM host and narrow geometry cross that boundary.
+  return (<NarrowLayoutContext.Provider value={narrow}>
+    <ThreadHeaderSlotContext.Provider value={narrow ? null : headerSlot}>
     <WorkbenchContextProvider value={{ open, focusedRef: address.ref || null, subjects: byRef, platform: navigator.platform.includes('Mac') ? 'mac' : 'other' }}>
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
-          <ThreadHeaderSlotContext.Provider value={headerSlot}>
-            <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-              <aside aria-label="Agents" style={{ width: collapsed ? 40 : Math.min(width, maxSidebar) }} {...stylex.props(styles.sidebar)}>
-                <header {...stylex.props(styles.brand)}>
-                  <Aria.Button aria-label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(!collapsed)} {...stylex.props(styles.iconButton)}>
-                    {collapsed ? '»' : '«'}
-                  </Aria.Button>
-                  {collapsed ? null : <strong>Fractal</strong>}
-                </header>
-                {collapsed ? null : (
-                  <>
-                    <LiveSidebarToolbar filters={filters} update={setFilters} hosts={[...new Set(agents.map(row => row.host))].toSorted()} needsMeCount={needsYou.size} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
-                    {fleet._tag === 'Observed' && visibleSidebarTree.length === 0 ? <SidebarEmptyState query={deferredFilters.query} needsMe={deferredFilters.needsMe} onClear={() => setFilters({ ...defaultFilters, sort: filters.sort })} /> : null}
-                    <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
-                      {fleet._tag === 'Waiting' ? <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
-                        {Array.from({ length: 8 }, (_, index) => <div key={index} data-wf-skeleton-row="" {...stylex.props(styles.skeletonRow)}>
-                          <span {...stylex.props(styles.skeletonGlyph)} />
-                          <span data-wf-skeleton-line="name" {...stylex.props(styles.skeletonLine, styles.skeletonName)} />
-                          <span data-wf-skeleton-line="host" {...stylex.props(styles.skeletonLine, styles.skeletonHost)} />
-                        </div>)}
-                      </div> : null}
-                      <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} accessibleNames={accessibleNames} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} />
-                    </nav>
-                    {fleet._tag !== 'Observed' ? (
-                      <SystemNotice
-                        scope="rail"
-                        kind={fleet._tag === 'Waiting' ? 'loading' : 'error'}
-                        connection={fleet._tag === 'Unavailable' && fleet.reason !== 'ungranted' && fleet.reason !== 'unsupported'}
-                        title={fleet._tag === 'Waiting' ? 'Loading agents' : fleet.reason === 'ungranted' ? 'No access to the agent roster' : fleet.reason === 'unsupported' ? 'Agent roster not supported' : 'Agent roster could not load'}
-                        {...(fleet._tag === 'Unavailable' && fleet.reason === 'unsupported' ? { detail: 'This connection does not offer it' } : fleet._tag === 'Unavailable' && fleet.reason === 'ungranted' ? { detail: 'Read access has not been granted' } : {})}
-                        data-wf-roster-reason={fleet._tag === 'Unavailable' ? fleet.reason : undefined}
-                      />
-                    ) : stale ? (
-                      <SystemNotice scope="rail" kind="stale" connection title={fleet.coverage?._tag === 'Partial' ? 'Partial roster' : 'Last observed roster'} detail="Live updates pending" />
-                    ) : null}
-                    <footer {...stylex.props(styles.footer)}>
-                      <Aria.Button onPress={() => setScheme(scheme === 'dark' ? 'light' : 'dark')} aria-label="Toggle color scheme" {...stylex.props(styles.iconButton)}>
-                        {scheme === 'dark' ? '☀' : '☾'}
-                      </Aria.Button>
-                      <Aria.Button onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} {...stylex.props(styles.textButton)}>
-                        Missions
-                      </Aria.Button>
-                      <Aria.Button onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} {...stylex.props(styles.textButton)}>
-                        Usage
-                      </Aria.Button>
-                    </footer>
-                  </>
-                )}
-              </aside>
-              <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
+            <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} style={phoneViewportStyle} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
+              {narrow ? null : <>
+                <aside aria-label="Agents" style={{ width: collapsed ? 40 : Math.min(width, maxSidebar) }} {...stylex.props(styles.sidebar)}>
+                  <header {...stylex.props(styles.brand)}>
+                    <ChromeControl icon={collapsed ? 'chevron-right' : 'chevrons-left'} label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(!collapsed)} />
+                    {collapsed ? null : <strong>Fractal</strong>}
+                  </header>
+                  {collapsed ? null : sidebarBody}
+                </aside>
+                <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
+              </>}
+              <DockedSplit persistKey={`live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}`} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
+                <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
+                  <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} onSelectedViewChange={view => setInspectorView({ mount: dockedInspector, view })} />
+                </React.Suspense>
+              ) : undefined}>
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-                <ClockedThreadHeader agent={agent} stale={stale} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} /></>} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={() => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }} />
+                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} drawerOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleDrawer={toggleTerminal} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleDrawer={toggleTerminal} />}
                 <GatewayConnectionStatus />
-                {visiblePanes.length > 0 ? (
+                {!narrow && visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
                     <Aria.Button aria-pressed={selectedPane === 'thread'} onPress={() => navigate(current)} {...stylex.props(styles.textButton)}>
                       Thread
@@ -398,42 +535,42 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                       const id = `${pane.ref}:${pane.presentation ?? 'detail'}`
                       return (
                         <Aria.Button key={id} aria-pressed={id === selectedPane} onPress={() => navigate(current, id)} {...stylex.props(styles.textButton)}>
-                          {byRef.get(pane.ref)?.title ?? pane.ref.split('/').at(-1)}
+                          {paneTabLabel(pane.ref, byRef.get(pane.ref)?.title)}
                         </Aria.Button>
                       )
                     })}
                   </div>
                 ) : null}
-                <div ref={setPaneHost} {...stylex.props(styles.body)} />
+                {/* Keep this panel and its portal container at one reconciliation position across the breakpoint. */}
+                <PhoneWorkspaceTabs enabled={narrow} trailing={narrow && (terminalRef !== undefined || terminalDisabledReason !== undefined) ? <PhoneTerminalToggle pressed={terminalOpen} onPress={toggleTerminal} {...(terminalDisabledReason === undefined ? {} : { disabledReason: terminalDisabledReason })} /> : undefined} tabs={phoneTabs} selected={selectedPane === 'thread' ? current : selectedPane} onSelect={id => id === current || agents.some(row => row.ref === id) ? select(id) : navigate(current, id)}>
+                  <div ref={setPaneHost} {...stylex.props(styles.body, narrow && selectedPane === 'changes' && styles.phoneHidden)} />
+                  {narrow && selectedPane === 'changes' && current !== '' ? <React.Suspense fallback={<SystemNotice kind="loading" title="Loading captured changes" />}><ChangesInspector key={current} agentRef={current} width="fill" /></React.Suspense> : null}
+                </PhoneWorkspaceTabs>
               </section>
-              {diffOpen && openedTool === undefined && current !== '' ? (
-                <>
-                  <ResizableSplit id="live-change-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Change panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setDiffOpen(false)} onReset={() => setPanelFraction(380 / viewport)} />
-                  <React.Suspense fallback={<aside aria-label="Changes" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}><SystemNotice kind="loading" title="Loading captured changes" /></aside>}>
-                    <ChangesInspector key={current} agentRef={current} width={panelSize} />
-                  </React.Suspense>
-                </>
-              ) : null}
-              {openedTool !== undefined && current !== '' ? (
+              </DockedSplit>
+              {!narrow && openedTool !== undefined && current !== '' ? (
                 <>
                   <ResizableSplit id="live-tool-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Tool detail panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setOpenedTool(undefined)} onReset={() => setPanelFraction(380 / viewport)} />
-                  <aside aria-label="Tool detail" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}>
-                    <header {...stylex.props(styles.toolDetailHeader)}>
-                      <strong {...stylex.props(styles.toolDetailTitle)}>{openedTool.title}{openedTool.argsSummary === undefined ? '' : ` ${openedTool.argsSummary}`}</strong>
-                      <Aria.Button aria-label="Close tool detail" onPress={() => setOpenedTool(undefined)} {...stylex.props(styles.iconButton)}>×</Aria.Button>
-                    </header>
-                    <pre {...stylex.props(styles.toolDetailOutput)}>{openedTool.detail ?? (openedTool.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
-                  </aside>
+                  {toolDetail(openedTool, panelSize)}
                 </>
               ) : null}
+              {/* Always mounted: the theme portal host must exist before the sheet opens; contents render only while open. */}
+              <DeclarationDialog subject={declarationRef ?? ''} isOpen={declarationRef !== undefined} onOpenChange={(open) => { if (!open) setDeclarationRef(undefined) }} />
+              {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400}>
+                {current === '' ? null : openedTool !== undefined ? toolDetail(openedTool, undefined) : (
+                  <React.Suspense fallback={<SystemNotice kind="loading" title="Loading agent details" />}>
+                    <AgentDetailsPanel key={current} agentRef={current} width="fill" scheme={scheme} onClose={closeDetails} onOpen={(uri) => { closeDetails(); openDetailsUri(uri) }} />
+                  </React.Suspense>
+                )}
+              </NarrowSheet> : null}
               <div ref={overlayHost} {...stylex.props(styles.overlayHost)} />
             </div>
-          </ThreadHeaderSlotContext.Provider>
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
-  </>)
+    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === 'changes'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>}
+    </ThreadHeaderSlotContext.Provider>
+  </NarrowLayoutContext.Provider>)
 }
 
 /** Only time-bearing surfaces subscribe to the wall clock, not the workspace providers. */
@@ -475,7 +612,7 @@ const GatewayConnectionStatus = () => {
  * evict their follows. Render-time history updates avoid a second committed selection.
  * Locking a pane costs O(its rows) in the browser, so the outgoing pane is only covered by the
  * opaque shown pane during the switch frame and locked after that frame paints. */
-export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool, onOpenDocument, onOpenAgent, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly ux?: UxTelemetry }) {
+export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agentName, onOpenTool, onOpenDocument, onOpenAgent, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly hidden?: boolean; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly ux?: UxTelemetry }) {
   // Reading positions belong to this surface, not its three-pane DOM cache. A new
   // surface (including reload) starts following live; evicted panes keep memory here.
   const [viewportStore] = React.useState(() => new ViewportStore())
@@ -486,7 +623,7 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
   const [retained, setRetained] = React.useState<readonly RetainedPane[]>([])
   const [switched, setSwitched] = React.useState<{ readonly shown: string; readonly covered: string | undefined }>({ shown: current, covered: undefined })
   // The terminal is a drawer below the thread: the thread stays shown and usable beside it.
-  const visible = current !== '' && (view._tag === 'Thread' || view._tag === 'Terminal')
+  const visible = !hidden && current !== '' && (view._tag === 'Thread' || view._tag === 'Terminal')
   React.useLayoutEffect(() => {
     if (visible) return
     // Abandon at the eager view boundary, even if the transcript module or data
@@ -555,7 +692,7 @@ export function LiveSidebarToolbar(props: Omit<SidebarToolbarProps, 'searchStyle
 
 const styles = stylex.create({
   legacyBridge: { '--canvas': c.canvas, '--panel': c.raised, '--recess': c.message, '--ink': c.fg, '--muted': c.fgMuted, '--line': c.borderStrong, '--accent': c.primary, '--on-accent': c.onPrimary, '--selection': c.rowActive, '--good': c.done, '--warning': c.attention, '--danger': c.dangerFg, '--sans': t.fontSans, '--mono': t.fontMono },
-  app: { display: 'flex', height: 'calc(100dvh - var(--wf-devbar-space, 0px))', width: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  app: { display: 'flex', height: 'calc(100dvh - var(--wf-devbar-space, 0px))', width: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, paddingBlockStart: { default: 0, '@media (max-width: 899px)': 'env(safe-area-inset-top)' }, paddingBlockEnd: { default: 0, '@media (max-width: 899px)': 'env(safe-area-inset-bottom)' }, boxSizing: 'border-box' },
   // Out of flow, above the panes. Viewport-wide but zero-height: no hit area of
   // its own, yet shrink-to-fit popovers get the viewport as available width.
   overlayHost: { position: 'fixed', top: 0, left: 0, width: '100%', height: 0, zIndex: 20 },
@@ -576,7 +713,9 @@ const styles = stylex.create({
   skeletonHost: { gridRow: '2', width: '44%' },
   footer: { height: 40, display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0 },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
+  resourcesDock: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, height: '100%' },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
+  phoneHidden: { display: 'none' },
   // Identical geometry in both states: revealing a pane must not invalidate its layout. Only
   // non-inherited properties toggle (no inert/pointer-events/visibility), so a reveal does not
   // restyle the retained subtree; content-visibility already removes it from focus and a11y.
@@ -590,6 +729,7 @@ const styles = stylex.create({
   paneNotice: { position: 'relative', zIndex: 2 },
   empty: { position: 'relative', zIndex: 2, margin: 'auto', padding: s.section, color: c.fgMuted },
   changesPanel: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: 0, minHeight: 0, overflowY: 'auto', borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: c.border },
+  sheetPanel: { flexGrow: 1, borderLeftWidth: 0 },
   toolDetailHeader: { height: 40, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
   toolDetailTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize },
   toolDetailOutput: { margin: 0, padding: s.lg, minHeight: 0, overflowY: 'auto', fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: c.fgMuted },

@@ -283,6 +283,10 @@ Top-level schedules are also valid authored declarations: `st apply schedules.kd
 and publishes them without creating a mission run. Each schedule names the mission it will
 request at its declared times. Other top-level execution members still require a mission run.
 
+[`st schedules ls`](schedules-list.md) lists locally replicated declarations with recorded owners,
+nominal next declared ticks and explicit per-row knowledge age/unheard-host coverage. It does not
+contact the hosts or inspect occurrence history.
+
 The origin of the `mission-run.created` claim advances the mission run. It also materializes the run declarations.
 
 A replica stores the run and its steps. It can accept eligible work claims, but it does not evaluate the run.
@@ -1048,6 +1052,11 @@ dismissed it, and a request that defines its own `dismiss` answer keeps that mea
 which is where a `--new-run` asker reads it. `st work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
 history. A free-text ask works as before: it keeps no `request` field and takes no named answer.
+Assistant-scoped answers retain `assistant/chatgpt` as the claim actor and projected
+`respondent`; optional `sender_class`, `assistant_grant_id`, `assistant_owner`, and
+`assistant_session_actor` expose separate server-owned provenance, not person
+authority or an `acted_for` delegation. Human-readable work details display the
+respondent and all four provenance fields when present.
 
 #### Updates
 
@@ -1964,6 +1973,15 @@ schedule again never starts work from before the stop.
 
 The schedule does not assign work. The referenced mission defines its work selectors.
 
+### Optional automatic standby
+
+See [Automatic schedule standby](schedule-standby.md) for the `standby { host
+"archive"; after "5m" }` declaration and all-member adoption requirement.
+Jobs must be safe to run twice: while hosts cannot hear each other a job may run
+on both; write jobs so a second run is harmless.
+
+If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
+
 ## Mission revisions
 
 In [free mode](kdl-lifecycle.md#free-mode), any person or agent may revise any part of a run, as
@@ -2065,7 +2083,7 @@ Eligibility reads register the absent binding as a dependency. Its later publica
 
 ### Revision controls
 
-`cargo test -p st3-daemon --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
+`cargo test -p fractal-daemon --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
 
 `scripts/st3-revision-seat-eval/run ST3_FIXTURE_BINARY OUTPUT_DIR` runs actual CLI controls on a private daemon and real PTYs, using invented garden seats and `sleep` commands. It checks four builders across repeated revisions, explicit stop, removal and intentional cancellation with finally cleanup. It also removes a mission-owned binding after its declaring step completes, checks the missing-agent fault delivered to the requester, restores eligibility and cancels the control. All sockets, HOME/XDG directories and terminal roots are isolated. It writes `result.json` and tears down its own runtimes.
 
