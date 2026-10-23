@@ -181,7 +181,8 @@ def collect(github, checks, since, until, members):
                 continue
             attempt = job.get('run_attempt')
             wanted.append((run, job, check, real.get((check, attempt)),
-                           [name for name in members.get(check, ()) if real.get((name, attempt)) in ('failure', 'cancelled')],
+                           [other.get('name') for other in jobs if other.get('run_attempt') == attempt
+                            and member_of(other.get('name'), members.get(check, ())) and other.get('conclusion') in ('failure', 'cancelled')],
                            superseded(run, [other for other in jobs if other.get('run_attempt') == attempt], members.get(check, ()),
                                       newer)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
@@ -203,12 +204,17 @@ def head_of(run):
     return ((run.get('head_repository') or {}).get('full_name'), run.get('head_branch'))
 
 
+def member_of(name, members):
+    """Whether a job the API names is one of the workflow's member jobs; a matrix job's are named `KEY (0)`, `KEY (1)`, ..."""
+    return any(name == key or (name or '').startswith(f'{key} (') for key in members)
+
+
 def superseded(run, jobs, needed, newer):
     """Whether an aggregate's red in this attempt came only from a push that replaced the run: the run concluded cancelled;
     of the jobs a skip of the check would skip (`needed`), none failed and at least one was cancelled; and a run of a
     different head on the same branch was created before the first of those was cancelled. A timeout, a cancel with no
     newer run, or a failed member stays a hidden red; a red of a member that always runs stays visible."""
-    conclusions = {job.get('name'): job for job in jobs if job.get('name') in needed}
+    conclusions = {job.get('name'): job for job in jobs if member_of(job.get('name'), needed)}
     cancelled = [parse_time(job.get('completed_at')) for job in conclusions.values() if job.get('conclusion') == 'cancelled']
     if run.get('conclusion') != 'cancelled' or not cancelled or None in cancelled \
             or any(job.get('conclusion') == 'failure' for job in conclusions.values()):

@@ -330,6 +330,24 @@ class FlipReady(unittest.TestCase):
         with self.assertRaises(ValueError):
             flip.skipped_members('jobs:\n  linux-gate:\n    steps: []\n', policy)
 
+    def test_a_matrix_members_jobs_are_named_with_their_index_and_still_count(self):
+        # The API names fractal-web-execution's matrix jobs "fractal-web-execution (0)", "(1)", ... (run 39866986203).
+        def run(shards, conclusion='cancelled'):
+            self.gh = FakeGitHub()
+            self.ready_history(count=40, check='fractal-web')
+            self.gh.run(9000, at(5), [decision(check='fractal-web')], real='failure', check='fractal-web', conclusion=conclusion,
+                        branch='z', sha='e' * 40, ended=at(5, -300),
+                        members={f'fractal-web-execution ({i})': value for i, value in enumerate(shards)})
+            self.gh.run(9001, at(5, -60), [decision(check='fractal-web')], real='success', check='fractal-web', branch='z', sha='f' * 40)
+            return self.check_of('fractal-web')
+        entry = run(['cancelled', 'cancelled'])
+        self.assertEqual((entry['superseded_red'], entry['hidden_red']), ([9000], []))
+        entry = run(['cancelled', 'failure'])  # a failed shard: hidden
+        self.assertEqual((entry['superseded_red'], entry['hidden_red']), ([], [9000]))
+        entry = run(['success', 'failure'], conclusion='failure')  # not superseded, and the shard's red is a member red
+        self.assertEqual((entry['superseded_red'], entry['hidden_red'], entry['visible_red']), ([], [9000], []))
+        self.assertFalse(flip.member_of('fractal-web-execution-extra', ('fractal-web-execution',)))
+
     def test_a_superseded_aggregate_with_a_failed_member_stays_hidden_and_an_unrelated_red_does_not_block(self):
         def run(members):
             self.gh = FakeGitHub()
