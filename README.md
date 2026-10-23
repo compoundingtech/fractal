@@ -51,7 +51,7 @@ when you need them.
 
 - [Two machines](docs/site/guides/two-machines.md): connect machines and check replication.
 - [Missions in practice](docs/site/guides/missions-in-practice.md): revise work and ask for decisions.
-- [Talking to agents](docs/site/guides/talking-to-agents.md): terminal, phone, CLI and attachments.
+- [Talking to agents](docs/site/guides/talking-to-agents.md): web app, phone, CLI and attachments.
 - [Agent lifecycle](docs/site/guides/agent-lifecycle.md): create, restart and suspend agents.
 - [Upgrading](docs/site/guides/upgrading.md): choose a build and check recovery.
 - [GitHub integration](docs/site/guides/github-integration.md): repository intake and review.

@@ -13,8 +13,11 @@ asks the verifier, from the accepted base, whether the tree is now covered, and 
 
 The tree: HEAD, the commit you are pushing. The CI gate looks up the note for the pull request head's own tree, so the tree
 you built and signed is the tree that counts even when main has moved since; the merge queue still tests the integrated tree.
-It tells you how far behind the base the branch is. The command always runs in a fresh throwaway worktree of that commit, never
-in this checkout, so untracked or ignored files here cannot change the result. Nothing is linked in from here: when the tree
+It tells you how far behind the base the branch is. The command always runs in a clean worktree of that commit, never
+in this checkout, so untracked or ignored files here cannot change the result. The worktree is one of a small pool of persistent
+ones per repository (~/.cache/st-test/<hash of the git common dir>/tree-N, one flock each, so no two runs share one), reset to the
+commit and stripped of untracked and ignored files before every run: the same path every time keeps cargo's fingerprints and
+sccache's absolute-path keys valid, so a second run is warm. Nothing is linked in from here: when the tree
 has a megarepo.lock, its members are materialized under repos/ first, with the command CI's `megarepoApplyStep` runs
 (`mr apply`, from the flake's effect-utils pin), because both lanes read repos/effect-utils and their dev shells no longer
 create it.
@@ -87,12 +90,17 @@ OPT_IN = frozenset({RUST_TESTS})
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate'})  # rust-tests is not: a test's result does not depend on the base
 BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
-# The heavy checks build in one cargo target per host (~/.cache/st-test-target, or ST_EVIDENCE_TARGET), kept between runs, so a run
-# does not start cold: every run's worktree is new, so the workspace's own crates rebuild, but the dependencies do not. It lives
-# under ~/.cache/*-target, which the host's scratch sweep may reclaim when idle, and is removed before a run once it passes
-# TARGET_MAX_GB, only while no other run uses it. ST_EVIDENCE_TARGET=off builds in the throwaway worktree as before; a
-# CARGO_TARGET_DIR the caller set is left alone.
+# The heavy checks build in one cargo target per pool tree (<pool>/target-N, outside the tree so the cleaning keeps it), kept between
+# runs, so a run does not start cold: the tree's path is the same every run, so the workspace's own crates rebuild only when they
+# changed and the dependencies and build scripts are reused. It is removed before a run once it passes TARGET_MAX_GB (the run holds
+# the tree's lock, so nobody else uses it). ST_EVIDENCE_TARGET=PATH names one shared target for all trees instead (kept as before:
+# trimmed only while no other run uses it); ST_EVIDENCE_TARGET=off builds in the tree itself; a CARGO_TARGET_DIR the caller set is
+# left alone.
 TARGET_MAX_GB = 25.0  # operations' terms for a kept target on a shared host (as the pre-sign worker had)
+# The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
+# under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
+POOL_WAIT_SECONDS = 5
+POOL_SETTINGS = {}  # ST_TEST_TREES and ST_TEST_POOL as the caller set them: read before the seat scrub drops every ST_* name
 
 
 class Failure(Exception):
@@ -174,19 +182,30 @@ def size_gb(path):
     return total / 1e9
 
 
-def shared_target():
-    """The kept target for the heavy checks and a lock held while they use it, or (None, None) when it is off or the caller set one."""
+def trim(target):
+    """Empty a target past TARGET_MAX_GB. Only a directory cargo made (it writes CACHEDIR.TAG into a target) is emptied: never one a
+    caller named for something else."""
+    if (target / 'CACHEDIR.TAG').is_file() and size_gb(target) > TARGET_MAX_GB:
+        shutil.rmtree(target, ignore_errors=True)
+        target.mkdir(parents=True, exist_ok=True)
+
+
+def shared_target(tree_target=None):
+    """The kept target for the heavy checks and a lock held while they use it, or (None, None) when it is off or the caller set one.
+
+    With a pool tree's own target (and no ST_EVIDENCE_TARGET), that target: the tree's lock is held, so there is nothing to lock here."""
     if os.environ.get('ST_EVIDENCE_TARGET') == 'off' or os.environ.get('CARGO_TARGET_DIR'):
         return None, None
+    if tree_target and not os.environ.get('ST_EVIDENCE_TARGET'):
+        tree_target.mkdir(parents=True, exist_ok=True)
+        trim(tree_target)
+        return tree_target, None
     target = Path(os.environ.get('ST_EVIDENCE_TARGET') or Path.home() / '.cache/st-test-target')
     target.mkdir(parents=True, exist_ok=True)
     lock = open(target.parent / f'{target.name}.lock', 'w')
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # nobody else is using it: the moment to keep it small
-        # Only a directory cargo made (it writes CACHEDIR.TAG into a target) is emptied: never one a caller named for something else.
-        if (target / 'CACHEDIR.TAG').is_file() and size_gb(target) > TARGET_MAX_GB:
-            shutil.rmtree(target, ignore_errors=True)
-            target.mkdir(parents=True, exist_ok=True)
+        trim(target)
     except BlockingIOError:
         pass
     fcntl.flock(lock, fcntl.LOCK_SH)  # held until this run ends; cargo's own lock orders the builds inside it
@@ -262,6 +281,77 @@ def target_worktree(base, scratch):
     directory = Path(scratch) / 'tree'
     git('worktree', 'add', '--detach', '-q', str(directory), commit)
     return directory, commit
+
+
+def pool_size():
+    """How many persistent trees the pool holds: ST_TEST_TREES, else the host's heavy slots plus one; None (off) for fresh worktrees."""
+    value = POOL_SETTINGS.get('ST_TEST_TREES', '')
+    if value == 'off':
+        return None
+    if value:
+        if not value.isdigit() or int(value) < 1:
+            raise Failure(f'ST_TEST_TREES={value!r} must be a positive number or "off"')
+        return int(value)
+    try:
+        slots = int((Path.home() / '.config/cargo-heavy-slots').read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        slots = 1
+    return max(slots, 1) + 1
+
+
+def pool_root():
+    """This repository's pool: one directory per git common dir, so clones and worktrees of one repository share it."""
+    common = text(git('rev-parse', '--path-format=absolute', '--git-common-dir'))
+    key = hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:16]
+    return Path(POOL_SETTINGS.get('ST_TEST_POOL') or Path.home() / '.cache/st-test') / key
+
+
+def acquire_tree(root, size):
+    """(n, lock): the lowest free tree of the pool, held by an flock until the lock is closed; waits while every tree is in use."""
+    root.mkdir(parents=True, exist_ok=True)
+    waited = False
+    while True:
+        for n in range(size):
+            lock = open(root / f'tree-{n}.lock', 'w')
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return n, lock
+            except BlockingIOError:
+                lock.close()
+        if not waited:
+            print(f'st-test: all {size} pool trees are in use; waiting for one', file=sys.stderr)
+            waited = True
+        time.sleep(POOL_WAIT_SECONDS)
+
+
+def is_pool_tree(directory):
+    """Whether `directory` is a worktree of this repository (a leftover from another clone or a broken one is replaced)."""
+    done = git('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=directory, check=False)
+    ours = git('rev-parse', '--path-format=absolute', '--git-common-dir', check=False)
+    return done.returncode == 0 and ours.returncode == 0 and os.path.realpath(text(done)) == os.path.realpath(text(ours))
+
+
+def prepare_tree(root, n, commit):
+    """The pool tree `n`, at `commit` with nothing untracked or ignored left in it (build output lives outside, in target-N), or a
+    Failure when it is still not clean: the signature is for the committed tree."""
+    directory = root / f'tree-{n}'
+    if directory.exists() and not is_pool_tree(directory):
+        git('worktree', 'remove', '--force', str(directory), check=False)
+        shutil.rmtree(directory, ignore_errors=True)
+    git('worktree', 'prune', check=False)
+    if directory.exists():
+        git('reset', '--hard', '-q', cwd=directory)
+        git('checkout', '--detach', '-q', '-f', commit, cwd=directory)
+    else:
+        git('worktree', 'add', '--detach', '--force', '-q', str(directory), commit)
+    if git('clean', '-ffdxq', cwd=directory, check=False).returncode != 0:
+        # A check can leave read-only directories (copies of nix store paths, under .devenv/ and repos/): make them writable, once.
+        subprocess.run(['chmod', '-R', 'u+rwX', '--', str(directory)], check=False, capture_output=True)
+        git('clean', '-ffdxq', cwd=directory)
+    dirty = text(git('status', '--porcelain', cwd=directory))
+    if dirty:
+        raise Failure(f'pool tree {directory} is not clean after resetting it to {commit[:12]}: {dirty.splitlines()[0]}')
+    return directory
 
 
 def members_command(directory):
@@ -502,6 +592,8 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
 
 
 def main(argv):
+    POOL_SETTINGS.clear()
+    POOL_SETTINGS.update({name: os.environ[name] for name in ('ST_TEST_TREES', 'ST_TEST_POOL') if name in os.environ})
     scrub_git_environment()
     scrub_seat_environment()
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
@@ -583,8 +675,14 @@ def main(argv):
             path.chmod(0o700)
             tools[name] = str(path)
         directory = Path(scratch) / 'tree'
+        pool_trees, tree_lock, tree_target = pool_size(), None, None
         try:
-            directory, commit = target_worktree(args.base, scratch)
+            if pool_trees:
+                commit, root = target_commit(args.base), pool_root()
+                n, tree_lock = acquire_tree(root, pool_trees)
+                directory, tree_target = prepare_tree(root, n, commit), root / f'target-{n}'
+            else:
+                directory, commit = target_worktree(args.base, scratch)
             lag = behind(args.base)
             tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
             lane_base = branch_point(commit, base_commit)
@@ -593,7 +691,7 @@ def main(argv):
             signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
             rows, failed, unsigned = [], False, False
             lanes = lane_names(args.base)
-            target, target_lock = shared_target() if any(name in HEAVY for name in checks) else (None, None)
+            target, target_lock = shared_target(tree_target) if any(name in HEAVY for name in checks) else (None, None)
             unmaterialized = materialize_members(directory)
             for name in checks:
                 if unmaterialized:
@@ -649,8 +747,10 @@ def main(argv):
                     print(f'  {line}')
             return 1 if failed else (4 if unsigned else 0)
         finally:
-            if directory.exists():
+            if not pool_trees and directory.exists():
                 git('worktree', 'remove', '--force', str(directory), check=False)
+            if tree_lock:
+                tree_lock.close()
 
 
 if __name__ == '__main__':
