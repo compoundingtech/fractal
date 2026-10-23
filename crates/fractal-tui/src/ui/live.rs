@@ -13,7 +13,7 @@ use super::direct;
 use super::glass::GlassWrite;
 use super::view::{Load, MissionPreview};
 use super::{AgentControl, Effect, Guard, Ui};
-use crate::feed::{self, Command, Inventories, Inventory, TerminalUpdate, Window};
+use crate::feed::{self, Command, Inventories, Inventory, Window};
 use crate::model::{self, Collection, Model};
 use anyhow::Result;
 use crossterm::{
@@ -982,60 +982,7 @@ pub fn run(context: Context) -> Result<()> {
                     save_cache(cache_path.as_deref(), &person, &model);
                     changed = true;
                 }
-                feed::Update::Terminal(update) => match update {
-                    TerminalUpdate::Attached {
-                        terminal_id,
-                        attachment_id,
-                        incarnation,
-                    } => {
-                        attached = Some(Following {
-                            terminal_id,
-                            attachment_id,
-                            incarnation,
-                        });
-                    }
-                    TerminalUpdate::Screen(screen) => {
-                        if let Some(view) = ui.terminal.as_mut() {
-                            view.lines = screen_lines(&screen);
-                            view.cursor = screen
-                                .cursor
-                                .visible
-                                .then_some((screen.cursor.row, screen.cursor.column));
-                            view.stale = None;
-                            if !screen.title.is_empty() {
-                                view.title = format!("{} · {}", view.name, screen.title);
-                            }
-                        }
-                    }
-                    TerminalUpdate::Reconnecting(reason) => {
-                        if let Some(view) = ui.terminal.as_mut() {
-                            view.stale = Some(reason);
-                        }
-                    }
-                    TerminalUpdate::Ended { restarted, reason } => {
-                        if ui
-                            .terminal
-                            .as_ref()
-                            .is_some_and(|view| view.ended.is_none())
-                        {
-                            super::slo::METRICS.add("dead_terminal_tabs", 1);
-                        }
-                        attached = None;
-                        match ui.terminal.as_mut() {
-                            Some(view) => {
-                                view.ended = Some(if restarted {
-                                    "Terminal restarted; open it again to follow the new one".into()
-                                } else {
-                                    reason
-                                })
-                            }
-                            None if !restarted => {
-                                ui.flash(format!("Could not open the terminal: {reason}"))
-                            }
-                            None => {}
-                        }
-                    }
-                },
+                feed::Update::Terminal(update) => attach::apply_terminal_update(&mut ui, update, &mut attached),
             }
         }
         while let Ok(result) = fetched.try_recv() {
@@ -1345,12 +1292,12 @@ pub fn run(context: Context) -> Result<()> {
                 if shown_tab == 1 {
                     let _ = commands.send(Command::Unfollow);
                     attached = None;
-                    view.stale = Some("paused while hidden".into());
+                    if !attach::retryable(view) { view.stale = Some("paused while hidden".into()); }
                 } else if tab == 1 {
                     let _ = commands.send(Command::Follow {
                         runtime_ids: runtime_ids.clone(),
                     });
-                    view.stale = Some("reconnecting".into());
+                    if !attach::retryable(view) { view.stale = Some("reconnecting".into()); }
                 }
             }
             shown_tab = tab;

@@ -1,5 +1,6 @@
 //! Initial terminal attachment lifecycle; callbacks are fenced before any selected-view effects.
-use super::{Command, Direct, Fetched, Ui, connecting_text};
+use super::{Command, Direct, Fetched, Following, Ui, connecting_text, screen_lines};
+use crate::feed::TerminalUpdate;
 use std::{collections::BTreeMap, future::Future, net::Shutdown, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tokio::{sync::mpsc, task::JoinHandle};
 
@@ -144,15 +145,25 @@ impl State {
                 self.note = None;
                 self.started = None;
                 if self.opens.remove(&agent).is_some() { crate::ui::slo::METRICS.add("terminal_open_errors", 1); }
+                // Native setup has failed even if the opportunistic screen feed never replies.
+                // A real fallback screen can clear this state; errors must keep retry available.
+                if let Some(view) = ui.terminal_view_mut(&agent) {
+                    view.stale = Some(failed(&reason));
+                    view.ended = None;
+                }
                 if reason.ends_with("timed out") {
                     self.cancel(&agent);
                     self.pending.remove(&agent);
-                    if let Some(view) = ui.terminal_view_mut(&agent) { view.stale = Some(failed(&reason)); }
-                } else if agent.starts_with("terminal/") {
-                    if let Some(view) = ui.terminal_view_mut(&agent) { view.ended = Some(format!("could not attach: {reason}")); }
-                } else if ui.terminal_view(&agent).is_some() {
-                    ui.flash(format!("No direct terminal ({reason}); showing st's view of it"));
-                    let _ = commands.send(Command::Follow { runtime_ids });
+                } else if !agent.starts_with("terminal/") && ui.terminal_view(&agent).is_some() {
+                    if commands.send(Command::Follow { runtime_ids }).is_err() {
+                        let reason = format!("{reason}; fallback Follow unavailable");
+                        if let Some(view) = ui.terminal_view_mut(&agent) {
+                            view.stale = Some(failed(&reason));
+                        }
+                        ui.flash(format!("Could not open the terminal: {reason}"));
+                    } else {
+                        ui.flash(format!("No direct terminal ({reason}); trying st's view"));
+                    }
                 }
             }
             _ => unreachable!("only initial attach results enter this dispatch"),
@@ -166,6 +177,61 @@ pub(super) fn close(direct: Direct) {
 }
 
 fn failed(reason: &str) -> String { format!("failed: {reason} · Ctrl+R to retry") }
+
+pub(super) fn apply_terminal_update(ui: &mut Ui, update: TerminalUpdate, attached: &mut Option<Following>) {
+    match update {
+        TerminalUpdate::Attached { terminal_id, attachment_id, incarnation } => {
+            *attached = Some(Following { terminal_id, attachment_id, incarnation });
+        }
+        TerminalUpdate::Screen(screen) => {
+            if let Some(view) = ui.terminal.as_mut() {
+                view.lines = screen_lines(&screen);
+                view.cursor = screen.cursor.visible.then_some((screen.cursor.row, screen.cursor.column));
+                view.stale = None;
+                if !screen.title.is_empty() {
+                    view.title = format!("{} · {}", view.name, screen.title);
+                }
+            }
+        }
+        TerminalUpdate::Reconnecting(reason) => {
+            if let Some(view) = ui.terminal.as_mut() {
+                view.stale = Some(if retryable(view) {
+                    failed(&format!("fallback screen: {reason}"))
+                } else {
+                    reason
+                });
+            }
+        }
+        TerminalUpdate::Ended { restarted, reason } => {
+            *attached = None;
+            if let Some(view) = ui.terminal.as_mut().filter(|view| retryable(view)) {
+                // Do not replace an initial-attach failure with an unretryable ended state.
+                let reason = if restarted { format!("fallback terminal restarted: {reason}") }
+                    else { format!("fallback screen: {reason}") };
+                view.stale = Some(failed(&reason));
+                return;
+            }
+            if ui.terminal.as_ref().is_some_and(|view| view.ended.is_none()) {
+                crate::ui::slo::METRICS.add("dead_terminal_tabs", 1);
+            }
+            match ui.terminal.as_mut() {
+                Some(view) => {
+                    view.ended = Some(if restarted {
+                        "Terminal restarted; open it again to follow the new one".into()
+                    } else {
+                        reason
+                    });
+                }
+                None if !restarted => ui.flash(format!("Could not open the terminal: {reason}")),
+                None => {}
+            }
+        }
+    }
+}
+
+pub(super) fn retryable(view: &crate::ui::TerminalView) -> bool {
+    view.native.is_none() && view.stale.as_deref().is_some_and(|status| status.starts_with("failed: "))
+}
 
 #[cfg(test)]
 mod tests {
@@ -281,6 +347,62 @@ mod tests {
         }, &tx);
         assert!(matches!(rx.try_recv(), Ok(Command::Follow { runtime_ids }) if runtime_ids == ["runtime/A"]));
         assert!(state.started.is_none());
+    }
+
+    #[test]
+    fn native_failure_then_closed_follow_channel_is_failed_with_a_reason() {
+        let (mut state, mut ui, tx, rx) = selected("agent/A");
+        drop(rx);
+        let generation = state.generation;
+        state.apply_fetched(&mut ui, Fetched::NativeFailed {
+            agent: "agent/A".into(), generation, runtime_ids: vec!["runtime/A".into()],
+            reason: "remote unavailable".into(),
+        }, &tx);
+        state.tick(&mut ui);
+        let view = ui.terminal.as_ref().unwrap();
+        assert_eq!(view.stale.as_deref(), Some("failed: remote unavailable; fallback Follow unavailable · Ctrl+R to retry"));
+        assert!(retryable(view));
+        assert!(view.ended.is_none());
+        assert!(state.started.is_none());
+    }
+
+    #[test]
+    fn fallback_screen_failure_stays_failed_and_ctrl_r_starts_exactly_one_attempt() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (mut state, mut ui, tx, mut rx) = selected("agent/A");
+        let generation = state.generation;
+        state.apply_fetched(&mut ui, Fetched::NativeFailed {
+            agent: "agent/A".into(), generation, runtime_ids: vec!["runtime/A".into()],
+            reason: "remote unavailable".into(),
+        }, &tx);
+        assert!(matches!(rx.try_recv(), Ok(Command::Follow { .. })));
+        let mut attached = None;
+        apply_terminal_update(&mut ui, TerminalUpdate::Reconnecting("gateway screen unavailable".into()), &mut attached);
+        assert_eq!(ui.terminal.as_ref().unwrap().stale.as_deref(), Some("failed: fallback screen: gateway screen unavailable · Ctrl+R to retry"));
+        apply_terminal_update(&mut ui, TerminalUpdate::Ended {
+            restarted: false, reason: "screen read refused".into(),
+        }, &mut attached);
+        state.tick(&mut ui);
+        let view = ui.terminal.as_ref().unwrap();
+        assert_eq!(view.stale.as_deref(), Some("failed: fallback screen: screen read refused · Ctrl+R to retry"));
+        assert!(view.ended.is_none());
+        assert!(state.started.is_none());
+        assert!(state.note.is_none());
+        assert!(rx.try_recv().is_err());
+
+        ui.effects.clear();
+        ui.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        let effects = std::mem::take(&mut ui.effects);
+        let [crate::ui::Effect::OpenTerminal { agent }] = effects.as_slice() else {
+            panic!("retry must emit exactly one OpenTerminal effect");
+        };
+        assert_eq!(agent, "agent/A");
+        // Process the effect with the same lifecycle entry used by the live OpenTerminal arm.
+        let (retry, _, _) = state.begin(&mut ui, agent);
+        assert_eq!(retry, generation + 1);
+        assert!(state.started.is_some());
+        assert_eq!(state.pending.get(agent), Some(&retry));
+        assert_eq!(state.wanted.len(), 1);
     }
 
     #[test]
