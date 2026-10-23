@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import textwrap
 import itertools
+import sys
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -16,7 +17,7 @@ workflow = (ROOT / ".github/workflows/fleet.yml").read_text()
 picker = workflow.split("  pick-runner:\n", 1)[1].split("  namespace-capacity:\n", 1)[0]
 assert "vars.CI1_RUNNERS == 'on'" in picker, "general PR picking remains opt-in"
 # Read this generated YAML block scalar without adding a YAML dependency to the CI shell.
-script = textwrap.dedent(picker.split("        run: |\n", 1)[1].split("\n      - ", 1)[0])
+script = textwrap.dedent(picker.split("      - if: ", 1)[1].split("        run: |\n", 1)[1].split("\n      - ", 1)[0])
 bash = shutil.which("bash")
 assert bash, "runner selection tests require bash on PATH"
 
@@ -256,8 +257,10 @@ for job in ("linux-tests", "linux-tests-shard-2", "linux-tests-shard-3", "linux-
 assert "vars.CI1_MIN_IDLE || '1'" in picker, "use an idle general slot without requiring the entire pool"
 
 # Evaluate the generated runs-on expressions, not a second copy of the routing rule.
-def route(job, event, profile='', picked='', merge_ci1='', merge_picked='', partial_primary='', partial_mail='', producer_mode='', producer_picked=''):
+def route(job, event, profile='', picked='', merge_ci1='', merge_picked='', partial_primary='', partial_mail='', producer_mode='', producer_picked='', pr_profile='', pr_optional=''):
     expression = blocks[job].split('runs-on: ', 1)[1].splitlines()[0].strip().removeprefix('${{').removesuffix('}}').strip()
+    expression = expression.replace('needs.pick-runner.outputs.namespace_pr_optional', repr(pr_optional))
+    expression = expression.replace('needs.pick-runner.outputs.namespace_pr', repr(pr_profile))
     expression = expression.replace('needs.pick-runner.outputs.ci1_build', repr(producer_picked))
     expression = expression.replace('vars.CI_MERGE_TEST_BUILD_OWNED', repr(producer_mode))
     expression = expression.replace('needs.pick-runner.outputs.merge_ci1', repr(merge_picked))
@@ -559,3 +562,15 @@ assert route('linux-test-build', 'merge_group', producer_mode='on', producer_pic
 for job in ('linux-tests','linux-tests-shard-2','linux-tests-shard-3','linux-tests-shard-4','mail-redelivery-canaries','isolation-vm','linux-clippy','linux-fleet-compat'):
     assert 'ci1_build' not in blocks[job] and 'CI_MERGE_TEST_BUILD_OWNED' not in blocks[job]
 print('passed: merge producer-only six-member admission, at most three busy and two eligible idle, host affinity, configured Namespace rollback and unchanged other consumers')
+# The native provider limit applies only to unqueued PR Namespace fallbacks.
+pr_labels = '["namespace-profile-smalltalk-pr-linux-x86-64;job.priority=2;github.run-id=123"]'
+for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'isolation-vm',
+            'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
+    assert route(job, 'pull_request', pr_profile=pr_labels) == json.loads(pr_labels), job
+    for event in ('merge_group', 'push', 'workflow_dispatch', 'schedule'):
+        assert route(job, event, pr_profile=pr_labels) == route(job, event), (job, event)
+for job in ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
+    assert route(job, 'pull_request', picked='["ci1"]', pr_profile=pr_labels) == ['ci1'], job
+assert "github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on'" in picker.split('      - if:',1)[1].split('name:',1)[0]
+subprocess.run([sys.executable, str(ROOT / 'scripts/ci-namespace-pr-profile-test')], check=True)
+print('passed: PR-only provisioned profile, unchanged owned/merge/non-PR routing')
