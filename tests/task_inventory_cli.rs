@@ -478,7 +478,7 @@ fn completed_single_agent_writer_abas_during_runtime_observation_are_incomplete(
             } else {
                 Default::default()
             };
-            let value = tasks_during_held_observation(tmp.path(), &catalog, &bin, || {
+            tasks_during_held_observation(tmp.path(), &catalog, &bin, || {
                 if writer == "publish" {
                     for (source, input, expected) in [
                         (&source_b, digest_b.as_str(), digest_a.as_str()),
@@ -529,8 +529,7 @@ fn completed_single_agent_writer_abas_during_runtime_observation_are_incomplete(
                     fs::read_to_string(catalog.join(".st2/catalog-generation")).unwrap(),
                     "2\n"
                 );
-            });
-            value
+            })
         });
         assert_generation_changed(&value, writer);
     }
