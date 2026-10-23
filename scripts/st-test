@@ -157,7 +157,8 @@ def shared_target():
     lock = open(target.parent / f'{target.name}.lock', 'w')
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # nobody else is using it: the moment to keep it small
-        if size_gb(target) > TARGET_MAX_GB:
+        # Only a directory cargo made (it writes CACHEDIR.TAG into a target) is emptied: never one a caller named for something else.
+        if (target / 'CACHEDIR.TAG').is_file() and size_gb(target) > TARGET_MAX_GB:
             shutil.rmtree(target, ignore_errors=True)
             target.mkdir(parents=True, exist_ok=True)
     except BlockingIOError:
