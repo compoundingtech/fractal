@@ -19,7 +19,7 @@ the remote has it too); --rerun runs it anyway. It tells you how far behind the 
 The command always runs in a clean worktree of that commit, never
 in this checkout, so untracked or ignored files here cannot change the result. The worktree is one of a small pool of persistent
 ones per repository (~/.cache/st-test/<hash of the git common dir>/tree-N, one flock each, so no two runs share one), reset to the
-commit and stripped of untracked and ignored files before every run: the same path every time keeps cargo's fingerprints and
+commit and stripped of untracked and ignored files (except the megarepo members, node_modules and target/compat-baselines) before every run: the same path every time keeps cargo's fingerprints and
 sccache's absolute-path keys valid, so a second run is warm. Nothing is linked in from here: when the tree
 has a megarepo.lock, its members are materialized under repos/ first, with the command CI's `megarepoApplyStep` runs
 (`mr apply`, from the flake's effect-utils pin), because both lanes read repos/effect-utils and their dev shells no longer
@@ -92,6 +92,9 @@ TARGET_MAX_GB = 25.0  # operations' terms for a kept target on a shared host (as
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
 POOL_WAIT_SECONDS = 5
+# Ignored inputs a pool tree keeps between runs (git clean -e): the megarepo members, the installed dependencies and the downloaded
+# compat baselines cost minutes to materialize, install and download again. They are not tracked files, so the tree stays exact.
+POOL_KEEP = ('/repos/', 'node_modules/', '/target/compat-baselines/')
 POOL_SETTINGS = {}  # ST_TEST_TREES and ST_TEST_POOL as the caller set them: read before the seat scrub drops every ST_* name
 
 
@@ -335,11 +338,13 @@ def prepare_tree(root, n, commit):
         git('checkout', '--detach', '-q', '-f', commit, cwd=directory)
     else:
         git('worktree', 'add', '--detach', '--force', '-q', str(directory), commit)
-    if git('clean', '-ffdxq', cwd=directory, check=False).returncode != 0:
+    clean = ['clean', '-ffdxq', *[f'--exclude={pattern}' for pattern in POOL_KEEP]]
+    if git(*clean, cwd=directory, check=False).returncode != 0:
         # A check can leave read-only directories (copies of nix store paths, under .devenv/ and repos/): make them writable, once.
         subprocess.run(['chmod', '-R', 'u+rwX', '--', str(directory)], check=False, capture_output=True)
-        git('clean', '-ffdxq', cwd=directory)
-    dirty = text(git('status', '--porcelain', cwd=directory))
+        git(*clean, cwd=directory)
+    # The tracked files must equal the commit (the signature is for it); what is kept above is ignored input, not a tracked file.
+    dirty = text(git('status', '--porcelain', '--untracked-files=no', cwd=directory))
     if dirty:
         raise Failure(f'pool tree {directory} is not clean after resetting it to {commit[:12]}: {dirty.splitlines()[0]}')
     return directory

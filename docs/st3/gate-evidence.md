@@ -1348,8 +1348,9 @@ many commits behind the base the branch is. It no longer signs the merge tree (t
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a clean
 worktree of that commit, so untracked or ignored files in your checkout cannot change the result. The worktree is one of a small pool
 of persistent ones per repository (`~/.cache/st-test/<hash of the git common dir>/tree-N`), each held by an flock while a run uses it
-(a run waits for a free one and never shares one with a concurrent run); before each run the tree is reset to the commit, stripped of
-untracked and ignored files, and checked clean (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
+(a run waits for a free one and never shares one with a concurrent run); before each run the tree is reset to the commit and stripped of
+untracked and ignored files except the inputs that cost minutes to fetch again (the megarepo members under `repos/`, every `node_modules/`
+and `target/compat-baselines/`), and its tracked files must equal the commit (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
 fingerprints and sccache's absolute-path keys stay valid and a second run is warm. `ST_TEST_TREES` sets the pool size (default: the
 host's heavy slots from `~/.config/cargo-heavy-slots`, plus one; `off` runs in a fresh throwaway worktree as before) and `ST_TEST_POOL`
 its directory. When that tree has a

@@ -489,6 +489,21 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
         self.assertFalse((tree / '.devenv/store').exists())
 
+    def test_the_inputs_that_cost_minutes_to_fetch_survive_the_cleaning_and_everything_else_goes(self):
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        tree = self.pool() / 'tree-0'
+        kept = ['repos/effect-utils/src.ts', 'apps/web/node_modules/pkg/index.js', 'node_modules/.pnpm/x', 'target/compat-baselines/abc/bin']
+        gone = ['stray.txt', 'target/debug/junk', 'repos-not/file', 'cache/other/node_modules_not']
+        for name in kept + gone:
+            (tree / name).parent.mkdir(parents=True, exist_ok=True)
+            (tree / name).write_text('x')
+        (tree / 'a.txt').write_text('edited')  # tracked: reset
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.assertEqual([name for name in kept if not (tree / name).exists()], [])
+        self.assertEqual([name for name in gone if (tree / name).exists()], [])
+        self.assertEqual((tree / 'a.txt').read_text(), 'one\n')
+
     def test_a_pool_tree_that_is_not_a_worktree_of_this_repository_is_replaced(self):
         self.commit('b.txt', 'two')
         self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
