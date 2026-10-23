@@ -1569,7 +1569,7 @@ class CommittedPolicy(unittest.TestCase):
         # job, which passes without running the lane when no web path changed against that run's base, so it is no evidence.
         web = self.rules('fractal-web')
         self.assertEqual(sorted(web['kinds']), ['wrapper'])
-        self.assertEqual(web['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent'))
+        self.assertEqual(web['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent', 'queue'))
         # A host or agent note is one local run of every kit play and app test (scripts/ci-local-web), recorded as one shard of a
         # pull request, so the shard-count and input-order rules below apply to it as to CI's.
         host = web['kinds']['wrapper']['by_level']['host']
