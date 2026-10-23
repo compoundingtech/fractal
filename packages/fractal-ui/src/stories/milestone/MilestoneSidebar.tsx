@@ -1,16 +1,14 @@
 // Workshop-only composition: not exported from the package. The roster is one React Aria Tree (folder → agent → subagent);
-// rows are a milestone SR-2 composition with fixed trailing columns, built from the kit's status, time and hover-card parts.
+// each agent row is the kit `MilestoneAgentRow`, the same component the live sidebar renders inside `SidebarTree`.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Disclosure, DisclosurePanel, Input, Label, Popover, SearchField, Tree, TreeItem, TreeItemContent, type Key } from 'react-aria-components'
-import { AgentHoverCard, Highlight, sidebarRowAccessibleName } from '../../assistant-ui/sidebar/SidebarAgentRow'
-import { SidebarTime } from '../../assistant-ui/sidebar/SidebarTime'
-import { SidebarDuration } from '../../assistant-ui/sidebar/SidebarDuration'
+import { Button, Disclosure, DisclosurePanel, Input, Label, SearchField, Tree, TreeItem, TreeItemContent, type Key } from 'react-aria-components'
+import { sidebarRowAccessibleName } from '../../assistant-ui/sidebar/SidebarAgentRow'
+import { MilestoneAgentRow } from '../../assistant-ui/sidebar/MilestoneAgentRow'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { Icon } from '../../assistant-ui/composition/Icons'
-import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
 import type { RosterFolder } from './milestone-fixtures'
-import { StatusGlyph } from './MilestonePane'
 
 export type RosterState = 'ready' | 'loading' | 'empty' | 'error' | 'stale'
 export interface MilestoneSidebarProps {
@@ -32,8 +30,6 @@ export interface MilestoneSidebarProps {
   readonly modKey: string
 }
 
-const spend = Intl.NumberFormat('en', { style: 'currency', currency: 'USD', notation: 'compact', maximumSignificantDigits: 2 })
-const tokens = Intl.NumberFormat('en', { notation: 'compact', maximumSignificantDigits: 2 })
 const folderKey = (id: string) => `folder:${id}`
 const matches = (row: Row, needle: string) => `${row.title} ${row.host} ${row.ref}`.toLowerCase().includes(needle)
 
@@ -52,7 +48,6 @@ export function MilestoneSidebar(props: MilestoneSidebarProps) {
   const showRows = state === 'ready' || state === 'stale'
   const treeRef = React.useRef<HTMLDivElement>(null)
   const rows = React.useMemo(() => new Map(folders.flatMap(folder => folder.rows.flatMap(row => [[row.ref, row] as const, ...row.children.map(child => [child.ref, child] as const)]))), [folders])
-  const hover = useHoverCard()
   const toggle = (key: Key) => setExpanded(current => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next })
   // One compact row under the agent list (RM1-Q7, decided).
   const sections = <div data-section-nav="footer" {...stylex.props(styles.sections, styles.sectionsFooter)}>
@@ -102,72 +97,26 @@ export function MilestoneSidebar(props: MilestoneSidebarProps) {
               <Button slot="chevron" excludeFromTabOrder {...stylex.props(styles.chevron)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} size={12} /></Button>
               <span {...stylex.props(styles.folderLabel)}>{folder.label}</span><span aria-hidden="true" {...stylex.props(styles.count)}>{folder.rows.length}</span>
             </div>}</TreeItemContent>
-            {folder.rows.map(row => <AgentItem key={row.ref} row={row} {...props} now={clock} hover={hover} />)}
+            {folder.rows.map(row => <AgentItem key={row.ref} row={row} {...props} now={clock} frozen={state === 'stale'} />)}
           </TreeItem>)}
         </Tree>
       </div>}
     </div>
     {sections}
-    <Popover isNonModal isOpen={hover.row !== undefined} onOpenChange={open => { if (!open) hover.close() }} triggerRef={hover.anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
-      {hover.row !== undefined && <AgentHoverCard row={hover.row} now={clock} />}
-    </Popover>
   </aside>
 }
 
-interface HoverCard {
-  readonly row: Row | undefined
-  readonly anchor: React.RefObject<HTMLElement | null>
-  readonly start: (row: Row, element: HTMLElement | null) => void
-  readonly end: () => void
-  readonly close: () => void
-}
-
-/** Pointer hover opens the kit hover card after 150ms beside the row; leaving closes it after 300ms. */
-function useHoverCard(): HoverCard {
-  const [row, setRow] = React.useState<Row>()
-  const anchor = React.useRef<HTMLElement | null>(null)
-  const timer = React.useRef<number | undefined>(undefined)
-  React.useEffect(() => () => window.clearTimeout(timer.current), [])
-  return React.useMemo(() => ({
-    row, anchor,
-    start: (next: Row, element: HTMLElement | null) => { window.clearTimeout(timer.current); timer.current = window.setTimeout(() => { anchor.current = element; setRow(next) }, 150) },
-    end: () => { window.clearTimeout(timer.current); timer.current = window.setTimeout(() => setRow(undefined), 300) },
-    close: () => { window.clearTimeout(timer.current); setRow(undefined) },
-  }), [row])
-}
-
-type AgentItemProps = MilestoneSidebarProps & { readonly row: Row; readonly hover: HoverCard }
-function AgentItem({ row, hover, ...props }: AgentItemProps) {
-  const element = React.useRef<HTMLDivElement>(null)
+type AgentItemProps = MilestoneSidebarProps & { readonly row: Row; readonly frozen: boolean }
+function AgentItem({ row, frozen, ...props }: AgentItemProps) {
   const active = row.ref === props.activeRef
-  return <TreeItem ref={element} id={row.ref} textValue={row.title} aria-label={`${sidebarRowAccessibleName(row)}${active ? ', open' : ''}`}
-    onHoverStart={() => hover.start(row, element.current)} onHoverEnd={hover.end} {...stylex.props(styles.item)}>
-    <TreeItemContent>{({ hasChildItems, isExpanded, isFocusVisible, level }) => <MilestoneAgentRow row={row} level={level} active={active} focused={isFocusVisible} query={props.query} now={props.now} stale={props.state === 'stale'}
+  return <TreeItem id={row.ref} textValue={row.title} aria-label={`${sidebarRowAccessibleName(row)}${active ? ', open' : ''}`} {...stylex.props(styles.item)}>
+    {/* RAC levels: folder 1, agent 2, subagent 3; the row's depth counts below the root agent. */}
+    <TreeItemContent>{({ hasChildItems, isExpanded, isFocusVisible, level }) => <MilestoneAgentRow row={row} depth={level - 2} active={active} focused={isFocusVisible} query={props.query} now={props.now} frozen={frozen} onOpen={props.onOpen}
       chevron={hasChildItems ? <Button slot="chevron" excludeFromTabOrder aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${row.children.length} subagents`} {...stylex.props(styles.chevron)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} size={12} /></Button> : null} />}</TreeItemContent>
-    {row.children.map(child => <AgentItem key={child.ref} {...props} row={child} hover={hover} />)}
+    {row.children.map(child => <AgentItem key={child.ref} {...props} row={child} frozen={frozen} />)}
   </TreeItem>
 }
 
-/**
- * SR-2 two-line row. Line 1: glyph · title · last turn · signal · chevron, each trailing column a fixed width so every
- * time ends on one edge and the title ellipsis keeps a 6px gap. Line 2: status word (unless working) · host · spend · duration.
- */
-export function MilestoneAgentRow({ row, level, active, focused, query, now, stale, chevron }: { readonly row: Row; readonly level: number; readonly active: boolean; readonly focused: boolean; readonly query: string; readonly now: number; readonly stale: boolean; readonly chevron: React.ReactNode }) {
-  const fields: React.ReactNode[] = []
-  if (row.status !== 'working') fields.push(<span key="status" data-row-field="status-label">{row.statusLabel}</span>)
-  fields.push(<span key="host" data-row-field="host">{row.host}</span>)
-  if (row.usage._tag === 'Known') fields.push(<span key="spend" data-row-field="spend" aria-label={`Spend including subagents: $${row.usage.usd}, ${row.usage.tokens} tokens`}>{spend.format(row.usage.usd)} · {tokens.format(row.usage.tokens)}</span>)
-  if (row.duration._tag === 'Known') fields.push(<span key="duration" data-row-field="duration"><SidebarDuration duration={row.duration} /></span>)
-  return <div data-testid="milestone-agent-row" data-status={row.status} data-level={level} {...stylex.props(styles.row, level > 2 && styles.nested, active && styles.active, focused && styles.focused)}>
-    {/* A stale roster is a last-observed snapshot: every glyph goes muted (shape still tells states apart) and times are frozen at the observation. */}
-    <span data-row-column="glyph" {...stylex.props(styles.glyph)}><StatusGlyph status={row.status} statusLabel={row.statusLabel} freshness={stale ? 'stale' : row.freshness} frozen={stale} /></span>
-    <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
-    <span data-row-column="time" title={stale ? 'As of the last observation' : undefined} {...stylex.props(styles.time, stale && styles.frozenInk)}>{row.lastTurn._tag === 'Known' && <SidebarTime at={Math.min(row.lastTurn.at, now)} now={now} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact />}</span>
-    <span data-row-column="signal" {...stylex.props(styles.signal)}>{row.needsMe ? <span aria-label="Needs your attention" {...stylex.props(styles.needs, stale && styles.frozenInk)}>!</span> : (row.unread ?? 0) > 0 ? <span aria-label={`${row.unread} unread`} {...stylex.props(styles.unread, stale && styles.frozenInk)}>{row.unread}</span> : null}</span>
-    <span data-row-column="chevron" {...stylex.props(styles.chevronSlot)}>{chevron}</span>
-    <span data-row-column="line2" {...stylex.props(styles.line2)}>{fields.flatMap((field, index) => index === 0 ? [field] : [<span key={`sep-${index}`} aria-hidden="true" {...stylex.props(styles.sep)}>·</span>, field])}</span>
-  </div>
-}
 
 const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } as const
 const styles = stylex.create({
@@ -187,21 +136,7 @@ const styles = stylex.create({
   folderLabel: { flex: '1 1 0', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   chevron: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, padding: 0, marginInlineStart: s.xs, borderWidth: 0, borderRadius: r.keyboard, backgroundColor: surface.transparent, color: ink.sidebarFgMuted, cursor: 'pointer', ':hover': { color: ink.fg, backgroundColor: surface.rowActive } },
   count: { color: ink.fgMuted, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
-  row: { display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.icon}`, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignItems: 'center', columnGap: s.sm, height: g.sidebarRow, boxSizing: 'border-box', paddingInline: s.sm, borderRadius: r.sm, color: ink.fg, ':hover': { backgroundColor: surface.rowHover } },
-  nested: { paddingInlineStart: s.xl },
-  active: { backgroundColor: surface.rowActive },
   focused: focusRing,
-  glyph: { gridColumn: '1', gridRow: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  title: { gridColumn: '2', gridRow: '1', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
-  time: { gridColumn: '3', gridRow: '1', justifySelf: 'end', color: ink.fgSoft, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
-  signal: { gridColumn: '4', gridRow: '1', display: 'flex', justifyContent: 'center' },
-  needs: { color: tone.attention, fontSize: t.denseSize, fontWeight: t.weightSemibold },
-  unread: { color: accent.primary, fontSize: t.microSize, fontVariantNumeric: 'tabular-nums' },
-  // Last-observed values: neutral ink, no live accent. fgSoft (not fgMuted) so it still clears 4.5:1 on the active-row wash.
-  frozenInk: { color: ink.fgSoft },
-  chevronSlot: { gridColumn: '5', gridRow: '1', display: 'flex', justifyContent: 'center' },
-  line2: { gridColumn: '2 / -1', gridRow: '2', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
-  sep: { paddingInline: s.xs, color: ink.fgMuted },
   notice: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.controlSm, margin: 0, paddingInline: s.sm, color: ink.fgMuted, fontSize: t.denseSize },
   message: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: s.xs, margin: 0, paddingInline: s.sm, paddingBlock: s.lg },
   messageStart: { paddingBlockStart: s.md },
@@ -221,6 +156,5 @@ const styles = stylex.create({
   sections: { display: 'flex', alignItems: 'center', gap: s.lg, flexShrink: 0, height: g.controlLg, paddingInline: s.lg, boxSizing: 'border-box', color: ink.sidebarFgMuted, fontSize: t.denseSize },
   sectionsFooter: { borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border },
   section: { display: 'inline-flex', alignItems: 'center', gap: s.xs },
-  hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', boxShadow: elevation.popover, outline: 'none' },
   visuallyHidden: { position: 'absolute', width: '1px', height: '1px', margin: '-1px', padding: 0, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', borderWidth: 0 },
 })

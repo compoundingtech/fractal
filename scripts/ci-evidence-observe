@@ -5,7 +5,8 @@ Runs in the `Evidence observe` workflow on the signing runners, never on a pull 
 code. It does not run any check: it asks the protected observer (`st3 evidence observe-ci`,
 behind a sekrets grant) to record what the run already did, imports the returned object
 pack into a scratch repository, verifies every full-trust record with scripts/evidence-verify
-against the accepted key list, and only then creates and pushes refs/notes/evidence/<id>.
+against the accepted key list, and only then creates and pushes refs/tags/evidence/<tree>/<id> and, while gates on
+older bases read only notes, refs/notes/evidence/<tree>/<id> naming the same record.
 
   exit 0  every record was imported (full records verified; degraded ones labelled as such),
           or the run was cancelled/skipped and has nothing to attest
@@ -25,6 +26,7 @@ import tempfile
 sys.dont_write_bytecode = True
 
 NOTES = 'refs/notes/evidence/'
+TAGS = 'refs/tags/evidence/'
 OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
 DEFAULT_OBSERVER = ['st', 'sekrets', '--', 'st3', 'evidence', 'observe-ci']
 
@@ -170,7 +172,7 @@ def publish(repo, remote, token, refs):
                 text = text.replace(token, '***')
             raise Failure(f'git {args[0]} against the remote failed: {text.strip()[-2000:]}')
 
-    remote_git('push', '--quiet', remote, *[f'{ref}:{ref}' for ref, _, _ in refs])
+    remote_git('push', '--quiet', remote, *[f'{ref}:{ref}' for names, _, _ in refs for ref in names])
 
 
 def push_token():
@@ -340,15 +342,18 @@ def one_run(args, run, attempt):
                 failures.append(f'record {record} has unexpected tier {tier!r}; not published')
                 entry['error'] = failures[-1]
                 continue
-            ref = NOTES + record
-            existing = git(scratch, 'for-each-ref', '--format=%(objectname)', ref).stdout.decode().strip()
-            if existing and existing != record:
-                failures.append(f'{ref} already names {existing}; evidence refs are never replaced')
+            names = [f'{TAGS}{tree}/{record}', f'{NOTES}{tree}/{record}']
+            taken = [(ref, existing) for ref in names
+                     for existing in [git(scratch, 'for-each-ref', '--format=%(objectname)', ref).stdout.decode().strip()]
+                     if existing and existing != record]
+            if taken:
+                failures.append(f'{taken[0][0]} already names {taken[0][1]}; evidence refs are never replaced')
                 entry['error'] = failures[-1]
                 continue
-            if not existing:
-                git(scratch, 'update-ref', ref, record, '0' * len(record))
-            refs.append((ref, record, source))
+            for ref in names:
+                if not git(scratch, 'for-each-ref', '--format=%(objectname)', ref).stdout.decode().strip():
+                    git(scratch, 'update-ref', ref, record, '0' * len(record))
+            refs.append((names, record, source))
         if args.remote and refs:
             publish(scratch, args.remote, push_token(), refs)
         summary['metrics'] = response.get('metrics', {})

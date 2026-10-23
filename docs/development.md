@@ -10,6 +10,69 @@ For st3 claims, missions, replication, runtime ownership, or recovery, start wit
 [documentation index](st3/README.md). For st2 lifecycle, messaging, teardown, or presence,
 read and preserve the proofs in [st2 invariants](st2/invariants.md).
 
+## CLI actor contract
+
+`st actor-contract --json` prints the actor syntax of the binary that runs it. It
+does not read config or call a daemon. The versioned `contract` has one entry for
+each callable clap command path, including hidden commands and optional parent
+commands. `aliases` lists other names under each canonical command. `contract_sha256` is
+the SHA-256 of compact JSON for `contract`, not of the formatted output. The
+printer computes this digest; the checked-in snapshot omits it and the equality
+test compares the contract body. The printed `actor_semantics` reminder comes
+first: actor: none means no --as syntax.
+
+Version policy:
+
+kind st3.actor-contract.v1 and version 1 stay for: new commands, new aliases, new optional fields on an entry, and new values of an existing enum (actor, and any later enum). Readers MUST ignore unknown fields and MUST treat an unknown enum value as unknown, never as one of the values they know; they must not infer --as syntax, person support or authority from an unknown value. kind and version bump together for: a removed or renamed field, a changed field type, a removed enum value, or a changed meaning of an existing field or value. contract_sha256 changes with ANY content change (a command moving class included) and identifies one binary build; it is not a version. The contract describes argv syntax and is never an authorization input.
+
+No actor-contract reader exists in this repository yet; the unknown-enum rule
+is a requirement on future readers. Existing tests parse JSON only to check the
+producer's output and snapshot, not to interpret unknown actor values.
+
+`actor` means whether argv accepts `--as`: `none`, `optional`, or `required`.
+`actor_environment` names an environment default, if one exists. `accepts_person`
+means the real argument value parser accepts `person/NAME`; it does not grant
+person authority. An optional flag can still need an actor from config or the
+environment at run time. A command with no flag can still use a configured
+identity. `can_carry_person` records whether a command can carry a person actor,
+including configured-person fallbacks and the separate `note --actor` option.
+This does not mean an agent may use that person: identity guards and daemon
+authorization still apply. `as_role` distinguishes an actor from the document
+name in `documents put --as` and the ignored compatibility flags on reads.
+`ignores_actor` identifies those ignored flags. Do not use this contract as an
+authorization decision.
+
+Add `--effective` to include only the selected `instance`, `config_path` and
+`state_dir` metadata; no config values are printed. Instance activation and the
+existing config loader determine the state directory. **`config_path` always
+reports `Config::default_path()` for the selected instance, not the actual path
+of a custom config file.** Do not use it as evidence of which file was loaded.
+These fields are outside the hashed contract and can differ between calls.
+Without `--effective`, static mode reads no config (even an invalid config is
+irrelevant) and does not contact a daemon.
+
+After a deliberate CLI change, review the changed actor entries and regenerate
+the checked-in contract:
+
+```sh
+st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
+cargo nextest run -p fractal -E 'test(actor_contract)'
+```
+
+Use the binary built from the changed source. Resolve any rebase conflict in
+`docs/st3/actor-contract.json` by running that regeneration command, never by
+hand-merging the JSON. The snapshot test fails if a
+command is added or removed, if its actor parser changes the published fields, or
+if an alias changes. Supplement coverage also compares the reviewed setup/UI,
+note and changes paths, including every descendant, against the real clap
+inventory. Additions or removals require reviewing the identity handlers named
+beside `implicit_person`; mutation tests exercise added setup/UI descendants and
+a removed UI descendant. `st ui open` resolves the configured person before
+queueing a request in that person's terminal UI request directory.
+This is freshness coverage, not proof of live runtime fallback or authority.
+Host, account, repository and harness policy remains in the
+operator layer. Person-authority enforcement is a separate daemon change.
+
 ## Build from source
 
 From a checkout, install with Nix:
@@ -65,15 +128,76 @@ source instead, which needs Zig 0.15.2 on `PATH`. On macOS, the vendored
 [`libghostty-vt-sys`](../vendor/libghostty-vt-sys/README.md) build script lets Zig 0.15.2 link against
 the macOS 26.5 and 27 SDKs.
 
-The script builds and installs `st3` and `st3-migrate`, and makes `st` a symlink to
+The script builds and installs `st3` and `fractal-migrate`, and makes `st` a symlink to
 the installed `st3`. `st` is never a separate build. On macOS, st3 lives in a fixed app bundle; see [macOS installation and signing](st3/macos-installation.md). A source install also needs [`pty`](https://github.com/compoundingtech/pty-rust) on `PATH`.
+
+## Shared TypeScript SDK
+
+`packages/fractal-sdk` owns the app-independent `@fractal/sdk` package. Its
+`@fractal/sdk/effect` entry point provides transport, follow state, decoding, and
+trace-context propagation without browser startup or UI dependencies.
+`St3Live(options)` works without an application platform layer; callers can supply
+an explicit socket in options for custom transports and tests.
+
+Browser behavior stays in `apps/fractal-web/src/data`: early collection socket
+adoption, traced browser fetch/WebSocket wrappers, and visibility/LRU admission
+policy. The app supplies those through `St3Platform`; the neutral SDK does not
+adopt a browser bootstrap socket or install browser visibility policy by default.
+`@fractal/sdk/admission` exposes the admission primitives used by that adapter.
+
+`St3.watch` accepts a typed `FollowDescriptor<TResource>`: `spec` selects an
+existing window collection and the descriptor's `decodeRow` decodes its rows.
+Optional `spec.descriptor` is a stable local decoder ID for independent decoder
+and admission identity; it is never sent on the wire. The watch shares the scoped
+follow lifecycle and multiplexed socket; it does not introduce another wire format.
+
+`St3Options.credential` resolves a bearer credential for each HTTP request and
+socket open. It is not an actor selector. The `client` option is only a reported
+client/build label, never authenticated identity or authority. An explicit
+credential bypasses browser bootstrap socket adoption; non-browser socket
+factories must honor the provided credential headers.
+
+The SDK is a root workspace member, not a nested app package. Its standalone
+Node suite and typecheck run with:
+
+```sh
+pnpm --filter @fractal/sdk test
+pnpm --filter @fractal/sdk typecheck
+```
+
+## Fractal web diagnostics member
+
+Run `mr apply --worktree-mode auto` before entering `nix develop .#web` or
+`nix develop .#genie`. The `effect-utils` member in `megarepo.lock` supplies the
+shared developer bar, meters, and build identity utilities from source. The web
+shell publishes their generated dependency closure into root-owned immutable
+source inputs before pnpm installs it; no install writes into `repos/`.
+The flake input supplies the matching toolchain without replacing the member link.
+Keep the member and flake input pinned together: the flake exports the external
+Buck rules cell and its sandbox runtime, while the member supplies generation
+inputs. Runtime fixes must reach the exported rules cell as well as the member's
+BUCK declarations; verify consumer targets under the production sandbox.
+After changing workspace membership, run `nix develop .#genie -c genie`,
+`nix develop .#web -c pnpm install`, and regenerate the dependency licenses below.
+The Buck client generators publish ordinary and product source trees with the
+same package-local inputs and separate recursive dependency views. Typechecks
+continue to use the ordinary tree.
+
+The app loads diagnostics only in development or explicit performance builds.
+Mod Shift B toggles the persisted bar preference. Counters and Meters open
+host-owned panels; the identity segment shows the canonical revision, dirty
+state, commit age, and version details. Meter histories share one scoped
+collector session, released when the bar is hidden.
 
 ## Workspace dependency licenses
 
 The root pnpm workspace includes the iOS app and TypeScript clients.
-`buck2/dependencies/licenses.json` records every name/version in the lockfile's `packages`
-set, not just the narrower Buck dependency closure. The inventory is generated, including
-font licenses such as `MIT AND OFL-1.1`; do not edit its entries by hand.
+`buck2/dependencies/licenses.json` records every registry package name/version in
+the lockfile's `packages` set, not just the narrower Buck dependency closure.
+Root-owned staged member sources have their directory resolutions validated but
+are not npm registry entries; their source repository owns their licensing.
+The inventory is generated, including font licenses such as `MIT AND OFL-1.1`;
+do not edit its entries by hand.
 
 Regenerate after changing the lockfile:
 
@@ -124,12 +248,17 @@ Namespace as overflow for ordinary PRs. The second test shard and supporting job
 macOS CI is currently disabled; its retained workflow is not a required check.
 See [CI operations](ci.md) for stage scope, routing, caches, and failure inspection.
 
+The standalone Rust client's generated `crates/fractal-client/src/lib.rs` must be
+regenerated with `cargo run -p fractal-client-codegen`, including after changes to
+directory discovery. Commit the generator's exact output rather than hand-formatting
+it; `cargo run -p fractal-client-codegen -- --check` checks freshness.
+
 ## Shared UI models
 
 [Build your own client](clients/build-your-own.md) maps the Rust and TypeScript pieces
 and includes a small [example TUI](../examples/client-tui/) built and tested in CI.
 
-`crates/st3-ui-model` provides renderer-independent UI semantics without a ratatui dependency.
+`crates/fractal-ui-model` provides renderer-independent UI semantics without a ratatui dependency.
 Its broad name is intentional; initially it contains only the terminal UI's mission model (`Word`,
 `StepState`, `Mission`, `Step`) and mission derivation. The terminal UI consumes that same model.
 `missions::adapt` borrows typed mission and agent projections plus unresolved, actor-filtered
@@ -142,13 +271,21 @@ the actual execution seat without reconstructing identity from display labels.
 `Mission.step_metadata` retains each selected step's raw `blocked_reason` and `last_progress`,
 keyed by its step-run ID. These facts survive state changes independently of a step's waiting
 blocker or derived queue `note`, and are not normalized by display text policies.
-Shared widgets and other UI models are separate follow-up work, not part of this mission extraction.
+`crates/fractal-mission-ui` composes mission step rows and their progress meter without
+owning a shell or choosing a default renderer. Enable its optional `ratatui` feature
+and call `steps` with a borrowed mission, expansion keys, spinner, `Palette`,
+`Glyphs`, and the caller's shared conversation `Theme` for inline markdown.
+The returned shared `Doc<Intent>` contains styled lines and
+`Intent::ToggleStep` click targets using `step:{mission}:{name}` keys. The embedding
+application owns expansion state and the surrounding card. Token defaults reproduce
+the terminal UI; progress counts every described step, not only runnable steps.
+Header and agent-work composition remain outside this crate.
 
 ## Embedding native conversations
 
-`crates/st3-conversation-ui` provides the same native conversation presentation used by
+`crates/fractal-conversation-ui` provides the same native conversation presentation used by
 `st`’s terminal interface, without terminal acquisition, application tabs or daemon connections. Feed
-`st3-client` conversation frames into `Timeline::apply(Frame { replace, has_more, items })`,
+`fractal-client` conversation frames into `Timeline::apply(Frame { replace, has_more, items })`,
 adapt the timeline with caller-owned display names, and render it with `Cache::render`
 and caller-supplied `Theme` tokens. The returned document contains styled lines and typed
 `PaneIntent` targets. `State` retains scrolling, tool expansion, display-column selection
@@ -162,7 +299,7 @@ The shared crate and the `stui` library use workspace Ratatui 0.30. An embedding
 rendering dependency before passing buffers or lines across this boundary. Native conversations are not a terminal emulator: harness menus and arbitrary
 permission prompts still require access to the harness terminal.
 
-See the [conversation crate](../crates/st3-conversation-ui/README.md) for model-only and
+See the [conversation crate](../crates/fractal-conversation-ui/README.md) for model-only and
 Ratatui builds, and [build your own client](clients/build-your-own.md) for the client contract.
 
 ## Fractal web changelog
@@ -192,7 +329,8 @@ device-local cursor is scoped by origin, product, and deployment channel; `live`
 and `stable` do not share cursors. Seen IDs survive rollbacks and skipped builds. No version
 string or timestamp comparison decides whether a change is new. First visits show “Recent
 changes”; subsequent visits show “New since you last looked” followed by “Recent”.
-The Changes trigger mounts next to the build version in the existing status bar.
+The Changes trigger is the `changelog` segment of the shared developer bar, next to the build
+version. When the bar overflows, the kit's +N control mirrors its unread dot.
 Its React Aria popover anchors to the visible bar with an 8px gap and restores focus
 on dismissal. It uses the shared light/dark theme, glass surface, and change-kind pills.
 The contract and compiler do not depend on a status-bar package or disclosure slot.
@@ -213,13 +351,13 @@ wording consistent when both describe the same change.
 
 | Path | Contents |
 | --- | --- |
-| `crates/st3` | Current daemon and CLI. |
-| `crates/stui` | Terminal UI library used by `st`. |
-| `crates/st-drivers`, `crates/st-runtime` | Harness drivers and shared runtime. |
-| `crates/st3-client`, `crates/st3-feed`, `crates/st3-schema`, `crates/st3-client-codegen` | Client API, feeds, schema, and code generation. |
-| `crates/st3-ui-model`, `crates/st3-conversation-ui` | Shared mission and conversation presentation. |
+| `crates/fractal` | Current daemon and CLI. |
+| `crates/fractal-tui` | Terminal UI library used by `st`. |
+| `crates/fractal-drivers`, `crates/fractal-runtime` | Harness drivers and shared runtime. |
+| `crates/fractal-client`, `crates/fractal-feed`, `crates/fractal-schema`, `crates/fractal-client-codegen` | Client API, feeds, schema, and code generation. |
+| `crates/fractal-ui-model`, `crates/fractal-conversation-ui` | Shared mission and conversation presentation. |
 | `clients`, `apps/ios` | TypeScript/Swift clients and the iOS app. |
-| `crates/st3-migrate` | Migration tooling. |
+| `crates/fractal-migrate` | Migration tooling. |
 | `src`, `tests` | Legacy st2 package and its integration tests. |
 | `components`, `evals`, `fixtures` | Provider components, evals, and proof fixtures. |
 | `examples/st3`, `docs` | Runnable declarations and documentation. |

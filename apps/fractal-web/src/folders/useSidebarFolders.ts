@@ -12,6 +12,7 @@ export interface SidebarFoldersOptions {
   readonly roster: readonly SidebarSeat[]
   readonly source?: Atom.Atom<FolderState>
   readonly query?: string
+  readonly collapsedSource?: Atom.Writable<readonly string[], readonly string[]>
 }
 export type SidebarFoldersBinding = Pick<AgentFoldersProps, 'tree' | 'canDrop' | 'onMove' | 'onCreateFolder' | 'onRenameFolder' | 'onDeleteFolder' | 'onToggleCollapsed' | 'unavailable' | 'treeStatus'> & {
   readonly orderingTree: AgentFoldersProps['tree']
@@ -23,21 +24,25 @@ export type SidebarFoldersBinding = Pick<AgentFoldersProps, 'tree' | 'canDrop' |
  * Subscription owns the existing sidebarFolders atom's editor, inventory follow and abort finalizer.
  * No second reader/editor or persistence of st domain data. Source injection exercises this without the kit.
  */
-export const useSidebarFolders = ({ roster, source = folders, query = '' }: SidebarFoldersOptions): SidebarFoldersBinding => {
+export const useSidebarFolders = ({ roster, source = folders, query = '', collapsedSource }: SidebarFoldersOptions): SidebarFoldersBinding => {
   const registry = React.useContext(RegistryContext)
   const snapshot = useAtomValue(source)
   const local = React.useMemo(() => ({
-    collapse: Atom.make<ReadonlyMap<string, boolean>>(new Map()),
+    collapse: Atom.make<readonly string[]>([]),
     /** Fixed-copy refusal of a write planned without a request, such as the filing stage of create-with-agent. */
     refused: Atom.make<string | undefined>(undefined),
   }), [source])
-  const [collapse, setCollapse] = useAtom(local.collapse)
+  const collapseAtom = collapsedSource ?? local.collapse
+  const [collapsedIds, setCollapsedIds] = useAtom(collapseAtom)
   const refused = useAtomValue(local.refused)
   const currentRoster = React.useRef(roster)
   currentRoster.current = roster
-  const doc = { ...snapshot.doc, roster }
-  // Filtering belongs to this hook; kit ordering always uses the complete canonical projection.
-  const orderingTree = sidebarTree(sidebarProjection(doc), roster, collapse)
+  // Arrangement identity is independent of query and clock presentation.
+  const orderingTree = React.useMemo(() => sidebarTree(sidebarProjection({ ...snapshot.doc, roster }), roster, new Map([
+    ...roster.filter(seat => collapsedIds.includes(`wf/expanded/${seat.id}`)).map(seat => [seat.id, false] as const),
+    ...collapsedIds.map(id => [id, true] as const),
+  ])), [snapshot.doc, roster, collapsedIds])
+  return React.useMemo(() => {
   const currentDoc = (): FolderDoc => registry.get(source).doc
   const ready = (): boolean => {
     const state = registry.get(source)
@@ -104,9 +109,18 @@ export const useSidebarFolders = ({ roster, source = folders, query = '' }: Side
     onRenameFolder: (intent) => { submit((fresh) => restageRename(fresh, intent)) },
     onDeleteFolder: (intent) => { submit((fresh) => restageDelete(fresh, intent)) },
     onToggleCollapsed: ({ id, collapsed }) => {
-      const folds = new Map(registry.get(local.collapse))
-      folds.set(id, collapsed)
-      setCollapse(folds)
+      // Search reveals descendants temporarily, without changing the saved working layout.
+      if (query.trim() !== '') return
+      const ids = registry.get(collapseAtom).filter(folder => folder !== id)
+      // Parent seats default collapsed; store an explicit expanded override separately.
+      if (currentRoster.current.some(seat => seat.id === id)) {
+        const marker = `wf/expanded/${id}`
+        const next = ids.filter(value => value !== marker)
+        setCollapsedIds(collapsed ? next : [...next, marker])
+        return
+      }
+      setCollapsedIds(collapsed ? [...ids, id] : ids)
     },
   }
+  }, [snapshot, roster, collapsedIds, refused, query, orderingTree, registry, source, collapseAtom, setCollapsedIds, local])
 }
