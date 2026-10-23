@@ -1321,7 +1321,7 @@ mod tests {
             std::time::Duration::from_millis(1),
         ), None);
         // The polling hook has returned without a decision. An answer can still
-        // arrive in Smalltalk, but there is no hook left to apply it to Claude.
+        // arrive in Fractal, but there is no hook left to apply it to Claude.
         append("harness.diagnostic", serde_json::json!({
             "code":"native-prompt-answered", "status":"allow",
             "driver":"claude", "incarnation_id":"current"

@@ -295,7 +295,7 @@ enum Command {
     /// Pair, inspect, and revoke client devices.
     Devices(DevicesArgs),
     /// The clients connected to this member now and those seen in the last few minutes:
-    /// stui, the phone and st itself, with their builds as they report them.
+    /// Fractal TUI, the phone and st itself, with their builds as they report them.
     Clients,
     /// Claim and update durable mission work.
     ///
@@ -713,7 +713,7 @@ struct UninstallArgs {
     /// Leave the fleet without reaching any member first.
     #[arg(long)]
     offline: bool,
-    /// Keep the installed st3, st, stui, st3-migrate, and pty executables.
+    /// Keep the installed st3, st, stui, fractal-migrate, and pty executables.
     #[arg(long)]
     keep_binaries: bool,
     /// Also required when this machine's graph exists nowhere else.
@@ -1974,7 +1974,7 @@ enum DevicesCommand {
         /// Import a private mode-0600 DER PKCS#8 file; otherwise generate a key.
         #[arg(long)]
         key_file: Option<PathBuf>,
-        /// Credential and private-key profile; person devices share stui's profile by default,
+        /// Credential and private-key profile; person devices share Fractal TUI's profile by default,
         /// assistant grants use a separate assistant profile.
         #[arg(long)]
         profile: Option<PathBuf>,
@@ -3992,7 +3992,7 @@ enum MessageCommand {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    /// Show one conversation as stui shows it: messages, folded tools, Fractal. `--raw`
+    /// Show one conversation as Fractal TUI shows it: messages, folded tools, Fractal. `--raw`
     /// prints every normalized entry (ids, message boundaries, tool JSON); `--json` the page.
     Timeline {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::Session)))]
@@ -9765,7 +9765,7 @@ fn unseen_timeline_entries(
             seen.remove(&id);
         }
     }
-    // Small Talk and transcript entries number their sequences apart; time orders them.
+    // Fractal and transcript entries number their sequences apart; time orders them.
     changed.sort_by(|a, b| {
         a.timestamp
             .cmp(&b.timestamp)
@@ -9941,7 +9941,7 @@ impl LocalEventFeed {
                         .pointer("/features/bounded_legacy_events")
                         .and_then(Value::as_u64)
                         == Some(1),
-                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
+                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
                 );
                 Err(error)
             }

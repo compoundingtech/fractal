@@ -1,4 +1,4 @@
-//! Gate-on-demand test that serves the API; it lives in st3-daemon because the API does.
+//! Gate-on-demand test that serves the API; it lives in fractal-daemon because the API does.
 
 #![allow(unused_imports, dead_code)]
 

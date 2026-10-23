@@ -1,7 +1,7 @@
 //! A named, fully separate st on one machine.
 //!
 //! `st --instance NAME` (or `FRACTAL_INSTANCE=NAME`, with `ST_INSTANCE` fallback) runs a second
-//! Smalltalk next to the default one for testing and for a clean first run. Everything it owns
+//! Fractal next to the default one for testing and for a clean first run. Everything it owns
 //! lives under one directory,
 //! `~/.st-instance/NAME`, so removing that directory (plus the service definitions that point into
 //! it) removes the instance and nothing else:
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn instance_aliases_agree_at_every_boundary() {
-        const CHILD: &str = "SMALLTALK_INSTANCE_ALIAS_TEST";
+        const CHILD: &str = "FRACTAL_INSTANCE_ALIAS_TEST";
         if let Ok(case) = env::var(CHILD) {
             let expected = match case.as_str() {
                 "preferred" => Some("new"),

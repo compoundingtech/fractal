@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Prove that both exit controls leave a live attached terminal without input to it: Ctrl+\\
-and a click on the terminal's header line, in stui's spaces."""
+and a click on the terminal's header line, in Fractal TUI's spaces."""
 
 import sys
 import time

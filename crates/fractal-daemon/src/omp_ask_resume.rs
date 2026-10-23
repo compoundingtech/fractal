@@ -390,7 +390,7 @@ if '--resume' in sys.argv and 'ST_ADMISSION_TRACE' not in os.environ:
     #[test]
     fn native_reopen_contraction_probe_when_omp_is_supplied() {
         let Some(binary) = std::env::var_os("OMP_BIN") else {
-            eprintln!("SKIP native reopen contraction probe: set OMP_BIN to the raw pinned OMP executable; smalltalk does not provide OMP");
+            eprintln!("SKIP native reopen contraction probe: set OMP_BIN to the raw pinned OMP executable; Fractal does not provide OMP");
             return;
         };
         // The hermetic contraction gate belongs to dotfiles/flakes/external/omp: invoke this

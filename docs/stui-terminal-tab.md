@@ -116,7 +116,7 @@ second answer with different geometry or defaults.
 
 ### DECRQM 5522 availability regression
 
-This is a **pty behavior change** in the f8388fe7 pin, not a new stui clipboard
+This is a **pty behavior change** in the f8388fe7 pin, not a new Fractal TUI clipboard
 implementation. pty#148 added mode 5522 tracking and its availability-dependent
 DECRQM reply; pty#152 made an attached writable client past its initial SCREEN
 an answering client. `CSI ? 5522 h` really sets this mode in the pinned producer.
@@ -124,22 +124,22 @@ The probe records actual child-input bytes for these three states:
 
 | Fixture case | Setup | Expected received bytes (hex) |
 | --- | --- | --- |
-| `queries/DECRQM-5522/no-answer-client` | Connect a session socket without ATTACH, before stui starts; enable 5522 in child output | `1b5b3f353532323b302479` (`ESC[?5522;0$y`) |
-| `queries/DECRQM-5522/enabled-False` | stui's normal writable attachment, reset 5522 | `1b5b3f353532323b322479` (`ESC[?5522;2$y`) |
+| `queries/DECRQM-5522/no-answer-client` | Connect a session socket without ATTACH, before Fractal TUI starts; enable 5522 in child output | `1b5b3f353532323b302479` (`ESC[?5522;0$y`) |
+| `queries/DECRQM-5522/enabled-False` | Fractal TUI's normal writable attachment, reset 5522 | `1b5b3f353532323b322479` (`ESC[?5522;2$y`) |
 | `queries/DECRQM-5522/enabled-True` | Same attachment, enable 5522 | `1b5b3f353532323b312479` (`ESC[?5522;1$y`) |
 
 All send `1b5b3f353532322470` (`ESC[?5522$p`). The first case has a real
 connected but unattached, hence non-answering, client; it does not fake a reply
-or rewrite stui's transport. Even an enabled mode reports 0 without availability.
+or rewrite Fractal TUI's transport. Even an enabled mode reports 0 without availability.
 Its output request is published through the existing child fixture files, and
 the child log supplies the complete reply before the writable attachment starts.
 The matrix resets modes before every subsequent case. The historic baseline is
-unchanged. The OSC 52 read/write probes and stui's own OSC 5522 clipboard read
+unchanged. The OSC 52 read/write probes and Fractal TUI's own OSC 5522 clipboard read
 in `src/ui/attach.rs` remain unchanged; a DECRQM capability reply is not proof of
 outer-terminal clipboard access.
 
 For hosted positive/negative controls, keep the same resolved pty f8388fe7
-derivation on PATH and the same stui unit-test worker executable for both runs:
+derivation on PATH and the same Fractal TUI unit-test worker executable for both runs:
 
 ```sh
 python3 crates/fractal-tui/tests/terminal_tab_probe.py --worker "$STUI_TEST_WORKER" --check

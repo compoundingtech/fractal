@@ -15,7 +15,7 @@ this account (`ST3_PERSON`, or the local default); a label is
 never authority. Prints only a few status lines, never terminal contents.
 
 `--keys` takes text sent as typed, with `\\x1b`, `\\r` and `\\x0b` (Ctrl+K) escapes understood,
-for example to open the palette and choose an agent: --keys '\\x0bstui\\r'.
+for example to open the palette and choose an agent: --keys '\\x0bworker\\r'.
 
 Measuring a send. `--events FILE` writes JSON lines with wall-clock epoch milliseconds and this
 process's monotonic milliseconds for: the start, each `--keys` write (index and byte count, never
@@ -23,7 +23,7 @@ the keys), and, with `--say MARKER`, the typing, the composer echo, the Enter, a
 marker is visible in the conversation. MARKER must be an invented ID (8 to 64 of A-Z a-z 0-9 . _ -):
 it is typed into the message box, the box's echo is noted, Enter is sent as its own write, and the
 marker counts as visible only when it is on the screen at a place other than the box's echo and the
-box has cleared. That is the sender's conversation showing the message, including the entry stui
+box has cleared. That is the sender's conversation showing the message, including the entry the terminal UI
 draws before st acknowledges it: compare its time with the message.send request in the `--timing`
 log to tell that from an acknowledged one. If the echo or the visible marker never comes within
 `--visible-timeout` seconds the exit status is 3 or 4 and the events say which. Screen contents
@@ -228,7 +228,7 @@ def main() -> int:
     parser.add_argument("--events", help="append JSON lines of this runner's own wall-clock and monotonic times (start, key writes, the marker's typing, echo, send and visibility)")
     parser.add_argument("--say", help="type this invented marker into the open conversation's box and send it; see --events")
     parser.add_argument("--visible-timeout", type=float, default=10)
-    parser.add_argument("--start-wait", type=float, default=5, help="seconds to let stui start and draw before any keys")
+    parser.add_argument("--start-wait", type=float, default=5, help="seconds to let the terminal UI start and draw before any keys")
     arguments = parser.parse_args()
     if arguments.say is not None and not MARKER.match(arguments.say):
         parser.error("--say takes an invented ID of 8 to 64 characters from A-Z a-z 0-9 . _ -, never prose")

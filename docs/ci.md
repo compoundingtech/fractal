@@ -486,7 +486,7 @@ The gate covers st3 and the code st3 uses. The `ci` profile's `default-filter` i
 `.config/nextest.toml` selects it on every event, with no path filter or scheduled full run:
 
 - every test of the other workspace crates: st3, fractal-client, fractal-client-codegen, fractal-schema,
-  fractal-migrate, stui (the terminal UI library), fractal-runtime, fractal-drivers (the harness drivers, channels, hooks, messages,
+  fractal-migrate, Fractal TUI (the terminal UI library), fractal-runtime, fractal-drivers (the harness drivers, channels, hooks, messages,
   harness state and sessions st3 and st2 share) and the shared and resource-provider crates;
 - st2's integration test files, apart from those below.
 
@@ -528,7 +528,7 @@ existing scope.
 
 Every required Linux stage runs `scripts/check-st-boundary-test` and
 `scripts/check-st-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
-in st3/stui, plus direct, renamed or indirect workspace dependencies on st2 (including
+in st3/Fractal TUI, plus direct, renamed or indirect workspace dependencies on st2 (including
 optional and target-specific dependencies). st2 remains independently buildable/testable.
 
 The Claude no-st2 seat eval and all five harness boot canaries inspect fresh seat processes
@@ -845,7 +845,7 @@ changes its thresholds.
 The web shell supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
 effect-utils input; the Rust shells are unchanged. An empty `.buckroot` marks the Buck
 root; Genie generates `.buckconfig`, root `BUCK` and `buck2/toolchains/BUCK` from `buck2/root.ts`,
-mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `smalltalk`. Remote caching
+mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `fractal`. Remote caching
 and uploads are disabled, with no remote endpoints. The shell links `rules` and
 `capabilities` cells into ignored `.buck2/`; CI fails if checked-in root files drift
 from the Nix rendering. `buck2/dependencies/BUCK` and its SHA-256 sidecar project the

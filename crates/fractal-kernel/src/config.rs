@@ -1036,7 +1036,7 @@ mod tests {
             let error = config(&format!("{home}/{guarded}/projects")).validate().unwrap_err();
             assert!(error.to_string().contains(guarded), "{error}");
         }
-        assert!(config(&format!("{home}/Smalltalk")).validate().is_ok());
+        assert!(config(&format!("{home}/Fractal")).validate().is_ok());
     }
 
     #[test]
@@ -1055,7 +1055,7 @@ mod tests {
         assert!(super::check_work_root_in(&new_through, home.path()).is_err());
         let new_direct = elsewhere.path().join("newwork/deeper");
         assert!(super::check_work_root_in(&new_direct, home.path()).is_err());
-        assert!(super::check_work_root_in(&home.path().join("Smalltalk"), home.path()).is_ok());
+        assert!(super::check_work_root_in(&home.path().join("Fractal"), home.path()).is_ok());
         assert!(super::check_work_root_in(home.path(), home.path()).is_err());
     }
 

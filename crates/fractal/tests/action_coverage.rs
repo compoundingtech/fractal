@@ -823,7 +823,7 @@ fn cli_value(output: Output) -> Value {
         .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stdout)))
 }
 
-// Call the same typed builders stui uses. The inventory guard below compares this dispatch
+// Call the same typed builders Fractal TUI uses. The inventory guard below compares this dispatch
 // with the generated contract so a newly offered action cannot silently escape the matrix.
 async fn dispatch(
     client: &Client,
@@ -5315,7 +5315,7 @@ fn action_inventory_matches_contract_and_has_existing_test_references() {
         .collect();
     assert_eq!(
         offered, documented,
-        "add reducer and transport evidence when stui gains an effect"
+        "add reducer and transport evidence when Fractal TUI gains an effect"
     );
     let source = include_str!("../../fractal-tui/src/ui/glass.rs");
     let declaration = source
@@ -5343,7 +5343,7 @@ fn action_inventory_matches_contract_and_has_existing_test_references() {
         .collect();
     assert_eq!(
         offered, documented,
-        "add coverage when the stui palette grows"
+        "add coverage when the Fractal TUI palette grows"
     );
 }
 

@@ -5,7 +5,7 @@ export type MissionActionType = Extract<ActionCommon['type'], `mission.${string}
 
 // NOT IN THE PROTOCOL. Fields the missions views need that client-v0 does not serve today. They are
 // kept apart from the resource so every view can render with and without them, which is exactly
-// the gap list handed back to smalltalk (see the story docs).
+// the gap list handed back to Fractal (see the story docs).
 // ---------------------------------------------------------------------------------------------
 
 /** A recurring schedule as declared in the mission KDL (`schedule "…" { every; anchor; … }`). */
@@ -31,7 +31,7 @@ export interface ProposedEscalation {
   readonly stepPath: string
 }
 
-/** Mission fields the views need that the protocol does not serve yet (gap list for smalltalk). */
+/** Mission fields the views need that the protocol does not serve yet (gap list for Fractal). */
 export interface ProposedMissionFields {
   readonly schedule?: ProposedSchedule
   /** Set on a finite cycle mission started by a schedule parent. */

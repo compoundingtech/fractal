@@ -1,9 +1,9 @@
-// moves to smalltalk/clients/typescript
+// moves to fractal/clients/typescript
 /**
  * Data schemas for the first envelope schema ids, plus the schema-id-indexed catalog and the
  * typed `KnownEnvelope` union.
  *
- * Shapes derive from smalltalk `clients/typescript/fractal-client/Models.generated.ts` (Mission,
+ * Shapes derive from Fractal `clients/typescript/fractal-client/Models.generated.ts` (Mission,
  * MissionRunSummary, Agent, WorkLabel, Attention, Runtime, TerminalScreen) and the fact lists in
  * `docs/st3/schema.md` (`vcs.pull-request`, `ci.run`). Header fields (`id`, `kind`, `revision`)
  * move to the envelope; `data` is the rest of the subject body.

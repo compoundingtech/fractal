@@ -4,7 +4,7 @@ import { conversationEntries, DEFAULT_FILTERS, SHOW_EVERYTHING, headerLine } fro
 import { simplify } from '@fractal/views/conversationSimple';
 
 // Every harness transcript in fixtures/clients/transcripts reads the same in this model as in
-// st3-conversation-ui. Rust's model-only tests (crates/fractal-conversation-ui/src/tests.rs) check
+// fractal-conversation-ui. Rust's model-only tests (crates/fractal-conversation-ui/src/tests.rs) check
 // the same `*.expected.json`, so the two cannot drift.
 const fixture = name => JSON.parse(readFileSync(new URL(`../../../../fixtures/clients/transcripts/${name}`, import.meta.url), 'utf8'));
 

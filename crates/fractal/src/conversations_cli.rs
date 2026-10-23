@@ -25,7 +25,7 @@ fn print_timeline_page(
     Ok(())
 }
 
-/// A conversation page as stui draws it, through the shared renderer: in colour on a terminal
+/// A conversation page as Fractal TUI draws it, through the shared renderer: in colour on a terminal
 /// (unless `NO_COLOR` is set), plain text otherwise.
 fn print_conversation_page(
     response: &ClientEnvelope<ClientTimelinePage>,

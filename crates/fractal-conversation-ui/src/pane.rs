@@ -94,7 +94,7 @@ impl<T: SelectionLine + ?Sized> SelectionLine for &T {
 }
 
 impl Selection {
-    /// The selected text as the person would paste it: without the edge stui draws beside a
+    /// The selected text as the person would paste it: without the edge Fractal TUI draws beside a
     /// message, the indent its body sits at, or the fences it draws around code.
     pub fn text<L: SelectionLine>(&self, lines: &[L]) -> String {
         let (start, end) = order(self.anchor, self.head);

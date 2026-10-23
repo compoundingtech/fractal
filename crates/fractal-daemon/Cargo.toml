@@ -2,7 +2,7 @@
 name = "fractal-daemon"
 version = "0.1.0"
 edition = "2024"
-description = "Claims-graph agent reconciler: the st3 library"
+description = "Claims-graph agent reconciler: the Fractal daemon library"
 license = "MIT"
 
 [features]

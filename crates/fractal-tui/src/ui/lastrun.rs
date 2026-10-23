@@ -1,12 +1,12 @@
-//! Whether the stui before this one ended cleanly.
+//! Whether the Fractal TUI before this one ended cleanly.
 //!
-//! A stui that is killed from outside (SIGKILL) or aborts cannot restore the terminal, so its
-//! window keeps its last picture and looks frozen (Nathan, 2026-10-05). Each running stui keeps
+//! A Fractal TUI that is killed from outside (SIGKILL) or aborts cannot restore the terminal, so its
+//! window keeps its last picture and looks frozen (Nathan, 2026-10-05). Each running Fractal TUI keeps
 //! a small file under `$XDG_CACHE_HOME/st3/stui/runs/` (the cache, not the state: a device
 //! with no st state must stay free of it), removed when it exits by any route that
 //! runs destructors: a quit, a signal it handles or an error. A panic preserves its marker
 //! for draft-recovery accounting on the next launch. A file whose process is
-//! gone is the trace of one that did not, and the next stui to start says so.
+//! gone is the trace of one that did not, and the next Fractal TUI to start says so.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -21,16 +21,16 @@ struct Mark {
     panicked: bool,
 }
 
-/// This stui's file, removed on drop.
+/// This Fractal TUI's file, removed on drop.
 pub struct Run {
     file: Option<PathBuf>,
     started: std::time::Instant,
 }
 
-/// Why this stui is ending, as the code that ends it knows. Said once; the first reason stands.
+/// Why this Fractal TUI is ending, as the code that ends it knows. Said once; the first reason stands.
 static EXIT_REASON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// Record why this stui is ending, for `exits.log` (Nathan, 2026-10-13: "it crashed twice and I
+/// Record why this Fractal TUI is ending, for `exits.log` (Nathan, 2026-10-13: "it crashed twice and I
 /// cannot tell why"). A hard kill leaves no reason, and a run file that outlives its process.
 pub fn note_exit(reason: impl Into<String>) {
     if let Ok(mut said) = EXIT_REASON.lock()
@@ -72,7 +72,7 @@ impl Drop for Run {
     }
 }
 
-/// When this stui's own executable was last written, as it was at start.
+/// When this Fractal TUI's own executable was last written, as it was at start.
 static EXE_AT_START: std::sync::OnceLock<Option<std::time::SystemTime>> = std::sync::OnceLock::new();
 
 fn executable_written() -> Option<std::time::SystemTime> {
@@ -82,7 +82,7 @@ fn executable_written() -> Option<std::time::SystemTime> {
         .and_then(|meta| meta.modified().ok())
 }
 
-/// Whether the executable this stui runs from was replaced on disk since it started, once: a
+/// Whether the executable this Fractal TUI runs from was replaced on disk since it started, once: a
 /// deploy that writes over a running program can make the system stop it (macOS does for a
 /// binary whose signature no longer matches), which looks like a crash with no panic. The fact
 /// is written to `exits.log` before anything can stop it, so the cause is on record.
@@ -100,7 +100,7 @@ pub fn binary_replaced() -> bool {
         write_line(
             &file,
             &format!(
-                "{} pid {}: the program was replaced on disk while this stui ran (a deploy); the system may stop it",
+                "{} pid {}: the program was replaced on disk while this Fractal TUI ran (a deploy); the system may stop it",
                 now_unix(),
                 std::process::id()
             ),
@@ -111,14 +111,14 @@ pub fn binary_replaced() -> bool {
 
 /// The terminal is gone and the watch that sees it is about to end this process without running
 /// destructors: say so in `exits.log` (an exit with no line there is a silent one), take this
-/// run's marker away so the next stui does not count it as a crash, and keep what was typed.
+/// run's marker away so the next Fractal TUI does not count it as a crash, and keep what was typed.
 pub fn terminal_gone() {
     if let Some(runs) = directory() {
         if let Some(log) = runs.parent().map(|dir| dir.join("exits.log")) {
             write_line(
                 &log,
                 &format!(
-                    "{} pid {}: the terminal closed; the hangup watch ended this stui",
+                    "{} pid {}: the terminal closed; the hangup watch ended this Fractal TUI",
                     now_unix(),
                     std::process::id()
                 ),
@@ -162,7 +162,7 @@ fn write_line(file: &Path, line: &str) {
     }
 }
 
-/// Append one line to `exits.log`, which is cleared once it passes 100 KB: when this stui ended,
+/// Append one line to `exits.log`, which is cleared once it passes 100 KB: when this Fractal TUI ended,
 /// how long it had run, and why.
 fn write_exit(file: &Path, ran_seconds: u64, reason: &str) {
     use std::io::Write as _;
@@ -203,7 +203,7 @@ pub fn log_panics(build: &str) {
         super::slo::panic();
         let what = format!("{info}\n{}", std::backtrace::Backtrace::force_capture());
         // Beside the run files in the cache, and beside `connection.log` in the state
-        // directory, where a person looking at what stui left behind looks first.
+        // directory, where a person looking at what Fractal TUI left behind looks first.
         let state = super::prefs::path().and_then(|prefs| {
             prefs
                 .parent()
@@ -264,7 +264,7 @@ fn alive(pid: u32) -> bool {
     found == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Record that this stui is running, and say whether an earlier one left without exiting
+/// Record that this Fractal TUI is running, and say whether an earlier one left without exiting
 /// cleanly: its file is there and its process is gone. The newest such trace is returned
 /// (and every one is cleared), as "started 3h ago".
 pub fn begin(build: &str) -> (Run, Option<String>) {
@@ -325,7 +325,7 @@ fn left_without_exiting(directory: &Path, own: u32, now: u64) -> Option<String> 
     }
     newest.map(|mark| {
         format!(
-            "An earlier stui (pid {}, started {} ago, {}) ended without exiting cleanly: killed or crashed",
+            "An earlier Fractal TUI (pid {}, started {} ago, {}) ended without exiting cleanly: killed or crashed",
             mark.pid,
             elapsed(now.saturating_sub(mark.started_unix)),
             mark.build

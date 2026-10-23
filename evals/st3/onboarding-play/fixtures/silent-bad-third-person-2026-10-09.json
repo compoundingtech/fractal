@@ -5,9 +5,9 @@
  "alert_raised": true,
  "assistant_text": [
   {"ms": 19000, "text": "I need the person's name."},
-  {"ms": 28000, "text": "Hi Avery! I'm the Smalltalk Assistant. In the next few minutes I'll show you two agents talking to each other, then a small mission running, and then I'll ask what you'd like to do. I run on your own account, so this uses its usage. You can say \"skip\" whenever you like."},
+  {"ms": 28000, "text": "Hi Avery! I'm the Fractal Assistant. In the next few minutes I'll show you two agents talking to each other, then a small mission running, and then I'll ask what you'd like to do. I run on your own account, so this uses its usage. You can say \"skip\" whenever you like."},
   {"ms": 60000, "text": "Two agents just sent each other messages, and either of them can wake the other. You saw both sides."},
-  {"ms": 110000, "text": "A notice now sits above the message input. You can read it and dismiss it. What do you want to accomplish in Smalltalk today?"},
+  {"ms": 110000, "text": "A notice now sits above the message input. You can read it and dismiss it. What do you want to accomplish in Fractal today?"},
   {"ms": 150000, "text": "You have been quiet, so I will leave it here. I am available whenever you want to start."}
  ],
  "messages": [

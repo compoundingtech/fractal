@@ -7,7 +7,7 @@ import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 // Tags made with this workflow's token do not start the tag workflow, so there is no second build.
 export default githubWorkflow(auditCaches({
   actionlint: linuxActionlintConfig,
-  name: 'Smalltalk daily release',
+  name: 'Fractal daily release',
   on: {
     schedule: [{ cron: '17 5 * * *' }],
     workflow_dispatch: {
@@ -21,7 +21,7 @@ export default githubWorkflow(auditCaches({
     },
   },
   permissions: { contents: 'read' },
-  concurrency: { group: 'smalltalk-daily-release', 'cancel-in-progress': false },
+  concurrency: { group: 'fractal-daily-release', 'cancel-in-progress': false },
   jobs: {
     release: {
       name: 'daily-release',

@@ -166,7 +166,7 @@ def created_runs(repo, low, high):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--date', default=(datetime.now(UTC) - timedelta(days=1)).date().isoformat())
-    parser.add_argument('--repo', default=os.environ.get('GITHUB_REPOSITORY', 'compoundingtech/smalltalk'))
+    parser.add_argument('--repo', default=os.environ.get('GITHUB_REPOSITORY', 'compoundingtech/fractal'))
     parser.add_argument('--output', required=True)
     args = parser.parse_args()
     start = timestamp(args.date + 'T00:00:00Z')

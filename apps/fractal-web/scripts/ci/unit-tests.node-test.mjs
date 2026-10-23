@@ -43,7 +43,7 @@ test('an SDK-only change selects app tests through workspace package imports', a
 })
 
 test('files outside the app, SDK, kit and client trees cannot affect the app tests', () => {
-  assert.deepEqual(selectTests([modified('docs/ci.md'), modified('crates/st3/src/lib.rs'), modified('release-notes/x.json')]), { mode: 'related', files: [] })
+  assert.deepEqual(selectTests([modified('docs/ci.md'), modified('crates/fractal-daemon/src/lib.rs'), modified('release-notes/x.json')]), { mode: 'related', files: [] })
   assert.deepEqual(selectTests([]), { mode: 'related', files: [] })
 })
 

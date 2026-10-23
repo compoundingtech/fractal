@@ -149,7 +149,7 @@ impl Store {
     /// rereads the newer.
     #[cfg(any(test, feature = "test-support"))]
     pub fn subscribe_attention_list(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.smalltalk.attention_list.revision.subscribe()
+        self.fractal.attention_list.revision.subscribe()
     }
 
 }

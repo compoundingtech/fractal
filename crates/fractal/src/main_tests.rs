@@ -682,7 +682,7 @@ fn a_conversation_reads_as_stui_shows_it_and_raw_keeps_every_entry() {
     );
     assert!(pretty.starts_with("CONVERSATION  session/example"), "{pretty}");
     assert!(pretty.contains("Please check why the n"), "{pretty}");
-    // The harness's own wrappers are cleaned away, as in stui; no escapes without colour.
+    // The harness's own wrappers are cleaned away, as in Fractal TUI; no escapes without colour.
     for noise in ["<task-notification>", "<channel", "<command-name>", "\x1b["] {
         assert!(!pretty.contains(noise), "{noise}: {pretty}");
     }
@@ -4042,7 +4042,7 @@ fn mission_start_help_shows_the_run_subject_an_id_names() {
 
 #[test]
 fn mission_start_bare_ids_are_scoped_to_each_mission() {
-    for mission in ["fleet/smalltalk/daemon-github-sekrets", "release/demo"] {
+    for mission in ["fleet/fractal/daemon-github-sekrets", "release/demo"] {
         for requested in ["2026-10-07", "mission-run/2026-10-07"] {
             let run_id = mission_start_run_id(mission, Some(requested));
             assert_eq!(run_id, format!("{mission}/2026-10-07"));

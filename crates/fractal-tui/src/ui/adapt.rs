@@ -74,7 +74,7 @@ fn loaded_or_why<T>(snapshot: bool, items: Vec<T>, why: Option<&String>) -> Load
     }
 }
 
-/// The host this stui talks to, from whichever window has loaded.
+/// The host this Fractal TUI talks to, from whichever window has loaded.
 fn gateway(model: &Model) -> Option<String> {
     [&model.missions, &model.agents, &model.now, &model.sessions]
         .into_iter()
@@ -1173,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn small_talk_in_the_timeline_draws_as_mail_and_step_pings_as_events() {
+    fn fractal_in_the_timeline_draws_as_mail_and_step_pings_as_events() {
         let timeline: Vec<TimelineEntry> = serde_json::from_value(serde_json::json!([
             {"id":"e1","sequence":4,"revision":1,"timestamp":"2026-09-29T10:00:00Z","role":"user","type":"message","final":true,
              "body":{"message_id":"message/one","from":"agent/example/harbor","to":"agent/example/cos","title":"A question"}},
@@ -1211,7 +1211,7 @@ mod tests {
         assert!(
             matches!(&entries[1].body, Body::Event(title) if title == "Mission step ready: review")
         );
-        // A harness turn's own message header is not Small Talk.
+        // A harness turn's own message header is not Fractal.
         assert!(matches!(&entries[2].body, Body::Assistant(text) if text == "On it."));
     }
 
@@ -1417,7 +1417,7 @@ mod tests {
 
     #[test]
     fn a_delivery_by_the_current_channel_plugin_leaves_no_empty_shell_behind() {
-        // Nathan, 2026-10-05: "I see xml in stui tonight": plugin:st-channel:st was not a name
+        // Nathan, 2026-10-05: "I see xml in Fractal TUI tonight": plugin:st-channel:st was not a name
         // the delivery recognised, so its envelope was taken out and `<channel …></channel>` stayed.
         let delivery = "<channel source=\"plugin:st-channel:st\" from=\"person/example\" messageId=\"message/c4\" threadId=\"message/c4\" identity=\"fleet/example/quay\">\n<smalltalk-message id=\"c4\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/c4\">\nhow is it going?\n</smalltalk-message>\nThe person reads replies in st, not in the agent's session.\n</channel>";
         let shown = BTreeSet::from(["message/c4".to_owned()]);

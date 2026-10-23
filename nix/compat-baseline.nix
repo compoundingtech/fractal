@@ -5,7 +5,7 @@ let
   bundle = baseline.bundles.${target} or (throw "No ${target} bundle for compatibility baseline ${baseline.tag}");
 in
 pkgs.stdenv.mkDerivation {
-  pname = "smalltalk-compat-baseline";
+  pname = "fractal-compat-baseline";
   version = pkgs.lib.removePrefix "v" baseline.tag;
   src = pkgs.fetchurl {
     inherit (bundle) url sha256;

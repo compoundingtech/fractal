@@ -2,7 +2,7 @@ import type { TerminalModes } from '@fractal/client/schema'
 
 import { ghosttyKeyCodes } from './ghosttyKeyCodes.generated.ts'
 
-/** The encoder executes Smalltalk's pinned native Ghostty WASM, not a JS approximation. */
+/** The encoder executes Fractal's pinned native Ghostty WASM, not a JS approximation. */
 export interface TerminalKeyEncoder {
   key(batch: { readonly event: BrowserTerminalKey; readonly modes: TerminalModes }): Uint8Array
   paste(batch: { readonly text: string; readonly modes: TerminalModes }): Uint8Array

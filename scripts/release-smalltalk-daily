@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Publish a release from the archives main already built, when main changed since the last one.
 
-Every main commit runs "Smalltalk tag release", which builds, tests and verifies both archives and
+Every main commit runs "Fractal tag release", which builds, tests and verifies both archives and
 uploads them as the `smalltalk-release` artifact. This takes the newest commit whose run succeeded,
 re-verifies its checksums and sources, tags that exact commit and publishes the same bytes. Nothing
 is rebuilt, so a release is always an archive a main run has already proven.
@@ -111,13 +111,13 @@ def main():
         say(f'{tag} already exists; refusing to reuse a tag')
         return 1
     try:
-        rendered, impact = render(repo, previous, sha, tag, os.environ.get('GH_REPO', 'compoundingtech/smalltalk'), since)
+        rendered, impact = render(repo, previous, sha, tag, os.environ.get('GH_REPO', 'compoundingtech/fractal'), since)
     except ImpactError as error:
         say(str(error))
         return 1
     say(f'releasing {tag} from {sha} (run {run_id}), previous release {previous} at {since}')
 
-    dist = pathlib.Path(tempfile.mkdtemp(prefix='smalltalk-release-'))
+    dist = pathlib.Path(tempfile.mkdtemp(prefix='fractal-release-'))
     run('gh', 'run', 'download', str(run_id), '--name', 'smalltalk-release', '--dir', str(dist))
     # The same checks the tag workflow makes, so the bytes are proven before they are published.
     run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)

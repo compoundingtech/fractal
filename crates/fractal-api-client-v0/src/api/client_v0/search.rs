@@ -1,4 +1,4 @@
-//! The part of `api::client_v0::search` that moved up from st3-api.
+//! The part of `api::client_v0::search` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::DeliveryStore;
 use super::*;
@@ -276,7 +276,7 @@ fn inventory(
             stamp.push_str(&resource["updated_at"].to_string());
         }
         if owner.starts_with("agent/") && remote.is_none() {
-            // Joined Small Talk message entries also change this normalized conversation.
+            // Joined Fractal message entries also change this normalized conversation.
             stamp.push_str(
                 &state
                     .store
@@ -366,7 +366,7 @@ fn local_pages(
             if matches!(kind, "truncation" | "redaction" | "error") {
                 incomplete.push(format!("{id}: {kind}"));
             }
-            // A Small Talk message has its canonical mailbox hit; avoid indexing its
+            // A Fractal message has its canonical mailbox hit; avoid indexing its
             // duplicated title and content again through each seat's transcript.
             if !matches!(kind, "content" | "tool_call" | "tool_result") {
                 continue;
@@ -483,7 +483,7 @@ fn refresh(
                     if matches!(kind, "truncation" | "redaction" | "error") {
                         incomplete.push(format!("{id}: {kind}"));
                     }
-                    // A Small Talk message has its canonical mailbox hit; avoid indexing its
+                    // A Fractal message has its canonical mailbox hit; avoid indexing its
                     // duplicated title and content again through each seat's transcript.
                     if !matches!(kind, "content" | "tool_call" | "tool_result") {
                         continue;

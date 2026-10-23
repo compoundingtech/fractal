@@ -1,4 +1,4 @@
-//! The peer listener as smalltalk runs it: the sync worker from `smallclaims::sync`, reaching the
+//! The peer listener as Fractal runs it: the sync worker from `smallclaims::sync`, reaching the
 //! store through this node's daemon, with the client-read relay and raw terminal routes beside
 //! the sync routes.
 
@@ -1865,8 +1865,8 @@ impl Backend for MainBackend {
     }
 }
 
-/// The routes smalltalk serves beside the sync routes on the peer listener.
-pub fn smalltalk_routes(splice: RawSplice) -> Router<PeerState> {
+/// The routes Fractal serves beside the sync routes on the peer listener.
+pub fn fractal_routes(splice: RawSplice) -> Router<PeerState> {
     relay_trace::init();
     Router::new()
         .route(
@@ -1894,7 +1894,7 @@ pub async fn conversation_gateway_relay(
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(splice))).await });
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, fractal_routes(splice))).await });
     let secret = root.join("fleet-secret");
     fs::write(&secret, [7_u8; 32])?;
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600))?;
@@ -1946,7 +1946,7 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
         worker,
         MainBackend::new(config.socket.clone()),
         wake,
-        smalltalk_routes(splice),
+        fractal_routes(splice),
     )
     .await
 }

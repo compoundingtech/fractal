@@ -3,13 +3,13 @@ use super::*;
 impl Store {
     #[cfg(any(test, feature = "test-support"))]
     pub fn count_refolded_cards_for_test(&self, cards: usize) {
-        self.smalltalk.agent_resources_refolded_cards.fetch_add(cards, std::sync::atomic::Ordering::Relaxed);
-        self.smalltalk.agent_resources_largest_fold.fetch_max(cards, std::sync::atomic::Ordering::Relaxed);
+        self.fractal.agent_resources_refolded_cards.fetch_add(cards, std::sync::atomic::Ordering::Relaxed);
+        self.fractal.agent_resources_largest_fold.fetch_max(cards, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn agent_resources_refolded_cards_for_test(&self) -> usize {
-        self.smalltalk.agent_resources_refolded_cards.load(std::sync::atomic::Ordering::Relaxed)
+        self.fractal.agent_resources_refolded_cards.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Only fields consumed by agent cards, retaining the full reducer's membership,
@@ -607,7 +607,7 @@ impl Store {
             .into_iter()
             .collect::<Vec<_>>();
         let kept = {
-            let folds = self.smalltalk.usage_folds.lock().expect("usage folds poisoned");
+            let folds = self.fractal.usage_folds.lock().expect("usage folds poisoned");
             unique_subjects.iter()
                 .filter_map(|subject| folds.get(subject.as_str())
                     .filter(|cached| cached.through <= through)
@@ -695,7 +695,7 @@ impl Store {
         let summaries = folded.iter()
             .filter_map(|(subject, cached)| cached.fold.summary().map(|summary| (subject.clone(), summary)))
             .collect();
-        let mut folds = self.smalltalk.usage_folds.lock().expect("usage folds poisoned");
+        let mut folds = self.fractal.usage_folds.lock().expect("usage folds poisoned");
         for (subject, cached) in folded {
             folds.keep(subject, cached);
         }
@@ -800,12 +800,12 @@ impl Store {
             let (title, detail) = if let [seat] = names.as_slice() {
                 (
                     format!("{seat} on {host} needs you to log in"),
-                    format!("{seat} on {host} needs you to log in: attach (Ctrl+] in stui) and {how}. A successful authenticated turn clears this alert automatically."),
+                    format!("{seat} on {host} needs you to log in: attach (Ctrl+] in Fractal TUI) and {how}. A successful authenticated turn clears this alert automatically."),
                 )
             } else {
                 (
                     format!("{} seats on {host} need you to log in to {login}", names.len()),
-                    format!("{} on {host} share the login {login}, which needs you to sign in again: attach to {} (Ctrl+] in stui) and {how}. One sign-in fixes every seat; each clears when its next authenticated turn succeeds.", names.join(", "), first.subject),
+                    format!("{} on {host} share the login {login}, which needs you to sign in again: attach to {} (Ctrl+] in Fractal TUI) and {how}. One sign-in fixes every seat; each clears when its next authenticated turn succeeds.", names.join(", "), first.subject),
                 )
             };
             items.push(AttentionItemView {

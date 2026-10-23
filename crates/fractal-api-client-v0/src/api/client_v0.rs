@@ -1,4 +1,4 @@
-//! The part of `api::client_v0` that moved up from st3-api.
+//! The part of `api::client_v0` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::AttentionListStore;
 use crate::AttentionStore;
@@ -1798,7 +1798,7 @@ fn is_native_record(item: &Value) -> bool {
     item["id"].as_str().is_some_and(|id| id.starts_with("timeline-entry/native-"))
 }
 
-/// A native page's key for one entry: transcript records rank 0, Small Talk messages 1, as
+/// A native page's key for one entry: transcript records rank 0, Fractal messages 1, as
 /// the native page builders assign by source.
 fn native_entry_key(item: &Value) -> crate::external_sessions::TimelineKey {
     crate::external_sessions::timeline_key(item, u8::from(!is_native_record(item)))
@@ -4441,7 +4441,7 @@ fn conversation_read_now_unbounded(
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
-        // Native pages contain native records and Small Talk messages, not the driver's
+        // Native pages contain native records and Fractal messages, not the driver's
         // mirrored harness.timeline entries. Requiring those IDs in a native page creates
         // a false gap on every observation, even when the native transcript is unchanged.
         if let Some(owner) = owner.as_deref().filter(|_| !native_replay) {
@@ -4578,7 +4578,7 @@ fn conversation_read_now_unbounded(
 }
 
 /// What a conversation read last saw, so a wake-up can tell cheaply whether anything that
-/// concerns the conversation changed: a claim about its agent, Small Talk to or from it, a local
+/// concerns the conversation changed: a claim about its agent, Fractal to or from it, a local
 /// timeline entry, or its native transcript file.
 #[derive(Clone)]
 struct ConversationMark {
@@ -18265,14 +18265,14 @@ mission "example/zero-run" state="ready" {
             vec!["generic legacy message", "current composer message"]
         );
 
-        // The agent's own Small Talk joins its conversation, saying who wrote to whom.
+        // The agent's own Fractal joins its conversation, saying who wrote to whom.
         let _ = accept_message(
             &state,
             MessageSendRequest {
                 idempotency_key: "session-message-outgoing".into(),
                 from: subject.into(),
                 to: "agent/session-message-peer".into(),
-                content: "outgoing small talk".into(),
+                content: "outgoing Fractal message".into(),
                 title: Some("A question".into()),
                 in_reply_to: None,
                 tags: Vec::new(),
@@ -18294,7 +18294,7 @@ mission "example/zero-run" state="ready" {
         let items = timeline["items"].as_array().unwrap();
         let outgoing = items
             .iter()
-            .position(|item| item["body"]["text"] == "outgoing small talk")
+            .position(|item| item["body"]["text"] == "outgoing Fractal message")
             .expect("the agent's own message is in its conversation");
         let header = &items[outgoing - 1];
         assert_eq!(header["type"], "message");
@@ -18303,7 +18303,7 @@ mission "example/zero-run" state="ready" {
         assert_eq!(header["body"]["to"], "agent/session-message-peer");
         assert_eq!(header["body"]["title"], "A question");
 
-        // A new incarnation starts a new conversation: earlier Small Talk stays with the old one.
+        // A new incarnation starts a new conversation: earlier Fractal stays with the old one.
         std::thread::sleep(std::time::Duration::from_millis(2));
         state
             .store
@@ -18529,7 +18529,7 @@ mission "example/zero-run" state="ready" {
                 ("from".into(), json!("person/alex")),
                 ("to".into(), json!(owner)),
                 ("session_id".into(), json!(session_id)),
-                ("content".into(), json!("Small Talk message")),
+                ("content".into(), json!("Fractal message")),
                 ("status".into(), json!("sent")),
             ]),
             evidence: Vec::new(),

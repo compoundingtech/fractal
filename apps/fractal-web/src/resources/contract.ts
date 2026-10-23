@@ -1,4 +1,4 @@
-// moves to smalltalk/clients/typescript
+// moves to fractal/clients/typescript
 /**
  * Renderer contract: UI-kit-free, JSON-serializable, so stui (Rust/ratatui), iOS (Swift/RN)
  * and wf (React) implement the same manifests and the same resolution algorithm, each binding

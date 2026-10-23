@@ -498,9 +498,9 @@ async fn connected(
     let mut pinged: Option<Instant> = None;
     let mut probe = tokio::time::interval(QUIET_CHECK);
     probe.tick().await;
-    // Glasses are followed only where st grants them in the shape this stui reads (splits of
-    // tab groups, version 1); elsewhere stui keeps them on the device. A member still on the
-    // earlier shape would send glasses this stui cannot decode, and that drops the connection.
+    // Glasses are followed only where st grants them in the shape this Fractal TUI reads (splits of
+    // tab groups, version 1); elsewhere Fractal TUI keeps them on the device. A member still on the
+    // earlier shape would send glasses this Fractal TUI cannot decode, and that drops the connection.
     let capabilities = match client.capabilities().await {
         Ok(capabilities) => capabilities,
         Err(error) => return Ended::Dropped(error.plain()),
@@ -1481,7 +1481,7 @@ mod tests {
     #[test]
     fn stale_fence_on_the_stream_follows_again_and_the_attach_decides_if_it_restarted() {
         // st says stale-fence for an owner briefly out of reach or a viewer that idled, not only
-        // for a restart: stui follows again, and `attach` refuses a changed incarnation.
+        // for a restart: Fractal TUI follows again, and `attach` refuses a changed incarnation.
         let (tx, rx) = mpsc::channel();
         let mut current = following();
         terminal_failed(

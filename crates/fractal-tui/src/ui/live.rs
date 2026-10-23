@@ -1,4 +1,4 @@
-//! `stui`: the screens on the live graph.
+//! `fractal tui`: the screens on the live graph.
 //!
 //! The feed keeps the attention, missions and agents windows current over one socket, joined
 //! by st, and follows the open terminal on the same socket. This loop turns those windows
@@ -570,7 +570,7 @@ pub fn run(context: Context) -> Result<()> {
         ui.flash("The old screens are gone: this is spaces, and ? shows its keys");
     }
 
-    // A stui killed from outside leaves its last picture on the screen; the next one says so.
+    // A Fractal TUI killed from outside leaves its last picture on the screen; the next one says so.
     if let Some(note) = earlier {
         // Long enough to read: the usual flash ends after four seconds.
         ui.flash = Some((note, Instant::now() + Duration::from_secs(26)));
@@ -662,7 +662,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut sync_due: Option<Instant> = None;
     // The windows whose first frame has arrived on this connection: that frame is not a change.
     let mut windows_seen: BTreeSet<String> = BTreeSet::new();
-    // A closed terminal ends the loop: without this check a detached stui spins and keeps
+    // A closed terminal ends the loop: without this check a detached Fractal TUI spins and keeps
     // polling the daemon forever.
     while !ui.quit
         && !stopping.load(std::sync::atomic::Ordering::Relaxed)
@@ -2662,7 +2662,7 @@ fn mark_unanswered(pending: &mut [Pending]) -> bool {
 /// The followed agents whose conversation shows a session they have since left: st resolves an
 /// agent to its session when a subscription starts, so after a restart that subscription keeps
 /// the old one (Nathan's message to a restarted seat sat at "sending…" because it landed in the
-/// new session, which his stui was not showing). Each is named once per new session.
+/// new session, which his Fractal TUI was not showing). Each is named once per new session.
 fn moved_sessions(
     conversing: &[String],
     model: &Model,
@@ -2812,7 +2812,7 @@ async fn agent_control(client: &Client, agent: &str, control: AgentControl) -> R
         runtime_desired_revision: Some(definition.value.desired_token),
         ..Fence::default()
     };
-    let reason = Some("from stui's agent actions".to_owned());
+    let reason = Some("from Fractal TUI's agent actions".to_owned());
     let steps: &[AgentControl] = match control {
         AgentControl::Restart => &[AgentControl::Retire, AgentControl::Start],
         _ => std::slice::from_ref(&control),
@@ -3104,7 +3104,7 @@ async fn perform(
                     fence,
                     fractal_client::TargetParameters {
                         target_id: run.clone(),
-                        reason: Some(format!("cancelled from stui by {person}")),
+                        reason: Some(format!("cancelled from Fractal TUI by {person}")),
                         ..Default::default()
                     },
                 )
@@ -3196,7 +3196,7 @@ async fn perform(
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned()),
                     }),
-                    // An st from before attachments: name the files, as stui did then.
+                    // An st from before attachments: name the files, as Fractal TUI did then.
                     Err(fractal_client::ClientError::Api(
                         fractal_client::ErrorCode::NotFound
                         | fractal_client::ErrorCode::UnsupportedCapability,
@@ -3875,7 +3875,7 @@ mod tests {
         }
     }
 
-    /// The world a running stui shows after the stream delivered Attention (older) and Agents
+    /// The world a running Fractal TUI shows after the stream delivered Attention (older) and Agents
     /// (newest) windows, built by the same function the live loop uses.
     fn running_world(sync: Option<&fractal_client::SyncNotice>) -> super::super::view::World {
         let mut model = Model::default();

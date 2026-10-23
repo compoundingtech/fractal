@@ -31,7 +31,7 @@ PATTERNS = (
     "clients/typescript/fractal-client/BUCK*",
     "clients/typescript/fractal-views/**",
     "clients/typescript/fractal-scenarios/**",
-    # The st3-scenarios recording import reads the client wire schema at runtime.
+    # The fractal-scenarios recording import reads the client wire schema at runtime.
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     # Views tests and scenario lanes read committed client/scenario fixtures.
     "fixtures/**",
@@ -209,7 +209,7 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/index.html",
     "clients/typescript/fractal-scenarios/**",
     "clients/typescript/fractal-client/**",
-    # The st3-scenarios recording import reads the client wire schema at runtime.
+    # The fractal-scenarios recording import reads the client wire schema at runtime.
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "package.json*",
     "pnpm-workspace.yaml*",

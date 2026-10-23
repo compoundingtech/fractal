@@ -2408,21 +2408,21 @@ command = ["evidence-sign"]
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path().join("runner");
         fs::create_dir(&root).unwrap();
-        fs::create_dir_all(root.join("smalltalk/repo")).unwrap();
+        fs::create_dir_all(root.join("fractal/repo")).unwrap();
         let uid = fs::metadata(&root).unwrap().uid();
-        let fd = open_checkout_beneath(&root, Path::new("smalltalk/repo"), uid).unwrap();
+        let fd = open_checkout_beneath(&root, Path::new("fractal/repo"), uid).unwrap();
         let actual = fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd())).unwrap();
         assert_eq!(
             actual.ino(),
-            fs::metadata(root.join("smalltalk/repo")).unwrap().ino()
+            fs::metadata(root.join("fractal/repo")).unwrap().ino()
         );
         for path in [
             "",
             "..",
-            "../runner/smalltalk",
+            "../runner/fractal",
             "/",
             "missing",
-            "smalltalk/repo/../repo",
+            "fractal/repo/../repo",
         ] {
             assert!(
                 open_checkout_beneath(&root, Path::new(path), uid).is_err(),
@@ -2430,12 +2430,12 @@ command = ["evidence-sign"]
             );
         }
         assert!(
-            open_checkout_beneath(&root, Path::new("smalltalk/repo"), uid.wrapping_add(1)).is_err()
+            open_checkout_beneath(&root, Path::new("fractal/repo"), uid.wrapping_add(1)).is_err()
         );
         let outside = fixture.path().join("outside");
         fs::create_dir(&outside).unwrap();
         symlink(&outside, root.join("escape")).unwrap();
-        symlink(root.join("smalltalk/repo"), root.join("inside-link")).unwrap();
+        symlink(root.join("fractal/repo"), root.join("inside-link")).unwrap();
         for path in ["escape", "inside-link"] {
             assert!(open_checkout_beneath(&root, Path::new(path), uid).is_err());
         }
@@ -2444,12 +2444,12 @@ command = ["evidence-sign"]
         assert!(
             open_checkout_beneath(
                 &fixture.path().join("root-link"),
-                Path::new("smalltalk/repo"),
+                Path::new("fractal/repo"),
                 uid
             )
             .is_err()
         );
-        fs::rename(root.join("smalltalk"), root.join("renamed")).unwrap();
+        fs::rename(root.join("fractal"), root.join("renamed")).unwrap();
         assert_eq!(
             fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd()))
                 .unwrap()

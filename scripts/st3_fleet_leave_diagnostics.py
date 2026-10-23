@@ -75,7 +75,7 @@ def dump(root, reason):
         path = root / name
         print(f"--- {name}", file=sys.stderr)
         print(path.read_text() if path.exists() else "not yet recorded", file=sys.stderr)
-    guardian = int(os.environ["SMALLTALK_TEST_SUPERVISOR"])
+    guardian = int(os.environ["FRACTAL_TEST_SUPERVISOR"])
     print("--- owned process tree (before cleanup)", file=sys.stderr)
     print(json.dumps(process_tree(guardian), indent=2), file=sys.stderr, flush=True)
     for node in ("a", "b"):
@@ -103,10 +103,10 @@ def main():
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command or args.seconds <= 0:
         parser.error("a command and positive deadline are required")
-    if "SMALLTALK_TEST_SUPERVISOR" not in os.environ:
+    if "FRACTAL_TEST_SUPERVISOR" not in os.environ:
         parser.error("must run inside st3_test_process.py so all children are owned")
     task = subprocess.Popen(command, env={**os.environ,
-        "SMALLTALK_FLEET_LEAVE_DIAGNOSTICS": str(args.root)})
+        "FRACTAL_FLEET_LEAVE_DIAGNOSTICS": str(args.root)})
     with os.fdopen(os.pidfd_open(task.pid), "rb") as fd:
         poller = select.poll()
         poller.register(fd, select.POLLIN)

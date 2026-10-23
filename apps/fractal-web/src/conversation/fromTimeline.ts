@@ -77,7 +77,7 @@ const joinResult = ({
 /**
  * st's native-transcript reader (`external_sessions.rs` `push_message`) emits a `message` entry
  * carrying only the harness's own message id before each transcript message's parts. It is a turn
- * header, not a Small Talk delivery (those always name `from`/`to`), so it renders nothing; the
+ * header, not a Fractal delivery (those always name `from`/`to`), so it renders nothing; the
  * parts after it carry the content.
  */
 const isTurnHeader = (entry: Entry) =>
@@ -132,7 +132,7 @@ const unrecognizedOmpItem = (
 
 /**
  * String convention emitted by st's external_sessions.rs `push_native_block`, matching the
- * reasoning-label semantics in st3-conversation-ui/src/adapt.rs. No duration is available.
+ * reasoning-label semantics in fractal-conversation-ui/src/adapt.rs. No duration is available.
  * TODO(st#2010): typed reasoning — https://github.com/compoundingtech/smalltalk/issues/2010
  */
 const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): ConversationItem | undefined => {

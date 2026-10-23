@@ -6,7 +6,7 @@
 # EVIDENCE_LOG_FLAGS adds --publish and, once GC writes its lines first, --restore.
 set -euo pipefail
 state=${EVIDENCE_LOG_STATE:-$HOME/.local/state/evidence-log}
-remote=${EVIDENCE_LOG_REMOTE:-https://github.com/compoundingtech/smalltalk.git}
+remote=${EVIDENCE_LOG_REMOTE:-https://github.com/compoundingtech/fractal.git}
 config=${EVIDENCE_LOG_CONFIG:-$HOME/.config/evidence-log}
 repo=$state/repo.git
 mkdir -p "$state"

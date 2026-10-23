@@ -39,4 +39,4 @@ recommendations="$(jq --arg run_tag "$run_tag" --arg sup "agent/${FRACTAL_MISSIO
 test "$(jq 'length' <<<"$recommendations")" -eq 1
 test "$(jq -r '.[0].created_index' <<<"$recommendations")" -gt "$latest_critique"
 
-echo "PASS: Small Talk has six peer critiques and one later recommendation"
+echo "PASS: Fractal has six peer critiques and one later recommendation"

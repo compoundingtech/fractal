@@ -461,7 +461,7 @@ fn structured_request(
             ));
         }
     }
-    // The images it carries: a line each that opens it; where stui keeps image state, the line
+    // The images it carries: a line each that opens it; where Fractal TUI keeps image state, the line
     // also loads it inline (`Content::expand_requests`).
     if !images.is_empty() {
         card.blank();
@@ -2376,7 +2376,7 @@ pub fn fleet_detail(world: &World, id: Option<&str>, width: usize, spinner: &'st
     if links.lines.is_empty() {
         links.line(Line::from(span(
             if machine.you_are_here {
-                "This is the machine stui is talking to."
+                "This is the machine Fractal TUI is talking to."
             } else {
                 "st reports no link to this machine."
             },
@@ -3109,7 +3109,7 @@ fn tree_listing(
 }
 
 /// Each path's folders, with a folder that holds only one folder joined to it on one line
-/// (Nathan, 2026-10-01): `fleet/smalltalk/operations/` rather than three nested folders.
+/// (Nathan, 2026-10-01): `fleet/fractal/operations/` rather than three nested folders.
 fn compact_folders(paths: &[Vec<String>]) -> Vec<Vec<String>> {
     use std::collections::{BTreeMap, BTreeSet};
     // What each folder holds: its subfolders by name, and a leaf as the empty name.
@@ -3455,8 +3455,8 @@ mod tree_tests {
     fn a_folder_holding_only_a_folder_joins_it_on_one_line() {
         let path = |text: &str| text.split('/').map(str::to_owned).collect::<Vec<_>>();
         let compact = compact_folders(&[
-            path("fleet/smalltalk/operations/2026-10-01/operator"),
-            path("fleet/smalltalk/ci/watcher"),
+            path("fleet/fractal/operations/2026-10-01/operator"),
+            path("fleet/fractal/ci/watcher"),
             path("fleet/cos/standing/cos"),
             path("solo"),
         ]);
@@ -3465,10 +3465,10 @@ mod tree_tests {
             [
                 vec![
                     "fleet".to_owned(),
-                    "smalltalk".into(),
+                    "fractal".into(),
                     "operations/2026-10-01".into()
                 ],
-                vec!["fleet".to_owned(), "smalltalk".into(), "ci".into()],
+                vec!["fleet".to_owned(), "fractal".into(), "ci".into()],
                 vec!["fleet".to_owned(), "cos/standing".into()],
                 Vec::<String>::new(),
             ]

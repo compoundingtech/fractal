@@ -39,7 +39,7 @@ version 2
         step "read-request" { title "The exact immutable license request is understood"; goal "Read the referenced task document through st3 documents get. Confirm that the widget library must become MIT licensed." }
         step "send-worker-brief" {
           title "The worker receives one bounded license brief"
-          goal "Send agent/${ST_MISSION_RUN}/lmc.worker exactly one Small Talk message. Require canonical MIT LICENSE text, package.json license MIT, no proprietary text, a commit, and a clean tree. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/license-brief resource.observed --actor agent/${ST_MISSION_RUN}/lmc.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send agent/${ST_MISSION_RUN}/lmc.worker exactly one Fractal message. Require canonical MIT LICENSE text, package.json license MIT, no proprietary text, a commit, and a clean tree. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/license-brief resource.observed --actor agent/${ST_MISSION_RUN}/lmc.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "read-request" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/license-brief" { kind "custom.st3.message-receipt"; state "published" } }
         }
@@ -66,7 +66,7 @@ version 2
         }
         step "report-worker-result" {
           title "The supervisor receives the committed license evidence"
-          goal "Send agent/${ST_MISSION_RUN}/lmc.sup exactly one Small Talk report. Include changed files, commit, MIT checks, and clean-tree evidence. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/worker-report resource.observed --actor agent/${ST_MISSION_RUN}/lmc.worker --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send agent/${ST_MISSION_RUN}/lmc.sup exactly one Fractal report. Include changed files, commit, MIT checks, and clean-tree evidence. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/worker-report resource.observed --actor agent/${ST_MISSION_RUN}/lmc.worker --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "publish-license-revision" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/worker-report" { kind "custom.st3.message-receipt"; state "published" } }
         }
@@ -85,7 +85,7 @@ version 2
         step "verify-worker-revision-read-only" { title "The supervisor independently verifies the MIT revision"; goal "Without edits, inspect ../worker. Verify canonical MIT LICENSE text, package.json MIT, no proprietary text, the published HEAD, its commit diff, and a clean tree."; depends-on { step "read-worker-report" completed } }
         step "confirm-requester" {
           title "The requester receives one verified MIT confirmation"
-          goal "Send person/eval-requester exactly one Small Talk message. Cite the real commit and each read-only verification. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/final-confirmation resource.observed --actor agent/${ST_MISSION_RUN}/lmc.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send person/eval-requester exactly one Fractal message. Cite the real commit and each read-only verification. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/final-confirmation resource.observed --actor agent/${ST_MISSION_RUN}/lmc.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "verify-worker-revision-read-only" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/final-confirmation" { kind "custom.st3.message-receipt"; state "published" } }
         }

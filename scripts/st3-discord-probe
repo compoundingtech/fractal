@@ -57,7 +57,7 @@ class Discord:
         request = urllib.request.Request(API + path, data=data, method=method, headers={
             'Authorization': 'Bot ' + self.token,
             'Content-Type': 'application/json',
-            'User-Agent': 'DiscordBot (https://github.com/compoundingtech/smalltalk, 0.1)',
+            'User-Agent': 'DiscordBot (https://github.com/compoundingtech/fractal, 0.1)',
         })
         try:
             with self.opener.open(request, timeout=15) as response:

@@ -295,7 +295,7 @@ by ID. Frame `has_more` is `Option<bool>`: an absent delta leaves the timeline's
 unchanged, while an explicit value updates it. A replacement or changed session starts fresh.
 The timeline keeps a boolean for the current window, and older pages track their own start.
 
-The shared crate and the `stui` library use workspace Ratatui 0.30. An embedding application must align its
+The shared crate and the `fractal-tui` library use workspace Ratatui 0.30. An embedding application must align its
 rendering dependency before passing buffers or lines across this boundary. Native conversations are not a terminal emulator: harness menus and arbitrary
 permission prompts still require access to the harness terminal.
 
@@ -363,7 +363,7 @@ wording consistent when both describe the same change.
 | `examples/st3`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |
 
-The `stui` package is a library embedded in `st`; it has no standalone executable. Its existing
-Clippy baseline allowances remain under the `stui` package key because the library still owns
+The `fractal-tui` package is a library embedded in `st`; it has no standalone executable. Its existing
+Clippy baseline allowances remain under the `fractal-tui` package key because the library still owns
 the renderer and its existing lint baseline.
 Removing the binary does not rename the library or the protocol client identity.

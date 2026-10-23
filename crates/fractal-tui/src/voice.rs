@@ -1,5 +1,5 @@
 //! Voice mode: the speech helper (`st-listen`, inside SmallTalk.app on a Mac) run as a child,
-//! its JSON lines read into events. The helper owns the microphone and the transcription; stui
+//! its JSON lines read into events. The helper owns the microphone and the transcription; Fractal TUI
 //! only shows what it hears and decides what happens to the words.
 
 use std::io::{BufRead, BufReader, Write};
@@ -27,7 +27,7 @@ pub enum Event {
 }
 
 /// The helper to run: `ST_LISTEN` when set (any machine, so a stand-in can be tested), else the
-/// one inside the SmallTalk.app this stui runs from, else the try-out copy beside it.
+/// one inside the SmallTalk.app this Fractal TUI runs from, else the try-out copy beside it.
 pub fn helper() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("ST_LISTEN").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
@@ -47,13 +47,13 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Whether this stui can listen, looked up once.
+/// Whether this Fractal TUI can listen, looked up once.
 pub fn available() -> bool {
     static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FOUND.get_or_init(|| helper().is_some())
 }
 
-/// Where a helper may be, for a stui at `exe`: in its app's Helpers, then in the try-out folder.
+/// Where a helper may be, for a Fractal TUI at `exe`: in its app's Helpers, then in the try-out folder.
 fn candidates(exe: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     const INNER: &str = "StListen.app/Contents/MacOS/st-listen";
     let mut found = Vec::new();

@@ -1767,7 +1767,7 @@ fn normalized_timeline_usage_body(
     Value::Object(body)
 }
 
-/// The Small Talk in one session's conversation: messages sent for this session, and messages
+/// The Fractal in one session's conversation: messages sent for this session, and messages
 /// to or from its agent that name no session, accepted while this incarnation was the agent's
 /// current one. st joins them into the timeline so every client shows the same conversation.
 fn session_messages(
@@ -1806,7 +1806,7 @@ fn session_message_belongs(
     }
 }
 
-/// A message's timeline body: who wrote to whom, about what, so a client can draw Small Talk
+/// A message's timeline body: who wrote to whom, about what, so a client can draw Fractal
 /// apart from the harness's own turns.
 /// Who signed a message a person wrote and whether it checks: the verdict st recorded, and the
 /// device the signing key was granted to, by the label the person gave it when it paired. A
@@ -2439,7 +2439,7 @@ fn canonical_native_slice(
 /// The most native entries one echo-omitting read examines.
 #[cfg(not(any(test, feature = "test-support")))]
 pub const NATIVE_ECHO_SCAN_ITEMS: usize = 4096;
-/// Test builds (st3-api-client-v0's tests reach this through test-support) scan a smaller budget, so a
+/// Test builds (fractal-api-client-v0's tests reach this through test-support) scan a smaller budget, so a
 /// fixture can exceed it with a few hundred echoes.
 #[cfg(any(test, feature = "test-support"))]
 pub const NATIVE_ECHO_SCAN_ITEMS: usize = 256;
