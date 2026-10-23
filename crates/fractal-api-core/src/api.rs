@@ -96,7 +96,10 @@ mod owned_sets;
 pub mod published_attention;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
-pub use published_attention::{published_attention_rows, refresh_attention_list};
+pub use published_attention::{
+    attention_fleet, present_attention, published_attention_rows, refresh_attention_list,
+    refresh_attention_list_with,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
@@ -4191,12 +4194,13 @@ pub fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
     }
 }
 
-fn client_attention_resources_with_previews(
+pub fn client_attention_resources_with_previews(
     state: &AppState,
     person: Option<&str>,
     history: bool,
 ) -> anyhow::Result<Vec<Value>> {
     let mut items = client_attention_resources(&state.store, person, history)?;
+    published_attention::published_attention_presentations(&state.store, &mut items);
     for item in &mut items {
         if item["attention_kind"] != "launch-approval" {
             continue;

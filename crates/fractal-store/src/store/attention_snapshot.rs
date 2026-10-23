@@ -17,6 +17,16 @@ const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
     AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
 
 impl Store {
+    /// A step's name within its mission, while st has the step.
+    pub fn step_path(&self, step: &str) -> Result<Option<String>> {
+        Ok(self
+            .readers
+            .get()
+            .prepare_cached("SELECT step_path FROM step_runs WHERE subject=?1")?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h7dbe458e77a9 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [step], |row| row.get(0))
+            .optional()?)
+    }
+
     /// The person-attention collection at `now`, with the first instant after `now` at which
     /// the unchanged collection changes.
     ///
