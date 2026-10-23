@@ -131,3 +131,7 @@ and a stale pass is reused. Four controls, in order of when they bite:
   check to `.st/evidence-skip-policy.json` makes `evidence-verify-test` and `ci-evidence-gate-test` expect a gate job and lane for it. Until
   the policy names the check at the base, `st-test` judges coverage by signature, crate and key alone (a local convenience), and the notes
   carry no lane digest, so step 3's notes are signed again.
+
+Measured with the committed extras over the last 57 first-parent merges of main (2026-10-23): the median merge changes the key of 5 of 52
+crates; 29 merges change at most 5, 5 change 6 to 20, 14 change 21 to 49, and 9 change 50 or more (global paths: a manifest, the lock, the
+stage scripts). So about half the merges re-run a handful of crates and one in six re-runs everything.
