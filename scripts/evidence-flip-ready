@@ -38,6 +38,8 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
 POLICY = '.st/evidence-skip-policy.json'
+GATE = 'scripts/ci-evidence-gate'
+OLD_BASE_REASONS = ('no_policy', 'no-gate-at-base')  # an unavailable line whose base git shows predates GATE or the entry
 DOC = 'docs/st3/gate-evidence.md'
 DOC_SECTION = '### Which checks skip today'
 # The test lists that name the enforced checks, written out in each test so a flip is a deliberate change to them.
@@ -174,8 +176,39 @@ def collect(github, checks, since, until):
             if fields.get('check') == check:
                 rows.append({'check': check, 'run': run['id'], 'created_at': parse_time(run.get('created_at')),
                              'actor': ((run.get('actor') or {}).get('login') or '-'),
+                             'base': (((run.get('pull_requests') or [{}])[0] or {}).get('base') or {}).get('sha'),
                              'fields': fields, 'real': conclusion, 'members_red': members_red})
     return rows
+
+
+def old_base(root, row, runner, seen):
+    """The reason when an unavailable line came from a base that git shows predates the gate or the check's policy entry:
+    that gate never verified, so the line says nothing about the log. An unknown or unreadable base, or any other reason,
+    is None: a gate fault still restarts the window."""
+    fields = row['fields']
+    reason, base = fields.get('reason'), fields.get('base') or row.get('base') or ''
+    if fields.get('outcome') != 'unavailable' or fields.get('log', '-') != '-' or reason not in OLD_BASE_REASONS \
+            or not re.fullmatch(r'[0-9a-f]{40}', base):
+        return None
+    key = (base, reason, row['check'])
+    if key not in seen:
+        seen[key] = predates(root, base, reason, row['check'], runner)
+    return reason if seen[key] else None
+
+
+def predates(root, base, reason, check, runner):
+    def ok(*args):
+        return runner(['git', '-C', str(root), *args]).returncode == 0
+    if not ok('cat-file', '-e', f'{base}^{{commit}}') and not (ok('fetch', '-q', 'origin', base) and ok('cat-file', '-e', f'{base}^{{commit}}')):
+        return False
+    if reason == 'no-gate-at-base':
+        return not ok('cat-file', '-e', f'{base}:{GATE}')
+    if not ok('cat-file', '-e', f'{base}:{POLICY}'):
+        return True  # the base predates the policy file
+    try:
+        return check not in json.loads(runner(['git', '-C', str(root), 'show', f'{base}:{POLICY}']).stdout)['checks']
+    except (ValueError, KeyError, TypeError):
+        return False
 
 
 def evaluate(rows, enforce, now):
@@ -194,7 +227,13 @@ def evaluate(rows, enforce, now):
     # A single job's failure is hidden by its skip; an aggregate's only when a member the skip would skip went red.
     hidden = sorted({row['run'] for row in red if row['check'] not in SKIPPED_MEMBERS or row['members_red']})
     visible = sorted({row['run'] for row in red} - set(hidden))
-    # The log window began with the first line that has a log value after the last line without one.
+    # The log window began with the first line that has a log value after the last line without one. An old base's line
+    # (old_base) neither starts nor restarts it; the report counts those it set aside.
+    ignored = {}
+    for row in window:
+        if row.get('old_base'):
+            ignored[row['old_base']] = ignored.get(row['old_base'], 0) + 1
+    rows = [row for row in rows if not row.get('old_base')]
     unset = [i for i, row in enumerate(rows) if row['fields'].get('log', '-') == '-']
     began = rows[unset[-1] + 1:] if unset else rows
     window_start = began[0]['created_at'] if began else None
@@ -202,9 +241,10 @@ def evaluate(rows, enforce, now):
         'enforce': enforce, 'lines': len(window),
         'satisfied_log_ok': sum(1 for row, value in zip(window, log) if value == 'ok' and row['fields'].get('outcome') == 'satisfied'),
         'log_missing': log.count('missing'), 'unlogged_pass_unexplained': unexplained, 'hidden_red': hidden,
-        'visible_red': visible, 'log_window_start': iso(window_start),
+        'visible_red': visible, 'log_window_start': iso(window_start), 'old_base_lines': ignored,
     }
-    why = [f'{log.count(value)} lines with log={value}' for value in NOT_FRESH if value in log]
+    verified = [value for row, value in zip(window, log) if not row.get('old_base')]
+    why = [f'{verified.count(value)} lines with log={value}' for value in NOT_FRESH if value in verified]
     if window_start is None:
         why.append('no line with a log value')
     elif window_start > start:
@@ -447,6 +487,9 @@ def main(argv, runner=default_runner, now=None, root=ROOT):
         policy = json.loads(git(root, 'show', f'origin/main:{POLICY}', runner=runner))['checks']
         since = now - datetime.timedelta(seconds=WINDOW_S + LOOKBACK_S)
         rows = collect(github, set(policy), since, now)
+        seen = {}
+        for row in rows:
+            row['old_base'] = old_base(root, row, runner, seen)
     except (Unreadable, RuntimeError, ValueError) as error:
         print(f'could not read GitHub or origin/main: {error}', file=sys.stderr)
         return 2
