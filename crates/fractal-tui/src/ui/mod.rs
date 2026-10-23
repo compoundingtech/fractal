@@ -7,6 +7,7 @@
 
 pub mod adapt;
 mod alerts;
+mod answers;
 mod attach;
 mod clickable;
 mod content;
@@ -431,6 +432,8 @@ pub struct Ui {
     updates_read: HashSet<String>,
     /// Attention items the person acted on from here: st closing them is their doing.
     acted: HashSet<String>,
+    /// Answers hidden locally until the action and authoritative Attention window agree.
+    pending_answers: HashMap<String, answers::PendingAnswer>,
     /// Attention items st no longer lists that nobody here acted on. Nothing leaves Home by
     /// itself (Nathan, 2026-10-07): they stay, marked, until `x` clears them.
     closed: HashSet<String>,
@@ -786,6 +789,7 @@ impl Ui {
             effects: Vec::new(),
             updates_read: HashSet::new(),
             acted: HashSet::new(),
+            pending_answers: HashMap::new(),
             closed: HashSet::new(),
             older_wanted: RefCell::default(),
             conversation_first: None,
@@ -846,6 +850,7 @@ impl Ui {
 
     /// Note what the person did to an item from here, so its closing is not listed under Recently closed.
     pub(crate) fn note_acted(&mut self, effect: &Effect) {
+        self.begin_answer(effect);
         match effect {
             Effect::Attention { id, .. }
             | Effect::LaunchRevise { id, .. }
@@ -925,6 +930,7 @@ impl Ui {
         }
         self.world = world;
         self.keep_closed_attention(before);
+        self.hide_pending_answers();
         for (index, id) in chosen.into_iter().enumerate() {
             if let Some(id) = id
                 && let Some(position) = self
@@ -1986,7 +1992,9 @@ impl Ui {
                 Style::default().fg(theme::OVERLAY0).bg(theme::CRUST),
             );
         }
-        if let Some((message, _)) = &self.flash {
+        let sending = (!self.pending_answers.is_empty())
+            .then(|| format!("Sending {} answer(s)…", self.pending_answers.len()));
+        if let Some(message) = self.flash.as_ref().map(|(message, _)| message).or(sending.as_ref()) {
             let message = format!(" {message} ");
             let width = text::width(&message) as u16;
             // A message wins over the key hints: on a narrow window it must still show.
