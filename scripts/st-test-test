@@ -203,6 +203,54 @@ class StTest(unittest.TestCase):
         self.assertRegex(out, r'demo +not signed +0s +this tree edits its lane \(scripts/lane\.sh\); CI runs it')
         self.assertNotIn('FAILED', out)
 
+    def main_moves(self, name, content):
+        """main gains a commit the feature branch does not have."""
+        git(self.work, 'checkout', '-q', '--detach', 'origin/main')
+        self.commit(name, content)
+        git(self.work, 'push', '-q', 'origin', 'HEAD:main')
+        git(self.work, 'checkout', '-q', 'feature')
+        git(self.work, 'fetch', '-q', 'origin')
+
+    def test_a_branch_that_only_lags_a_lane_change_on_main_is_signed_for_its_branch_point_and_covered(self):
+        policy = json.loads(json.dumps(POLICY))
+        wrapper = policy['checks']['demo']['kinds']['wrapper']
+        wrapper['by_level'] = {'host': {'command': wrapper['command'], 'events': ['pull_request'], 'lane': True}}
+        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
+        self.lane_file()
+        point = git(self.work, 'rev-parse', 'HEAD')
+        self.commit('b.txt', 'two')
+        self.main_moves('scripts/lane.sh', 'lane, and more, on main\n')
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('covered by wrapper', out)
+        statement, = self.statements()
+        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        rules = verifier.lane_rules(git(self.work, 'show', f'{point}:.st/required-lanes.json'), 'demo')
+        at_point = verifier.lane_definition(str(self.work), git(self.work, 'rev-parse', f'{point}^{{tree}}'),
+                                            git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)['sha256']
+        self.assertEqual(statement['predicate']['observed']['inputs']['lane_definition_sha256'], at_point)
+        code, out, err = self.run_st_test('--check', 'demo', '--status')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'demo +covered ')
+
+    def test_the_branch_point_is_the_base_when_main_changed_the_lane_file_itself(self):
+        self.lane_file()
+        point = git(self.work, 'rev-parse', 'HEAD')
+        self.commit('b.txt', 'two')
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            with mock.patch.dict(os.environ, GIT_ENV):
+                self.assertEqual(st_test.branch_point('HEAD', 'origin/main'), point)
+                self.main_moves('a.txt', 'main moved\n')
+                self.assertEqual(st_test.branch_point('HEAD', 'origin/main'), point)  # main moved, the lane file did not
+                lanes = json.loads((self.work / '.st/required-lanes.json').read_text())
+                lanes['lanes']['demo']['argv'] = ['sh', '-c', 'echo ran more']
+                self.main_moves('.st/required-lanes.json', json.dumps(lanes))
+                self.assertEqual(st_test.branch_point('HEAD', 'origin/main'), 'origin/main')
+        finally:
+            os.chdir(cwd)
+
     def test_status_counts_a_lane_edit_as_covered_by_ci(self):
         self.lane_file()
         self.commit('scripts/lane.sh', 'lane, but fewer tests\n')
@@ -626,7 +674,7 @@ class StTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness'])
 
-    def test_a_heavy_check_runs_under_one_heavy_slot_ticket_and_a_builds_slice_scope(self):
+    def test_a_heavy_check_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
         tmp = Path(self.tmp.name)
         calls = tmp / 'calls'
@@ -644,10 +692,10 @@ class StTest(unittest.TestCase):
         with mock.patch.object(st_test, 'HEAVY', frozenset({'demo'})):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
-            first, second = calls.read_text().splitlines()
-            self.assertTrue(first.startswith('cargo --stage-slot st-test-demo -- systemd-run '), first)  # the ticket, then the scope
-            self.assertTrue(second.startswith('systemd-run --user --scope --quiet --collect --slice=builds.slice -- '), second)
-            self.assertIn('evidence-wrap --check demo', second)
+            # The scope alone: no stage ticket, whose holder the test guardian's cargo commands would queue behind (they detach).
+            only, = calls.read_text().splitlines()
+            self.assertTrue(only.startswith('systemd-run --user --scope --quiet --collect --slice=builds.slice -- '), only)
+            self.assertIn('evidence-wrap --check demo', only)
             statement, = self.statements()
             self.assertEqual(statement['predicate']['observed']['checks']['demo']['command'], ['sh', '-c', 'echo ran'])  # what is signed is unchanged
             calls.unlink()
@@ -659,8 +707,7 @@ class StTest(unittest.TestCase):
             code, out, err = self.run_st_test('--check', 'demo', extra_env={'XDG_RUNTIME_DIR': str(tmp / 'no-bus')})  # no user bus: runs anyway, and says so
             self.assertEqual(code, 0, err)
             self.assertIn('st-test: demo runs without the host build cap (no user systemd bus for a builds.slice scope)', err)
-            self.assertEqual(calls.read_text().split()[:3], ['cargo', '--stage-slot', 'st-test-demo'])  # the ticket alone
-            calls.unlink()
+            self.assertFalse(calls.exists())  # neither a scope nor a ticket
         self.commit('e.txt', 'five')
         self.assertEqual(self.run_st_test('--check', 'demo', extra_env=env)[0], 0)
         self.assertFalse(calls.exists())  # a light check is not wrapped

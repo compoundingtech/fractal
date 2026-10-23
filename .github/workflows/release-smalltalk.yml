@@ -449,7 +449,6 @@ jobs:
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
           summarize: true
-        if: runner.os == 'Linux'
       - name: Provide the pinned Linux host C compiler
         if: runner.os == 'Linux'
         run: |
