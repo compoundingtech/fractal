@@ -16,6 +16,7 @@ use sha2::{Digest as _, Sha256};
 
 mod legacy_start_closure;
 pub use legacy_start_closure::{LegacyStartClosureEvidence, LegacyStartClosureProof};
+mod producer;
 
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -392,7 +393,16 @@ impl PtyRuntime {
                 "st3: WARN what the last incarnation of {id} left running did not end: {error:#}"
             );
         }
-        let unit = crate::scope_unit("st3", id);
+        let operation = env.get("ST3_START_OPERATION")
+            .filter(|operation| tags.get("st3.start-operation") == Some(*operation));
+        let scope_identity = operation.map_or_else(|| id.to_owned(), |operation| format!("{id}-{operation}"));
+        let unit = crate::scope_unit("st3", &scope_identity);
+        // An existing or unreadable ownership record may describe an earlier
+        // entered producer. Refusing its replay is not a never-started witness.
+        let previously_entered = *producer_entered;
+        *producer_entered = true;
+        let mut producer = self.prepare_producer(id, operation, &unit)?;
+        *producer_entered = previously_entered;
         if crate::isolation_mode() == crate::Isolation::Scope {
             // The session's record removes itself once its harness exits, so st keeps the name
             // of the scope to end what the harness leaves behind.
@@ -512,6 +522,7 @@ impl PtyRuntime {
                 });
             }
             *producer_entered = true;
+            self.acknowledge_launcher(&mut producer, false)?;
             let output = match output_for_start(command, self.command_timeout, operation) {
                 Ok(output) => output,
                 Err(error) => {
@@ -519,11 +530,12 @@ impl PtyRuntime {
                     return Err(error);
                 }
             };
+            self.acknowledge_launcher(&mut producer, true)?;
             if output.status.success() {
                 let published = self.wait_for_publication(id, previous_incarnation.as_deref())?;
                 std::fs::remove_file(&fence)
                     .with_context(|| format!("clear PTY publication fence {}", fence.display()))?;
-                crate::protect_servers(std::slice::from_ref(&published));
+                self.protect_servers(std::slice::from_ref(&published))?;
                 return Ok(());
             }
             // Classify captured output privately; only the closed kind and status
@@ -699,16 +711,14 @@ impl PtyRuntime {
     }
 
     pub fn kill_if(&self, id: &str, expected_incarnation: Option<&str>) -> Result<()> {
-        let session = self.require_incarnation(id, expected_incarnation)?;
-        // Everything else the harness started ends with it, but the server leaves the work scope
-        // first: it outlives the harness to record the exit.
-        let unit = work_scope(&session).filter(|unit| {
-            server_apart(
-                id,
-                unit,
-                session.pid.and_then(|pid| u32::try_from(pid).ok()),
-            )
-        });
+        let observed = observation(self.require_incarnation(id, expected_incarnation)?)?;
+        // The supporting server must be durably owned before it leaves the work
+        // scope, including when a kill races normal publication protection.
+        let unit = observed.tags.get("st3.scope-unit").map(String::as_str);
+        let unit = match unit {
+            Some(unit) if self.server_apart(id, unit, Some(&observed))? => Some(unit),
+            _ => None,
+        };
         self.signal_if(id, expected_incarnation, libc::SIGKILL)?;
         if let Some(unit) = unit {
             crate::end_scope(unit, Duration::ZERO)?;
@@ -850,10 +860,9 @@ impl PtyRuntime {
                 .cloned(),
         );
         // A server that wrote its exit record can still be shutting down.
-        let server = ended.and_then(|session| session.pid);
         let mut done = true;
         for unit in &units {
-            if server_apart(id, unit, server) {
+            if self.server_apart(id, unit, ended)? {
                 crate::end_scope(unit, crate::SCOPE_GRACE)?;
             } else {
                 done = false;
@@ -871,6 +880,15 @@ impl PtyRuntime {
         }
         Ok(())
     }
+    /// Every synchronous migration shares the publication path's durable ownership gate.
+    fn server_apart(&self, id: &str, unit: &str, observed: Option<&PtyObservation>) -> Result<bool> {
+        let server = observed.and_then(|observed| observed.pid)
+            .filter(|pid| process_runs(*pid));
+        let Some(server) = server else { return Ok(true); };
+        self.record_server_ownership(observed.context("live PTY server has no observation")?)?;
+        Ok(crate::priority::keep_server_apart(id, server, unit))
+    }
+
 
     pub fn remove(&self, id: &str) -> Result<()> {
         // The record is the last place that names the session's work scope.
@@ -1042,14 +1060,6 @@ fn work_scope(session: &SessionInfo) -> Option<&str> {
         .map(String::as_str)
 }
 
-/// Whether the PTY server `server` of `id`, if it still runs, is outside the work scope `unit`,
-/// moving it out first. Ending the scope then leaves the server, which answers attaches and
-/// records the exit.
-fn server_apart(id: &str, unit: &str, server: Option<u32>) -> bool {
-    server
-        .filter(|pid| process_runs(*pid))
-        .is_none_or(|server| crate::priority::keep_server_apart(id, server, unit))
-}
 
 /// Whether `pid` names a process that has not exited. A zombie has exited.
 fn process_runs(pid: u32) -> bool {
@@ -2203,6 +2213,60 @@ exit 0
         assert_eq!(cgroup_leaf(harness), work_unit);
         assert_eq!(cgroup_file(server, "cpu.weight").trim(), "1000");
         assert_eq!(cgroup_file(harness, "cpu.weight").trim(), "100");
+    }
+
+    #[test]
+    fn synchronous_server_migrations_record_ownership_before_publication_protection() {
+        let Some(pty) = scoped_pty() else {
+            eprintln!("skipped: no systemd user scopes or no pty binary");
+            return;
+        };
+        for kill in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let registry = root.path().join("registry");
+            let runtime = PtyRuntime::new(registry.clone()).with_binary(pty.to_string_lossy());
+            let id = "example-migration";
+            let operation = "example-migration-operation".to_owned();
+            let unit = crate::scope_unit("st3", "example-migration-operation");
+            let mut owner = runtime.prepare_producer(id, Some(&operation), &unit).unwrap();
+            let pid_file = root.path().join("harness.pid");
+            let Launch::Argv(harness) = waiting_harness(&pid_file) else { unreachable!() };
+            let mut arguments = vec![
+                "run".to_owned(), "-d".into(), "--id".into(), id.into(),
+                "--tag".into(), format!("st3.scope-unit={unit}"),
+                "--tag".into(), format!("st3.start-operation={operation}"), "--".into(),
+            ];
+            arguments.extend(harness);
+            let arguments = arguments.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+            runtime.acknowledge_launcher(&mut owner, false).unwrap();
+            assert!(crate::wrap_isolated(&unit, pty.as_os_str(), &arguments)
+                .env("PTY_ROOT", &registry).status().unwrap().success());
+            runtime.acknowledge_launcher(&mut owner, true).unwrap();
+            struct StopOnDrop<'a>(&'a PtyRuntime, &'a str);
+            impl Drop for StopOnDrop<'_> {
+                fn drop(&mut self) { let _ = self.0.stop(self.1); }
+            }
+            let _cleanup = StopOnDrop(&runtime, id);
+            let harness = read_pid(&pid_file);
+            let observed = runtime.session(id).map(observation).unwrap().unwrap();
+            let server = observed.pid.unwrap();
+            assert_eq!(cgroup_leaf(server), unit);
+            assert_eq!(cgroup_leaf(harness), unit);
+            // Raw launch above deliberately bypasses normal publication protection.
+            // The synchronous stop/previous-scope path must itself record ownership.
+            if kill {
+                runtime.kill_if(id, observation_incarnation(&observed).as_deref()).unwrap();
+            } else {
+                let _lock = runtime.acquire_spawn_lock(id).unwrap();
+                runtime.end_previous_scopes(id, Some(&observed)).unwrap();
+            }
+            assert_eq!(cgroup_leaf(server), crate::server_unit(id, server));
+            assert!(process_runs(server), "the supporting server must still be live");
+            assert!(crate::isolate::observe_closed_scope(&unit).unwrap().is_some(),
+                "only the server scope should remain populated");
+            assert!(!runtime.start_operation_closed(id, &operation).unwrap(),
+                "an unrecorded live server would incorrectly certify closure");
+        }
     }
 
     #[test]

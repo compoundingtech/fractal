@@ -73,6 +73,7 @@ let
 in
 pkgs.runCommand "typescript-client-${version}" {
   nativeBuildInputs = [ pnpm node pkgs.bubblewrap pkgs.coreutils pkgs.bash ];
+  passthru = { inherit installation; };
 } ''
   export HOME=$(mktemp -d)
   cp -r ${self} source

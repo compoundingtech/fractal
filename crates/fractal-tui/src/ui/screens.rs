@@ -2865,7 +2865,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
             theme::dim(),
         )));
         doc.blank();
-        doc.buttons(&[("g", "Open in Now", Hit::Key('g'), theme::PERSON)]);
+        doc.buttons(&[("g", "Open in Inbox", Hit::Key('g'), theme::PERSON)]);
     } else {
         doc.wrap(
             &[run(
@@ -3260,7 +3260,7 @@ pub fn new_mission_form(fields: &[String; 4], focus: usize, cursor: usize, width
     inner.blank();
     inner.wrap(
         &[run(
-            "Say what you want. A planner turns it into a proposed mission, which appears in Now for you to approve; nothing runs before that.",
+            "Say what you want. A planner turns it into a proposed mission, which appears in Inbox for you to approve; nothing runs before that.",
             theme::soft(),
         )],
         w,

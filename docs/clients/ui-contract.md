@@ -192,7 +192,7 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
 - Grouped by the mission word (`words.json` → `mission`), in this order: needs you, stalled,
   unstaffed, unclaimed, queued, working, watching, held, idle, done, failed, cancelled, not started. Each group heading
   explains itself through the word's `explain` text in the detail view.
-- Tree view (toggle): the mission path as folders (`fleet/smalltalk/ci/watch/…`).
+- Tree view (toggle): the mission path as folders (`fleet/fractal/ci/watch/…`).
 - Detail: word pill, title, explanation; goals; **the decision card embedded** when a person is
   needed (the same card as Now, answerable in place); a **what you can do** card for stalled,
   failed and unstaffed missions (the stuck step, its blockers, restart the agent, retry the step,
@@ -256,7 +256,7 @@ Today only Rust and the phone run the fixtures; `noise` and `claude-skill` run o
 and only the phone runs `conversation-style.json`. Fractal cleans conversations in
 `apps/fractal-web/src/conversation/` without `st3-views` and runs none of them. Adding that
 test is the first step of this rule
-([#2647](https://github.com/compoundingtech/smalltalk/issues/2647)).
+([#2647](https://github.com/compoundingtech/fractal/issues/2647)).
 Once the [conversation projection](#conversation-stream) is served, it is the derivation the
 fixtures pin, and a Fractal PR that changes the fixtures changes the projection with them.
 
@@ -353,7 +353,7 @@ Today the terminal UI derives mission words, agent states and Now cards in Rust,
 derives its own copies in TypeScript, and the web app would need a third. The copies already
 disagree. st serves each of these once, as a presentation projection, so every client reads the
 same answer and one place is measured and optimized
-([#2646](https://github.com/compoundingtech/smalltalk/issues/2646)).
+([#2646](https://github.com/compoundingtech/fractal/issues/2646)).
 
 ### Rules for every projection
 
@@ -592,7 +592,7 @@ rule.
 
 Each person has one Sidebar arrangement, at the reserved subject
 `arrangement/person/NAME/00000000-0000-7000-8000-000000000001`
-([#2043](https://github.com/compoundingtech/smalltalk/issues/2043)). The generated Rust, Swift
+([#2043](https://github.com/compoundingtech/fractal/issues/2043)). The generated Rust, Swift
 and TypeScript clients expose that UUID as `SIDEBAR_ARRANGEMENT_UUID` (Swift:
 `st3SidebarArrangementUuid`), from `constants` in `operations.json`. Every client picks the same
 Sidebar:
@@ -635,7 +635,7 @@ small PRs. The daemon PR carries the schema and regenerated clients, the refresh
 `words.json` check, the SLO entries and the `daemon_load` window. Separate PRs then move the
 terminal UI and the phone onto the projection and delete their derivations. When a projection
 merges, its route and collection are posted on
-[#2646](https://github.com/compoundingtech/smalltalk/issues/2646) for Fractal to adopt; Fractal
+[#2646](https://github.com/compoundingtech/fractal/issues/2646) for Fractal to adopt; Fractal
 asks there for any field it needs that is not listed here.
 
 ## iOS, the Expo way

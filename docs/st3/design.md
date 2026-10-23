@@ -31,8 +31,8 @@ public subject and claim vocabulary.
 
 The graph is its own crate, `crates/smallclaims`: the claim log and its batches, envelopes and
 their admission, the canonical order, projection digests, replication between members,
-fleet membership, checkpoints, documents and blobs. It depends on nothing of smalltalk's, so agents,
-missions, seats, delivery, drivers, the CLI and the terminal UI stay out of it. smalltalk's store wraps the
+fleet membership, checkpoints, documents and blobs. It depends on nothing of Fractal's, so agents,
+missions, seats, delivery, drivers, the CLI and the terminal UI stay out of it. Fractal's store wraps the
 graph's and plugs in through `smallclaims::store::Runtime`: its tables and their migration, claim
 kind validation, local writes, projection and replay, cache invalidation, the digested tables, and
 the checkpoint rules and proof answers. A runtime may call the graph freely; the graph reaches a
@@ -45,13 +45,13 @@ that represents a database transaction.
 
 `st launch preview` validates and renders a planner-authored launch candidate.
 `st apply FILE... --as ACTOR` previews and then atomically applies authored KDL for seats,
-missions and schedules. In [free mode](kdl-lifecycle.md#free-mode) any agent may publish, as itself. A failed
+missions and schedules. In [free mode](../site/reference/configuration.md#free-mode) any agent may publish, as itself. A failed
 declaration rejects the complete publication.
 
 Removing a prior declaration from a later file has no effect. A cancellation, stop, repair, or new
 desired declaration must state the change.
 
-See the [KDL lifecycle](kdl-lifecycle.md) for the complete operator workflow.
+See [Configuration and KDL](../site/reference/configuration.md) for the complete operator workflow.
 
 ## Missions and work
 

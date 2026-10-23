@@ -576,7 +576,7 @@ impl NativeRuntime {
     fn snapshot_pty_registry(&self, include_provenance: bool) -> Result<PtyRegistrySnapshot> {
         let observations = self.pty()?.snapshot()?;
         // A PTY server started before st moved servers out of their harness's scope moves here.
-        fractal_runtime::protect_servers(&observations);
+        self.pty()?.protect_servers(&observations)?;
         let mut start_operations = HashMap::new();
         let observations = observations
             .into_iter()
@@ -722,8 +722,7 @@ impl RuntimeControl for NativeRuntime {
             return Ok(false);
         };
         if member.terminal {
-            // The current PTY producer has no operation-bound closure acknowledgment.
-            return Ok(false);
+            return self.pty()?.start_operation_closed(&member.runtime_id, operation);
         }
         Ok(matches!(self.exec.observe(&member.runtime_id)?,
             Some(fractal_runtime::ExecObservation::Exited(generation))

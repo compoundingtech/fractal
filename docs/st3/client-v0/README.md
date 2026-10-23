@@ -224,7 +224,7 @@ server; it must not infer `"standing"`, `"owner"`, or `"bounded"` from other fie
 Like the other forward-compatible response enums, the wire schema accepts future strings.
 Generated clients decode an unfamiliar value as `Unknown` without dropping the roster row;
 this differs from an absent field, which means no lifecycle was declared.
-See [agent declarations](../kdl-lifecycle.md#definitions-do-not-start-work).
+See [agent declarations](../../site/reference/configuration.md#definitions-do-not-start-work).
 
 ### Agent activity and human blocking
 
@@ -576,7 +576,7 @@ a managed declaration return `not-found`; conflicting declarations or a stop wit
 unambiguous predecessor return `validation-failed`. No directory is inferred from the seat ID.
 
 For the full attach, stop/start, and suspend/resume recipe, see
-[seat lifecycle](../../seat-lifecycle.md#find-a-workspace-and-return-to-an-interactive-seat).
+[agent lifecycle](../../seat-lifecycle.md#find-a-workspace-and-return-to-an-interactive-agent).
 
 ### Applied subject definitions
 
@@ -980,7 +980,7 @@ imply that an active claim is making progress.
 
 A trusted local agent session (`--as agent/PATH` on the local Unix API) holds every scope a person's
 local session holds and may invoke every action, recorded with the agent as its actor; see
-[free mode](../kdl-lifecycle.md#free-mode). Glasses stay a person's own: an agent session reads and
+[free mode](../../site/reference/configuration.md#free-mode). Glasses stay a person's own: an agent session reads and
 writes none. Each action keeps its own fences, and a review still needs its named reviewer.
 
 `GET /v1/client/agent-queues/{agent_id}` returns one `AgentQueue` value for a seat: its
@@ -1174,7 +1174,7 @@ are grandfathered: their older claims do not contain the caller-key association.
 expires those rows or rewrites those claims. A separate follow-up deletes the fixed legacy
 cohort **30 days after actual deployment**, outside realistic client retry horizons. Operations
 must record the deployment timestamp and due date in
-[the legacy cleanup follow-up](https://github.com/compoundingtech/smalltalk/issues/1741).
+[the legacy cleanup follow-up](https://github.com/compoundingtech/fractal/issues/1741).
 That future deletion is an explicit legacy exception, not an indefinite dedupe guarantee.
 
 Cleanup adds, drops and changes **no indexes**. It seeks the first rowid above a persisted legacy
@@ -1587,7 +1587,7 @@ paths return an empty 404.
 
 The flake's `packages.st-chatgpt` builds only the adapter executable with the shared locked
 Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
-`nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt` at a published commit.
+`nix build github:compoundingtech/fractal/<commit>#st-chatgpt` at a published commit.
 The shared `checks.st3` suite includes the adapter's Rust tests.
 
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):

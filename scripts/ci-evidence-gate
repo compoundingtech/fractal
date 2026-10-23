@@ -186,7 +186,10 @@ def observe(context, revision='HEAD'):
     base, check, repository = context['base'], context['check'], context['repository']
     if not base:
         return 'unavailable', None, 'no accepted base commit for this event', None
-    if run('git', 'fetch', '--no-tags', '--depth=1', '-q', 'origin', base).returncode != 0:
+    # A head tree's history is already here (choose_tree deepened it and has the base): a depth-1 fetch of the base would cut it
+    # there, and the verifier checks that the branch point is an ancestor of the base.
+    present = context.get('tree_of') == 'head' and run('git', 'cat-file', '-e', f'{base}^{{commit}}').returncode == 0
+    if not present and run('git', 'fetch', '--no-tags', '--depth=1', '-q', 'origin', base).returncode != 0:
         return 'unavailable', None, 'could not fetch the accepted base', None
     # --no-filter: choose_tree may have made this a partial clone (history without blobs); the notes' blobs must arrive in this one fetch,
     # not one lazy round trip each when the verifier reads them (that took more than the verifier's 30 seconds on a runner).
@@ -225,9 +228,12 @@ def observe(context, revision='HEAD'):
         # The run's own input values, for a policy that compares a note's with them (input_order), once the base's verifier takes them.
         values = [f'--run-input={key}={value}' for key, value in sorted(context.get('run_inputs', {}).items())] \
             if b'--run-input' in script.stdout else []
+        # A head tree is held to the lane definition at its branch point, once the base's verifier takes one.
+        lane_base = ['--lane-base', context['lane_base']] if context.get('tree_of') == 'head' and context.get('lane_base') \
+            and b'--lane-base' in script.stdout else []
         fetch_input_notes(path, base, check, repository, revision)
         done = run(sys.executable, path, '--repo', '.', '--revision', revision, '--check', check,
-                   '--policy-from', base, '--repository', repository, *keys, *log, *values, timeout=VERIFIER_TIMEOUT)
+                   '--policy-from', base, '--repository', repository, *keys, *log, *values, *lane_base, timeout=VERIFIER_TIMEOUT)
     try:
         result = json.loads(done.stdout)
     except ValueError:  # includes output that is not valid UTF-8
@@ -403,6 +409,9 @@ def choose_tree(context):
         if changed:
             raise Fallback('protected files differ from the branch point')
         context['tree_of'], context['head_tree'] = 'head', 'used'
+        # The head's lane definition is judged from the branch point, not main's tip: a branch that only lags main changed no lane
+        # file itself (docs/st3/gate-evidence.md, "Which lane definition a pull request is held to").
+        context['lane_base'] = branch_point
         return head, []
     except Fallback as reason:
         context['head_tree'] = 'fallback:' + str(reason).replace(' ', '_')

@@ -85,7 +85,7 @@ approval; do not replace a TODO with a permanent exemption.
 
 ### Conversation-owner inventory review (PR #3116)
 
-The [owner-once change](https://github.com/compoundingtech/smalltalk/pull/3116)
+The [owner-once change](https://github.com/compoundingtech/fractal/pull/3116)
 retains the existing inline claim representation. The responsible maintainers
 are the maintainers of the producer modules named below; ownership does not
 transfer to the offline command or this inventory. All entries remain
