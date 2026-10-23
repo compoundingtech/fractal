@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Expanded TUI decision alerts put the recommended answer first with a star and distinct color, and show a visible recommendation reason. Answers requiring words remain in Now.",
+  "summary": "Expanded TUI decision alerts put the recommended answer first with a star and distinct color, and show its reason on one line with an ellipsis when needed so answer buttons stay visible. Full reasons and answers requiring words remain in Now.",
   "replay": {"status": "none", "detail": "No replay or backfill; reads the existing native request recommendation."},
   "schema": {"status": "none", "detail": "No request, answer, client API or storage schema change."},
   "rules": {"status": "none", "detail": "No claim, checkpoint, retention or authority rule change."},

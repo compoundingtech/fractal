@@ -172,25 +172,26 @@ fn note_rows(note: &str, width: usize) -> Vec<BandRow> {
     .collect()
 }
 
-/// The asker's reason for the starred answer, wrapped under the title.
+/// Keep the inline reason to one row so it cannot displace the answer buttons.
+/// The complete reason remains in the request's detail card.
 fn recommendation_rows(label: &str, reason: &str, in_now: bool, width: usize) -> Vec<BandRow> {
-    let runs = [
-        text::run("   ★ recommended: ", theme::strong(theme::GREEN)),
-        text::run(reason.trim().to_owned(), theme::soft()),
-    ];
-    let mut rows: Vec<_> =
-        text::wrap(&runs, width, &[], &[text::run("     ", theme::dim())], None)
-            .into_iter()
-            .map(|line| BandRow {
-                line,
-                hits: Vec::new(),
-            })
-            .collect();
+    // The alert bar is inserted after these rows are built.
+    let available = width.saturating_sub(1);
+    let prefix = text::truncate("   ★ recommended: ", available);
+    let reason = reason.trim().replace(char::is_whitespace, " ");
+    let reason = text::truncate(&reason, available.saturating_sub(text::width(&prefix)));
+    let mut rows = vec![BandRow::text(vec![
+        Span::styled(prefix, theme::strong(theme::GREEN)),
+        Span::styled(reason, theme::soft()),
+    ])];
     if in_now {
-        rows.extend(note_rows(
-            &format!("★ {label} needs your words: open in Now"),
-            width,
-        ));
+        rows.push(BandRow::text(vec![Span::styled(
+            text::truncate(
+                &format!("   ★ {label} needs your words: open in Now"),
+                available,
+            ),
+            theme::dim(),
+        )]));
     }
     rows
 }

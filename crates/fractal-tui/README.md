@@ -46,8 +46,8 @@ conversation instead; it is kept in `$XDG_STATE_HOME/st3/stui/prefs.json` and ne
 device that saved the older `terminal_first` keeps attaching. An alert for the agent shows on top
 of its attached terminal: click it to show it, click an answer to send it, or click
 "open in Now". A request's recommended answer comes first among its at most three answer buttons,
-green and starred (`★`), under a `★ recommended: <reason>` line with the asker's reason; one that needs your
-words stays in Now. Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
+green and starred (`★`), under a single `★ recommended: <reason>` line. Long reasons end in `…`;
+the full reason and answers needing your words stay in Now. Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
 answers an alert. When the link to the
 terminal drops, its status line says `reconnecting`, why, the next try and `Ctrl+\ c conversation`;
 it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. Scrolling to the top of a conversation loads the page before it. Now cards show
