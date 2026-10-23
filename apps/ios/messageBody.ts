@@ -1,6 +1,6 @@
 // Reading the whole text of a long message: what the phone says when st cannot give it. The message
 // shows its start either way; these are the words for why the rest is not there.
-import { ClientError, plainError } from '../../clients/typescript/st3-client';
+import { ClientError, plainError } from '../../clients/typescript/fractal-client';
 
 /** What a read of a message's whole text answered. */
 export type WholeTextAnswer = { text: string; complete?: boolean };

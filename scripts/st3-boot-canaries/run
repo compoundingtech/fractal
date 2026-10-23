@@ -45,6 +45,7 @@ import traceback
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.dont_write_bytecode = True
+from script_process import signal_private
 from st_boundary import fresh_seat_findings, isolated_path, output_findings
 from st3_test_evidence import register, capture, write_json
 from st3_events import Events, claim, fields
@@ -162,7 +163,8 @@ client_gateway_socket = "{root / 'run/client.sock'}"
                       alive=lambda: self.daemon.poll() is None or fail("daemon exited: " + self.tail("daemon.log")))
 
     def kill_daemon(self):
-        os.killpg(self.daemon.pid, signal.SIGKILL)
+        if self.daemon.poll() is None:
+            os.killpg(self.daemon.pid, signal.SIGKILL)
         self.daemon.wait()
 
     def tail(self, name):
@@ -229,7 +231,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for pid, _ in self.seat_processes():
                 try:
-                    os.kill(pid, sig)
+                    signal_private(pid, sig, endpoint=self.endpoint)
                 except ProcessLookupError:
                     pass
             time.sleep(0.3)
@@ -757,8 +759,15 @@ def claude_attachment(node, seats, mode):
         if recovered_incarnation == blocked_incarnation or len(automatic) != 1:
             fail(f"the missing channel did not recover with one automatic restart: {automatic}")
         continued_session(node, "automatic channel recovery")
-    elif recovered_incarnation != blocked_incarnation or automatic:
-        fail("a channel initialized during recheck was unnecessarily restarted")
+    else:
+        # A slow store can delay the attach report past the recheck. The reconciler then
+        # finds the channel attached before stopping anything, settles its own request as
+        # retained, and keeps the incarnation (channel_recovery.rs). That is not a restart.
+        retained = {(row.get("body", {}).get("evidence") or [None])[0] for row in recovery_claims
+                    if row.get("kind") == "runtime.action.succeeded"
+                    and row.get("body", {}).get("fields", {}).get("incarnation_id") == blocked_incarnation}
+        if recovered_incarnation != blocked_incarnation or any(row.get("id") not in retained for row in automatic):
+            fail("a channel initialized during recheck was unnecessarily restarted")
     until(lambda: (node.api("/v1/messages/read/" + early) or {}).get("status") in ("read", "closed"),
           seats.bound, "early mail did not recover after channel attachment")
     until(lambda: native_offer_count(node, early) == 1, seats.bound, "early mail was not offered once")

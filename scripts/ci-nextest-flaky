@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Count the tests nextest passed only on a retry in a `scripts/ci-linux tests` log.
+
+usage: scripts/ci-nextest-flaky LOG FILE
+
+The count is the `N flaky` of nextest's `Summary [...] ... tests run: ...` line (the CI profile retries
+and sets final-status-level = "flaky"); a log without a Summary, from a run that stopped early, counts its
+final `FLAKY a/b [...]` lines instead. Prints `nextest flaky: N`, appends `flaky=N` to $GITHUB_OUTPUT when it
+is set, and writes those FLAKY lines to FILE when N is not 0 (removing FILE otherwise): Workspace CI uploads
+FILE as `nextest-flaky-<lane>-<N>` for `st slo`'s flakes objective, which reads only the name.
+"""
+import os
+import re
+import sys
+
+SUMMARY = re.compile(r'^\s*Summary \[\s*[0-9.]+s\] \d+ tests? run: (.*)$')
+FLAKY_COUNT = re.compile(r'\b(\d+) flaky\b')
+FLAKY_LINE = re.compile(r'^\s*FLAKY \d+/\d+ \[')
+
+
+def count(lines):
+    """The flaky test count and nextest's final FLAKY lines."""
+    summaries, flaky = [], []
+    for line in lines:
+        line = line.rstrip('\n')
+        summary = SUMMARY.match(line)
+        if summary:
+            found = FLAKY_COUNT.search(summary.group(1))
+            summaries.append(int(found.group(1)) if found else 0)
+        elif FLAKY_LINE.match(line):
+            flaky.append(line.strip())
+    return (sum(summaries) if summaries else len(flaky)), flaky
+
+
+def main(argv):
+    if len(argv) != 3:
+        print(__doc__.split('\n\n', 1)[0], file=sys.stderr)
+        return 2
+    log, out = argv[1], argv[2]
+    with open(log, encoding='utf-8', errors='replace') as lines:
+        flaky, named = count(lines)
+    print(f'nextest flaky: {flaky}')
+    if os.environ.get('GITHUB_OUTPUT'):
+        with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+            output.write(f'flaky={flaky}\n')
+    if flaky:
+        with open(out, 'w', encoding='utf-8') as file:
+            file.write(f'nextest flaky: {flaky}\n' + ''.join(f'{line}\n' for line in named))
+    elif os.path.exists(out):
+        os.remove(out)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
