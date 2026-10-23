@@ -7,7 +7,9 @@
 #   2. The workspace test archive linux-test-build produces (`cargo nextest archive` with CI's own filter) and the standalone
 #      production gateway (`cargo build -p fractal --bin st3`, refused when it carries test-support or a test profile).
 #   3. The transport isolation VM driver, run with the archive (all three systemd-scope tests), then the sekrets VM driver, run with
-#      the gateway. TMPDIR is this run's scratch: the drivers keep their VM state there, so two runs never share it.
+#      the gateway. The drivers keep their VM state (a 16 GiB disk image) under XDG_RUNTIME_DIR when it is set, else TMPDIR; they
+#      run without XDG_RUNTIME_DIR (a CI runner has none) and with TMPDIR in this run's scratch on disk, so the image never lands
+#      in the small runtime tmpfs and two runs never share it.
 set -euo pipefail
 : "${RUNNER_TEMP:?ci-local-isolation-vm runs under scripts/ci-local}"
 out="$RUNNER_TEMP/isolation-vm"
@@ -49,9 +51,9 @@ FRACTAL_ISOLATION_ARCHIVE="$archives/workspace.tar.zst" ST_ISOLATION_ARCHIVE="$a
 FRACTAL_ISOLATION_WORKSPACE="$workspace" ST_ISOLATION_WORKSPACE="$workspace" \
 FRACTAL_ISOLATION_BUILD_WORKSPACE="$workspace" ST_ISOLATION_BUILD_WORKSPACE="$workspace" \
 FRACTAL_ISOLATION_TIMINGS="$out/vm-timings.json" ST_ISOLATION_TIMINGS="$out/vm-timings.json" \
-TMPDIR="$out/tmp" "$out/vm-driver/bin/nixos-test-driver" --output_directory "$out/vm-out"
+TMPDIR="$out/tmp" env -u XDG_RUNTIME_DIR "$out/vm-driver/bin/nixos-test-driver" --output_directory "$out/vm-out"
 
 nix build --print-build-logs --out-link "$out/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
 FRACTAL_SEKRETS_BINARY="$archives/sekrets-st3" ST_SEKRETS_BINARY="$archives/sekrets-st3" \
-TMPDIR="$out/tmp" "$out/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$out/sekrets-vm-out"
+TMPDIR="$out/tmp" env -u XDG_RUNTIME_DIR "$out/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$out/sekrets-vm-out"
 echo "ci-local-isolation-vm: both VM tests passed"
