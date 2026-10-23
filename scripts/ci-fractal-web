@@ -42,6 +42,8 @@ production_build() (
 
 
 kit_receipt_dir=${KIT_RECEIPT_DIRECTORY:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/kit-play-receipts}
+# Retain the whole lane duration even when it fails before a strict-play receipt exists.
+trap 'mkdir -p "$kit_receipt_dir"; echo "$SECONDS" > "$kit_receipt_dir/lane-seconds"' EXIT
 
 kit_storybook() (
   # The module graph proves every bundled repository file is a declared kit input. The build's
@@ -49,7 +51,7 @@ kit_storybook() (
   local stats_dir start=$SECONDS
   stats_dir=$(mktemp -d "${TMPDIR:-/tmp}/fractal-kit-stats.XXXXXX")
   trap 'rm -rf "$stats_dir"' EXIT
-  pnpm --filter @smalltalk/fractal-ui build-storybook --stats-json "$stats_dir"
+  pnpm --filter @fractal/ui build-storybook --stats-json "$stats_dir"
   mkdir -p "$kit_receipt_dir"
   echo "$((SECONDS - start))" > "$kit_receipt_dir/storybook-build-seconds"
   python3 scripts/ci-fractal-web-kit-graph "$stats_dir/preview-stats.json"
@@ -89,22 +91,22 @@ run_streams() {
 }
 
 stream_scenarios() {
-  lane "Scenario typecheck" pnpm --filter @smalltalk/st3-scenarios typecheck
-  lane "Scenario tests" pnpm --filter @smalltalk/st3-scenarios test
-  lane "Scenario freshness" pnpm --filter @smalltalk/st3-scenarios emit:check
-  lane "Scenario privacy" pnpm --filter @smalltalk/st3-scenarios scan
+  lane "Scenario typecheck" pnpm --filter @fractal/scenarios typecheck
+  lane "Scenario tests" pnpm --filter @fractal/scenarios test
+  lane "Scenario freshness" pnpm --filter @fractal/scenarios emit:check
+  lane "Scenario privacy" pnpm --filter @fractal/scenarios scan
 }
 
 stream_checks() {
   lane "Dependency licenses" python3 scripts/ci-fractal-web-licenses --check
   lane "Buck typecheck" buck2 build //:typecheck
-  lane "Scenario decode" pnpm --filter @smalltalk/st3-scenarios decode
+  lane "Scenario decode" pnpm --filter @fractal/scenarios decode
   lane "Measurement contracts" node --experimental-strip-types --test apps/fractal-web/src/telemetry/measurement/measurement.node-test.ts
   lane "Measurement bundle exclusion" bun apps/fractal-web/src/telemetry/measurement/check-bundles.mjs
   lane "Synthetic fixtures" bash apps/fractal-web/scripts/ci/fixtures-gate.sh
   lane "Extension registry" node --experimental-strip-types --test apps/fractal-web/src/extensions/registry.unit.test.ts
   lane "Folders core" node --test apps/fractal-web/src/folders/core.node-test.mjs
-  lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.config.ts
+  lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/fractal-sdk exec vitest run --config vitest.config.ts
 }
 
 stream_app() {
@@ -123,12 +125,14 @@ first_shard() { [ "${KIT_SHARD_INDEX:-0}" -eq 0 ]; }
 
 stream_kit() {
   if first_shard; then
-    lane "UI kit typecheck" pnpm --filter @smalltalk/fractal-ui typecheck
-    lane "UI kit scenario story check" pnpm --filter @smalltalk/fractal-ui test:stories
+    lane "UI kit typecheck" pnpm --filter @fractal/ui typecheck
+    lane "UI kit scenario story check" pnpm --filter @fractal/ui test:stories
+    lane "UI kit tab-strip policy" pnpm -C packages/fractal-ui run test:tab-strip
   fi
   case "${KIT_INPUTS:-true}" in
     true)
       lane "UI kit play index contracts" node --test packages/fractal-ui/scripts/kit-play-index.node-test.mjs
+      lane "UI kit timing contracts" node --test packages/fractal-ui/scripts/kit-play-timings.node-test.mjs
       ;;
     false)
       printf 'UI kit plays skipped: no kit inputs changed (%s..%s)\n' "${BASE_SHA:?}" "${HEAD_SHA:?}" | tee -a "$summary"
@@ -150,7 +154,9 @@ exclusive_lanes() {
     lane "UI kit Storybook and module graph" kit_storybook
   fi
   if first_shard; then
-    lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.perf.config.ts
+    # Replay covers the app even when no kit inputs changed; never duplicate it across kit shards.
+    lane "App replay browser e2e" node apps/fractal-web/scripts/replay-e2e.mjs
+    lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/fractal-sdk exec vitest run --config vitest.perf.config.ts
   fi
   if [ "${KIT_INPUTS:-true}" = true ]; then
     lane "UI kit strict plays (440/1440 × dark/light)" kit_plays

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run one check once on this machine and ask the signer to record it as an evidence note.
 
-  scripts/evidence-wrap --check linux-gate [--change-id github:OWNER/REPO#N] [--push origin] -- COMMAND...
+  scripts/evidence-wrap --check linux-gate [--change-id github:OWNER/REPO#N] [--input NAME=VALUE]... [--push origin] -- COMMAND...
 
 Run it from a clean checkout of the exact commit you are about to push. It runs COMMAND once
 (output streams to your terminal), then sends the signer the facts it measured: the commit,
@@ -9,11 +9,13 @@ the command, its exit code, the sha256 of its exact output and an environment fi
 (flake.lock, the dev shell derivation, this script's own bytes, the system, the attempt). The
 signer (scripts/evidence-sign, behind a sekrets grant; this script never sees the key)
 recomputes the tree and flake.lock itself and signs. A failing command is recorded too: a
-failure is a record, not a missing record.
+failure is a record, not a missing record. COMMAND keeps the caller's environment; the signer is
+started without the loader and interpreter variables it refuses (LD_*, DYLD_*, PYTHON*,
+GLIBC_TUNABLES, GCONV_PATH, NLSPATH) and with a fixed PATH.
 
-The note is imported as refs/notes/evidence/<tree>/<record> in this checkout. With --push REMOTE it
-is also pushed, after scripts/evidence-verify accepts it. CI finds a note by its tree, so it
-only helps when the commit you push has the tree CI will test (a branch current with main).
+The note is imported as refs/tags/evidence/<tree>/<record> in this checkout and, while gates on older bases
+read only notes, as refs/notes/evidence/<tree>/<record> naming the same record. With --push REMOTE both are
+also pushed, after scripts/evidence-verify accepts it. CI finds a note by its tree, so it only helps when the commit you push has the tree CI will test (a branch current with main).
 
 With --aggregate FILE nothing is run: FILE is JSON {"command": [...], "exit_code": N, "output": ANY,
 "inputs": {name: string}} written by a job that summarizes other jobs (an aggregate gate). The
@@ -44,6 +46,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 
@@ -51,10 +55,31 @@ sys.dont_write_bytecode = True
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_SIGNER = ['st', 'sekrets', '--', 'evidence-sign']
+# What would make the loader or the interpreter load code into the signer, which refuses to start with any of them
+# set (scripts/evidence-sign REFUSED_ENVIRONMENT; the refusal stays, it is the signer's tripwire). Some hosts preload
+# a library into every process (hetz2: jemalloc), so the signer is started without these, and with a fixed PATH: its
+# program is resolved first, with the caller's.
+LOADER_PREFIXES = ('LD_', 'DYLD_', 'PYTHON')
+LOADER_VARIABLES = ('GLIBC_TUNABLES', 'GCONV_PATH', 'NLSPATH')
+SIGNER_PATH = '/run/current-system/sw/bin:/usr/bin:/bin'
 
 
 class Failure(Exception):
     pass
+
+
+def signer_launch(argv, environ=None):
+    """(argv, env) that start the signer: the program as an absolute path, the caller's environment without any
+    loader or interpreter variable, and SIGNER_PATH as PATH."""
+    environ = os.environ if environ is None else environ
+    if not argv or not all(isinstance(a, str) for a in argv):
+        raise Failure('--signer must be a JSON array of strings')
+    program = argv[0] if '/' in argv[0] else shutil.which(argv[0], path=environ.get('PATH', ''))
+    if not program:
+        raise Failure(f'the signer {argv[0]!r} is not on PATH')
+    env = {k: v for k, v in environ.items() if not k.startswith(LOADER_PREFIXES) and k not in LOADER_VARIABLES}
+    env['PATH'] = SIGNER_PATH
+    return [os.path.abspath(program), *argv[1:]], env
 
 
 def git(*args, stdin=None, check=True, env_extra=None):
@@ -83,6 +108,11 @@ def tracked_dirty():
     changed = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
     hidden = [line for line in git('ls-files', '-v').stdout.decode().splitlines() if line[:2] != 'H ']
     return changed or ('index flags hide changes: ' + ', '.join(hidden[:3]) if hidden else '')
+
+
+# The inputs this script sets itself; --input may not name them.
+WRAP_INPUTS = frozenset({'flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system', 'attempt', 'lane_definition_sha256',
+                         'workspace_clean', 'untracked_files'})
 
 
 def toolchain_digest(override):
@@ -145,6 +175,8 @@ def main(argv):
     parser.add_argument('--lanes-from', metavar='COMMIT',
                         help='hold the check to its lane in .st/required-lanes.json at this accepted base and record the lane definition digest')
     parser.add_argument('--aggregate', metavar='FILE', help='record the facts in FILE instead of running a command')
+    parser.add_argument('--input', action='append', default=[], metavar='NAME=VALUE',
+                        help='record one more input the command depends on (a name this script does not set itself; repeatable)')
     parser.add_argument('--out', metavar='DIR', help='write the pack and a summary here instead of importing and pushing')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -171,9 +203,14 @@ def main(argv):
             'system': f'{system[1]}-{system[0]}'.lower() if len(system) == 2 else 'unknown',
             'attempt': args.attempt,
         }
+        for item in args.input:
+            name, sep, value = item.partition('=')
+            if not sep or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name) or not value or name in inputs or name in WRAP_INPUTS:
+                raise Failure(f'--input {item!r}: NAME=VALUE with a lower-case name this script does not set itself, and a value')
+            inputs[name] = value
         if args.aggregate:
             facts = json.loads(Path(args.aggregate).read_text())
-            known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs'}
+            known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs', 'runner'}
             if set(facts) - known or not {'command', 'exit_code'} <= set(facts) or ('output' in facts) == ('output_sha256' in facts):
                 raise Failure('--aggregate FILE must hold command, exit_code, exactly one of output or output_sha256, and optionally inputs')
             command, exit_code = facts['command'], facts['exit_code']
@@ -196,8 +233,10 @@ def main(argv):
             raise Failure('the checkout changed while the command ran; nothing was signed')
         request = {'commit': commit, 'check': args.check, 'command': command, 'exit_code': exit_code,
                    'output_sha256': output_sha256, 'change_id': args.change_id or f'local:{commit}', 'inputs': inputs}
-        signer = json.loads(args.signer)
-        done = subprocess.run(signer, input=json.dumps(request).encode(), capture_output=True, timeout=300)
+        if args.aggregate and facts.get('runner'):
+            request['runner'] = facts['runner']
+        signer, signer_env = signer_launch(json.loads(args.signer))
+        done = subprocess.run(signer, input=json.dumps(request).encode(), capture_output=True, timeout=300, env=signer_env)
         if done.returncode != 0:
             raise Failure('the signer refused: ' + done.stderr.decode(errors='replace').strip()[-500:])
         answer = json.loads(done.stdout)
@@ -213,10 +252,11 @@ def main(argv):
             print(json.dumps(summary, indent=2), file=sys.stderr)
             return 0 if exit_code == 0 else exit_code
         git('index-pack', '--stdin', stdin=base64.b64decode(answer['object_pack_base64'], validate=True))
-        ref = f'refs/notes/evidence/{tree}/{record}'
-        if not git('for-each-ref', '--format=%(objectname)', ref).stdout.strip():
-            git('update-ref', ref, record, '0' * len(record))
-        result = {'record': record, 'ref': ref, 'tree': tree, 'check': args.check, 'exit_code': exit_code,
+        ref, tag = f'refs/notes/evidence/{tree}/{record}', f'refs/tags/evidence/{tree}/{record}'
+        for name in (tag, ref):
+            if not git('for-each-ref', '--format=%(objectname)', name).stdout.strip():
+                git('update-ref', name, record, '0' * len(record))
+        result = {'record': record, 'ref': ref, 'tag': tag, 'tree': tree, 'check': args.check, 'exit_code': exit_code,
                   'verified': False, 'pushed': False}
         if exit_code == 0 and Path(args.verifier).exists():
             keys = ['--keys', args.keys] if args.keys else None
@@ -242,7 +282,7 @@ def main(argv):
                 header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
                 extra = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader',
                          'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
-            pushed = git('push', '--quiet', args.push, f'{ref}:{ref}', check=False, env_extra=extra)
+            pushed = git('push', '--quiet', args.push, f'{tag}:{tag}', f'{ref}:{ref}', check=False, env_extra=extra)
             if pushed.returncode != 0:
                 text = pushed.stderr.decode(errors='replace').replace(token, '***') if token else pushed.stderr.decode(errors='replace')
                 raise Failure(f'push failed: {text.strip()[-500:]}')
