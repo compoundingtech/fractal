@@ -1,25 +1,27 @@
-import { Component, createRef, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ActionSheetIOS, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import type { St3Client, TimelineEntry } from '../../../clients/typescript/st3-client';
-import type { ConversationContentRef } from '../../../clients/typescript/st3-client';
-import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@smalltalk/st3-views';
+import type { FractalClient, TimelineEntry } from '../../../clients/typescript/fractal-client';
+import type { ConversationContentRef } from '../../../clients/typescript/fractal-client';
+import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@fractal/views';
 import { checkoutLabel } from '../launcher';
-import { agentGlyph, agentModel, agentName, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
+import { agentGlyph, agentModel, agentName, agentReported, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
 import { Banners } from '../chrome';
 import { quality } from '../qualityNative';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
-import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
+import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@fractal/views';
 import { wholeText, wholeTextFailure } from '../messageBody';
 import { draftSize, messageLimit, restoreDraft, sendReason } from '../composer';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
 import { rememberBounded } from '../boundedCache';
-import { ConversationImageViewport, VisibleConversationImage, type VisibleImageState } from '../visibleConversationImages';
+import { ConversationImageViewport } from '../visibleConversationImages';
+import { ImageBox, MailImageView, useWindowViewport } from '../imageBox';
+import { IMAGES } from '../imageView';
 import { dictationAvailable, startDictation } from '../modules/st-dictation';
 import type { RootScreen } from '../navigation';
 import { openSubagentConversation } from '../conversationNavigation';
@@ -32,7 +34,7 @@ import { AlertsStrip } from './Alerts';
 const RULES: ConversationRules = rules;
 const c = tokenColor;
 
-const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, older: { paged: false, start: false, loading: false } };
+const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, historyVersion: 0, older: { paged: false, start: false, loading: false } };
 // `unconfirmed` is the exact request st may have taken and has not confirmed, to send again unchanged.
 type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
@@ -63,11 +65,13 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     const current = timelineNow.current;
     const sessionId = current.sessionId;
     if (!dragged.current || !current.hasOlder || current.older.loading || !sessionId || status !== 'online') return;
+    // A replacement can arrive while this page is loading, even for the same session.
+    const request = { sessionId, historyVersion: current.historyVersion };
     const keep = (next: Conversation<TimelineEntry>) => { rememberBounded(conversationCache.current, target, next, 24); return next; };
-    setTimeline(previous => olderLoading(previous));
+    setTimeline(previous => olderLoading(previous, request));
     void actions.olderTimeline(sessionId, current.older, current.entries[0]).then(
-      page => setTimeline(previous => keep(applyOlderPage(previous, sessionId, page))),
-      error => setTimeline(previous => olderFailed(previous, error instanceof Error ? error.message : String(error))),
+      page => setTimeline(previous => keep(applyOlderPage(previous, request, page))),
+      error => setTimeline(previous => olderFailed(previous, request, error instanceof Error ? error.message : String(error))),
     );
   };
   // Whether st has answered at all: until it has, the screen says it is loading, never "nothing".
@@ -352,10 +356,11 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     setDictated(true);
   }
   // Debug builds only: type a message and send it, as a person would, so a recording can show
-  // what the list does on send (EXPO_PUBLIC_ST3_TEST_SEND).
+  // what the list does on send (EXPO_PUBLIC_FRACTAL_TEST_SEND).
   const [devSend, setDevSend] = useState(0);
   useEffect(() => {
-    const text = __DEV__ ? process.env.EXPO_PUBLIC_ST3_TEST_SEND : undefined;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    const text = __DEV__ ? (process.env.EXPO_PUBLIC_FRACTAL_TEST_SEND ?? process.env.EXPO_PUBLIC_ST3_TEST_SEND) : undefined;
     if (!text || !loaded || !agent) return;
     // `\n` in the variable is a new line, so a recording can show a tall box after a send.
     const typed = setTimeout(() => setDraft(`${text.replaceAll('\\n', '\n')} ${new Date().toISOString().slice(11, 19)}`), 3_000);
@@ -364,10 +369,11 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   }, [loaded, agent?.id]);
   useEffect(() => { if (devSend) void send(); }, [devSend]);
   // Debug builds only: scroll back to the oldest entry every few seconds, as a person reading
-  // back would, so a recording can show earlier pages arriving (EXPO_PUBLIC_ST3_TEST_SCROLL_BACK
+  // back would, so a recording can show earlier pages arriving (EXPO_PUBLIC_FRACTAL_TEST_SCROLL_BACK
   // is how many times).
   useEffect(() => {
-    let left = __DEV__ ? Number(process.env.EXPO_PUBLIC_ST3_TEST_SCROLL_BACK ?? 0) : 0;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    let left = __DEV__ ? Number(process.env.EXPO_PUBLIC_FRACTAL_TEST_SCROLL_BACK ?? process.env.EXPO_PUBLIC_ST3_TEST_SCROLL_BACK ?? 0) : 0;
     if (!left || !loaded) return;
     const timer = setInterval(() => {
       if (left-- <= 0) { clearInterval(timer); return; }
@@ -483,7 +489,7 @@ function AgentStrip({ agent, onMission }: { agent: NonNullable<ReturnType<typeof
   const work = agent.current_work?.[0];
   return <View style={styles.strip}>
     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-      <T bold color={color}>{glyph} </T><T bold>{agentName(agent)}</T><T color={color}>  {agentWord(state)}</T>
+      <T bold color={color}>{glyph} </T><T bold>{agentName(agent)}</T><T color={color}>  {agentReported(agent) ?? agentWord(state)}</T>
       <View style={{ flex: 1 }} />
       <T color={harnessColor(harness)}>{harness}</T><T dim>{agentModel(agent) ? ` · ${agentModel(agent)}` : ''} · {agent.host_id?.replace(/^host\//, '') ?? '?'}</T>
     </View>
@@ -528,49 +534,20 @@ const EntryView = memo(function EntryView(props: { entry: ConversationEntry; con
   </View>;
 });
 
-type NativeImage = { uri: string; size: number };
-type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: St3Client | null };
+type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: FractalClient | null };
 
-// Class lifecycle owns native measurement and invalidates late responses on unmount.
-// All mounted images share the viewport queue; FlatList overscan never authorizes reads.
-class VisibleConversationImageView extends Component<ConversationImageProps, VisibleImageState<NativeImage>> {
-  state: VisibleImageState<NativeImage> = { kind: 'closed' };
-  private box = createRef<View>();
-  private unregister?: () => void;
-  private image = new VisibleConversationImage<NativeImage>(this.props.viewport, async current => {
-    const { client, conversationId, reference } = this.props;
+// A transcript's image, read in chunks from st (and from the owner of the message through it) only
+// while it is on screen; st names its real type and size before the bytes arrive.
+function VisibleConversationImageView({ conversationId, reference, viewport, client }: ConversationImageProps) {
+  const load = (current: () => boolean) => IMAGES.read(`${conversationId}:${reference.ref}`, async () => {
     if (!client) throw new Error('Connect to the server and try again.');
     const content = await loadConversationContent(reference, async (ref, offset) => {
       if (!current()) throw new Error('Image is no longer visible.');
       return (await client.conversationContentChunk(conversationId, ref, offset)).value;
     });
-    return { uri: contentImageUri(content), size: content.bytes.length };
-  }, state => this.setState(state));
-
-  componentDidMount() {
-    this.unregister = this.props.viewport.register({
-      measure: done => this.box.current?.measureInWindow((x, y, width, height) => done({ x, y, width, height })),
-      visible: shown => this.image.setVisible(shown),
-    });
-  }
-
-  componentWillUnmount() { this.image.dispose(); this.unregister?.(); }
-
-  render() {
-    const state = this.state;
-    return <View style={styles.entry}>
-      <View ref={this.box} collapsable={false} style={styles.mailImage} onLayout={() => this.props.viewport.refresh()}>
-        {state.kind === 'image'
-          ? <Image accessibilityLabel="Fetched conversation image" source={{ uri: state.image.uri, cache: 'reload' }} style={StyleSheet.absoluteFill} resizeMode="contain" onError={() => this.image.fail('The image could not be displayed. Try again.')} />
-          : <T dim style={{ padding: 6 }}>{state.kind === 'failed' ? 'Image unavailable' : state.kind === 'loading' ? 'Loading image…' : 'Image'}</T>}
-      </View>
-      {state.kind === 'image' ? <T dim>{megabytes(state.image.size)}</T> : null}
-      {state.kind === 'failed' ? <View>
-        <T color={theme.red}>Could not load image: {state.message}</T>
-        <Pressable accessibilityRole="button" onPress={() => this.image.retry()}><T color={theme.accent}>Retry loading image</T></Pressable>
-      </View> : null}
-    </View>;
-  }
+    return contentImageUri(content);
+  });
+  return <View style={styles.entry}><ImageBox facts={{ mediaType: reference.media_type, size: reference.size }} viewport={viewport} load={load} /></View>;
 }
 
 function ConversationImageView(props: Omit<ConversationImageProps, 'client'>) {
@@ -604,17 +581,20 @@ function FetchedContent({ conversationId, reference, entry, onOpenSession }: { c
   </View>;
 }
 
-const EntryBodyView = memo(function EntryBodyView({ entry, open, onToggle, brief = false, onOpenSession }: { entry: ConversationEntry; open: boolean; onToggle: (id: string) => void; brief?: boolean; onOpenSession?: (sessionId: string, title: string) => void }) {
+const EntryBodyView = memo(function EntryBodyView({ entry, open, onToggle, brief = false, onOpenSession, imageViewport }: { entry: ConversationEntry; open: boolean; onToggle: (id: string) => void; brief?: boolean; onOpenSession?: (sessionId: string, title: string) => void; imageViewport?: ConversationImageViewport }) {
   const body = entry.body;
   switch (body.kind) {
     case 'user':
+      // An image alone in the person's turn: the image view below is the turn.
+      if (!body.text) return <T color={c(RULES.user.time)} style={{ alignSelf: 'flex-end', paddingHorizontal: 12, paddingTop: 6 }}>{entry.at}</T>;
       return <View style={[styles.user, { backgroundColor: c(RULES.user.fill) }]}>
         <T color={c(RULES.user.time)} style={{ alignSelf: 'flex-end' }}>{entry.at}</T>
         <T color={c(RULES.user.text)}>{body.text}</T>
       </View>;
     case 'assistant':
+      if (!body.text) return null;
       return <View style={styles.entry}><Markdown selectable={false} text={body.text} color={c(RULES.assistant)} /></View>;
-    case 'mail': return <MailView entry={entry} body={body} open={open} onToggle={onToggle} brief={brief} />;
+    case 'mail': return <MailView entry={entry} body={body} open={open} onToggle={onToggle} brief={brief} imageViewport={imageViewport} />;
     case 'event': {
       const color = body.tone === 'fault' ? theme.red : body.tone === 'warning' ? theme.yellow : c(RULES.event.label);
       return <View style={[styles.entry, { flexDirection: 'row' }]}>
@@ -687,7 +667,9 @@ type Mail = Extract<ConversationEntry['body'], { kind: 'mail' }>;
 // Mail the person is part of leads; mail between others stays back and folds to a few rows,
 // like a tool call, until tapped. Mail to the person is filled like their own messages, and
 // their own says how far it got: ✓ st has it, ✓✓ the agent has it.
-const MailView = memo(function MailView({ entry, body, open, onToggle, brief = false }: { entry: ConversationEntry; body: Mail; open: boolean; onToggle: (id: string) => void; brief?: boolean }) {
+const MailView = memo(function MailView({ entry, body, open, onToggle, brief = false, imageViewport }: { entry: ConversationEntry; body: Mail; open: boolean; onToggle: (id: string) => void; brief?: boolean; imageViewport?: ConversationImageViewport }) {
+  // Outside a conversation's list (a fetched turn, a card), the window is the viewport.
+  const windowViewport = useWindowViewport();
   const rule = RULES.mail;
   const toYou = body.to === 'you';
   const look = folds(body) ? rule.between_others : rule.involving_you;
@@ -718,7 +700,7 @@ const MailView = memo(function MailView({ entry, body, open, onToggle, brief = f
       <T color={c(RULES.tool.collapse.color)}>{whole.loading ? '  loading the whole message…' : `  show the whole message · ${kib(body.whole.bytes)}`}</T>
     </Pressable> : null}
     {whole.note ? <T color={theme.waiting} style={{ fontSize: 12 }}>{whole.note}</T> : null}
-    {body.images ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>{body.images.map(image => <MailImageView key={image.sha256} image={image} />)}</View> : null}
+    {body.images ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>{body.images.map(image => <MailImageView key={image.sha256} image={image} viewport={imageViewport ?? windowViewport} />)}</View> : null}
     {long ? <T color={c(RULES.tool.collapse.color)}>{open ? `  ${RULES.tool.collapse.text}` : '  … more · tap to show'}</T> : null}
   </Pressable>;
 });
@@ -740,28 +722,10 @@ function useWholeText(whole: { message: string; bytes: number } | undefined) {
   return { ...state, load };
 }
 
-// An image a message carries, read from st when shown. Its box keeps one size while it loads,
-// so the conversation does not move under the reader.
-function MailImageView({ image }: { image: MailImage }) {
-  const { actions } = useStore();
-  const [uri, setUri] = useState<string | null>(null), [failed, setFailed] = useState('');
-  useEffect(() => {
-    let live = true;
-    actions.image(image).then(next => { if (live) setUri(next); }, error => { if (live) setFailed(error instanceof Error ? error.message : String(error)); });
-    return () => { live = false; };
-  }, [image.sha256]); // eslint-disable-line react-hooks/exhaustive-deps
-  const label = `${image.name ?? 'image'} · ${megabytes(image.size)}`;
-  return <View style={styles.mailImage} accessibilityLabel={label}>
-    {uri ? <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-      : <T dim style={{ fontSize: 11, padding: 6 }}>{failed ? `🖼 ${label}\n${failed}` : `🖼 ${label}…`}</T>}
-  </View>;
-}
-
 const styles = StyleSheet.create({
   tray: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, paddingTop: 8, backgroundColor: theme.mantle, borderTopColor: theme.surface0, borderTopWidth: StyleSheet.hairlineWidth * 2 },
   thumb: { width: 56, height: 56, borderRadius: 6, backgroundColor: theme.surface0 },
   unthumb: { position: 'absolute', top: -6, right: -6, width: 20, height: 20, borderRadius: 10, backgroundColor: theme.surface1, alignItems: 'center', justifyContent: 'center' },
-  mailImage: { width: 200, height: 150, borderRadius: 6, overflow: 'hidden', backgroundColor: theme.surface0 },
   screen: { flex: 1, backgroundColor: theme.base },
   freshness: { paddingHorizontal: 12, paddingVertical: 3, backgroundColor: theme.base },
   strip: { paddingHorizontal: 12, paddingVertical: 6, borderBottomColor: theme.surface0, borderBottomWidth: StyleSheet.hairlineWidth * 2, backgroundColor: theme.base },

@@ -77,6 +77,11 @@ A process that is neither is refused as unidentified. A person's own terminal in
 terminal, or a terminal st started) is in the service manager, so the person calls from a login
 session.
 
+`st sekrets` finds the daemon as other st commands do: `--endpoint`, then `ST3_ENDPOINT`, then the
+configured socket, and only over a Unix socket. `st sekrets enable` registers the key of the
+daemon found that way, so a person enables from a login environment whose `ST3_ENDPOINT`, if set,
+names their own daemon.
+
 ### Tiles
 
 A [tile](tiles.md) is an agent with its own Unix user, and the kernel names it without any
@@ -136,7 +141,7 @@ gateway socket, not a proxy.
   login, read once and kept until a 401 says it changed.
 - Each request is logged by method, path and status, never with the token or the body.
 
-In Rust: `st3::sekrets::authorized::authorized_request(&config, "ada/daemon-gh", &request)`
+In Rust: `fractal_daemon::sekrets::authorized::authorized_request(&config, "ada/daemon-gh", &request)`
 returns the response or `Unavailable` (no gateway or no node key), `Refused` or `Transport`.
 
 ## The sandbox

@@ -1,10 +1,10 @@
 # st3 schema registry
 
-This file is generated from `st3-schema`.
+This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
-Storage version: `19`
-Storage digest: `1dcbc0927e291e822470da735e497deec0a5ad4f1cd6cb7e00679a0e44fab099`
+Storage version: `20`
+Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d58`
 
 ## Subject families
 
@@ -13,9 +13,11 @@ Storage digest: `1dcbc0927e291e822470da735e497deec0a5ad4f1cd6cb7e00679a0e44fab09
 | `account` | `account/NAME` | no | A model account: its provider, owner, plan and where its login lives. |
 | `agent` | `agent/RUN/LOCAL_ID` | no | A mission-run agent runtime. |
 | `arrangement` | `arrangement/person/NAME/UUIDv7` | no | A permanently person-owned shared folder arrangement. |
+| `assistant` | `assistant/chatgpt[/session/assistant-grant/ID]` | no | An external assistant principal or its grant-bound audit session, never a person. |
 | `attention` | `attention/ID` | yes | An explicit request for human attention. |
 | `checkpoint` | `checkpoint/DAY` | no | A checkpoint that trims replicated history dated before a UTC day. |
 | `checkpoint-excusal` | `checkpoint-excusal/ID` | no | A person's excusal of an unreachable writer from checkpoints. |
+| `client` | `client/DEVICE` | no | A paired device's server-derived diagnostic identity. |
 | `custom` | `custom/NAMESPACE/NAME` | yes | An extension subject. |
 | `daemon` | `daemon/NODE` | no | An st3 daemon. |
 | `doc` | `doc/NAME` | no | A named immutable document lineage. |
@@ -26,6 +28,7 @@ Storage digest: `1dcbc0927e291e822470da735e497deec0a5ad4f1cd6cb7e00679a0e44fab09
 | `gate-operation` | `gate-operation/IDENTITY` | no | One gate evaluation attempt. |
 | `github-post` | `github-post/OWNER/REPO/KIND/ID` | no | A GitHub comment or review an agent seat posted, by its GitHub ID. |
 | `glass` | `glass/person/NAME/UUID` | no | A private person workspace. |
+| `harness-question` | `harness-question/ID` | no | A question a seat's harness asked natively: question ids and option positions, never text. |
 | `host` | `host/NAME` | no | A graph host. |
 | `lane` | `lane/RUN/LOCAL_ID` | no | A mission-run lane: an ordered line of entries its run works through front first. |
 | `loop-run` | `loop-run/GENERATION/PATH` | no | One bounded loop execution. |
@@ -56,7 +59,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `arrangement` | `body:object`, `owner!:subject-reference(person) immutable` | A person-owned per-register arrangement. |
 | `ci.run` | `commit:subject-reference`, `completed_at:string`, `conclusion:string`, `external_id:string`, `name:string`, `provider:string`, `pull_request:subject-reference`, `repository:subject-reference`, `started_at:string`, `status:string`, `url:string` | A continuous integration run. |
 | `filesystem.file` | `content_hash:string`, `mode:integer`, `path:string immutable`, `reason:string`, `size:integer`, `status:string` | A file observed through an explicit local path. |
-| `harness.session-file` | `agent:subject-reference`, `harness:string immutable`, `incarnation_id:string`, `modified_at:string`, `path:string`, `session_id:string`, `status:string` | A harness session file that can outlive one runtime incarnation. |
+| `harness.session-file` | `agent:subject-reference`, `desired_token:string`, `harness:string immutable`, `incarnation_id:string`, `modified_at:string`, `path:string`, `session_id:string`, `status:string` | A harness session file that can outlive one runtime incarnation. |
 | `human.review` | `decision:string`, `document:string`, `evidence_tests:array`, `reason:string`, `reviewer:subject-reference`, `submitted_at:string`, `target:subject-reference` | A human review of another graph subject. |
 | `vcs.commit` | `author:string`, `committed_at:string`, `committer:string`, `message:string`, `parents:array`, `repository:subject-reference immutable`, `sha:string immutable`, `state:string`, `tree:string immutable`, `url:string` | An immutable version control commit. |
 | `vcs.issue` | `author:string`, `closed_by:string`, `closed_by_resource:subject-reference`, `comments:integer`, `created_at:string`, `labels:array`, `last_comment:object`, `mentions:array`, `moved_to:subject-reference`, `node_id:string`, `number:integer`, `opened_by:subject-reference`, `opened_by_run:subject-reference`, `reactions:object`, `recent_comments:array`, `repository:subject-reference`, `state:string`, `state_reason:string`, `title:string`, `updated_at:string`, `url:string` | A version control issue. |
@@ -73,6 +76,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `agent.placement.source-offline` | `agent` | `authorized-requester` | `append` | `durable` | `desired_token!:string`, `destination!:string`, `sources!:array` |  |
 | `agent.presence` | `agent` | `same-subject-actor` | `append` | `durable` | `presence!:string`, `reachability:string`, `reason:string` |  |
 | `agent.queue.moved` | `agent` | `authorized-requester` | `append` | `durable` | `anchor:subject-reference(mission-run)`, `placement!:string`, `reason:string`, `run!:subject-reference(mission-run)` |  |
+| `agent.renamed` | `agent` | `system-only` | `append` | `durable` | `declaration!:string`, `from!:subject-reference(agent|mission)`, `owner_host!:string`, `preserved_incarnation:string`, `previous_revision:string`, `reason!:string`, `request!:object`, `to!:subject-reference(agent|mission)` |  |
 | `agent.retired` | `agent` | `system-only` | `once` | `durable` | `declaration!:string`, `owner_host!:string`, `reason!:string`, `retired_by!:subject-reference(agent|person|daemon)`, `successor:subject-reference(agent)`, `transfer:string` |  |
 | `arrangement.edited` | `arrangement` | `ordinary-client` | `append` | `durable` | `action_digest:string`, `action_id:string`, `operations!:array`, `owner!:subject-reference(person)` |  |
 | `attention.requested` | `attention` | `authorized-participant` | `once` | `durable` | `closed_by:string`, `reason!:string`, `reviewer!:subject-reference(person)`, `severity!:string`, `step:subject-reference(step-run)`, `step_attempt:integer`, `targets:array`, `title!:string`, `until:string` |  |
@@ -80,6 +84,10 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `checkpoint.excused` | `checkpoint-excusal` | `system-only` | `append` | `durable` | `reason!:string`, `writer!:string` |  |
 | `checkpoint.sealed` | `checkpoint` | `system-only` | `append` | `durable` | `build:string`, `checkpoint_protocol!:integer`, `cut_unix_ms!:integer`, `participants:array`, `rules_digest!:string`, `sealed_count!:integer`, `sealed_digest!:string` |  |
 | `checkpoint.verified` | `checkpoint` | `system-only` | `append` | `durable` | `build:string`, `checkpoint_protocol!:integer`, `cut_unix_ms!:integer`, `drop_digest!:string`, `dropped_claims!:integer`, `dropped_envelopes!:integer`, `graph_digest!:string`, `participants:array`, `reader_digest!:string`, `retained_digest!:string`, `rules_digest!:string`, `sealed_digest!:string` |  |
+| `client.hang` | `client` | `system-only` | `append` | `local` | `app_version!:string`, `capture_source!:string`, `captured_at_unix_ms!:integer`, `event_id!:string`, `launch_id!:string`, `launch_id_basis!:string`, `native_build!:string`, `occurred_at_unix_ms!:integer`, `occurrence_time_basis!:string`, `os_version!:string`, `paired_device!:string`, `pairing_grant!:string`, `payload!:object`, `person_id!:string`, `platform!:string`, `runtime_version!:string`, `sequence!:integer`, `severity!:string`, `update_id!:string` |  |
+| `client.js-error` | `client` | `system-only` | `append` | `local` | `app_version!:string`, `capture_source!:string`, `captured_at_unix_ms!:integer`, `event_id!:string`, `launch_id!:string`, `launch_id_basis!:string`, `native_build!:string`, `occurred_at_unix_ms!:integer`, `occurrence_time_basis!:string`, `os_version!:string`, `paired_device!:string`, `pairing_grant!:string`, `payload!:object`, `person_id!:string`, `platform!:string`, `runtime_version!:string`, `sequence!:integer`, `severity!:string`, `update_id!:string` |  |
+| `client.launch` | `client` | `system-only` | `append` | `local` | `app_version!:string`, `capture_source!:string`, `captured_at_unix_ms!:integer`, `event_id!:string`, `launch_id!:string`, `launch_id_basis!:string`, `native_build!:string`, `occurred_at_unix_ms!:integer`, `occurrence_time_basis!:string`, `os_version!:string`, `paired_device!:string`, `pairing_grant!:string`, `payload!:object`, `person_id!:string`, `platform!:string`, `runtime_version!:string`, `sequence!:integer`, `severity!:string`, `update_id!:string` |  |
+| `client.native-crash` | `client` | `system-only` | `append` | `local` | `app_version!:string`, `capture_source!:string`, `captured_at_unix_ms!:integer`, `event_id!:string`, `launch_id!:string`, `launch_id_basis!:string`, `native_build!:string`, `occurred_at_unix_ms!:integer`, `occurrence_time_basis!:string`, `os_version!:string`, `paired_device!:string`, `pairing_grant!:string`, `payload!:object`, `person_id!:string`, `platform!:string`, `runtime_version!:string`, `sequence!:integer`, `severity!:string`, `update_id!:string` |  |
 | `daemon.diagnostic` | `daemon` | `system-only` | `append` | `durable` | `code!:string`, `reason!:string`, `severity!:string`, `status:string` |  |
 | `daemon.started` | `daemon` | `system-only` | `append` | `durable` | `features:object`, `pid:integer`, `schema:string`, `schema_digest:string`, `status!:string`, `version:string` | `reset` |
 | `delivery.hold` | `agent` | `authorized-requester` | `state-transition` | `durable` | `held!:boolean`, `legacy_adoption:boolean`, `reason!:string`, `until_unix_ms!:integer` |  |
@@ -93,17 +101,24 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `fleet.member-endpoints` | `host` | `system-only` | `append` | `durable` | `build:string`, `endpoints:array`, `member_key!:string`, `mode!:string` |  |
 | `fleet.member-left` | `host` | `system-only` | `append` | `durable` | `high_water!:integer`, `member_key!:string` |  |
 | `fleet.member-removed` | `host` | `system-only` | `append` | `durable` | `high_water!:integer`, `member_key:string`, `reason!:string`, `removed_by:subject-reference(person)` |  |
-| `gate.requested` | `gate-operation` | `system-only` | `once` | `durable` | `attempt:integer`, `baseline:boolean`, `capability_expires_at:string`, `capability_hash:string`, `decisions:array`, `gate:string`, `mission_revision:string`, `mode:string`, `model:string`, `operation:subject-reference`, `owner:subject-reference`, `question:string`, `review_targets:array`, `reviewer:subject-reference`, `runner:string`, `status:string`, `step_definition:string`, `token_budget:integer`, `tools:array` | `gate` |
+| `gate.head-bound` | `gate-operation` | `system-only` | `append` | `durable` | `attempt!:integer`, `author!:subject-reference(agent|person)`, `boundary!:subject-reference`, `change!:object`, `episode!:integer`, `generation!:subject-reference(run-generation)`, `head!:object`, `mission_revision!:string`, `observation!:string`, `owner!:subject-reference`, `previous_binding:string`, `reason!:string`, `request_operation!:subject-reference(gate-operation)`, `review_targets!:array`, `reviewer!:subject-reference(agent|person)`, `scope!:object`, `step_definition!:string` | `gate` |
+| `gate.remediation-attached` | `gate-operation` | `system-only` | `append` | `durable` | `attempt_receipt!:string`, `author_attempt!:integer`, `author_generation!:subject-reference(run-generation)`, `author_step!:subject-reference(step-run)`, `binding_claim!:string`, `boundary_attempt!:integer`, `episode!:integer`, `evidence!:array`, `finding_refs!:array`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `request!:string`, `reviewed_head!:object`, `verdict!:string` | `gate` |
+| `gate.requested` | `gate-operation` | `system-only` | `once` | `durable` | `attempt:integer`, `author:subject-reference(agent|person)`, `baseline:boolean`, `binding_claim:string`, `capability_expires_at:string`, `capability_hash:string`, `change:object`, `decisions:array`, `delta_ref:string`, `episode:integer`, `gate:string`, `gate_subject:subject-reference(gate-operation)`, `generation:subject-reference(run-generation)`, `head:object`, `mission_revision:string`, `mode:string`, `model:string`, `operation:subject-reference`, `owner:subject-reference`, `question:string`, `review_targets:array`, `reviewer:subject-reference`, `runner:string`, `scope:object`, `status:string`, `step_definition:string`, `token_budget:integer`, `tools:array` | `gate` |
 | `gate.result` | `gate-operation` | `capability-holder` | `append` | `durable` | `acted_for:subject-reference(person)`, `baseline:boolean`, `decision:string`, `delegation:object`, `field:string`, `gate:string`, `operation:subject-reference`, `reason:string`, `request:string`, `stage:string`, `token_usage:integer`, `value:any`, `verdict!:string` | `gate` |
+| `gate.review-verdict` | `gate-operation` | `capability-holder` | `append` | `durable` | `attempt!:integer`, `binding_claim!:string`, `carry_forward_from:string`, `change!:object`, `episode!:integer`, `evidence!:array`, `finding_refs!:array`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `request!:string`, `review_targets!:array`, `reviewed_head!:object`, `reviewer!:subject-reference(agent|person)`, `scope!:object`, `source!:object`, `verdict!:string` | `gate` |
+| `gate.review-withdrawn` | `gate-operation` | `system-only` | `append` | `durable` | `attempt!:integer`, `authorization_evidence!:array`, `binding_claim!:string`, `episode!:integer`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `previous_binding!:string`, `reason!:string`, `request!:string`, `reviewer!:subject-reference(agent|person)`, `verdict!:string`, `withdrawing_actor!:subject-reference(agent|person)` | `gate` |
 | `github.posted` | `github-post` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `id!:integer`, `item!:integer`, `kind!:string`, `login:string`, `repository!:string`, `url:string` |  |
 | `glass.deleted` | `glass` | `authorized-requester` | `append` | `durable` | `base_revision:string`, `replaced_revision:string` |  |
 | `glass.upserted` | `glass` | `authorized-requester` | `append` | `durable` | `base_revision:string`, `body:object`, `replaced_revision:string` |  |
+| `harness-question.observed` | `harness-question` | `system-only` | `append` | `durable` | `agent!:subject-reference(agent)`, `native_id!:string`, `questions!:array`, `runtime_incarnation!:string`, `session!:string` |  |
+| `harness-question.resolved` | `harness-question` | `system-only` | `append` | `durable` | `answers!:object`, `receipt:object`, `revision!:string`, `status!:string` |  |
 | `harness.context-clear.requested` | `agent` | `authorized-requester` | `append` | `durable` | `context_epoch:string`, `incarnation_id:string`, `operation_status:string`, `runtime_id:string` |  |
 | `harness.context-clear.result` | `agent` | `system-only` | `once` | `durable` | `context_epoch:string`, `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string` |  |
 | `harness.diagnostic` | `agent` | `same-subject-actor` | `append` | `durable` | `attempt:integer`, `auth_attention_key:string`, `code:string`, `driver:string`, `incarnation_id:string`, `matched_line:string`, `observed_since_ms:integer`, `ownership_sequence:integer`, `provider_auth_sequence:integer`, `readiness_epoch:integer`, `reason:string`, `retry_after_unix_ms:integer`, `retry_attempt:integer`, `selector_scope:string`, `session_id:string`, `severity:string`, `status:string`, `step_run:subject-reference(step-run)`, `wake_attempts:integer` |  |
+| `harness.inventory.observed` | `agent` | `same-subject-actor` | `append` | `latest` | `commands!:array`, `dynamic_commands!:string`, `harness!:string`, `incarnation_id!:string`, `observed_at!:string`, `session_id!:string` |  |
 | `harness.limits` | `agent` | `same-subject-actor` | `append` | `durable` | `account:string`, `account_ref:string`, `driver!:string`, `five_hour_percent:number`, `five_hour_resets_at_unix_ms:integer`, `incarnation_id:string`, `measured_at_unix_ms!:integer`, `plan:string`, `weekly_percent:number`, `weekly_resets_at_unix_ms:integer` |  |
 | `harness.observed` | `agent` | `same-subject-actor` | `append` | `latest` | `ask:string`, `background_jobs:integer`, `blocked_on:string`, `blocking:array`, `driver:string`, `evidence_incarnation:string`, `exit:string`, `incarnation_id:string`, `input_buffer:string`, `observed_at_ms:integer`, `observed_since_ms:integer`, `ownership_sequence:integer`, `provider_auth:boolean`, `provider_auth_sequence:integer`, `quiescent:boolean`, `reason:string`, `rollout_operation:string`, `state!:string`, `status_transition:boolean`, `transition_sequence:integer`, `transport:string` |  |
-| `harness.session-file` | `agent` | `authorized-requester` | `append` | `durable` | `account_ref:string`, `agent:subject-reference(agent)`, `discovery_revision:string`, `harness!:string`, `incarnation_id:string`, `modified_at:string`, `path:string`, `session_id!:string`, `source_session:string`, `status:string` |  |
+| `harness.session-file` | `agent` | `authorized-requester` | `append` | `durable` | `account_ref:string`, `agent:subject-reference(agent)`, `desired_token:string`, `discovery_revision:string`, `harness!:string`, `incarnation_id:string`, `modified_at:string`, `path:string`, `session_id!:string`, `source_session:string`, `status:string` |  |
 | `harness.telemetry` | `agent` | `same-subject-actor` | `append` | `local` | `driver!:string`, `incarnation_id!:string`, `signals!:object`, `unit!:string` |  |
 | `harness.timeline` | `agent` | `same-subject-actor` | `append` | `local` | `body!:object`, `driver!:string`, `entry_id!:string`, `entry_type!:string`, `final!:boolean`, `incarnation_id!:string`, `observed_at_unix_ms:integer`, `operation!:string`, `revision!:integer`, `role!:string`, `sequence:integer`, `source_id:string` |  |
 | `harness.todo.observed` | `agent` | `same-subject-actor` | `append` | `latest` | `harness!:string`, `incarnation_id!:string`, `observed_at!:string`, `phases!:array`, `session_id!:string`, `source_op!:string`, `totals!:object`, `truncated!:boolean` |  |
@@ -117,10 +132,10 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `loop.round-dispatch` | `loop-run` | `system-only` | `append` | `durable` | `candidate:integer`, `dispatch!:integer`, `item_id:string`, `mission_run!:subject-reference(mission-run)`, `reason!:string`, `round!:integer`, `status!:string` | `loop`, `round` |
 | `loop.round-result` | `loop-run` | `system-only` | `append` | `durable` | `candidate:integer`, `feedback:subject-reference(doc)`, `item:any`, `metrics:object`, `mission_run!:subject-reference(mission-run)`, `reason:string`, `round!:integer`, `status!:string`, `token_usage:integer` | `loop`, `round` |
 | `loop.state` | `loop-run` | `system-only` | `state-transition` | `durable` | `best_metrics:object`, `best_round:integer`, `feedback:subject-reference(doc)`, `items:array`, `reason:string`, `round:integer`, `status!:string`, `winner:integer` | `loop` |
-| `message.closed` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acted_for:subject-reference(person)`, `delegation:object`, `status!:string` |  |
+| `message.closed` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acted_for:subject-reference(person)`, `acting_for:subject-reference(agent)`, `delegation:object`, `status!:string` |  |
 | `message.delivered` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
-| `message.read` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `status!:string` |  |
-| `message.sent` | `message` | `ordinary-client` | `once` | `durable` | `attachments:array`, `content:string`, `from:subject-reference`, `in_reply_to:subject-reference`, `session_id:string`, `status!:string`, `tags:array`, `title:string`, `to:subject-reference` | `message` |
+| `message.read` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acting_for:subject-reference(agent)`, `status!:string` |  |
+| `message.sent` | `message` | `ordinary-client` | `once` | `durable` | `assistant_grant_id:string`, `assistant_owner:subject-reference`, `assistant_session_actor:string`, `attachments:array`, `content:string`, `from:subject-reference`, `in_reply_to:subject-reference`, `sender_class:string`, `session_id:string`, `status!:string`, `tags:array`, `title:string`, `to:subject-reference` | `message` |
 | `message.staged` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
 | `mission-run.created` | `mission-run` | `system-only` | `once` | `durable` | `ad_hoc_title:string`, `after:subject-reference`, `current_generation:subject-reference`, `deadline_at_unix_ms:integer`, `default_selector:object`, `generation:subject-reference`, `initial_revision:string`, `inputs:object`, `mission:subject-reference`, `mission_spec:object`, `mode:string`, `parent_step_run:subject-reference`, `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `requester:subject-reference`, `revision:string`, `root_mission_run:subject-reference`, `root_revision:string`, `stalled_after_ms:integer`, `status:string`, `timeout_ms:integer`, `workspace:string` | `mission-run` |
 | `mission-run.report-to` | `mission-run` | `system-only` | `state-transition` | `durable` | `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `stalled_after_ms:integer` |  |
@@ -128,10 +143,11 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `mission.produced` | `mission`, `step-run` | `capability-holder` | `append` | `durable` | `attempt:integer`, `mission:subject-reference`, `name:string`, `revision:string`, `step_definition:string` | `produces` |
 | `mission.provenance` | `mission` | `system-only` | `once` | `durable` | `mission!:subject-reference(mission)`, `provenance!:object`, `revision!:string` | `provenance` |
 | `mission.published` | `mission` | `authorized-requester` | `append` | `durable` | `body:object`, `revision:string`, `state:string` | `mission` |
+| `mission.renamed` | `mission` | `system-only` | `append` | `durable` | `declaration!:string`, `from!:subject-reference(agent|mission)`, `owner_host!:string`, `preserved_incarnation:string`, `previous_revision:string`, `reason!:string`, `request!:object`, `to!:subject-reference(agent|mission)` |  |
 | `observer.observed` | `observer` | `system-only` | `append` | `durable` | `attempt:string`, `changed:boolean`, `changed_fields:array`, `cursor:string`, `locator:string`, `next_check_unix_ms:string`, `observation:subject-reference`, `provider:string`, `resource:subject-reference`, `revision:string`, `status:string` | `observer` |
 | `observer.refresh-requested` | `observer` | `system-only` | `append` | `durable` | `attempt!:string`, `revision!:string` | `refresh` |
 | `observer.state` | `observer` | `system-only` | `state-transition` | `durable` | `attempt:string`, `error_code:string`, `next_check_unix_ms:string`, `reason:string`, `revision:string`, `state!:string` | `observer` |
-| `operational.failure` | `agent`, `exec`, `pty`, `observer`, `subscription`, `schedule`, `daemon`, `machine`, `step-run`, `mission-run`, `loop-run`, `resource`, `checkpoint` | `system-only` | `append` | `durable` | `condition:string`, `episode:string`, `incarnation:string`, `reason:string`, `reviewer:subject-reference`, `severity:string`, `source_revision:string`, `targets:array`, `title:string` |  |
+| `operational.failure` | `agent`, `exec`, `pty`, `observer`, `subscription`, `schedule`, `daemon`, `machine`, `step-run`, `mission-run`, `loop-run`, `resource`, `checkpoint` | `system-only` | `append` | `durable` | `condition:string`, `episode:string`, `incarnation:string`, `reason:string`, `reproduction:object`, `reviewer:subject-reference`, `severity:string`, `source_revision:string`, `targets:array`, `title:string` |  |
 | `operational.recovered` | `agent`, `exec`, `pty`, `observer`, `subscription`, `schedule`, `daemon`, `machine`, `step-run`, `mission-run`, `loop-run`, `resource`, `checkpoint` | `system-only` | `append` | `durable` | `episode:string`, `failure:string`, `reason:string` |  |
 | `owned-set.revised` | `owned-set` | `system-only` | `append` | `durable` | `body!:object`, `revision!:string` |  |
 | `person.delegation-set` | `person` | `same-subject-actor` | `state-transition` | `durable` | `actions!:array` |  |
@@ -165,13 +181,13 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `runtime.action.failed` | `agent`, `exec`, `pty`, `gate-operation` | `system-only` | `append` | `system-local` | `action:string`, `blocking:array`, `code:string`, `deadline_key:string`, `desired_token:string`, `harness:string`, `incarnation_id:string`, `native_session_id:string`, `operation:string`, `operation_status:string`, `reason:string`, `rollout:object`, `rollout_operation:string`, `runtime_id:string`, `signal:string`, `source_host:string`, `terminal:boolean` | `stop`, `gate` |
 | `runtime.action.requested` | `agent`, `exec`, `pty`, `gate-operation` | `authorized-requester` | `append` | `system-local` | `action:string`, `deadline_unix_ms:string`, `host:string`, `incarnation_id:string`, `operation:string`, `reason:string`, `rollout:object`, `runtime_id:string`, `signal:string`, `source_host:string`, `terminal:boolean` | `stop`, `gate` |
 | `runtime.action.succeeded` | `agent`, `exec`, `pty`, `gate-operation` | `system-only` | `append` | `system-local` | `action:string`, `blocking:array`, `code:string`, `deadline_key:string`, `desired_token:string`, `harness:string`, `incarnation_id:string`, `native_session_id:string`, `operation:string`, `operation_status:string`, `reason:string`, `rollout:object`, `rollout_operation:string`, `runtime_id:string`, `signal:string`, `source_host:string`, `terminal:boolean` | `stop`, `gate` |
-| `runtime.observed` | `agent`, `exec`, `pty`, `gate-operation` | `same-subject-actor` | `append` | `durable` | `adopted:boolean`, `driver:string`, `exit_code:integer`, `exit_signal:integer`, `host:string`, `incarnation_id:string`, `reachability:string`, `reason:string`, `runtime_id:string`, `shutdown_timeout_ms:integer`, `status:string`, `terminal:boolean` |  |
+| `runtime.observed` | `agent`, `exec`, `pty`, `gate-operation` | `same-subject-actor` | `append` | `durable` | `adopted:boolean`, `driver:string`, `exit_code:integer`, `exit_signal:integer`, `host:string`, `incarnation_id:string`, `reachability:string`, `reason:string`, `restarting_from:string`, `runtime_id:string`, `shutdown_timeout_ms:integer`, `status:string`, `terminal:boolean` |  |
 | `runtime.readiness-deadline-reached` | `agent` | `system-only` | `append` | `local` | `deadline_unix_ms!:string`, `driver!:string`, `incarnation_id!:string`, `reason!:string`, `runtime_id!:string` |  |
 | `runtime.reconcile-decision` | `agent`, `exec`, `pty`, `schedule` | `system-only` | `append` | `durable` | `decision:string`, `gate:string`, `input_number:integer`, `key:string`, `reachability:string`, `reason:string`, `restart_at_unix_ms:string` |  |
 | `runtime.restart-window-reset` | `agent`, `exec`, `pty` | `system-only` | `append` | `durable` | `desired_token:string`, `incarnation_id!:string`, `reason!:string` | `reset` |
 | `schedule.occurrence-cancelled` | `schedule` | `system-only` | `append` | `durable` | `occurrence:integer`, `reason:string`, `revision:string` | `schedule` |
-| `schedule.occurrence-reached` | `schedule` | `system-only` | `append` | `durable` | `at_unix_ms:integer`, `occurrence:integer`, `revision:string`, `scheduled:subject-reference`, `scheduled_at_unix_ms:string` | `schedule` |
-| `schedule.occurrence-scheduled` | `schedule` | `system-only` | `append` | `durable` | `at_unix_ms:integer`, `occurrence:integer`, `revision:string`, `scheduled_at_unix_ms:string` | `schedule` |
+| `schedule.occurrence-reached` | `schedule` | `system-only` | `append` | `durable` | `at_unix_ms:integer`, `occurrence:integer`, `reason:string`, `revision:string`, `scheduled:subject-reference`, `scheduled_at_unix_ms:string`, `standby:object` | `schedule` |
+| `schedule.occurrence-scheduled` | `schedule` | `system-only` | `append` | `durable` | `at_unix_ms:integer`, `occurrence:integer`, `reason:string`, `revision:string`, `scheduled_at_unix_ms:string`, `standby:object` | `schedule` |
 | `schedule.work-failed` | `schedule` | `system-only` | `append` | `durable` | `code!:string`, `reason!:string`, `request!:string` | `schedule` |
 | `schedule.work-requested` | `schedule` | `system-only` | `append` | `durable` | `inputs!:object`, `mission!:subject-reference(mission)`, `mission_revision!:string`, `occurrence!:integer`, `revision!:string`, `workspace!:string` | `schedule` |
 | `schedule.work-started` | `schedule` | `system-only` | `append` | `durable` | `mission_run!:subject-reference(mission-run)`, `request!:string` | `schedule` |
@@ -179,13 +195,13 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `sekret.changed` | `sekret` | `system-only` | `append` | `local` | `at_unix_ms!:integer`, `caller:subject-reference(agent|person)`, `change!:string`, `detail:object`, `person!:subject-reference(person)`, `profile:string`, `seq!:integer` |  |
 | `sekret.exited` | `sekret` | `system-only` | `append` | `local` | `at_unix_ms!:integer`, `call!:integer`, `caller:subject-reference(agent|person)`, `error:string`, `exit_code:integer`, `person!:subject-reference(person)`, `profile:string`, `seq!:integer`, `signal:integer` |  |
 | `sekret.refused` | `sekret` | `system-only` | `append` | `local` | `argv:array`, `at_unix_ms!:integer`, `caller:subject-reference(agent|person)`, `person!:subject-reference(person)`, `profile:string`, `reason!:string`, `seq!:integer` |  |
+| `slo.breach-transition` | `resource` | `system-only` | `append` | `durable` | `record!:object` |  |
 | `step-run.carried` | `step-run` | `system-only` | `once` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `definition_hash:string`, `source:subject-reference`, `source_generation:subject-reference`, `source_step_run:subject-reference`, `status:string`, `worker_reported:boolean` | `step` |
 | `step-run.retried` | `step-run` | `system-only` | `append` | `durable` | `attempt:integer`, `goals:array`, `not_before_unix_ms:integer`, `reason:string`, `status:string` | `step` |
 | `step-run.state` | `step-run` | `system-only` | `state-transition` | `durable` | `attempt:integer`, `readiness_epoch:integer`, `reason:string`, `status:string` | `step` |
 | `subagent.appeared` | `agent` | `same-subject-actor` | `append` | `durable` | `description:string`, `driver!:string`, `incarnation_id!:string`, `lease_expires_at_unix_ms!:integer`, `session_id:string`, `started_at_unix_ms:integer`, `step_run:subject-reference(step-run)`, `subagent_id!:string`, `subagent_type:string` |  |
 | `subagent.ended` | `agent` | `same-subject-actor` | `append` | `durable` | `cache_write_tokens:integer`, `cached_tokens:integer`, `duration_ms:integer`, `ended_at_unix_ms:integer`, `input_tokens:integer`, `outcome!:string`, `output_tokens:integer`, `reason:string`, `subagent_id!:string`, `total_tokens:integer` |  |
 | `subagent.renewed` | `agent` | `same-subject-actor` | `append` | `durable` | `incarnation_id:string`, `lease_expires_at_unix_ms!:integer`, `subagent_id!:string` |  |
-| `slo.breach-transition` | `resource` | `system-only` | `append` | `durable` | `record!:object` |  |
 | `subscription.batch-sent` | `subscription` | `system-only` | `append` | `durable` | `entries!:integer`, `message!:subject-reference(message)`, `through!:string` | `subscription` |
 | `subscription.batched` | `subscription` | `system-only` | `append` | `durable` | `delivery_key!:string`, `entries!:array` | `subscription` |
 | `subscription.mission-deferred` | `subscription` | `system-only` | `append` | `durable` | `not_before_unix_ms!:integer`, `request!:string` | `subscription` |
@@ -206,7 +222,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `work.nudged` | `step-run` | `system-only` | `append` | `durable` | `agent:subject-reference`, `attempt:integer`, `idle_since_unix_ms:string`, `message:subject-reference`, `reason:string`, `waits:array` |  |
 | `work.person-asked` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `generation:subject-reference`, `key:string`, `legacy_request:string`, `mission_spec:object`, `origin_attempt:integer`, `origin_step:subject-reference`, `owner_generation:subject-reference`, `owner_run:subject-reference`, `person:subject-reference`, `reason:string`, `request:object`, `requester_declaration:string`, `run:subject-reference`, `status:string`, `title:string`, `waiting_since:string` |  |
 | `work.person-cancelled` | `step-run` | `authorized-participant` | `append` | `durable` | `answer:object`, `attempt:integer`, `episode:string`, `key:string`, `status:string`, `summary:string` |  |
-| `work.person-done` | `step-run` | `authorized-participant` | `append` | `durable` | `acted_for:subject-reference(person)`, `answer:object`, `attempt:integer`, `delegation:object`, `episode:string`, `key:string`, `status:string`, `summary:string` |  |
+| `work.person-done` | `step-run` | `authorized-participant` | `append` | `durable` | `acted_for:subject-reference(person)`, `answer:object`, `assistant_grant_id:string`, `assistant_owner:subject-reference(person)`, `assistant_session_actor:string`, `attempt:integer`, `delegation:object`, `episode:string`, `key:string`, `sender_class:string`, `status:string`, `summary:string` |  |
 | `work.progress` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.released` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.renewed` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
@@ -231,6 +247,19 @@ Notes inform and never grant approval, gate verdicts, delegation, or person-ask 
 
 Publication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.
 
+## Arrangement operation vocabulary
+
+Replication retains unknown operation tags and unknown placement subject families as retryable `unknown-claim-field` records. Local edits still refuse them with `invalid-arrangement-operations` and `invalid-subject-reference`. Supported operation tags, included in this registry's digest:
+
+- `create`
+- `rename`
+- `folder.create`
+- `folder.rename`
+- `folder.move`
+- `folder.delete`
+- `subject.place`
+- `retire`
+
 ## Harness todo snapshots
 
 `harness.todo.observed` replaces the entire seat todo list. Session and incarnation identify its source; `observed_at` is source timestamp provenance, not an ordering clock. Keep the last snapshot until replaced, and expose stale provenance rather than presenting an old binding as current. Missing means unobserved; `phases: []`, zero totals and `truncated: false` means known empty.
@@ -241,7 +270,7 @@ OMP's native `abandoned` tasks are omitted from phase tasks rather than relabele
 
 ## Local checkpoint capture storage
 
-SQLite `user_version` is 19. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
+SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
 ```sql
 CREATE TABLE IF NOT EXISTS checkpoint_capture_epoch (
@@ -275,7 +304,7 @@ Capture does not read envelope signatures/holds, projection-health rows, peer/cu
 
 Triggers persist and increment the epoch in the mutation's own transaction on every connection, without connection-local hooks or SQL functions. Rollback rolls back the increment too. A trigger-version migration atomically drops/recreates the old predicates, increments `value`, and stores `trigger_version=3`; captures using the old guard must restart. Earlier version-18 PR-head stores receive `cut_unix_ms` and `trigger_version` columns with default zero while preserving their epoch and frontier. Version-2 stores retain their active cut/frontier through the version-3 predicate migration. Ordinary reopens preserve all bounds and do not repeat the migration.
 
-Upgrade requires the normal process restart, not a history migration; its restart duration has not been measured. Stable older binaries reject storage version 18. Earlier version-18 PR-head binaries are not rollback targets: guard version 1 cannot safely operate the cut-aware schema, and guard version 2 rejects trigger version 3 on open. Their copied stores can migrate forward only. Binary rollback requires restoring a pre-upgrade database snapshot; otherwise roll forward. No replicated claim, checkpoint rule, wire protocol, or response shape changes.
+The checkpoint guard requires the normal process restart. Storage version 20 atomically renames and preserves the complete pre-candidate signature projection and its indexes, then inventories candidates online in bounded loans while the whole legacy authorization model serves. One atomic control-row update activates the candidate model; the version marker commits with the rename, so older builds refuse the store before creating empty signature state. The restart duration has not been measured. Builds limited to storage version 19 or earlier reject version 20; in-place rollback below 20 is unsupported. Earlier version-18 PR-head binaries are not rollback targets: guard version 1 cannot safely operate the cut-aware schema, and guard version 2 rejects trigger version 3 on open. Their copied stores can migrate forward only. Binary rollback requires restoring a pre-upgrade database snapshot; otherwise roll forward. No replicated claim, checkpoint rule, or wire protocol changes. Local signature provenance and grant proof responses label the serving authorization model.
 
 ## Local runtime start operations
 
@@ -288,3 +317,157 @@ Admission retains full original physical and optional requester-control receipt 
 Resolved ledger rows, prepared bindings and result proof remain stored indefinitely. Releasing evidence removes only trim pins: the original local request/result observation bodies can subsequently be trimmed. Consumers must bind a modern request to the retained owner ledger and original request ID; UUID text or a status label alone cannot exclude legacy uncertainty.
 
 The old version-18 binary refuses version 19. Do not lower `user_version` for rollback: drain starts, revoke pending operations and verify that all producers and operation-owned runtimes have ended, preserve the ledger and runtime generation records as evidence, then restore a consistent pre-upgrade database and runtime state with their matching binary under Operations supervision. New exec generation records contain operation provenance that older runtimes cannot read; restoring only SQLite is insufficient. A claim-only restore does not carry cancellation tombstones and cannot safely authorize starting old unresolved producers. Roll forward if closure cannot be proved. See [seat lifecycle](../seat-lifecycle.md#pending-runtime-starts).
+
+## Immutable claim positions
+
+`claim_positions` holds each claim's position in its batch, the canonical order's fifth
+component. Admission stores it: a replicated claim takes its record's wire position before the
+claim row is inserted, and a local claim takes the number of claims its batch already holds,
+which is where sealing places its record. A later record of the same claim can only lower the
+value, so the stored position is the least position over every record the member has held and
+does not depend on arrival order. For claims stored before this table existed, triggers store
+the legacy value (least record position, else arrival count among surviving siblings) just
+before deleting an earlier sibling, deleting a record or changing a record's claim or position
+could change it. Deleting inputs never renumbers a survivor. Rows outlive their claims and are
+never deleted. No history backfill runs at open; a claim without a row and without any removal
+since keeps the legacy value, which equals what would be stored.
+
+## Retired identity ledger
+
+`retired_claim_ids` and `retired_envelopes` hold permanent deletion knowledge apart from the
+checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
+`checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
+background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
+per background writer loan with its cursor in `meta`, resting outside the loan for
+max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
+identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
+stays retired and is also labeled in `retired_claim_withdrawals` or
+`retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read
+the checkpoint tables: reading the ledger before local-mode activation stops those withdrawals
+would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
+64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
+equates with a BLOB.
+
+## Writer heads
+
+`writer_heads` keeps each writer's highest batch (sequence, hash). A trigger raises it on every
+batch insert and stores it before any batch delete, so a checkpoint trim that deletes a writer's
+newest batch never lowers it; rows are never deleted. Local sequence allocation takes the
+maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `checkpoint_envelopes`
+and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
+this table existed), and the writer floor; the chain's previous hash is the higher of the newest
+batch and the stored head.
+
+## Repaired claim replacements
+
+`repaired_claim_replacements` keeps, for each repaired original claim, its current replacement and
+the repaired record's reference. A trigger copies them whenever a record becomes repaired or is
+repaired again, and deleting the record leaves them; rows are never deleted. A one-time copy at
+open reads only the repaired records that predate the triggers, through their partial index.
+Readers still use the records and `projection_digest_repaired_claims`.
+
+## Retired claim facts
+
+`retired_operation_receipts` (operation, request digest, claim) and `retired_claim_ancestry`
+(claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
+read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
+cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
+them, including rows adoption later withdraws, so they only grow. Claim identities use the
+ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
+activation stops those withdrawals.
+
+## Claim range digests
+
+`claim_range_digests` summarizes the claims this store retains for claims sync. Each claim falls
+in one of 4,096 leaf ranges by the first three hex digits of its ID, and each leaf in one of 64 top
+ranges; an ID that is not 64 lowercase hex digits is counted in a separate irregular range. A
+range keeps its claim count and the 512-bit modular sum of its members' domain-separated SHA-512
+hashes, so it does not depend on arrival order. Plain-SQL triggers queue every claim insert and
+delete in `claim_range_pending`, so an earlier build that writes claims queues its changes too. A
+background job (`maintenance.claim_ranges`) folds the queue into the digests after each store
+event, and once folds the claims that predate the triggers, tracked by `claim_range_import`; it
+takes 4,096 rows per background writer loan and rests outside the loan for max(100 ms, 4 x the
+loan's hold), capped at 5 s. The digests cover exactly the retained claims when the queue and the
+import are both empty. Nothing reads them yet.
+
+## Local message selectors
+
+The client message list pages through `local_client_message_selectors_v1`, a SQLite projection kept only on the local node. It is derived from message claims and from the `desired` projection, so it is not part of this registry. It adds no subject family, resource kind, claim kind or claim field. The registry digest and the replication compatibility digest therefore stay unchanged. Nodes with and without this table exchange claims as before. The `_v1` suffix is the projection version: a layout change uses a new table name, never an edit to this one in place.
+
+### Table
+
+Each row is a body-free selector header. It holds the fields a page needs to pick and order messages, never message text, attachments or other body fields.
+
+| Column | Meaning |
+|---|---|
+| `subject`, `born_index` | Primary key. Nonnegative `born_index` is the store index at which this header version became current. `born_index = -1` records a pending source change; `born_index = -2` records destructive-edit quarantine. Neither marker is a page candidate. |
+| `retired_index`, `retired_at_unix_ms` | Store index and wall time at which a newer header version replaced this one. `NULL` means current. |
+| `sender`, `recipient` | Normalized message parties. |
+| `sent_key` | Page order key: the timestamp of the message's first canonical claim. |
+| `created_index` | For a header, the store index at which the message was first indexed. For a pending row, a source-touch generation counter. For a quarantine marker, `i64::MAX` until replacement finishes, then the reconciled cut that must be published before the subject is safe to serve. |
+| `mailbox`, `native_mailbox` | Whether the recipient's mailbox owns the message, and whether a native `message.sent` claim (rather than a declaration) established it. |
+| `closed`, `reminder`, `version` | Lifecycle and reminder-group fields used for eligibility. `version` is zero-padded so text order matches numeric order. |
+| `global_current`, `recipient_current` | Whether the message is eligible in the broad list and in the recipient's list. In a reminder group only the newest open version is eligible. |
+| `desired_mask` | Which of sender, recipient and tags came from the `desired` projection, so deleting that row clears exactly those fields. |
+| `dirty_flags` | Pending-row reasons for recomputing the subject. |
+
+The table is `WITHOUT ROWID`.
+
+### Indexes
+
+The fourteen page indexes are partial on `born_index >= 0` and order by `sent_key DESC, subject`. Current open pages use live eligibility indexes. Open pages pinned to an earlier cut combine bounded candidates from a live eligibility index and a retired-only cut eligibility index, with matching keyset ranges and `LIMIT` applied to each branch. History pages use the unfiltered order indexes. Closed messages do not force open pages to scan all message headers; new live headers do not duplicate writes into the five retired-only indexes.
+
+| Index | Leading columns | Extra filter | Use |
+|---|---|---|---|
+| `client_selector_order` | `sent_key DESC` | none | Broad list including history and earlier cuts. |
+| `client_selector_sender` | `sender` | none | Sender filter including history and earlier cuts. |
+| `client_selector_recipient` | `recipient` | none | Recipient filter including history and earlier cuts. |
+| `client_selector_recipient_sender` | `recipient, sender` | none | Recipient and sender filter including history and earlier cuts. |
+| `client_selector_global_eligible` | `sent_key DESC` | current, `global_current = 1` | Current broad open list. |
+| `client_selector_sender_eligible` | `sender` | current, `global_current = 1` | Current open list by sender. |
+| `client_selector_recipient_global_eligible` | `recipient` | current, `global_current = 1` | Current open list addressed to an actor. |
+| `client_selector_recipient_eligible` | `recipient` | current, `recipient_current = 1` | Current open mailbox of a person or agent. |
+| `client_selector_recipient_sender_eligible` | `recipient, sender` | current, `recipient_current = 1` | Current open mailbox by sender. |
+| `client_selector_global_retired_eligible` | `sent_key DESC` | retired, `global_current = 1` | Retired candidates for the broad open list at a retained cut. |
+| `client_selector_sender_retired_eligible` | `sender` | retired, `global_current = 1` | Retired sender candidates at a retained cut. |
+| `client_selector_recipient_global_retired_eligible` | `recipient` | retired, `global_current = 1` | Retired actor-addressed candidates at a retained cut. |
+| `client_selector_recipient_retired_eligible` | `recipient` | retired, `recipient_current = 1` | Retired mailbox candidates at a retained cut. |
+| `client_selector_recipient_sender_retired_eligible` | `recipient, sender` | retired, `recipient_current = 1` | Retired mailbox-by-sender candidates at a retained cut. |
+| `client_selector_reminder_candidates` | `reminder, version DESC, subject DESC` | current, open | Picks the newest open version in a reminder group. |
+| `client_selector_recipient_reminder_candidates` | `recipient, reminder, version DESC, subject DESC` | current, open, mailbox | The same within one mailbox. |
+| `client_selector_reminder_winner` | `reminder, subject` | current, `global_current = 1`, reminder set | Finds the previous broad winner to demote. |
+| `client_selector_recipient_reminder_winner` | `recipient, reminder, subject` | current, `recipient_current = 1`, reminder set | Finds the previous mailbox winner to demote. |
+| `client_selector_retirement` | `retired_at_unix_ms` | retired rows | Locates retired versions; retirement time alone never authorizes pruning. |
+| `client_selector_pending` | `subject` | `born_index = -1` | Finds pending rows for bounded maintenance and backfill without scanning headers. |
+| `client_selector_retired_cut` | `retired_index` | `retired_index IS NOT NULL` | Locates retired versions by the cut whose publication starts their retention window. |
+| `client_selector_destructive` | `created_index, subject` | `born_index = -2` | Finds reconciled quarantine markers for bounded cleanup after publication. |
+
+"Current" means `retired_index IS NULL`; "retired" means `retired_index IS NOT NULL`. A page at an earlier cut `C` selects live rows with `born_index <= C` plus retired rows with `born_index <= C < retired_index`. The five `_retired_eligible` indexes contain retired headers only and include `retired_index`, so retained-cut eligibility is checked without visiting message bodies. Schema setup drops the earlier five `_cut_eligible` indexes and creates these new named indexes, so an existing cache cannot retain the old live-and-retired predicate.
+
+### Maintenance
+
+Triggers on `claims` (insert, update, delete) for `message/` subjects and on `desired` (insert, update, delete) add a pending row with the reason. Insert triggers mark only claims that can change a selector field: `message.sent`, `message.closed`, `intent.desired`, or a claim that sets `from`, `to`, `tags` or `status`. A body-only edit adds no new header version. Deleting a `desired` row immediately clears the fields it supplied (`desired_mask`) and recomputes eligibility only for that subject and the old/new global and affected-recipient reminder winners. Each candidate or previous-winner lookup is an indexed seek with `LIMIT 1`, in canonical `version DESC, subject DESC` order for candidates; it never enumerates or updates the superseded open members of a reminder group. At most seven live headers and one subject-keyed pending row are touched per desired deletion, independent of group size. The pending row retains the old reminder and recipient for bounded durable reconciliation. A fresh page therefore never shows a removed declaration, even before the transaction's flush.
+
+The seventh source-change trigger, `client_selector_repair`, watches `replica_records` updates of `state` and `replacement_claim_id`. A message claim newly marked `repaired`, or already repaired with a changed replacement claim, queues a full selector fold and a destructive quarantine marker. The paired epoch trigger invalidates previously issued cuts for both initial repair and replacement reselection.
+
+The central `Runtime::before_commit` boundary runs pending selector work exactly once before each managed outer writer transaction commits, including both batched and lent-writer transactions and canonical settlement. Appending claims, applying declarations and projecting replicas do not take separate eager selector allowances. The entire transaction shares at most 64 claim or legacy-position prefix rows and 16 subjects, with a cooperative 10 ms work budget; these limits do not restart for each helper invocation. The accumulator and cleanup state use the same transaction-wide allowances, and SQLite retains FULL synchronous durability. Work that does not fit remains durable for a later transaction. The accumulator for one active subject lives in `meta` under `client_message_selectors_v1_fold` and holds the subject, cut, epoch, source-touch generation, scan position, phase, canonical keys and selection scalars only. It never contains message content or attachments. A suspended full fold retains its scalar progress across append touches, finishes its captured cut, then extends to the newer cut and generation. It restarts only after a destructive epoch change, or when a metadata-only fold based on an existing header first gains selection-field dirtiness. A body-only edit adds no header version when the resulting selector is unchanged.
+
+For claims without an explicit replica position, `local_client_message_fold_batches` caches legacy wire-position prefix counts. It is `WITHOUT ROWID` with columns `batch_id TEXT PRIMARY KEY`, `after_index INTEGER NOT NULL` and `claim_count INTEGER NOT NULL`. Prefix scans include other subjects' claims in that batch to preserve canonical wire order, but share the same 64-row budget. A prefix scan completed with one row does not persist scratch counters. Clearing this scratch table and pruning retired headers also use at most 64 rows per transaction. Malformed `desired` JSON causes that subject's selector header to be skipped, not replaced with an empty-field placeholder. It emits a tracing warning and increments the cumulative `meta` counter `client_message_selectors_v1_malformed_desired`; startup continues and healthy subjects remain readable.
+
+When a subject finishes, changed headers and reminder winners are updated transactionally. `meta` key `client_message_selectors_v1_cut` advances only when all pending selector work for the frontier is complete. Pending and quarantine rows are never page candidates. While ordinary maintenance remains queued, pages continue to serve the last fully published frontier instead of failing or exposing a partially folded selector set. Each HTTP traversal pins that published frontier; a later completed publication does not move its cut. Desired-row deletion is an explicit exception: its transaction immediately clears declaration-derived fields and eligibility in place and bumps the epoch, so existing cursors expire and fresh pages reflect the deletion even before queued reconciliation finishes. Destructive claim update or deletion, message repair, and repaired replacement reselection also bump the epoch and upsert one durable quarantine marker per subject (`born_index = -2`, `created_index = i64::MAX`), rather than updating an unbounded set of historical headers. A completed fold sets the marker's `created_index` to its reconciled cut. Page selection uses a primary-key `NOT EXISTS` check to omit the subject until that reconciled cut is no greater than the served frontier; marker cleanup after publication is bounded to 64 rows. Each page reads selectors, claim metadata and selected message folds inside one SQLite snapshot. The current desired-projection shortcut is used only after an indexed subject/kind existence check proves that no declaration for the subject was accepted after the requested cut.
+
+`local_client_message_publications` stores retention cohorts as `through_index INTEGER PRIMARY KEY, published_at_unix_ms INTEGER NOT NULL`, in a `WITHOUT ROWID` table. After the initial conservative bootstrap cohort, a new cohort is inserted only when a retired header needs its first covering publication; an advancing completed-cut marker without retirement does not write another cohort. A retired header is pruned only after the first stored publication whose `through_index >= retired_index` is older than the page cursor lifetime. Retiring a header while folds remain unpublished therefore cannot age out a cut that fresh pages still issue. Unreferenced cohorts are pruned at most 64 at a time, always keeping the latest stored cohort even if the completed-cut marker has advanced beyond it.
+
+A weakly owned daemon maintenance worker drains remaining live work through independent writer loans. Busy chunks are separated by 20 ms; idle checks run once a second and do not borrow or commit the writer. Completing the last pending task wakes readers and events. The worker does not keep a closed store alive.
+
+### Cursor epoch
+
+`local_client_message_cut_epoch` is a single-row counter. It is incremented when a message claim is updated or deleted, when a message `desired` row is deleted, when a message claim's replica record becomes `repaired` or its repaired replacement changes, and once when a selector backfill starts. Each issued page cursor records the epoch it was read under. A continuation that sees a different epoch in its snapshot fails with HTTP 410 `page-cursor-expired` instead of returning a partial page. The client then starts again from the first page. Appending a claim does not change the epoch: retained header versions keep earlier cuts readable.
+
+### Backfill
+
+A store with no completed selector cut records resumable initialization metadata at open, without waiting for a full cut. Once both APIs serve, the background worker builds the cut through three independently admitted phases. Starting a rebuild increments the cursor epoch once and records the initial cut. `clear` deletes old selector rows, at most 64 per transaction. `headers` queues subject-keyed pending tasks in subject order, at most 16 subjects per transaction. `pending` runs the claim-row-bounded fold described above, including legacy batch-position prefixes, until every task is complete. Until a first cut exists, even metadata-only appends to already-folded headers use full folds. The cooperative 10 ms work budget leaves room for durable commit; total backfill time and longest commit-inclusive transaction must be measured separately.
+
+One worker-owned guard saves and disables SQLite automatic WAL checkpoints for the entire initial online backfill, including the foreground writes interleaved between background loans. The daemon WAL recycler owns checkpoint scheduling. Completing the cut, returning an error or unwinding drops the guard and restores the incoming policy; an explicitly disabled policy remains disabled. Explicit benchmark rebuilds additionally perform a passive checkpoint outside their chunk transactions. Checkpoint cost must be reported separately from commit-inclusive chunk duration.
+
+Each transaction records backfill progress in `meta` under `client_message_selectors_v1_backfill` as `{"cut": INITIAL_INDEX, "phase": "clear" | "headers" | "pending", "after": LAST_SUBJECT}`; `client_message_selectors_v1_fold` separately records any unfinished subject fold. A restart resumes both instead of rescanning completed work. A populated store opened with pending rows queued reconciles them without discarding its headers or resetting its epoch. The final transaction writes the completed cut `client_message_selectors_v1_cut` and deletes the backfill marker together. Until then, negotiated v2 pages return retryable HTTP 503 `message-selectors-not-ready`, while legacy unindexed readers remain available. Ordinary maintenance after initialization keeps serving the previous published frontier. Earlier local message body-version tables and their triggers are dropped when the store opens. No claim is rewritten.

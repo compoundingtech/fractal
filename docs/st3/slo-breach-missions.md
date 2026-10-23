@@ -144,7 +144,7 @@ and successful output retained; those deltas include both the
 calling thread and the actual store writer thread. They do not establish production
 or hourly idle coverage.
 
-Checkpoint rules version 16 includes all three tables in replay and shared graph
+Checkpoint rules version 20 includes all three tables in replay and shared graph
 proofs. It keeps onset, dispatch, owner and recovery fences, including their signed
 payloads and a conflicting body where needed. Only redundant receipts of recovered
 episodes can compact once the recovery is at least seven days old and existing
@@ -155,9 +155,9 @@ is added. Empty new tables do change projection root bytes. The existing transpo
 compares graph roots only for the same registry: mixed registries wait with UNKNOWN
 comparison status instead of treating those roots as a proven divergence. Fresh
 checkpoint verification requires every participant to agree the same rules digest;
-version-15 and version-16 terms cannot form one complete certificate. Existing
+version-19 and version-20 terms cannot form one complete certificate. Existing
 historical-certificate adoption keeps its existing proof policy. Roll forward and
-coordinate participant upgrades before creating new version-16 checkpoints. The
+coordinate participant upgrades before creating new version-20 checkpoints. The
 curator confirmed these consequences are within the same accepted ask, with exact-head
 mixed-digest UNKNOWN and mixed-rules refusal controls required green before merge.
 

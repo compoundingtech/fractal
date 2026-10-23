@@ -14,7 +14,7 @@ or contact an agent-selected tracking endpoint.
 The policy is:
 
 ```text
-default-src 'self'; script-src 'self' 'wasm-unsafe-eval' <inline-script SHA-256 hashes>; style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o=' 'sha256-gYiS/BvZvRcK27JIXTuwhZ3hs2+VJ1X+2gUlE+farlg='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws://<page-authority> wss://<page-authority> <configured collector origins>; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
+default-src 'self'; script-src 'self' 'wasm-unsafe-eval' <inline-script SHA-256 hashes>; style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o=' 'sha256-gYiS/BvZvRcK27JIXTuwhZ3hs2+VJ1X+2gUlE+farlg=' <inline-stylesheet SHA-256 hashes>; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws://<page-authority> wss://<page-authority> <configured collector origins>; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
 ```
 
 `'wasm-unsafe-eval'` lets the terminal key encoder compile its WebAssembly module.
@@ -25,11 +25,16 @@ connect, the server's deployment identity, and Vite's development React-refresh
 preamble. There is no script `unsafe-inline` or `unsafe-eval` exception. Compiled
 StyleX CSS and fonts are same-origin. Only `style-src-attr` needs `unsafe-inline`:
 StyleX variable values, resizable widths and React Aria positioning are runtime
-style attributes whose changing values cannot use fixed hashes. The two style
+style attributes whose changing values cannot use fixed hashes. The two fixed style
 hashes authorize React Aria 3.52.1's fixed pressable touch-action and iOS modal
 overscroll stylesheets (`usePress` and `usePreventScroll`); recheck them when
-upgrading React Aria. Production and preview admit no other inline stylesheet
-elements. Vite development additionally allows `style-src-elem 'self' 'unsafe-inline'`
+upgrading React Aria. Inline-stylesheet hashes cover the `<style>` elements of the
+trusted application HTML: the themed first-paint shell, which must apply before any
+bundle stylesheet loads. Production and preview admit no other inline stylesheet
+elements, and no `data:` stylesheet. The bundle stylesheets (application CSS and
+compiled StyleX) are deferred `media="print"` links that a hashed bootstrap enables
+together once all have loaded; the app renders only then.
+Vite development additionally allows `style-src-elem 'self' 'unsafe-inline'`
 for its injected stylesheets and
 `worker-src 'self' blob:` for Vite's HMR reconnect SharedWorker. These development
 exceptions do not relax `img-src` or production's script/worker policy.
@@ -75,6 +80,24 @@ remote site. With CSP enforced the route is never reached and `img-src` reports
 the violation. Browser sessions, listeners and temporary build files are closed
 and removed on exit. There is no production CSP-disable switch.
 
+## Observation and unavailable states
+
+The roster and conversation retain trusted content across disconnects. Feed freshness
+and connection state determine whether that content is live; a stale observation never
+claims that a working agent is still working. Observation ages come from the source's
+retained `sync.*.last.observedAt`, not the moment a component renders or a connection
+fails. Sources without that evidence show no invented age. Relative-time leaves share
+the source clock; roster rows do not acquire timers or rerender on clock ticks.
+An in-progress run remains completion-unverified when frozen, even when some tool
+calls already completed. Its recorded calls stay expanded; disconnecting never
+turns unfinished work into a settled “Worked” summary.
+
+Waiting feeds show loading, observed empty feeds show empty content, and a filtered
+roster with no results offers Clear filters. A failed roster read exposes Retry through
+`source.retryAgents`; an unavailable conversation uses `source.retryConversation`.
+Those actions reacquire failed or ended follows without restarting healthy follows.
+Authorization and capability refusals retain their distinct explanations.
+
 ## Hosting the web app on a tailnet
 
 `apps/fractal-web/server/main.mts` runs the built app for one person. It listens on loopback
@@ -115,6 +138,110 @@ nothing for the port.
 The build records `rev`, `dirty`, `commitTs` and `buildTs` from git. The bundle embeds them, and
 the host serves them at `/build-identity.json`. That response names the exact commit that is
 running.
+
+## Fractal web Details
+
+The live agent inspector lazily mounts the kit's production `DetailsPane` inside a
+measured Workbench tab group. Details is the default tab; Changes retains its
+successful-tool captures and loaded-transcript-window scope. The public composition
+supplies native observations only. Host contributions may add independently scoped
+descendant observations without replacing native session accounting.
+
+Overview identity, mission, status-since and managed-session elapsed are separate
+facts. Elapsed freezes at the managed session's end and is wall time, not active
+work. Session age continues from `Session.started_at`, with that provenance in its
+label. Native incarnation launch age is unreported: it is not inferred from the
+managed session start. Context uses the same reported occupancy projection as the
+sidebar; cumulative tokens are not a context numerator. Main-session money carries
+its returned native usage interval. Cumulative tokens come from `Agent.usage.total_tokens`,
+span the agent's observed incarnations and have an explicitly unreported accumulation
+window; they remain visible without a proven current native root. Descendant money
+keeps its independent provider-reported window. Missing series, timestamps,
+attribution and grants remain explicit rather than becoming zero or fixtures.
+Session starts that equal the producer snapshot's `created_at` or the session update
+timestamp, or drift forward within the same session incarnation, cannot establish
+duration. This comparison never uses the client's display clock. Rejected/earliest
+starts are remembered per source, agent, session and incarnation across Details mounts;
+an earlier corrected start or a distinct incarnation can establish duration. Unknown
+duration values expose the actual guard reason rather than a fabricated age.
+The source retains a context-observation fence across an incarnation transition, even
+when the new row omits occupancy. Context, model and compaction claims remain unknown
+until a strictly newer occupancy observation arrives; cumulative token totals alone
+cannot restore them.
+Elapsed and age each stay pending until the session first read settles. A shared
+timing guard reason appears once, without duplicating it beneath both values.
+When all timing facts are missing, Overview says “Timing isn't available for this session.”
+Rendered Details absence reasons refer to the session, not the data source.
+
+Selected native-root attribution requires a current-incarnation binding plus matching
+native usage rows. `UsageRow` does not expose its grouping incarnation ID; a unique
+row alone is not proof of the current root. Without an explicit matching binding,
+root-scoped facts remain unavailable while unrelated native observations stay visible.
+Declaration reads request redacted values only; public code exposes binding kinds
+and counts without paths, reference targets, environment values or command arguments.
+The latest declaration is selected by agent, and its own declaration revision is
+displayed. `Agent.revision` belongs to the projection namespace, so it keys observation
+refresh but is never sent as a declaration-history revision.
+An optional protected host contribution can render the declared workspace,
+repository/base/branch and redacted binding targets. Neither projection claims
+observed checkout success or repository state. Metadata without a native navigation
+target opens a read-only dialog rather than fabricating a routable subject.
+Reported spend-window descriptions wrap at narrow pane widths without shortening
+their scope or provenance; monetary amounts keep their intrinsic width.
+The kit's E3 policy hides empty and unavailable resource bodies; unavailable categories
+are named once in its compact “Not reported for this session: …” summary. A collapsed
+“Why? Sections not reported” disclosure groups the reasons beneath it on desktop and phone.
+User-hidden categories are omitted. Known zero traced or observed st subagent counts
+remain visible evidence, distinct from an unknown count.
+The Subagents heading uses the reported traced-session total for both zero and
+positive counts, never the capped retained list length; unknown totals have no badge.
+Inclusive ledger totals and native self amounts are independently sourced and
+windowed observations, not a reconciled monetary split. Their difference never
+establishes descendant spend, including when the ledger reports zero descendants.
+First-read resource sections remain pending until their relevant feed settles; they
+are not included in the missing-section summary while loading. Settled absence is still explicit.
+Native root prerequisites carry their own acquisition state: a still-loading agent
+or usage-period read is not evidence that no verified native root exists. Only a
+settled missing identity/root is unavailable; loading never authorizes a provider read.
+Matching last-good descendant observations survive transient read failures and paused
+native freshness as retained/stale, labelled with the age of the last successful client
+read (not producer observation time). A paused native fence never authorizes another
+provider read; denial, root/host/incarnation replacement or a different source cannot
+reuse the old value.
+Retained-read error copy is separated from the coverage sentence with punctuation.
+Traced cards expose the reported role/label, known model and full native session identity
+before Open; generic reported roles remain generic, and missing kinds are not invented.
+An omitted role remains explicit as “role unreported” before the full session identity.
+Attention preserves main's sidebar union of waiting status and observed attention
+subjects; it does not introduce a separate sidebar policy. Terminal resources reuse the observed runtime's native navigation
+reference. Missions mounts the same selected-agent queue reader as Resources;
+grant refusal removes values, while stale retained queues are labelled last observed.
+
+Details readers acquire demand only for the visible tab. The tab group's local
+layout registry does not replace the application's data registry. Section variants
+remain independently supplied swap points; the deployed defaults are
+O2 / C3 / S2 / R1 / E3, not approval of exploration alternatives.
+Passive agent-row hover tooltips do not own pointer events over the sidebar divider;
+the explicit reported-details popover remains interactive.
+
+The conversation header's Resources control opens the kit's non-modal `SidePanel`, a
+labelled complementary region rather than a dialog: the workspace is never inerted or
+hidden. The trigger names the panel with `aria-controls`, and Escape or Close resources
+closes it and returns focus to the trigger. Opening focuses the panel heading without outlining the whole region; Tab proceeds to its controls and remains free to leave the panel. The panel renders under the owning scheme
+root. Below 640 px the Resources trigger keeps its accessible name but shows only the
+folder icon; wider headers also show the text label. Todos is its first section; a missing
+harness snapshot is named rather than shown as an empty list. Hover, focus and press start
+prefetch the resource and queue reads.
+Closing releases UI demand, while the intent-created read keeps polling for 60 seconds
+so a reopen shows the retained observation.
+
+Live time labels tick in their own leaves (`useClockLabel`) on the source clock; parent
+panels read `useNowSnapshot` and do not subscribe. The Details panel pairs its snapshot
+with `useClockDeadline`, so it re-renders only when its next displayed duration/age or
+synchronization threshold is reached. Native Details keeps main's existing formatting and
+observation guards. Conversation presentation time freezes on transport loss (the
+transcript's leaves receive the last live sample as `fixedNow`) without changing the
+source's independent freshness verdict.
 
 ## Fractal web transcript switch paint
 
@@ -200,14 +327,62 @@ Only successful calls with an observed nonerror result and known changed content
 The inspector preserves reported tool/sender provenance, separates repeated captures of
 the same path, and scopes counts to the shown capture and loaded transcript window.
 Missing captures do not establish that a repository is unchanged. Waiting, unavailable,
-stale observations and older-history boundaries remain visible. Resource card/chip actions
-select captured content locally; they do not fetch repository state.
+stale observations and older-history boundaries remain available. On desktop, the
+Changes header is followed directly by the Captured/current-turn toolbar and files.
+The keyboard-accessible information disclosure holds intact provenance and scope
+caveats, plus local capture selection when multiple resources exist. Repeated card/chip
+summaries are absent; Open on the file header focuses its diff. Unified rows show only
+new line numbers; Split preserves separate old/new numbers. Narrow card/chip actions
+still select captured content locally; neither path fetches repository state.
 
 The panel acquires visible conversation demand while mounted and shares the thread's
 retained feed. Its kit diff viewer loads on demand to preserve the shell's eager-graph
 boundary. `LiveHeader.integration.test.tsx` exercises the actual shell and kit inspector
 with decoded public conversation frames; `capturedChanges.unit.test.ts` guards the
 capture, count, provenance and selection rules.
+
+On desktop, the shared kit `DockedSplit` places captured Changes beside the thread.
+Both panes use the compact 32 px header. The separator normally clamps to 320–720 px:
+arrow keys resize by 8 px (Shift: 32 px), Home/End select the bounds, Enter closes,
+and double-click restores the default. Width persists in browser storage per reported
+host/workspace, with the conversation identity used when the workspace is unknown.
+Pointer resize updates a CSS variable and separator ARIA values without re-rendering
+the thread. Closing Changes unmounts its lazy inspector and releases its demand.
+The live split reserves the kit's general `geometryNumbers.panelMin` (360 px) for the
+thread/composer lane; RM1 has no separate thread-width minimum. Its effective dock
+maximum is the lesser of 720 px and actual container width minus 360 px and the
+separator. At constrained desktop widths, the dock may temporarily become narrower
+than 320 px rather than hiding the thread. Restore and container/window shrink apply
+the same bounds and ARIA maximum without changing the saved preference; more space
+restores that preference.
+Native header actions share one horizontal slot. A named inline-size container on the
+desktop header degrades chrome by the thread lane, not the viewport: at 680 px View KDL
+becomes a named, tooltipped icon; at 560 px the host breadcrumb is omitted and the agent
+name truncates; at 440 px Resources and View KDL move into the Conversation menu.
+The gear is conversation settings, not a theme control. Unavailable Resources retains
+its accessible refusal description/tooltip, and the overflow menu shows that reason.
+The narrow sheet keeps its own presentation. All desktop header controls remain on one
+32 px band without resize-driven React state. Run the real app geometry regression with
+`node apps/fractal-web/scripts/split-header-geometry-proof.mjs` through the heavy build
+lane; it checks pairwise control/breadcrumb overlap and lane containment at 900 px and
+at 1440 px with Changes fully expanded.
+The desktop pane header is the conversation's sole title owner. The transcript omits
+its own title band and portals its synchronization, retry and run controls into the
+stable pane-header action slot; parked conversations contribute no header controls.
+Portalled sync status uses `SyncLine.inline`: absent status takes no width, and hidden
+retry/details actions do not reserve their standalone slot. The native cluster therefore
+stays right-aligned next to the pane toggles; standalone desktop sync layout is unchanged.
+When status is visible, inline sync is the shrinkable item: its single-line text
+ellipsizes, the full reason stays in its accessible name and tooltip, and Retry/Details
+do not shrink. Below a 440 px lane only the status glyph, “Sync failed” and Retry remain;
+the status tooltip retains the full reason, and a retained failure adds “Sync details”
+to the Conversation menu to open the shared diagnostics (not merely the tooltip).
+Narrow SyncLine Retry and Details buttons, and narrow Conversation menu entries, use
+the shared 44 px touch target; desktop SyncLine keeps its dense 24 px controls.
+The browser regression reaches diagnostics through overflow at a 360 px lane and checks
+both phone Retry/Details targets, alongside retained subscription-limit geometry at
+360, 462 and 742 px lanes in both schemes, not only the live/empty status.
+History range, earlier-message and search navigation stay in the transcript viewport.
 
 ## Fractal web composer
 
@@ -256,6 +431,17 @@ It gates real HTTP/echo delivery to observe Pending→Sent→echo, injects one e
 checks Retry reuses the key, and prints build revision, seat and timings. The negative control
 removes the submit binding and proves the send criterion rejects it without issuing mail.
 Both commands skip all live activity when the one-minute `/proc/loadavg` value is 32 or higher.
+
+## Fractal web alert strip live proof
+
+`node apps/fractal-web/scripts/alerts-live-proof.mjs [run|up|down]` proves the conversation
+alert strip against a real daemon without touching your own st. `up` makes a throwaway instance
+(`webproof`, under its own HOME in `/var/tmp/st-webproof`) with person/avery, a program seat
+agent/example/atlas and a paired full-control device whose bearer it keeps in a mode-0600 file.
+`run` has atlas ask avery a yes-or-no question and a decision, answers both from the strip in
+headless Chromium, checks with st that each step finished with that answer, and prints the
+timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
+header lists what it needs (systemd user units, `st3`, `pty`, a Playwright module and Chromium).
 
 ## Fractal web arrangement edits
 
@@ -350,6 +536,11 @@ hover title until the live roster establishes a runtime for the selected agent. 
 loading, its reason is “Waiting for the live agent roster to find this agent’s terminal.”
 An absent roster row or an empty runtime list keeps it disabled with the specific cause.
 An explicit terminal deep link still shows its local reason beside the usable thread.
+On phones the control leaves the header, which keeps its room for the breadcrumb: a
+labelled **Terminal** button sits fixed at the right end of the workspace tab row, has a
+44px target and reports its pressed state. The tabs scroll and truncate before it rather
+than running under it. When unavailable it stays focusable; pressing it opens a reason
+popover rather than relying on a hover title.
 
 `NO_TERMINAL=1 node apps/fractal-web/scripts/terminal-failure-e2e.mjs <baseUrl> <outDir> <seat>`
 is a read-only proof for a terminal-less seat. It samples the page-level button's disabled,
@@ -359,7 +550,7 @@ roster-loading fallback that enabled a canonical terminal subject without runtim
 the first-control assertion must fail even if the settled control is correctly disabled.
 
 `data/liveSource.ts` resolves an agent's terminal runtime and passes the decoded runtime
-and its snapshot ID as `FollowSpec.Terminal.initialRuntime` to `@st3/sdk/effect`.
+and its snapshot ID as `FollowSpec.Terminal.initialRuntime` to `@fractal/sdk/effect`.
 The first attach consumes that observation rather than reading the same runtime twice.
 Admission identity remains the runtime ID; the observation is not a runtime cache.
 Reconnects and resyncs read the runtime afresh before obtaining another attachment.
