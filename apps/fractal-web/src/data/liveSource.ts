@@ -40,6 +40,7 @@ import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
+import { BrowserSt3Platform } from './sdk-browser/platform.ts'
 import { mergeOutboxItems } from './outbox.ts'
 import {
   initialFeedSync,
@@ -67,6 +68,7 @@ import {
 import { gatewaySubjectReads, SubjectReadPort, subjectReaderFromAtom } from './subjectReadPort.ts'
 import { gatewaySessionTraceLayer } from './stSessionTrace.ts'
 import { sessionTrace, type SessionTraceProvider } from './sessionTrace.ts'
+import { gatewayNativeDetails } from './nativeDetailsSource.ts'
 
 /** Open/silent subscriptions have no SDK idle deadline. Bound only the first roster snapshot;
  * transport failures trigger the published fallback immediately instead of waiting this long. */
@@ -126,11 +128,14 @@ const terminalUnavailable = (error: AttachFailure): Feed<never> => {
 /** Connect retained workbench projections through one SDK runtime and frame writer. */
 export const liveSource = ({
   options,
+  adoptEarlyCollections = false,
   telemetryLayer,
   ux,
   sessionTraceLayer,
 }: {
   readonly options: St3Options
+  /** The live page opts in; replay and other retained sources never take a page-global socket. */
+  readonly adoptEarlyCollections?: boolean
   /** Browser root owns sampling and observers; the SDK shares its scoped tracer/exporter. */
   readonly telemetryLayer?: Layer.Layer<never> | undefined
   readonly ux?: () => UxTelemetry
@@ -184,6 +189,7 @@ export const liveSource = ({
     discovery: client,
     registry,
   })
+  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
     St3Live({
       ...options,
@@ -247,6 +253,7 @@ export const liveSource = ({
         options.onDiagnostics?.(event)
       },
     }).pipe(
+      Layer.provide(BrowserSt3Platform({ adoptEarlyCollections })),
       Layer.provideMerge(Metric.enableRuntimeMetricsLayer),
       Layer.merge(Layer.succeed(SubjectReadPort, subjectReads)),
       Layer.merge(sessionTraceLayer ?? gatewaySessionTraceLayer(client).pipe(
@@ -1114,6 +1121,7 @@ export const liveSource = ({
     source: {
       mode: 'live',
       subjectReads,
+      nativeDetails,
       label: 'gateway',
       gateway: new URL(baseUrl).host,
       now: wallClock,

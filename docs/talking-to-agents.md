@@ -23,7 +23,7 @@ Enter the returned pairing ID and code in the app with your paired-only gateway 
 
 Large native tool output is a preview, not the complete result. In stui, use
 **Ctrl+Up/Down** to focus a tool or image and **Ctrl+Enter** to expand or collapse tool
-output. **o** in the classic view, or **Ctrl+E** in glasses, expands all tool rows and
+output. **Ctrl+E** expands all tool rows and
 loads visible clipped output one value at a time. Scrolling another clipped row into
 view loads it next; offscreen rows are not prefetched. Already loaded rows stay in
 memory when scrolled away, until collapsed. Restoring saved expansion state does not
@@ -58,10 +58,13 @@ Tool rows show a short description rather than raw commands or infrastructure pa
 Protocol events are hidden by default; the conversation menu can show payload-free
 event notices for inspection. Process and agent senders use readable captions.
 
-The pinned **Todos · phase completed/total** disclosure reads the accepted harness
-snapshot, independently of transcript loading. It remains above the composer while
-the conversation reconnects. A missing snapshot is not an empty task list, and stale
-or truncated snapshots keep their freshness and full-source progress labels.
+In the web workspace, **Resources** opens a side panel beside the conversation, which
+stays usable. The panel starts with a **Todos · phase completed/total** disclosure
+reading the accepted harness snapshot independently of transcript loading. The panel
+follows the workspace's light or dark scheme, including completed task text.
+A missing snapshot is not an empty task list. While the roster request is pending,
+retained tasks say **Pending** rather than claiming a stale binding; once verified,
+stale or truncated snapshots keep their freshness and full-source progress labels.
 
 If a conversation cannot be found or access is not granted, ask the gateway owner
 to grant access to the surface. Your saved work is unchanged.

@@ -1,3 +1,4 @@
+use crate::RetirementsStore;
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
 use crate::ConversationReadsStore;
@@ -94,9 +95,13 @@ pub mod read_deadline;
 pub mod response_body;
 mod owned_sets;
 pub mod published_attention;
+pub mod attention_history;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
-pub use published_attention::{published_attention_rows, refresh_attention_list};
+pub use published_attention::{
+    attention_fleet, present_attention, published_attention_rows, refresh_attention_list,
+    refresh_attention_list_with,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
@@ -168,7 +173,24 @@ pub fn raw_terminal_owner_splice(
     Box::pin(raw_terminal_splice(socket, transport, None, None, None, None, None))
 }
 
-pub use crate::delivery_presence::claude_channel_attached;
+pub use crate::delivery_presence::{claude_channel_attached, claude_channel_proof_pending};
+
+pub fn configure_claude_ownership_observation(root: &Path, enabled: bool) {
+    delivery_presence::configure_observation(root, enabled);
+}
+
+/// The same answer as `claude_channel_attached`, with the delivery binding that proves it and
+/// the instant the proof lapses by itself. Both come from one presence predicate, so a push
+/// stream's deadline cannot drift from what the poll answers.
+pub fn claude_channel_attachment(
+    store: &Store,
+    subject: &str,
+    incarnation: &str,
+) -> Option<(crate::mailbox::Fence, tokio::time::Instant)> {
+    delivery_presence::attachment_window(subject, incarnation)
+        .filter(|(_, until)| tokio::time::Instant::now() <= *until)
+        .filter(|(fence, _)| store.check_mailbox(fence).is_ok())
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -378,6 +400,7 @@ impl ApiError {
             | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
+            | "custody-pending"
             | "stale-subject"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -1707,6 +1730,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         "recipient-retired"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
+        | "invalid-custody-successor"
+        | "custody-pending"
         | "not-found"
         | "forbidden"
         | "attention-migrated"
@@ -1855,7 +1880,9 @@ pub fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> 
 }
 
 pub fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
-    if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
+    if cursor.starts_with(attention_history::CURSOR_PREFIX) {
+        attention_history::cursor_snapshot(cursor)
+    } else if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
         client_v0::native_page_cursor_snapshot(cursor)
     } else {
         decode_client_cursor(cursor).map(|cursor| cursor.snapshot)
@@ -2101,6 +2128,7 @@ fn client_page_read_projected(
                 has_more,
                 next_cursor,
                 cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+                omitted_items: None,
             },
             sync: client_sync_notice(state),
             replicated: None,
@@ -3171,10 +3199,20 @@ fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
     let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), local_host) else {
         return;
     };
+    // Eligibility above already required a live local native seat with an id.
+    let attachment_push = (item["driver"].as_str() == Some("claude")).then(|| {
+        delivery_presence::attachment_push(
+            item["id"].as_str().unwrap_or_default(),
+            item["incarnation_id"].as_str(),
+        )
+    });
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
     item["delivery"] = assessment.to_value();
+    if let Some(attachment_push) = attachment_push {
+        item["delivery"]["attachment_push"] = Value::String(attachment_push.into());
+    }
 }
 
 /// Share the live/local/native eligibility with scalar readers such as assistant summary
@@ -3639,6 +3677,13 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            // Fold the point read into a cached card. Presentation of a warm roster page
+            // must not repeat one retirement query for every retired row.
+            if state == "retired"
+                && let Some(custody) = store.mail_custody_status(&subject.subject).map_err(anyhow::Error::new)?
+            {
+                value["mail_custody"] = custody;
+            }
             if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));
@@ -4168,12 +4213,13 @@ pub fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
     }
 }
 
-fn client_attention_resources_with_previews(
+pub fn client_attention_resources_with_previews(
     state: &AppState,
     person: Option<&str>,
     history: bool,
 ) -> anyhow::Result<Vec<Value>> {
     let mut items = client_attention_resources(&state.store, person, history)?;
+    published_attention::published_attention_presentations(&state.store, &mut items);
     for item in &mut items {
         if item["attention_kind"] != "launch-approval" {
             continue;
@@ -5135,6 +5181,7 @@ fn client_work_published_page(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -6382,7 +6429,7 @@ fn native_delivery_identity(
 }
 
 #[cfg(target_os = "linux")]
-fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
     stream
         .peer_cred()
         .ok()?
@@ -6391,7 +6438,7 @@ fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
 }
 
 #[cfg(target_os = "macos")]
-fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd as _;
     let mut pid: libc::pid_t = 0;
     let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
@@ -6409,7 +6456,7 @@ fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn local_peer_pid(_stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(_stream: &tokio::net::UnixStream) -> Option<u32> {
     None
 }
 
@@ -7948,6 +7995,9 @@ fn doctor_report_with_operation_drift(
                 .iter()
                 .filter(|agent| {
                     agent.pointer("/delivery/state").and_then(Value::as_str) == Some("stale")
+                        || agent.pointer("/delivery/reason").and_then(Value::as_str)
+                            .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
+                                || reason.starts_with("ownership proof unavailable"))
                 })
                 .map(|agent| {
                     format!(

@@ -60,6 +60,7 @@ vi.mock('../data/react.tsx', async () => {
   }, () => source.now),
   useNowSnapshot: () => source.now,
   useGrants: () => ({ actions: 'ungranted', messageSend: source.sendable ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
+  usePausedNow: () => undefined,
   useAttention: () => ({ _tag: 'Waiting' }),
   })
 })

@@ -38,6 +38,8 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
 POLICY = '.st/evidence-skip-policy.json'
+GATE = 'scripts/ci-evidence-gate'
+OLD_BASE_REASONS = ('no_policy', 'no-gate-at-base')  # an unavailable line whose base git shows predates GATE or the entry
 DOC = 'docs/st3/gate-evidence.md'
 DOC_SECTION = '### Which checks skip today'
 # The test lists that name the enforced checks, written out in each test so a flip is a deliberate change to them.
@@ -47,11 +49,8 @@ LOOKBACK_S = 2 * 3600  # also read a little before the window, to see whether th
 MIN_SATISFIED_LOG_OK = 30
 LATENCY_S = 240  # two pulls of the log timer (every 2 minutes)
 NOT_FRESH = ('stale', 'absent', 'unsigned', '-')  # '-': the base did not pin the log key, so the window has not started
-# The members of the aggregate `linux-gate` that a skip decision skips at job level: the jobs whose `if` reads
-# needs.evidence-gate-linux-gate.outputs.skip (generated from .github/workflows/fleet.yml.genie.ts; the test checks this
-# list against fleet.yml). Every other member, upgrade-impact first, always runs, so its red is never hidden by a skip.
-SKIPPED_MEMBERS = {'linux-gate': ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3',
-                                  'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat')}
+WORKFLOW = '.github/workflows/fleet.yml'
+JOB = re.compile(r'^  ([A-Za-z0-9_-]+):\n((?:    .*\n|\n)*)', re.M)
 ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 # The gate prints its line on its own, after the runner's timestamp; the step's shell text (echoed before it) has the
 # line too, as a template with `$CHECK`, behind other text.
@@ -118,15 +117,72 @@ def fields_of(text):
     return dict(part.split('=', 1) for part in text.split(' ') if '=' in part)
 
 
-def collect(github, checks, since, until):
+def pr_runs(github, since, until, tries=4):
+    """The window's pull request runs, newest first, page by page until a page reaches back before the window. The created=
+    filter is not used: it answers an empty listing for about one request in four (2026-10-22: 205, 205, 0, ... for the
+    same request), which would read as missing lines. A page that is empty or short of what the listing's total says it
+    holds is asked again, then the run is unreadable; so is a window of more than the listing's 1,000 runs."""
+    runs, page = {}, 1
+    while True:
+        path = f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=100&page={page}'
+        for attempt in range(tries):
+            out = json.loads(github.gh('api', path))
+            batch, total = out.get('workflow_runs') or [], min(out.get('total_count') or 0, 1000)
+            expected = max(1 if page == 1 else 0, min(100, total - (page - 1) * 100))  # a repository with no runs is not real
+            if len(batch) >= expected:
+                break
+            if attempt < tries - 1:
+                time.sleep(2 ** attempt)
+        else:
+            raise Unreadable(f'page {page} of the pull request run listing came back with {len(batch)} of the {expected} runs it holds')
+        times = [parse_time(run.get('created_at')) for run in batch]
+        for run, created in zip(batch, times):
+            if created and since <= created <= until:
+                runs[run['id']] = run  # a run that arrived while paging shifts the pages: the same run can come twice
+        if len(batch) < 100 or any(created and created < since for created in times):
+            return list(runs.values())
+        if page * 100 >= 1000:
+            raise Unreadable(f'more than the listing\'s 1,000 runs since {iso(since)}')
+        page += 1
+
+
+def skipped_members(workflow, policy):
+    """For each aggregate check (its wrapper command is `CHECK aggregate ...`), the jobs a skip of it skips: every other job of
+    the workflow that reads needs.evidence-gate-CHECK.outputs.skip, in its `if` or its steps. Any other member (upgrade-impact,
+    fractal-web-changes) always runs, so its red is never hidden by a skip."""
+    jobs = {found.group(1): found.group(2) for found in JOB.finditer(workflow)}
+    members = {}
+    for check, entry in policy.items():
+        if (((entry.get('kinds') or {}).get('wrapper') or {}).get('command') or [])[1:2] == ['aggregate']:
+            members[check] = tuple(sorted(name for name, body in jobs.items()
+                                          if name != check and f'needs.evidence-gate-{check}.outputs.skip' in body))
+            if not members[check]:
+                raise ValueError(f'no job of {WORKFLOW} reads the skip output of the aggregate {check}')
+    return members
+
+
+def lines_of(github, job):
+    """A gate job's decision lines. A job cancelled before it wrote a log (a push replaced its run) has none: GitHub answers 404 for
+    its log, which is not a failure to read but the absence of a decision. Every other job's log must be read."""
+    try:
+        return github.decision_lines(job['id'])
+    except Unreadable:
+        if job.get('conclusion') == 'cancelled':
+            return []
+        raise
+
+
+def collect(github, checks, since, until, members):
     """One row per gate job that printed a line for a known check: the run, its creation time, the line's fields and
     the conclusion of the check's own job in the same attempt."""
-    runs = github.items(f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=100'
-                        f'&created={iso(since)}..{iso(until)}', 'workflow_runs')
+    runs = pr_runs(github, since, until)
     finished = [run for run in runs if run.get('status') == 'completed']  # a run still going is counted next time
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         job_lists = list(pool.map(
             lambda run: github.items(f'repos/{github.repo}/actions/runs/{run["id"]}/jobs?per_page=100&filter=all', 'jobs'), finished))
+    newer = {}  # (head repository, head branch) -> [(created, head sha)], for superseded()
+    for run in runs:
+        newer.setdefault(head_of(run), []).append((parse_time(run.get('created_at')), run.get('head_sha')))
     wanted = []
     for run, jobs in zip(finished, job_lists):
         real = {(job.get('name'), job.get('run_attempt')): job.get('conclusion') for job in jobs}
@@ -136,17 +192,76 @@ def collect(github, checks, since, until):
                 continue
             attempt = job.get('run_attempt')
             wanted.append((run, job, check, real.get((check, attempt)),
-                           [name for name in SKIPPED_MEMBERS.get(check, ()) if real.get((name, attempt)) in ('failure', 'cancelled')]))
+                           [other.get('name') for other in jobs if other.get('run_attempt') == attempt
+                            and member_of(other.get('name'), members.get(check, ())) and other.get('conclusion') in ('failure', 'cancelled')],
+                           superseded(run, [other for other in jobs if other.get('run_attempt') == attempt], members.get(check, ()),
+                                      newer)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        logs = list(pool.map(lambda item: github.decision_lines(item[1]['id']), wanted))
+        logs = list(pool.map(lambda item: lines_of(github, item[1]), wanted))
     rows = []
-    for (run, job, check, conclusion, members_red), lines in zip(wanted, logs):
+    for (run, job, check, conclusion, members_red, was_superseded), lines in zip(wanted, logs):
         for text in lines:
             fields = fields_of(text)
             if fields.get('check') == check:
                 rows.append({'check': check, 'run': run['id'], 'created_at': parse_time(run.get('created_at')),
-                             'fields': fields, 'real': conclusion, 'members_red': members_red})
+                             'actor': ((run.get('actor') or {}).get('login') or '-'),
+                             'base': (((run.get('pull_requests') or [{}])[0] or {}).get('base') or {}).get('sha'),
+                             'fields': fields, 'real': conclusion, 'aggregate': check in members, 'members_red': members_red,
+                             'superseded': was_superseded})
     return rows
+
+
+def head_of(run):
+    return ((run.get('head_repository') or {}).get('full_name'), run.get('head_branch'))
+
+
+def member_of(name, members):
+    """Whether a job the API names is one of the workflow's member jobs; a matrix job's are named `KEY (0)`, `KEY (1)`, ..."""
+    return any(name == key or (name or '').startswith(f'{key} (') for key in members)
+
+
+def superseded(run, jobs, needed, newer):
+    """Whether an aggregate's red in this attempt came only from a push that replaced the run: the run concluded cancelled;
+    of the jobs a skip of the check would skip (`needed`), none failed and at least one was cancelled; and a run of a
+    different head on the same branch was created before the first of those was cancelled. A timeout, a cancel with no
+    newer run, or a failed member stays a hidden red; a red of a member that always runs stays visible."""
+    conclusions = {job.get('name'): job for job in jobs if member_of(job.get('name'), needed)}
+    cancelled = [parse_time(job.get('completed_at')) for job in conclusions.values() if job.get('conclusion') == 'cancelled']
+    if run.get('conclusion') != 'cancelled' or not cancelled or None in cancelled \
+            or any(job.get('conclusion') == 'failure' for job in conclusions.values()):
+        return False
+    created = parse_time(run.get('created_at'))
+    return any(created < when < min(cancelled) and sha != run.get('head_sha') for when, sha in newer.get(head_of(run), ()) if when)
+
+
+def old_base(root, row, runner, seen):
+    """The reason when an unavailable line came from a base that git shows predates the gate or the check's policy entry:
+    that gate never verified, so the line says nothing about the log. An unknown or unreadable base, or any other reason,
+    is None: a gate fault still restarts the window."""
+    fields = row['fields']
+    reason, base = fields.get('reason'), fields.get('base') or row.get('base') or ''
+    if fields.get('outcome') != 'unavailable' or fields.get('log', '-') != '-' or reason not in OLD_BASE_REASONS \
+            or not re.fullmatch(r'[0-9a-f]{40}', base):
+        return None
+    key = (base, reason, row['check'])
+    if key not in seen:
+        seen[key] = predates(root, base, reason, row['check'], runner)
+    return reason if seen[key] else None
+
+
+def predates(root, base, reason, check, runner):
+    def ok(*args):
+        return runner(['git', '-C', str(root), *args]).returncode == 0
+    if not ok('cat-file', '-e', f'{base}^{{commit}}') and not (ok('fetch', '-q', 'origin', base) and ok('cat-file', '-e', f'{base}^{{commit}}')):
+        return False
+    if reason == 'no-gate-at-base':
+        return not ok('cat-file', '-e', f'{base}:{GATE}')
+    if not ok('cat-file', '-e', f'{base}:{POLICY}'):
+        return True  # the base predates the policy file
+    try:
+        return check not in json.loads(runner(['git', '-C', str(root), 'show', f'{base}:{POLICY}']).stdout)['checks']
+    except (ValueError, KeyError, TypeError):
+        return False
 
 
 def evaluate(rows, enforce, now):
@@ -163,9 +278,17 @@ def evaluate(rows, enforce, now):
                 unexplained += 1
     red = [row for row in window if row['fields'].get('outcome') == 'satisfied' and row['real'] == 'failure']
     # A single job's failure is hidden by its skip; an aggregate's only when a member the skip would skip went red.
-    hidden = sorted({row['run'] for row in red if row['check'] not in SKIPPED_MEMBERS or row['members_red']})
-    visible = sorted({row['run'] for row in red} - set(hidden))
-    # The log window began with the first line that has a log value after the last line without one.
+    # A red from a run that a newer push replaced (superseded) is neither: it is reported on its own.
+    replaced = sorted({row['run'] for row in red if row.get('superseded')})
+    hidden = sorted({row['run'] for row in red if not row['aggregate'] or row['members_red']} - set(replaced))
+    visible = sorted({row['run'] for row in red} - set(hidden) - set(replaced))
+    # The log window began with the first line that has a log value after the last line without one. An old base's line
+    # (old_base) neither starts nor restarts it; the report counts those it set aside.
+    ignored = {}
+    for row in window:
+        if row.get('old_base'):
+            ignored[row['old_base']] = ignored.get(row['old_base'], 0) + 1
+    rows = [row for row in rows if not row.get('old_base')]
     unset = [i for i, row in enumerate(rows) if row['fields'].get('log', '-') == '-']
     began = rows[unset[-1] + 1:] if unset else rows
     window_start = began[0]['created_at'] if began else None
@@ -173,9 +296,11 @@ def evaluate(rows, enforce, now):
         'enforce': enforce, 'lines': len(window),
         'satisfied_log_ok': sum(1 for row, value in zip(window, log) if value == 'ok' and row['fields'].get('outcome') == 'satisfied'),
         'log_missing': log.count('missing'), 'unlogged_pass_unexplained': unexplained, 'hidden_red': hidden,
-        'visible_red': visible, 'log_window_start': iso(window_start),
+        'visible_red': visible, 'log_window_start': iso(window_start), 'old_base_lines': ignored,
+        'superseded_red': replaced,
     }
-    why = [f'{log.count(value)} lines with log={value}' for value in NOT_FRESH if value in log]
+    verified = [value for row, value in zip(window, log) if not row.get('old_base')]
+    why = [f'{verified.count(value)} lines with log={value}' for value in NOT_FRESH if value in verified]
     if window_start is None:
         why.append('no line with a log value')
     elif window_start > start:
@@ -190,6 +315,59 @@ def evaluate(rows, enforce, now):
         why.append(f'{len(hidden)} runs with a hidden red')
     result.update(ready=not why, why_not=why)
     return result
+
+
+def presign_rates(rows, now):
+    """Per account that started the runs: how many distinct pull request heads in the window had a pre-signed (host or agent)
+    note for some check, how many only an earlier CI run's note, and how many no note at all."""
+    start = now - datetime.timedelta(seconds=WINDOW_S)
+    heads = {}
+    for row in rows:
+        if not row['created_at'] or not start <= row['created_at'] <= now:
+            continue
+        fields = row['fields']
+        key = (row['actor'], fields.get('pr', '-'), fields.get('pr_head') if fields.get('pr_head', '-') != '-' else fields.get('head', '-'))
+        level = fields.get('trust_level') if fields.get('outcome') in ('satisfied', 'degraded') else None
+        rank = 2 if level in ('host', 'agent') else 1 if level == 'fleet' else 0
+        heads[key] = max(heads.get(key, 0), rank)
+    rates = {}
+    for (actor, _, _), rank in heads.items():
+        counts = rates.setdefault(actor, {'heads': 0, 'presigned': 0, 'ci_note': 0, 'no_note': 0})
+        counts['heads'] += 1
+        counts[('no_note', 'ci_note', 'presigned')[rank]] += 1
+    for counts in rates.values():
+        counts['presigned_share'] = round(counts['presigned'] / counts['heads'], 3)
+    return dict(sorted(rates.items()))
+
+
+def clippy_base_pinned(entry):
+    """linux-gate's clippy stage ratchets against a base: a host or agent note must say which one it measured against."""
+    levels = ((entry.get('kinds') or {}).get('wrapper') or {}).get('by_level') or {}
+    missing = [level for level in ('host', 'agent')
+               if 'clippy_base_sha' not in ((levels.get(level) or {}).get('required_inputs') or ())]
+    return [f'the policy does not require clippy_base_sha of {" and ".join(missing)} linux-gate notes'] if missing else []
+
+
+def web_values_checked(entry):
+    """fractal-web's pull request runs pick their tests from their own diff: a note covers a run only when it ran the kit plays or the
+    run would skip them too (input_order on kit_inputs, true before false), and its shard results must be checked as values."""
+    wrapper = (entry.get('kinds') or {}).get('wrapper') or {}
+    why = []
+    if (wrapper.get('input_order') or {}).get('kit_inputs') != ['true', 'false']:
+        why.append('the policy does not order kit_inputs (true before false) for fractal-web notes')
+    if not wrapper.get('shard_inputs'):
+        why.append('the policy does not check the shard inputs of fractal-web notes')
+    return why
+
+
+# Conditions a check's policy entry must meet before its flip is proposed, whatever the decision lines say.
+PRECONDITIONS = {'linux-gate': clippy_base_pinned, 'fractal-web': web_values_checked}
+
+
+def preconditions(result, check, entry):
+    """Fold a check's preconditions, read from the policy at origin/main, into its trigger result."""
+    why = [*result['why_not'], *PRECONDITIONS.get(check, lambda entry: [])(entry)]
+    return {**result, 'ready': not why, 'why_not': why}
 
 
 def git(root, *args, runner=default_runner):
@@ -249,8 +427,10 @@ def flip_doc(text, check, entry, today):
     for i in table[2:]:
         cells = [cell.strip() for cell in lines[i].strip('|').split('|')]
         names = [part.strip() for part in cells[0].split(',')]
-        if name in names and len(cells) == 5 and cells[1] == 'false':
-            row, rest = i, [part for part in names if part != name]
+        # A name may carry a note after it: "`fractal-web` (whole-check note; ...)". The note moves with the name.
+        mine = [part for part in names if part == name or part.startswith(name + ' (')]
+        if mine and len(cells) == 5 and cells[1] == 'false':
+            row, rest, name = i, [part for part in names if part not in mine], mine[0]
     if row is None:
         raise ValueError(f'{DOC}: {check} is not in a row of the table with enforce false')
     cells = [cell.strip() for cell in lines[row].strip('|').split('|')]
@@ -351,7 +531,7 @@ def propose(report, root, github, runner, dry_run, today):
 
 def main(argv, runner=default_runner, now=None, root=ROOT):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('--repo', default='compoundingtech/smalltalk')
+    parser.add_argument('--repo', default='compoundingtech/fractal')
     parser.add_argument('--cache', default=os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), 'evidence-flip-ready'))
     parser.add_argument('--propose', action='store_true', help='open a flip pull request for each ready check')
     parser.add_argument('--dry-run', action='store_true', help='with --propose: print the diff, change nothing')
@@ -364,13 +544,17 @@ def main(argv, runner=default_runner, now=None, root=ROOT):
         git(root, 'fetch', '-q', 'origin', 'main', runner=runner)
         policy = json.loads(git(root, 'show', f'origin/main:{POLICY}', runner=runner))['checks']
         since = now - datetime.timedelta(seconds=WINDOW_S + LOOKBACK_S)
-        rows = collect(github, set(policy), since, now)
+        members = skipped_members(git(root, 'show', f'origin/main:{WORKFLOW}', runner=runner), policy)
+        rows = collect(github, set(policy), since, now, members)
+        seen = {}
+        for row in rows:
+            row['old_base'] = old_base(root, row, runner, seen)
     except (Unreadable, RuntimeError, ValueError) as error:
         print(f'could not read GitHub or origin/main: {error}', file=sys.stderr)
         return 2
     report = {'as_of': iso(now), 'window_s': WINDOW_S, 'checks': {
-        check: evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now)
-        for check, entry in policy.items()}}
+        check: preconditions(evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now), check, entry)
+        for check, entry in policy.items()}, 'presign': presign_rates(rows, now)}
     print(json.dumps(report, indent=2))
     if args.propose:
         return propose(report, root, github, runner, args.dry_run, now.date().isoformat())

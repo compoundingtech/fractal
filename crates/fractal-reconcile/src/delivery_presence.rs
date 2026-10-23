@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 /// A seat gets this long after the daemon starts before a missing poll counts as stale. Drivers
 /// retry every second while the daemon restarts, and a replaced driver re-executes within two.
@@ -31,6 +32,7 @@ const STARTUP_GRACE_CAP_ENV: &str = "ST3_TEST_DELIVERY_STARTUP_GRACE_MS";
 const POLL_STALE_AFTER: Duration = Duration::from_secs(45);
 /// The Claude channel refreshes its presence every second.
 const CHANNEL_STALE_AFTER_MS: u64 = 10_000;
+const CHANNEL_STALE_AFTER: Duration = Duration::from_millis(CHANNEL_STALE_AFTER_MS);
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct Report {
@@ -58,16 +60,52 @@ struct ChannelReport {
 }
 
 struct Beat {
-    at: Instant,
+    /// Tokio's clock, so a paused test clock and a stream's deadline share one timeline.
+    at: tokio::time::Instant,
     report: Report,
     fence: Option<crate::mailbox::Fence>,
 }
+
+const LEGACY_REASON: &str = "legacy ownership: unprotected until next natural restart";
+const SHAPE_LIMIT: usize = 8;
+#[derive(Clone)]
+struct Ownership {
+    incarnation: String,
+    legacy: bool,
+    peers: [u32; SHAPE_LIMIT],
+    used: usize,
+    shape: Option<(Instant, String)>,
+}
+impl Ownership {
+    fn new(incarnation: &str, legacy: bool) -> Self {
+        Self {
+            incarnation: incarnation.into(),
+            legacy,
+            peers: [0; SHAPE_LIMIT],
+            used: 0,
+            shape: None,
+        }
+    }
+}
+pub fn unprotected_reason(reason: &str) -> bool {
+    reason.starts_with(LEGACY_REASON)
+}
+
+#[derive(Clone)]
+struct Uncertain { fence: crate::mailbox::Fence, owner: u64, since: Instant, failures: u8 }
 
 struct Presence {
     started: Instant,
     image: Option<String>,
     beats: Mutex<HashMap<String, Beat>>,
     monitors: Mutex<HashMap<String, Beat>>,
+    ownership: Mutex<HashMap<String, Ownership>>,
+    observations: Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    uncertain: Mutex<HashMap<String, Uncertain>>,
+    /// Attachment-push title streams waiting on a subject, one sender per watched subject.
+    watchers: Mutex<HashMap<String, watch::Sender<u64>>>,
+    /// The title binding of each live stream that has been sent an attachment frame.
+    pushed: Mutex<HashMap<String, crate::mailbox::Fence>>,
 }
 
 fn presence() -> &'static Presence {
@@ -77,7 +115,87 @@ fn presence() -> &'static Presence {
         image: fractal_drivers::reexec::running_identity().map(|identity| identity.token()),
         beats: Mutex::new(HashMap::new()),
         monitors: Mutex::new(HashMap::new()),
+        ownership: Mutex::new(HashMap::new()),
+        observations: Mutex::default(),
+        uncertain: Mutex::default(),
+        watchers: Mutex::new(HashMap::new()),
+        pushed: Mutex::new(HashMap::new()),
     })
+}
+
+pub fn configure_observation(root: &std::path::Path, enabled: bool) {
+    if let Ok(mut roots) = presence().observations.lock() {
+        if enabled {
+            roots.insert(root.into());
+        } else {
+            roots.remove(root);
+        }
+    }
+}
+pub fn observation_enabled(root: &std::path::Path) -> bool {
+    presence()
+        .observations
+        .lock()
+        .ok()
+        .is_some_and(|roots| roots.contains(root))
+}
+pub fn proof_pending(fence: &crate::mailbox::Fence, owner: u64, failures: u8) {
+    if fence.component != "delivery" {
+        return;
+    }
+    if let Ok(mut rows) = presence().uncertain.lock() {
+        if rows
+            .get(&fence.subject)
+            .is_some_and(|r| r.fence.incarnation == fence.incarnation && r.owner > owner)
+        {
+            return;
+        }
+        let row = rows
+            .entry(fence.subject.clone())
+            .or_insert_with(|| Uncertain {
+                fence: fence.clone(),
+                owner,
+                since: Instant::now(),
+                failures: 0,
+            });
+        if row.owner != owner {
+            *row = Uncertain {
+                fence: fence.clone(),
+                owner,
+                since: Instant::now(),
+                failures: 0,
+            };
+        }
+        row.failures = failures.min(3);
+    }
+}
+pub fn clear_proof_pending(fence: &crate::mailbox::Fence, owner: u64, valid: bool) {
+    let cleared = presence().uncertain.lock().is_ok_and(|mut rows| {
+        let matches = rows.get(&fence.subject).is_some_and(|r| {
+            r.fence.incarnation == fence.incarnation
+                && r.fence.epoch == fence.epoch
+                && r.fence.token == fence.token
+                && (r.owner == owner || (valid && r.owner < owner))
+        });
+        if matches {
+            rows.remove(&fence.subject);
+        }
+        matches
+    });
+    if cleared {
+        // A push stream that held its first attachment frame back while the proof was pending
+        // looks again once it clears.
+        notify(&fence.subject);
+    }
+}
+pub fn pending_proof(subject: &str, incarnation: &str) -> Option<crate::mailbox::Fence> {
+    presence()
+        .uncertain
+        .lock()
+        .ok()?
+        .get(subject)
+        .filter(|r| r.fence.incarnation == incarnation)
+        .map(|r| r.fence.clone())
 }
 
 fn startup_grace_with_cap(cap_ms: Option<&str>) -> Duration {
@@ -105,17 +223,14 @@ pub fn record(recipient: &str, report: &str) {
     let Ok(report) = serde_json::from_str::<Report>(report) else {
         return;
     };
-    let presence = presence();
-    if let Ok(mut beats) = presence.beats.lock() {
-        beats.insert(
-            recipient.to_owned(),
-            Beat {
-                at: Instant::now(),
-                report,
-                fence: None,
-            },
-        );
-    }
+    replace_beat(
+        recipient,
+        Beat {
+            at: tokio::time::Instant::now(),
+            report,
+            fence: None,
+        },
+    );
 }
 
 /// Title updates cannot establish delivery readiness. They can report the outer driver's
@@ -124,43 +239,359 @@ pub fn record_fenced(fence: &crate::mailbox::Fence, raw: &str) -> bool {
     let Ok(report) = serde_json::from_str::<Report>(raw) else {
         return false;
     };
-    let target = if fence.component == "delivery" {
-        if report.transport.as_deref() != Some("claude-channel")
+    let beat = Beat {
+        at: tokio::time::Instant::now(),
+        report,
+        fence: Some(fence.clone()),
+    };
+    if fence.component == "delivery" {
+        if beat.report.transport.as_deref() != Some("claude-channel")
             && let Ok(mut monitors) = presence().monitors.lock()
         {
             monitors.remove(&fence.subject);
         }
-        &presence().beats
-    } else if report.transport.as_deref() == Some("claude-channel") {
-        &presence().monitors
-    } else {
+        return replace_beat(&fence.subject, beat);
+    }
+    if beat.report.transport.as_deref() != Some("claude-channel") {
         return false;
-    };
-    if let Ok(mut beats) = target.lock() {
-        beats.insert(
-            fence.subject.clone(),
-            Beat {
-                at: Instant::now(),
-                report,
-                fence: Some(fence.clone()),
-            },
-        );
+    }
+    if let Ok(mut monitors) = presence().monitors.lock() {
+        monitors.insert(fence.subject.clone(), beat);
         return true;
     }
     false
 }
 
 pub fn attachment(recipient: &str, incarnation: &str) -> Option<crate::mailbox::Fence> {
-    let beats = presence().beats.lock().ok()?;
-    let beat = beats.get(recipient)?;
+    if pending_proof(recipient, incarnation).is_some() { return None; }
+    attachment_window(recipient, incarnation)
+        .filter(|(_, until)| tokio::time::Instant::now() <= *until)
+        .map(|(fence, _)| fence)
+}
+
+/// The one attachment predicate, shared by the poll and by the push stream's deadline: the
+/// delivery binding a beat proves and the instant that proof lapses. The report's `age_ms` is
+/// fixed when the channel sends it, so it gates the proof without moving the deadline.
+fn window<'a>(
+    beat: &'a Beat,
+    incarnation: &str,
+) -> Option<(&'a crate::mailbox::Fence, tokio::time::Instant)> {
     let fence = beat.fence.as_ref()?;
     (fence.incarnation == incarnation
-        && beat.at.elapsed() <= Duration::from_millis(CHANNEL_STALE_AFTER_MS)
         && beat.report.transport.as_deref() == Some("claude-channel")
         && beat.report.ready == Some(true)
-        && beat.report.channel.as_ref().is_some_and(|channel|
-            channel.age_ms.is_some_and(|age| age <= CHANNEL_STALE_AFTER_MS)))
-    .then(|| fence.clone())
+        && beat.report.channel.as_ref().is_some_and(|channel| {
+            channel
+                .age_ms
+                .is_some_and(|age| age <= CHANNEL_STALE_AFTER_MS)
+        }))
+    .then(|| (fence, beat.at + stale_after(&fence.subject)))
+}
+
+/// How long a beat proves attachment. Always the constant in production; a test may shorten it
+/// for its own recipient, and the poll and the deadline still read the same window.
+fn stale_after(recipient: &str) -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(window) = WINDOW_OVERRIDES
+        .lock()
+        .ok()
+        .and_then(|overrides| overrides.get(recipient).copied())
+    {
+        return window;
+    }
+    let _ = recipient;
+    CHANNEL_STALE_AFTER
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static WINDOW_OVERRIDES: std::sync::LazyLock<Mutex<HashMap<String, Duration>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Shorten the proof window for one test recipient, so a stream test need not wait ten seconds.
+#[cfg(any(test, feature = "test-support"))]
+pub fn shorten_window(recipient: &str, window: Duration) {
+    WINDOW_OVERRIDES
+        .lock()
+        .unwrap()
+        .insert(recipient.to_owned(), window);
+}
+
+/// The proving delivery binding for `incarnation` and when it lapses, whether or not it has.
+pub fn attachment_window(
+    recipient: &str,
+    incarnation: &str,
+) -> Option<(crate::mailbox::Fence, tokio::time::Instant)> {
+    let beats = presence().beats.lock().ok()?;
+    let (fence, until) = window(beats.get(recipient)?, incarnation)?;
+    Some((fence.clone(), until))
+}
+
+/// What a beat proves at `now`, under any incarnation. Watchers look again only when it changes;
+/// a beat that merely refreshes the same proof leaves it equal.
+fn proof(beat: Option<&Beat>, now: tokio::time::Instant) -> Option<(String, u64, String)> {
+    let beat = beat?;
+    let incarnation = beat.fence.as_ref()?.incarnation.as_str();
+    window(beat, incarnation)
+        .filter(|(_, until)| now <= *until)
+        .map(|(fence, _)| (fence.incarnation.clone(), fence.epoch, fence.token.clone()))
+}
+
+/// Replace a recipient's delivery beat, and wake its attachment watchers if what it proves
+/// changed: an attach, a ready flip, a new binding, or a fresh proof after a lapsed one.
+fn replace_beat(recipient: &str, beat: Beat) -> bool {
+    let Ok(mut beats) = presence().beats.lock() else {
+        return false;
+    };
+    let now = tokio::time::Instant::now();
+    let changed = proof(beats.get(recipient), now) != proof(Some(&beat), now);
+    beats.insert(recipient.to_owned(), beat);
+    drop(beats);
+    if changed {
+        notify(recipient);
+    }
+    true
+}
+
+fn notify(recipient: &str) {
+    if let Ok(watchers) = presence().watchers.lock()
+        && let Some(sender) = watchers.get(recipient)
+    {
+        sender.send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+}
+
+fn same_binding(a: &crate::mailbox::Fence, b: &crate::mailbox::Fence) -> bool {
+    a.subject == b.subject
+        && a.incarnation == b.incarnation
+        && a.component == b.component
+        && a.epoch == b.epoch
+        && a.token == b.token
+}
+
+/// One push title stream's subscription to its subject's attachment changes. The map keeps a
+/// subject only while a live stream watches it; dropping the last watch removes the entry.
+pub struct AttachmentWatch {
+    subject: String,
+    receiver: Option<watch::Receiver<u64>>,
+}
+
+impl AttachmentWatch {
+    /// Wait for the next change. Never resolves if the watch could not be registered.
+    pub async fn changed(&mut self) {
+        let Some(receiver) = self.receiver.as_mut() else {
+            return std::future::pending().await;
+        };
+        if receiver.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+impl Drop for AttachmentWatch {
+    fn drop(&mut self) {
+        let Ok(mut watchers) = presence().watchers.lock() else {
+            return;
+        };
+        drop(self.receiver.take());
+        if watchers
+            .get(&self.subject)
+            .is_some_and(|sender| sender.receiver_count() == 0)
+        {
+            watchers.remove(&self.subject);
+        }
+    }
+}
+
+pub fn watch_attachment(subject: &str) -> AttachmentWatch {
+    let receiver = presence().watchers.lock().ok().map(|mut watchers| {
+        watchers
+            .entry(subject.to_owned())
+            .or_insert_with(|| watch::channel(0).0)
+            .subscribe()
+    });
+    AttachmentWatch {
+        subject: subject.to_owned(),
+        receiver,
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn watched(subject: &str) -> bool {
+    presence()
+        .watchers
+        .lock()
+        .is_ok_and(|watchers| watchers.contains_key(subject))
+}
+
+/// Age a recipient's delivery beat, or its title monitor, as if it arrived `by` earlier.
+#[cfg(any(test, feature = "test-support"))]
+pub fn backdate(recipient: &str, monitor: bool, by: Duration) {
+    let presence = presence();
+    let mut beats = if monitor {
+        presence.monitors.lock()
+    } else {
+        presence.beats.lock()
+    }
+    .unwrap();
+    let beat = beats.get_mut(recipient).expect("a recorded beat");
+    beat.at -= by;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl AttachmentWatch {
+    pub fn has_changed(&self) -> bool {
+        self.receiver
+            .as_ref()
+            .is_some_and(|receiver| receiver.has_changed().unwrap_or(false))
+    }
+}
+
+/// Record that this daemon sent a live title stream an attachment frame.
+pub fn note_pushed(fence: &crate::mailbox::Fence) {
+    if let Ok(mut pushed) = presence().pushed.lock() {
+        pushed.insert(fence.subject.clone(), fence.clone());
+    }
+}
+
+/// The title stream ended; forget it unless a newer binding has already been pushed to.
+pub fn forget_pushed(fence: &crate::mailbox::Fence) {
+    if let Ok(mut pushed) = presence().pushed.lock()
+        && pushed
+            .get(&fence.subject)
+            .is_some_and(|held| same_binding(held, fence))
+    {
+        pushed.remove(&fence.subject);
+    }
+}
+
+/// Whether this exact title binding has a live stream that negotiated push and was sent a
+/// frame. This proves only a push-capable binding, not that a request from it was an admission.
+pub fn push_capable(fence: &crate::mailbox::Fence) -> bool {
+    presence().pushed.lock().is_ok_and(|pushed| {
+        pushed
+            .get(&fence.subject)
+            .is_some_and(|held| same_binding(held, fence))
+    })
+}
+
+/// A Claude seat's attachment-push inventory: `negotiated` when its current title stream has
+/// been pushed to, `not-negotiated` when a fresh title report exists without push, otherwise
+/// `unknown`.
+pub fn attachment_push(recipient: &str, incarnation: Option<&str>) -> &'static str {
+    let current = |fence: &crate::mailbox::Fence| {
+        incarnation.is_none_or(|incarnation| fence.incarnation == incarnation)
+    };
+    if presence()
+        .pushed
+        .lock()
+        .is_ok_and(|pushed| pushed.get(recipient).is_some_and(current))
+    {
+        return "negotiated";
+    }
+    let reported = presence().monitors.lock().is_ok_and(|monitors| {
+        monitors.get(recipient).is_some_and(|beat| {
+            beat.at.elapsed() <= POLL_STALE_AFTER && beat.fence.as_ref().is_some_and(current)
+        })
+    });
+    if reported {
+        "not-negotiated"
+    } else {
+        "unknown"
+    }
+}
+
+/// Admission metadata is set by the daemon, not a helper's readiness claim. It grants no
+/// health or mailbox custody, and a legacy delivery generation is visible even on old helpers.
+pub fn record_ownership(fence: &crate::mailbox::Fence, legacy: bool) {
+    if fence.component == "delivery"
+        && let Ok(mut ownership) = presence().ownership.lock()
+    {
+        let row = ownership
+            .entry(fence.subject.clone())
+            .or_insert_with(|| Ownership::new(&fence.incarnation, legacy));
+        if row.incarnation != fence.incarnation {
+            *row = Ownership::new(&fence.incarnation, legacy);
+        }
+        row.legacy = legacy;
+        if !legacy {
+            row.shape = None;
+        }
+    }
+}
+
+/// Reserve BEFORE physical capture, outside this mutex. Fixed eight-PID capacity bounds both
+/// per-generation storage and count of extra captures, not their inventory cost; duplicate
+/// report ticks and floods beyond that count do no capture.
+/// This is diagnostic sampling, never a current custody certificate or recovery input.
+pub fn begin_legacy_shape(fence: &crate::mailbox::Fence, pid: u32) -> bool {
+    let Ok(mut rows) = presence().ownership.lock() else {
+        return false;
+    };
+    let row = rows
+        .entry(fence.subject.clone())
+        .or_insert_with(|| Ownership::new(&fence.incarnation, true));
+    if row.incarnation != fence.incarnation {
+        *row = Ownership::new(&fence.incarnation, true);
+    }
+    if !row.legacy || row.peers[..row.used].contains(&pid) || row.used == SHAPE_LIMIT {
+        return false;
+    }
+    row.peers[row.used] = pid;
+    row.used += 1;
+    true
+}
+pub fn finish_legacy_shape(
+    fence: &crate::mailbox::Fence,
+    pid: u32,
+    result: anyhow::Result<Vec<fractal_drivers::claude_process::Process>>,
+) {
+    let description = match result {
+        Ok(chain) if !chain.is_empty() && chain.len() <= 3 => format!(
+            "would-have-admitted direct-chain shape only (provider generation unverified); snapshot {:?}",
+            chain
+        ),
+        Ok(_) => "would-have-decision unavailable: unexpected chain length".into(),
+        Err(error)
+            if fractal_drivers::claude_process::failure_kind(&error)
+                == Some(fractal_drivers::claude_process::FailureKind::Refused)
+                || error
+                    .downcast_ref::<crate::St3Error>()
+                    .is_some_and(|error| error.code == "stale-mailbox-session") =>
+        {
+            "would-have-refused direct-chain shape; installed topology remains unverified".into()
+        }
+        Err(_) => "would-have-decision unavailable; installed topology remains unknown".into(),
+    };
+    // Fixed-cap proof vector has <=3 entries for wrapper/channel. Do not let future callers
+    // grow rendered metadata or accidentally record arbitrary error text/payloads.
+    let mut bounded = String::new();
+    for ch in description.chars() {
+        if bounded.len() + ch.len_utf8() > 384 {
+            break;
+        }
+        bounded.push(ch);
+    }
+    if let Ok(mut rows) = presence().ownership.lock()
+        && let Some(row) = rows.get_mut(&fence.subject)
+        && row.legacy
+        && row.incarnation == fence.incarnation
+        && row.peers[..row.used].contains(&pid)
+    {
+        row.shape = Some((Instant::now(), bounded));
+    }
+}
+
+fn ownership_warning(mut assessment: Assessment, legacy: bool) -> Assessment {
+    if legacy && matches!(assessment.state, "current" | "outdated" | "legacy") {
+        // Ownership protection and delivery readiness are independent observations.
+        // Keep truthful binary/readiness state; retain the ownership warning as a reason.
+        assessment.reason = Some(match assessment.reason.take() {
+            Some(reason) if !unprotected_reason(&reason) => format!("{LEGACY_REASON}; {reason}"),
+            Some(reason) => reason,
+            None => LEGACY_REASON.into(),
+        });
+    }
+    assessment
 }
 
 /// A metadata-free poll from a Unix peer proven to be this seat's native delivery process.
@@ -170,21 +601,19 @@ pub fn record_legacy(recipient: &str, transport: &str, pid: u32) {
     if let Ok(mut monitors) = presence().monitors.lock() {
         monitors.remove(recipient);
     }
-    if let Ok(mut beats) = presence().beats.lock() {
-        beats.insert(
-            recipient.into(),
-            Beat {
-                at: Instant::now(),
-                fence: None,
-                report: Report {
-                    transport: Some(transport.into()),
-                    pid: Some(pid),
-                    legacy: true,
-                    ..Report::default()
-                },
+    replace_beat(
+        recipient,
+        Beat {
+            at: tokio::time::Instant::now(),
+            fence: None,
+            report: Report {
+                transport: Some(transport.into()),
+                pid: Some(pid),
+                legacy: true,
+                ..Report::default()
             },
-        );
-    }
+        },
+    );
 }
 
 /// How one seat's delivery path looks from this daemon.
@@ -251,7 +680,7 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
     {
         beat = Some(captured(monitor));
     }
-    assess_beat(
+    let assessment = assess_beat(
         presence.started.elapsed(),
         presence.image.as_deref(),
         beat.map(|(at, mut report)| {
@@ -263,7 +692,33 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
             (at.elapsed(), report)
         }),
         driver,
-    )
+    );
+    let owner = presence.ownership.lock().ok().and_then(|rows| {
+        rows.get(recipient)
+            .filter(|row| row.legacy && incarnation == Some(row.incarnation.as_str()))
+            .cloned()
+    });
+    let mut assessment = ownership_warning(assessment, driver == "claude" && owner.is_some());
+    if let Some(owner) = owner
+        && let Some((at, shape)) = owner.shape
+    {
+        let cap = if owner.used == SHAPE_LIMIT {
+            "; capture cap reached, later peers unobserved"
+        } else {
+            ""
+        };
+        assessment.reason = Some(format!(
+            "{LEGACY_REASON}; {shape}; sampled {}s ago (not health or enforcement){cap}",
+            at.elapsed().as_secs()
+        ));
+    }
+    if let Some(proof) = presence.uncertain.lock().ok().and_then(|rows|
+        rows.get(recipient).filter(|r| incarnation == Some(r.fence.incarnation.as_str())).cloned()) {
+        assessment.state = "unknown";
+        assessment.reason = Some(format!("ownership proof unavailable{}; established stream retained, new effects held and automatic recovery deferred; {}s",
+            if proof.failures >= 3 { ": suspect after three checks" } else { "" }, proof.since.elapsed().as_secs()));
+    }
+    assessment
 }
 
 /// A message view may include a local poll when one exists; absent remote evidence stays absent.
@@ -350,6 +805,8 @@ fn assess_beat(
             "the channel is polling but has not received the provider's initial idle proof".into()
         }));
     }
+    let unprotected = driver == "claude"
+        && report.reason.as_deref().is_some_and(unprotected_reason);
     let current_image = |image: Option<&str>| match (image, daemon_image) {
         (Some(image), Some(daemon)) => image == daemon,
         // A daemon that cannot read its own image cannot judge anyone else's.
@@ -399,21 +856,30 @@ fn assess_beat(
             outdated = Some(replaced("Claude channel", channel.pid));
         }
     }
-    Assessment {
-        state: if outdated.is_some() {
-            "outdated"
-        } else {
-            "current"
+    ownership_warning(
+        Assessment {
+            state: if outdated.is_some() {
+                "outdated"
+            } else {
+                "current"
+            },
+            reason: outdated,
+            polled_seconds_ago: Some(age.as_secs()),
+            transport: report.transport,
         },
-        reason: outdated,
-        polled_seconds_ago: Some(age.as_secs()),
-        transport: report.transport,
-    }
+        unprotected,
+    )
 }
 
 /// Recheck the initialized live delivery owner before replacing an unattached seat.
 pub fn claude_channel_attached(store: &crate::store::Store, subject: &str, incarnation: &str) -> bool {
     attachment(subject, incarnation)
+        .is_some_and(|fence| store.check_mailbox(&fence).is_ok())
+}
+
+/// Unknown proof of an already admitted CURRENT stream is not proof of channel loss.
+pub fn claude_channel_proof_pending(store: &crate::store::Store, subject: &str, incarnation: &str) -> bool {
+    pending_proof(subject, incarnation)
         .is_some_and(|fence| store.check_mailbox(&fence).is_ok())
 }
 
@@ -472,7 +938,7 @@ mod tests {
             .unwrap()
             .get_mut(recipient)
             .unwrap()
-            .at = Instant::now() - Duration::from_secs(11);
+            .at = tokio::time::Instant::now() - Duration::from_secs(11);
         assert!(attachment(recipient, "current").is_none());
     }
 
@@ -562,6 +1028,42 @@ mod tests {
         );
         assert_eq!(assessment.state, "current", "{assessment:?}");
         assert_eq!(assessment.transport.as_deref(), Some("claude-channel"));
+    }
+
+    #[test]
+    fn legacy_process_ownership_warns_without_losing_delivery_or_faking_recovery() {
+        let mut legacy = report(Some("new"), Some((Some("new"), 0)));
+        legacy.reason = Some("legacy ownership: unprotected until next natural restart".into());
+        let current = assess_beat(
+            Duration::from_secs(60),
+            DAEMON,
+            Some((Duration::from_secs(1), legacy.clone())),
+            "claude",
+        );
+        assert_eq!(current.state, "current");
+        assert!(!current.stale());
+        assert!(reason(&current).contains("unprotected until next natural restart"));
+        let mut old_image = legacy.clone();
+        old_image.channel.as_mut().unwrap().image = Some("old".into());
+        let outdated = assess_beat(
+            Duration::from_secs(60),
+            DAEMON,
+            Some((Duration::from_secs(1), old_image)),
+            "claude",
+        );
+        assert_eq!(outdated.state, "outdated");
+        assert!(reason(&outdated).contains("unprotected until next natural restart"));
+        assert!(reason(&outdated).contains("Claude channel"));
+        legacy.ready = Some(false);
+        assert!(
+            assess_beat(
+                Duration::from_secs(60),
+                DAEMON,
+                Some((Duration::from_secs(1), legacy)),
+                "claude"
+            )
+            .stale()
+        );
     }
 
     #[test]
@@ -713,6 +1215,185 @@ mod tests {
         }
     }
 
+    fn claude_report(ready: bool, age_ms: u64) -> String {
+        json!({"transport":"claude-channel", "ready":ready,
+            "channel":{"pid":8,"image":"new","age_ms":age_ms}})
+        .to_string()
+    }
+
+    // The poll and the push stream's deadline read one predicate: attached through
+    // `at + 10 s` inclusive, and the report's own age is a gate fixed when it was sent.
+    #[tokio::test(start_paused = true)]
+    async fn the_poll_and_the_deadline_share_one_predicate() {
+        let recipient = "agent/attachment-window";
+        let mut delivery = crate::mailbox::Fence::new(recipient, "current", "delivery");
+        delivery.epoch = 3;
+        for (age_ms, attached) in [(9_999, true), (10_000, true), (10_001, false)] {
+            record_fenced(&delivery, &claude_report(true, age_ms));
+            assert_eq!(
+                attachment(recipient, "current").is_some(),
+                attached,
+                "{age_ms}"
+            );
+            assert_eq!(
+                attachment_window(recipient, "current").is_some(),
+                attached,
+                "{age_ms}"
+            );
+        }
+        record_fenced(&delivery, &claude_report(true, 0));
+        let (fence, until) = attachment_window(recipient, "current").unwrap();
+        assert_eq!(fence.epoch, 3);
+        assert_eq!(until, tokio::time::Instant::now() + CHANNEL_STALE_AFTER);
+        tokio::time::advance(CHANNEL_STALE_AFTER - Duration::from_millis(1)).await;
+        assert!(attachment(recipient, "current").is_some());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(
+            attachment(recipient, "current").is_some(),
+            "the last instant still holds"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(attachment(recipient, "current").is_none());
+        assert_eq!(
+            attachment_window(recipient, "current").unwrap().1,
+            until,
+            "a lapse moves no deadline"
+        );
+    }
+
+    // Planned T11: a beat that only refreshes the same proof wakes no push stream, so a
+    // steadily attached seat costs its title stream nothing until the deadline.
+    #[test]
+    fn only_a_change_in_what_presence_proves_wakes_a_watcher() {
+        let recipient = "agent/attachment-watch-wakes";
+        let mut delivery = crate::mailbox::Fence::new(recipient, "current", "delivery");
+        delivery.epoch = 1;
+        let watch = watch_attachment(recipient);
+        assert!(!watch.has_changed());
+        record_fenced(&delivery, &claude_report(true, 0));
+        assert!(watch.has_changed(), "an attach wakes");
+        let mut watch = watch;
+        if let Some(receiver) = watch.receiver.as_mut() {
+            receiver.borrow_and_update();
+        }
+        for _ in 0..1_000 {
+            record_fenced(&delivery, &claude_report(true, 0));
+        }
+        assert!(
+            !watch.has_changed(),
+            "refreshing the same proof wakes nothing"
+        );
+        record_fenced(&delivery, &claude_report(false, 0));
+        assert!(watch.has_changed(), "a ready flip wakes");
+        if let Some(receiver) = watch.receiver.as_mut() {
+            receiver.borrow_and_update();
+        }
+        let mut rebound = delivery.clone();
+        rebound.epoch = 2;
+        record_fenced(&rebound, &claude_report(true, 0));
+        assert!(watch.has_changed(), "a new binding wakes");
+        if let Some(receiver) = watch.receiver.as_mut() {
+            receiver.borrow_and_update();
+        }
+        backdate(recipient, false, Duration::from_secs(11));
+        record_fenced(&rebound, &claude_report(true, 0));
+        assert!(
+            watch.has_changed(),
+            "a fresh proof after a lapsed one wakes"
+        );
+    }
+
+    // Planned T14: the watcher map holds a subject only while a live watch exists, and a
+    // change for a subject nobody watches creates no entry.
+    #[test]
+    fn watchers_exist_only_for_live_watches() {
+        let watches = (0..1_000)
+            .map(|seat| watch_attachment(&format!("agent/attachment-watch-bound-{seat}")))
+            .collect::<Vec<_>>();
+        assert!(watched("agent/attachment-watch-bound-999"));
+        drop(watches);
+        assert!((0..1_000).all(|seat| !watched(&format!("agent/attachment-watch-bound-{seat}"))));
+        for seat in 0..1_000 {
+            let recipient = format!("agent/attachment-unwatched-{seat}");
+            let mut delivery = crate::mailbox::Fence::new(&recipient, "current", "delivery");
+            delivery.epoch = 1;
+            record_fenced(&delivery, &claude_report(true, 0));
+            assert!(!watched(&recipient));
+        }
+        let recipient = "agent/attachment-watch-shared";
+        let first = watch_attachment(recipient);
+        let second = watch_attachment(recipient);
+        drop(first);
+        assert!(watched(recipient), "a second live watch keeps the entry");
+        drop(second);
+        assert!(!watched(recipient));
+    }
+
+    // Planned T13: once the driver reports only on change and at each 10-second Ping, its title
+    // report is up to about ten seconds old. That age never changes what the seat shows: an
+    // unattached monitor is stale at any age, and an attached one is never consulted.
+    #[test]
+    fn title_report_age_never_changes_the_assessment() {
+        let recipient = "agent/attachment-monitor-age";
+        let mut delivery = crate::mailbox::Fence::new(recipient, "current", "delivery");
+        delivery.epoch = 1;
+        let mut title = crate::mailbox::Fence::new(recipient, "current", "title");
+        title.epoch = 1;
+        // The daemon's own image, read once: through /proc/self/exe on Linux and current_exe()
+        // elsewhere. When that read fails it is None, and then every image counts as current.
+        let image = presence().image.clone();
+        record_fenced(
+            &delivery,
+            &json!({"transport":"claude-channel", "ready":true, "image":image,
+                "channel":{"pid":8,"image":image,"age_ms":0}})
+            .to_string(),
+        );
+        let without_monitor = assess_current(recipient, "claude", Some("current"));
+        // The delivery beat alone is current, so only the monitor can make the seat stale below.
+        assert!(!without_monitor.stale(), "{without_monitor:?}");
+        assert_eq!(without_monitor.state, "current", "{without_monitor:?}");
+        record_fenced(
+            &title,
+            &json!({"transport":"claude-channel", "ready":false,
+                "reason":"claude-channel-unattached: mail held"})
+            .to_string(),
+        );
+        let mut aged = Duration::ZERO;
+        for age in [0, 9, 11, 44, 46] {
+            let age = Duration::from_secs(age);
+            backdate(recipient, true, age - aged);
+            aged = age;
+            let assessment = assess_current(recipient, "claude", Some("current"));
+            assert!(assessment.stale(), "{age:?}: {assessment:?}");
+            // The stale reading is the monitor's: it carries the monitor's age, and its reason
+            // until that age passes the poll limit, which is checked first.
+            assert!(
+                assessment.polled_seconds_ago >= Some(age.as_secs()),
+                "{age:?}: {assessment:?}"
+            );
+            if age + Duration::from_secs(30) < POLL_STALE_AFTER {
+                assert_eq!(
+                    assessment.reason.as_deref(),
+                    Some("claude-channel-unattached: mail held"),
+                    "{age:?}"
+                );
+            }
+        }
+        record_fenced(
+            &title,
+            &json!({"transport":"claude-channel", "ready":true}).to_string(),
+        );
+        for age in [0, 11, 46] {
+            backdate(recipient, true, Duration::from_secs(age));
+            let mut assessment = assess_current(recipient, "claude", Some("current"));
+            let mut expected = without_monitor.clone();
+            // Only the delivery beat's own age moves between the two readings.
+            assessment.polled_seconds_ago = None;
+            expected.polled_seconds_ago = None;
+            assert_eq!(assessment, expected, "{age}");
+        }
+    }
+
     #[test]
     fn a_report_is_recorded_per_recipient() {
         record(
@@ -723,4 +1404,37 @@ mod tests {
         assert_eq!(assessment.transport.as_deref(), Some("app-server"));
         assert!(assessment.polled_seconds_ago.is_some());
     }
+}
+
+#[cfg(test)]
+mod legacy_shape_controls {
+    use super::*;
+    #[test]
+    fn legacy_shape_sampling_is_bounded_non_authorizing_and_never_refreshes_health() {
+        let fence = crate::mailbox::Fence::new("agent/legacy-shape-control", "legacy", "delivery");
+        for pid in 1..=SHAPE_LIMIT as u32 {
+            assert!(begin_legacy_shape(&fence, pid));
+            assert!(!begin_legacy_shape(&fence, pid));
+            finish_legacy_shape(&fence, pid, Ok(vec![]));
+        }
+        assert!(!begin_legacy_shape(&fence, 999));
+        assert!(attachment(&fence.subject, &fence.incarnation).is_none());
+        let unknown = assess_current(&fence.subject, "claude", Some(&fence.incarnation));
+        assert!(matches!(unknown.state, "unknown" | "stale"));
+        record_ownership(&fence, false);
+        assert!(
+            !begin_legacy_shape(&fence, 1000),
+            "shadow cannot overwrite protected ownership"
+        );
+        let rows = presence().ownership.lock().unwrap();
+        let row = &rows[&fence.subject];
+        assert!(!row.legacy);
+        assert!(row.shape.is_none());
+        assert_eq!(row.used, SHAPE_LIMIT);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn legacy_capture_count(subject: &str) -> usize {
+    presence().ownership.lock().unwrap().get(subject).map_or(0, |row| row.used)
 }

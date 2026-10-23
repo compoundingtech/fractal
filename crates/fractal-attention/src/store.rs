@@ -129,6 +129,8 @@ pub mod owner_lists;
 pub mod published_list;
 pub mod published_views;
 pub mod summary_list;
+#[cfg(any(test, feature = "test-support"))]
+pub mod alert_action_controls;
 #[cfg(test)]
 pub mod checkpoint_agreement_tests;
 #[cfg(test)]

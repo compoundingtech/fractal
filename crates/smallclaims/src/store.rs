@@ -793,6 +793,8 @@ pub struct Store {
     /// needs when they differ. Off unless the daemon's divergence check is on: a default
     /// install never compares, reports no divergence, and settles sync on claims alone.
     pub divergence_capture: std::sync::atomic::AtomicBool,
+    /// Whether this member trims on its own (`[trim] local`); see `trim_locally`.
+    trim_local: AtomicBool,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
     /// Fixed local schema identity, initialized lazily before the first admission pass.
@@ -1102,6 +1104,7 @@ impl Store {
             replication_snapshot_build: Mutex::new(()),
             replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
+            trim_local: AtomicBool::new(false),
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
@@ -1266,6 +1269,8 @@ pub struct PeerSyncProgress {
     pub window_received: u64,
     pub graph_compared_at_unix_ms: Option<u128>,
     pub graph_differs_since_unix_ms: Option<u128>,
+    pub claims_compared_at_unix_ms: Option<u128>,
+    pub claims_differ_since_unix_ms: Option<u128>,
     /// The last exchange at which both nodes held the same envelopes and every projection was
     /// settled, so the two projections were comparable.
     pub aligned_comparison: Option<AlignedComparison>,
@@ -1317,6 +1322,16 @@ impl PeerSyncProgress {
             self.graph_differs_since_unix_ms = None;
         } else {
             self.graph_differs_since_unix_ms.get_or_insert(now);
+        }
+    }
+
+    /// Record one comparison of the claims this node retains with the peer's.
+    pub fn compare_claims(&mut self, equal: bool, now: u128) {
+        self.claims_compared_at_unix_ms = Some(now);
+        if equal {
+            self.claims_differ_since_unix_ms = None;
+        } else {
+            self.claims_differ_since_unix_ms.get_or_insert(now);
         }
     }
 
@@ -1457,6 +1472,8 @@ impl PeerSyncProgress {
             && now.saturating_sub(sync.measured_at_unix_ms) <= REPLICATION_SYNC_STALE_MS;
         sync.graph_compared_at_unix_ms = self.graph_compared_at_unix_ms;
         sync.graph_differs_since_unix_ms = self.graph_differs_since_unix_ms;
+        sync.claims_compared_at_unix_ms = self.claims_compared_at_unix_ms;
+        sync.claims_differ_since_unix_ms = self.claims_differ_since_unix_ms;
         sync.diverged = self
             .graph_differs_since_unix_ms
             .zip(self.graph_compared_at_unix_ms)
@@ -1709,6 +1726,7 @@ impl CompactReplicationInventory {
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         }
     }
 
@@ -2580,13 +2598,21 @@ pub fn fleet_meta(connection: &Connection, key: &str) -> Result<Option<String>> 
         .optional()?)
 }
 
-/// The highest sequence this node holds of a writer, counting envelopes a checkpoint dropped.
+/// The highest sequence this node has held of a writer, counting envelopes a trim dropped: the
+/// writer's batch head (`writer_heads`) and retired envelopes as well as tombstones, the same
+/// floor as `next_replica_sequence`. Adoption can withdraw a trimmed envelope's tombstone, and a
+/// removal's high water or a rejoin floor read only from the tombstones would then fall below a
+/// sequence peers already hold.
 pub fn writer_high_water(connection: &Connection, writer: &str) -> Result<Option<u64>> {
     Ok(connection.query_row(
         "SELECT MAX(sequence) FROM (
              SELECT MAX(sequence) AS sequence FROM replica_envelopes WHERE writer=?1
              UNION ALL
              SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1
+             UNION ALL
+             SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1
+             UNION ALL
+             SELECT sequence FROM writer_heads WHERE writer=?1
          )",
         [writer],
         |row| row.get(0),
@@ -4593,6 +4619,7 @@ impl TestReplica {
             buckets,
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         }
     }
 
@@ -4621,6 +4648,7 @@ impl TestReplica {
             buckets,
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         };
         (missing, inventory)
     }
@@ -4690,6 +4718,7 @@ pub fn compact_replication_exchange_lists_only_ranges_that_differ() {
         buckets: Vec::new(),
         accepts: None,
         checkpoint: None,
+        claim_range_query: None,
     })
     .unwrap()
     .len();
@@ -4794,6 +4823,7 @@ pub fn compact_replication_exchange_waits_for_a_complete_listing() {
         buckets: peer.summary().buckets,
         accepts: None,
         checkpoint: None,
+        claim_range_query: None,
     };
     let (missing, _) = compact_replication_difference(&inventory, &buckets, &listing, limit);
     assert_eq!(missing, test_envelope_ids("origin", 9..=10, "a"));
@@ -6004,6 +6034,38 @@ impl Store {
         Ok(())
     }
 
+    /// Bind a named store to one shard before it accepts claims or exchanges. The marker is
+    /// durable, so moving an existing shard file under another shard name fails on open.
+    pub fn bind_shard(&self, id: &crate::shards::ShardId) -> Result<()> {
+        let connection = self.connection.write();
+        let stored = fleet_meta(&connection, "shard_id")?;
+        if let Some(stored) = stored {
+            anyhow::ensure!(stored == id.as_str(), "this store belongs to shard `{stored}`");
+            return Ok(());
+        }
+        // A trimmed store can have no live claims while its envelopes and checkpoints
+        // still carry authority. An empty but fleet-bound default file is also already
+        // assigned to the default replication domain.
+        let previously_used = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims LIMIT 1)
+                 OR EXISTS(SELECT 1 FROM batches LIMIT 1)
+                 OR EXISTS(SELECT 1 FROM replica_envelopes LIMIT 1)
+                 OR EXISTS(SELECT 1 FROM checkpoint_envelopes LIMIT 1)
+                 OR EXISTS(SELECT 1 FROM checkpoints LIMIT 1)
+                 OR EXISTS(SELECT 1 FROM meta WHERE key IN ('fleet_id', 'fleet_anchor_key') LIMIT 1)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        anyhow::ensure!(!previously_used, "cannot bind a used default store to a shard");
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hef1ca5e8b2ef owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('shard_id', ?1)", [id.as_str()])?;
+        Ok(())
+    }
+
+    /// None names the legacy/default store and never means an absent named shard.
+    pub fn bound_shard(&self) -> Result<Option<String>> {
+        fleet_meta(&self.readers.get(), "shard_id")
+    }
+
     pub fn replication_inventory(&self) -> Result<ReplicationInventory> {
         Ok(self.replication_snapshot()?.inventory.public())
     }
@@ -6336,29 +6398,52 @@ impl Store {
     }
 
     pub fn export_replication_summary(&self, fleet_id: &str) -> Result<ReplicationExchange> {
+        self.replication_summary(fleet_id, true)
+    }
+
+    /// A local scalar guard reads only `authority_digest`. Keep the full summary's fresh
+    /// snapshot, metadata and errors, but avoid cloning/serializing its unused bucket list.
+    /// This reduced inventory must not be used to construct a signed peer exchange.
+    pub fn export_replication_authority_guard(&self, fleet_id: &str) -> Result<ReplicationExchange> {
+        self.replication_summary(fleet_id, false)
+    }
+
+    fn replication_summary(
+        &self,
+        fleet_id: &str,
+        include_buckets: bool,
+    ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
+        let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
         let signature_requests = self.replication_signature_requests()?;
         Ok(ReplicationExchange {
             peer: self.origin.clone(),
             fleet_id: fleet_id.to_owned(),
+            shard_id: self.bound_shard()?,
             schema_digest: self.runtime.schema_digest(),
             projection_registry_digest: Some(self.runtime.projection_registry_digest()),
             projection_versions: self.runtime.projection_versions(),
             authority_digest: snapshot.authority_digest.clone(),
-            graph_digest: snapshot.legacy_graph_digest.clone(),
-            projection_digests: snapshot.projection_digests.clone(),
+            graph_digest: digests.0.clone(),
+            projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 digest: snapshot.inventory.digest.clone(),
                 envelopes: Vec::new(),
-                buckets: snapshot.buckets.clone(),
+                buckets: if include_buckets {
+                    snapshot.buckets.clone()
+                } else {
+                    Vec::new()
+                },
                 accepts: Some(replication_accepts()),
                 checkpoint: self.trimmed_checkpoint()?,
+                claim_range_query: None,
             },
             envelopes: Vec::new(),
             signature_requests,
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+            claim_ranges: Some(self.claim_range_summary()?),
         })
     }
 
@@ -6396,6 +6481,21 @@ impl Store {
     ) -> Result<ReplicationExchange> {
         let mut exchange = self.export_replication_difference(fleet_id, remote)?;
         let _timing = time_stage(&self.replication_timers.export);
+        // Claims the peer found it lacks travel in their ordinary envelopes, after the
+        // envelopes the inventory difference already sends.
+        if let Some(query) = remote.claim_range_query.as_ref().filter(|query| !query.claims.is_empty()) {
+            let sent: BTreeSet<(String, u64, String)> = exchange
+                .envelopes
+                .iter()
+                .map(|envelope| (envelope.writer.clone(), envelope.sequence, envelope.hash.clone()))
+                .collect();
+            let wanted = self
+                .envelopes_carrying_claims(&query.claims)?
+                .into_iter()
+                .filter(|id| !sent.contains(&(id.writer.clone(), id.sequence, id.hash.clone())))
+                .collect();
+            exchange.envelopes.extend(self.replica_envelopes(wanted)?);
+        }
         exchange.signatures = self.replication_signatures_for(signature_requests)?;
         exchange.signature_requests = self.replication_signature_requests()?;
         fit_exchange_body(&mut exchange, budget)?;
@@ -6408,6 +6508,7 @@ impl Store {
         remote: &ReplicationInventory,
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
+        let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
         let same = !remote.digest.is_empty() && remote.digest == snapshot.inventory.digest;
         if !same && !remote.buckets.is_empty() {
@@ -6423,23 +6524,26 @@ impl Store {
             return Ok(ReplicationExchange {
                 peer: self.origin.clone(),
                 fleet_id: fleet_id.to_owned(),
+                shard_id: self.bound_shard()?,
                 schema_digest: self.runtime.schema_digest(),
                 projection_registry_digest: Some(self.runtime.projection_registry_digest()),
                 projection_versions: self.runtime.projection_versions(),
                 authority_digest: snapshot.authority_digest.clone(),
-                graph_digest: snapshot.legacy_graph_digest.clone(),
-                projection_digests: snapshot.projection_digests.clone(),
+                graph_digest: digests.0.clone(),
+                projection_digests: digests.1.clone(),
                 inventory: ReplicationInventory {
                     digest: snapshot.inventory.digest.clone(),
                     envelopes: listed,
                     buckets: snapshot.buckets.clone(),
                     accepts: Some(replication_accepts()),
                     checkpoint: self.trimmed_checkpoint()?,
+                    claim_range_query: None,
                 },
                 envelopes: self.replica_envelopes(missing)?,
                 signature_requests: Vec::new(),
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+                claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -6475,12 +6579,13 @@ impl Store {
         Ok(ReplicationExchange {
             peer: self.origin.clone(),
             fleet_id: fleet_id.to_owned(),
+            shard_id: self.bound_shard()?,
             schema_digest: self.runtime.schema_digest(),
             projection_registry_digest: Some(self.runtime.projection_registry_digest()),
             projection_versions: self.runtime.projection_versions(),
             authority_digest: snapshot.authority_digest.clone(),
-            graph_digest: snapshot.legacy_graph_digest.clone(),
-            projection_digests: snapshot.projection_digests.clone(),
+            graph_digest: digests.0.clone(),
+            projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 accepts: Some(replication_accepts()),
                 checkpoint: self.trimmed_checkpoint()?,
@@ -6500,6 +6605,7 @@ impl Store {
             signature_requests: Vec::new(),
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+            claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
         })
     }
 
@@ -6595,6 +6701,12 @@ impl Store {
             return Err(St3Error::new(
                 "fleet-id-mismatch",
                 "the peer belongs to another fleet",
+            ));
+        }
+        if input.shard_id != self.bound_shard().map_err(|error| St3Error::new("shard-state", error.to_string()))? {
+            return Err(St3Error::new(
+                "shard-mismatch",
+                "the exchange belongs to another shard or the default store",
             ));
         }
         let timing = time_stage(&self.replication_timers.receipt);
@@ -6846,12 +6958,21 @@ impl Store {
             self.observe_first_sync(relay, snapshot.inventory.envelopes.len() as u64)
                 .map_err(internal)?;
         }
+        // Claims are compared only with a peer that speaks the same claim-range protocol, and
+        // only while both range indexes cover every retained claim.
+        let claim_ranges = match input.claim_ranges.as_ref() {
+            Some(remote) => self.compare_claim_ranges(remote).map_err(internal)?,
+            None => None,
+        };
         let now = now_ms();
         let mut sync = self
             .replication_sync
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
+        if let Some(comparison) = &claim_ranges {
+            progress.compare_claims(comparison.same, now);
+        }
         let basis = InventoryBasis {
             peer_checkpoint: input.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
             local_inventory_generation: snapshot.inventory_generation,
@@ -6946,7 +7067,9 @@ impl Store {
                 buckets: Vec::new(),
                 accepts: None,
                 checkpoint: None,
+                claim_range_query: None,
             },
+            claim_ranges,
         })
     }
 
@@ -7270,6 +7393,29 @@ impl Store {
     /// Whether admitted replicated claims wait for a deferred projection.
     pub fn replication_projection_deferred(&self) -> bool {
         self.replication_projection_state.load(Ordering::Acquire) & 1 != 0
+    }
+
+    /// The graph and projection digests an exchange carries. While this node's projection is
+    /// not settled (a deferred catch-up, committed batches not yet sealed into envelopes, or
+    /// replicated claims waiting for a build that knows their kinds), its tables can differ
+    /// from a settled peer's at the same inventory with no divergence at all. It then sends
+    /// neither, which a peer reads as nothing to compare this time.
+    fn exported_digests(
+        &self,
+        snapshot: &ReplicationSnapshot,
+    ) -> Result<(String, BTreeMap<String, String>)> {
+        let waiting: bool = self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records WHERE state='unknown')",
+            [],
+            |row| row.get(0),
+        )?;
+        if self.replication_projection_deferred() || snapshot.unsealed || waiting {
+            return Ok((String::new(), BTreeMap::new()));
+        }
+        Ok((
+            snapshot.legacy_graph_digest.clone(),
+            snapshot.projection_digests.clone(),
+        ))
     }
 
     pub fn projection_contention_generation(&self) -> u64 {
@@ -7655,8 +7801,12 @@ impl Store {
                     // Readers may have cached the preceding prefix at the same admitted store
                     // index. Its projection changed even when no additional claim arrived.
                     chunked |= through < target;
-                    if replayed || chunked {
+                    if replayed {
                         self.runtime.forget_views();
+                    } else if chunked {
+                        // Only more of the admitted claims projected: published lists keep
+                        // serving what readers had until they refold once the backlog is in.
+                        self.runtime.projection_advanced(through >= target);
                     }
                     if through < target {
                         between();
@@ -8208,6 +8358,19 @@ impl Store {
     pub fn capture_divergences(&self, on: bool) {
         self.divergence_capture
             .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Trim on this member's own, without checkpoint agreement: the member's `[trim] local`
+    /// choice, off by default. It then seals, verifies and applies no new checkpoint and adopts
+    /// no peer's manifest, so a manifest never replaces its tombstones; a trim it had already
+    /// committed still finishes. Checkpoints need every participant, so the old checkpoints stop
+    /// on the other members until a person excuses this one.
+    pub fn trim_locally(&self, on: bool) {
+        self.trim_local.store(on, Ordering::Relaxed);
+    }
+
+    pub fn trims_locally(&self) -> bool {
+        self.trim_local.load(Ordering::Relaxed)
     }
 
     /// Every projection that a peer with the same envelopes projects differently, by peer.

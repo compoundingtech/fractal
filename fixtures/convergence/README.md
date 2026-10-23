@@ -78,6 +78,16 @@ regression and all convergence oracles; its only two failures were the old v5 tr
 assertions for seeds 34 and 1597. Characterization follows those measured outcomes,
 not an RNG prediction; the exact per-seed equality and majority coverage checks remain.
 
+`claims-v7.json` is the serialization of the registry that adds the system-only claim kind
+`slo.breach-transition` on top of version 6; v1 to v6 remain unchanged for comparisons pinned to
+those corpora. It is the next free corpus slot after the identity-rename registry. After merging
+main, regenerate it with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v7.json`;
+do not hand-edit the snapshot. The kind changes the shared RNG stream, so v6's never-trim
+characterization `[34]` does not apply: with v7 seeds 2 and 34 do not trim a checkpoint and the
+other 15 fixed seeds do, measured with
+`cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.
+
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&fractal_schema::registry().claims)`
 and deliberately update the simulation's include. Apply identical simulation
