@@ -800,6 +800,8 @@ pub struct GithubListing {
     pub values: Vec<Value>,
     pub versions: Vec<String>,
     pub truncated: bool,
+    /// An object-wrapped listing's `total_count` on its first page, when it names one.
+    pub total_count: Option<u64>,
 }
 
 /// Read up to `pages` pages of a listing. A listing that continues past them fails the read,
@@ -830,6 +832,7 @@ async fn github_listing_at_field(
         values: Vec::new(),
         versions: Vec::new(),
         truncated: false,
+        total_count: None,
     };
     while let Some(url) = next {
         if listing.versions.len() == pages {
@@ -844,6 +847,9 @@ async fn github_listing_at_field(
                     .is_none_or(|count| count <= (pages as u64).saturating_mul(100)),
                 "the GitHub object listing exceeds the {pages}-page bound"
             );
+            if listing.versions.is_empty() {
+                listing.total_count = payload.value.get("total_count").and_then(Value::as_u64);
+            }
         }
         listing
             .versions

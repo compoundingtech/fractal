@@ -70,6 +70,8 @@ pub enum ErrorCode {
     IdentityUnknown,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
+    InvalidCustodySuccessor,
+    CustodyPending,
     AttentionMigrated,
     ArrangementExists,
     ArrangementFolderExists,
@@ -220,6 +222,99 @@ pub struct PageInfo {
     pub next_cursor: Option<String>,
     #[serde(default)]
     pub cursor_expires_at: Option<String>,
+}
+
+/// Declaration reads preserve future fields and state strings without assigning new semantics.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ScheduleOwner {
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub generation_id: Option<String>,
+    #[serde(default)]
+    pub step_id: Option<String>,
+    pub state: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ScheduleKnowledge {
+    #[serde(default)]
+    pub origin_host_id: Option<String>,
+    pub basis: String,
+    #[serde(default)]
+    pub last_exchange_at: Option<String>,
+    #[serde(default)]
+    pub age_ms: Option<u64>,
+    pub completeness: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ScheduleUnheardHost {
+    pub host_id: String,
+    #[serde(default)]
+    pub last_exchange_at: Option<String>,
+    #[serde(default)]
+    pub age_ms: Option<u64>,
+    pub reason: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ScheduleCoverage {
+    pub scope: String,
+    pub unheard_after_ms: u64,
+    pub unheard_hosts: Vec<ScheduleUnheardHost>,
+    pub membership: String,
+    pub covered_host_count: u64,
+    pub truncated: bool,
+    pub omitted_configured_peer_count: u64,
+    pub omitted_covered_host_count: u64,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ScheduleDeclaration {
+    pub id: String,
+    pub revision: String,
+    pub declaration_claim_id: String,
+    #[serde(default)]
+    pub declaration_origin_host_id: Option<String>,
+    pub owner: ScheduleOwner,
+    #[serde(default)]
+    pub primary_host_id: Option<String>,
+    pub standby_state: String,
+    pub standby_node: Value,
+    pub state: String,
+    pub declaration: Value,
+    pub declaration_bytes: u64,
+    #[serde(default)]
+    pub read_problem: Option<String>,
+    #[serde(default)]
+    pub next_declared_fire_at: Option<String>,
+    pub next_fire_state: String,
+    pub next_fire_basis: String,
+    pub knowledge: ScheduleKnowledge,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SchedulesPage {
+    pub kind: String,
+    pub collection: String,
+    pub as_of: String,
+    pub basis: String,
+    pub items: Vec<ScheduleDeclaration>,
+    pub page: PageInfo,
+    pub coverage: ScheduleCoverage,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1362,6 +1457,11 @@ pub struct AgentRelationship {
     pub agent_id: String,
     pub reason: Option<String>,
 }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentMailCustody {
+    pub successor: String,
+    pub state: String,
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentEndReason {
     pub kind: String,
@@ -1381,6 +1481,8 @@ pub struct Agent {
     pub name: String,
     pub state: String,
     pub reachability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_custody: Option<AgentMailCustody>,
     #[serde(default)]
     pub runtime_ids: Vec<String>,
     #[serde(default)]
@@ -3683,6 +3785,8 @@ pub struct PersonAnswerRecord {
 pub struct AgentRetireParameters {
     pub agent: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

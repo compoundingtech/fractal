@@ -4,6 +4,7 @@ pub mod arrangements;
 pub mod custom;
 pub mod accountable;
 pub mod directive_notes;
+pub mod full_value;
 pub mod glasses;
 pub mod harness_questions;
 pub mod owned_terminals;
@@ -3870,8 +3871,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("transport", string()),
             ("runtime_id", string()),
         ],
-        "message.read" => &[("status", required_enum(&["read"]))],
-        "message.closed" => &[("status", required_enum(&["closed"]))],
+        "message.read" => &[("status", required_enum(&["read"])), ("acting_for", reference_to(&["agent"]))],
+        "message.closed" => &[("status", required_enum(&["closed"])), ("acting_for", reference_to(&["agent"]))],
         "planning-session.started" => &[
             ("mission", reference()),
             ("request", reference()),
@@ -3958,12 +3959,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
         ],
         "schedule.occurrence-scheduled" => &[
+            ("standby", object()),
+            ("reason", string()),
             ("occurrence", integer()),
             ("revision", string()),
             ("at_unix_ms", integer()),
             ("scheduled_at_unix_ms", string()),
         ],
         "schedule.occurrence-reached" => &[
+            ("standby", object()),
+            ("reason", string()),
             ("occurrence", integer()),
             ("revision", string()),
             ("at_unix_ms", integer()),

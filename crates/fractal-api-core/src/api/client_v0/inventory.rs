@@ -1,6 +1,5 @@
 //! Screen inventories use the same authorized reads as HTTP, on the collection snapshot.
 use crate::LimitsStore;
-use crate::SeatsStore;
 use super::*;
 
 

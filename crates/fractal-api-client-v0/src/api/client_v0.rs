@@ -42,12 +42,16 @@ pub mod conversation_blocks;
 pub mod harness_inventory;
 pub mod inventory;
 pub mod raw_terminal;
+mod runtime_start_diagnostics;
 pub mod search;
+pub mod schedules;
 pub mod summary;
 #[cfg(test)]
 mod agents_window_tests;
 #[cfg(test)]
 mod push_tests;
+#[cfg(test)]
+mod pairing_order_tests;
 #[cfg(test)]
 mod collection_refresh_tests;
 #[cfg(test)]
@@ -124,10 +128,12 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             "/v1/client/conversations/{id}/stream",
             get(conversation_stream),
         )
+        .route("/v1/client/schedules", get(schedules::list))
         .route("/v1/client/missions", get(missions))
         .route("/v1/client/missions-tree", get(missions_tree))
         .route("/v1/client/missions/{*id}", get(mission_detail))
         .route("/v1/client/runtimes", get(runtimes))
+        .route("/v1/client/runtime-starts", get(runtime_start_diagnostics::list))
         .route("/v1/client/runtimes/{*id}", get(runtime_detail))
         .route("/v1/client/observers", get(observers))
         .route(
@@ -7992,7 +7998,7 @@ async fn dispatch_action(
                 .ok_or_else(|| validation("agent.retire needs fence.runtime_desired_revision"))?;
             state
                 .store
-                .retire_agent(
+                .retire_agent_with_successor(
                     &agent,
                     authority_actor,
                     &parameters.reason,
@@ -8000,6 +8006,7 @@ async fn dispatch_action(
                     request.fence.runtime_incarnation.as_deref(),
                     &request.idempotency_key,
                     &state.configured_peers,
+                    parameters.successor.as_deref(),
                 )
                 .map_err(ApiError::bad)?;
             signal_changed(state);

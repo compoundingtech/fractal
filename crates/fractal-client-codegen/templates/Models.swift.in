@@ -60,6 +60,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case identityUnknown
     case lifecycleUnavailable
     case retirementUpgradeRequired
+    case invalidCustodySuccessor
+    case custodyPending
     case notFound
     case forbidden
     case unsupportedCapability
@@ -129,6 +131,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "identity-unknown": .identityUnknown
         case "lifecycle-unavailable": .lifecycleUnavailable
         case "retirement-upgrade-required": .retirementUpgradeRequired
+        case "invalid-custody-successor": .invalidCustodySuccessor
+        case "custody-pending": .custodyPending
         case "attention-migrated": .attentionMigrated
         case "not-found": .notFound
         case "forbidden": .forbidden
@@ -198,6 +202,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .identityUnknown: "identity-unknown"
         case .lifecycleUnavailable: "lifecycle-unavailable"
         case .retirementUpgradeRequired: "retirement-upgrade-required"
+        case .invalidCustodySuccessor: "invalid-custody-successor"
+        case .custodyPending: "custody-pending"
         case .attentionMigrated: "attention-migrated"
         case .notFound: "not-found"
         case .forbidden: "forbidden"
@@ -402,8 +408,9 @@ public struct AgentPresentationNow: Codable, Sendable { public let step, mission
 public struct WorkLabel: Codable, Sendable { public let id, missionID, missionRunID, path, state, since: String; public let title, goal, holderDownSince: String?; enum CodingKeys: String, CodingKey { case id, missionID = "mission_id", missionRunID = "mission_run_id", path, title, goal, state, since, holderDownSince = "holder_down_since" } }
 public struct WorkResource: Codable, Sendable { public let missionID: String?; public let id, kind, revision, updatedAt, missionRunID, generationID, definitionID, path, state: String; public let gateKind, title, assignedTo, lastProgress, progressAt: String?; public let attempt: UInt; public let readinessEpoch: UInt64; public let claimant, claimIncarnation, submittedIncarnation, blockedReason: String?; public let agentless: Bool?; public let claimExpiresAtUnixMS, executionStartedAtUnixMS, nudgedAtUnixMS, executionElapsedMS, timeoutMS: UInt64?; public let blockers, goals, constraints: [String]; public let personAnswers: [PersonAnswerRecord]?; public let usage: UsageSummary?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", missionID = "mission_id", missionRunID = "mission_run_id", generationID = "generation_id", definitionID = "definition_id", path, state, gateKind = "gate_kind", title, assignedTo = "assigned_to", lastProgress = "last_progress", progressAt = "progress_at", attempt, readinessEpoch = "readiness_epoch", claimant, claimIncarnation = "claim_incarnation", submittedIncarnation = "submitted_incarnation", agentless, claimExpiresAtUnixMS = "claim_expires_at_unix_ms", executionStartedAtUnixMS = "execution_started_at_unix_ms", nudgedAtUnixMS = "nudged_at_unix_ms", executionElapsedMS = "execution_elapsed_ms", timeoutMS = "timeout_ms", blockedReason = "blocked_reason", blockers, goals, constraints, personAnswers = "person_answers", usage, operational } }
 public struct AgentRelationship: Codable, Sendable { public let agentID: String; public let reason: String?; enum CodingKeys: String, CodingKey { case agentID = "agent_id", reason } }
+public struct AgentMailCustody: Codable, Sendable { public let successor, state: String }
 public struct AgentEndReason: Codable, Sendable { public let kind, endedAt: String; public let actor, reason, exitSignal, diagnostic: String?; public let exitCode: Int64?; enum CodingKeys: String, CodingKey { case kind, endedAt = "ended_at", actor, reason, exitSignal = "exit_signal", diagnostic, exitCode = "exit_code" } }
-public struct AgentResource: Codable, Sendable { public let id, kind, revision, updatedAt, name, state, reachability: String; public let runtimeIDs: [String]; public let ownerRunID, driver, harnessState, harnessErrorState, since, observation, blockedOn, ask, reason, activity, hostID, lastActivityAt, silentSince, downSince, fault, incarnationID, currentSessionID: String?; public let endReason: AgentEndReason?; public let currentWorkIDs, upcomingWorkIDs: [String]?; public let activeWorkCount, queuedWorkCount: UInt64?; public let nextWorkID: String?; public let currentWork, upcomingWork: [WorkLabel]?; public let nextWork: WorkLabel?; public let usage: UsageSummary?; public let under: [AgentRelationship]; public let delivery: AgentDelivery?; public let subagents: [AgentSubagent]?; public let suspension: AgentSuspension?; public let checkout: AgentCheckout?; public let workspace: String?; public let lifecycle: AgentLifecycle?; public let handoff: AgentHandoff?; public let rollout: JSONValue?; public let todo: AgentTodo?; public let presentation: AgentPresentation?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", name, state, reachability, runtimeIDs = "runtime_ids", ownerRunID = "owner_run_id", driver, harnessState = "harness_state", harnessErrorState = "harness_error_state", endReason = "end_reason", since, observation, blockedOn = "blocked_on", ask, reason, activity, hostID = "host_id", lastActivityAt = "last_activity_at", silentSince = "silent_since", downSince = "down_since", fault, incarnationID = "incarnation_id", currentSessionID = "current_session_id", currentWorkIDs = "current_work_ids", activeWorkCount = "active_work_count", nextWorkID = "next_work_id", upcomingWorkIDs = "upcoming_work_ids", queuedWorkCount = "queued_work_count", currentWork = "current_work", nextWork = "next_work", upcomingWork = "upcoming_work", usage, under, delivery, subagents, suspension, checkout, workspace, lifecycle, handoff, rollout, todo, presentation, operational } }
+public struct AgentResource: Codable, Sendable { public let id, kind, revision, updatedAt, name, state, reachability: String; public let runtimeIDs: [String]; public let ownerRunID, driver, harnessState, harnessErrorState, since, observation, blockedOn, ask, reason, activity, hostID, lastActivityAt, silentSince, downSince, fault, incarnationID, currentSessionID: String?; public let endReason: AgentEndReason?; public let currentWorkIDs, upcomingWorkIDs: [String]?; public let activeWorkCount, queuedWorkCount: UInt64?; public let nextWorkID: String?; public let currentWork, upcomingWork: [WorkLabel]?; public let nextWork: WorkLabel?; public let usage: UsageSummary?; public let under: [AgentRelationship]; public let mailCustody: AgentMailCustody?; public let delivery: AgentDelivery?; public let subagents: [AgentSubagent]?; public let suspension: AgentSuspension?; public let checkout: AgentCheckout?; public let workspace: String?; public let lifecycle: AgentLifecycle?; public let handoff: AgentHandoff?; public let rollout: JSONValue?; public let todo: AgentTodo?; public let presentation: AgentPresentation?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", name, state, reachability, runtimeIDs = "runtime_ids", ownerRunID = "owner_run_id", driver, harnessState = "harness_state", harnessErrorState = "harness_error_state", endReason = "end_reason", since, observation, blockedOn = "blocked_on", ask, reason, activity, hostID = "host_id", lastActivityAt = "last_activity_at", silentSince = "silent_since", downSince = "down_since", fault, incarnationID = "incarnation_id", currentSessionID = "current_session_id", currentWorkIDs = "current_work_ids", activeWorkCount = "active_work_count", nextWorkID = "next_work_id", upcomingWorkIDs = "upcoming_work_ids", queuedWorkCount = "queued_work_count", currentWork = "current_work", nextWork = "next_work", upcomingWork = "upcoming_work", usage, under, mailCustody = "mail_custody", delivery, subagents, suspension, checkout, workspace, lifecycle, handoff, rollout, todo, presentation, operational } }
 /// Unknown lifecycle strings are preserved so newer roster rows remain readable.
 public enum AgentLifecycle: Codable, Sendable, Equatable {
     case standing, owner, bounded
@@ -698,7 +705,7 @@ public struct PersonAnswerInput: Codable, Sendable { public var id, text: String
 public struct PersonAnswer: Codable, Sendable { public let type, outcome: String; public let id, label, text: String? }
 public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor, senderClass, assistantGrantID, assistantOwner, assistantSessionActor: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", senderClass = "sender_class", assistantGrantID = "assistant_grant_id", assistantOwner = "assistant_owner", assistantSessionActor = "assistant_session_actor", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
 public struct TargetParameters: Codable, Sendable { public var targetID: String; public var reason: String?; public var summary: String?; public var evidence: [String]; public init(targetID: String, reason: String? = nil, summary: String? = nil, evidence: [String] = []) { self.targetID = targetID; self.reason = reason; self.summary = summary; self.evidence = evidence }; enum CodingKeys: String, CodingKey { case targetID = "target_id", reason, summary, evidence } }
-public struct AgentRetireParameters: Codable, Sendable { public var agent: String; public var reason: String; public init(agent: String, reason: String) { self.agent = agent; self.reason = reason } }
+public struct AgentRetireParameters: Codable, Sendable { public var agent: String; public var reason: String; public var successor: String?; public init(agent: String, reason: String, successor: String? = nil) { self.agent = agent; self.reason = reason; self.successor = successor } }
 public struct AgentStopParameters: Codable, Sendable { public var agent: String; public var reason: String?; public init(agent: String, reason: String? = nil) { self.agent = agent; self.reason = reason } }
 public struct AgentStartParameters: Codable, Sendable { public var agent: String; public init(agent: String) { self.agent = agent } }
 public struct AgentSuspendParameters: Codable, Sendable { public var agent: String; public var reason: String?; public init(agent: String, reason: String? = nil) { self.agent = agent; self.reason = reason } }
@@ -1383,4 +1390,199 @@ public struct PushRegistrationResponse: Codable, Sendable {
     public let apiVersion, requestID: String
     public let value: PushRegistrationStatus
     enum CodingKeys: String, CodingKey { case apiVersion = "api_version", requestID = "request_id", value }
+}
+
+
+/// Raw fields and unfamiliar state strings survive decode/encode. No takeover meaning.
+public struct ScheduleOwner: Codable, Sendable {
+    public let runID: String?
+    public let generationID: String?
+    public let stepID: String?
+    public let state: String
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case runID = "run_id"
+        case generationID = "generation_id"
+        case stepID = "step_id"
+        case state
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        runID = try values.decodeIfPresent(String.self, forKey: .runID)
+        generationID = try values.decodeIfPresent(String.self, forKey: .generationID)
+        stepID = try values.decodeIfPresent(String.self, forKey: .stepID)
+        state = try values.decode(String.self, forKey: .state)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
+}
+public struct ScheduleKnowledge: Codable, Sendable {
+    public let originHostID: String?
+    public let basis: String
+    public let lastExchangeAt: String?
+    public let ageMS: UInt64?
+    public let completeness: String
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case originHostID = "origin_host_id"
+        case basis
+        case lastExchangeAt = "last_exchange_at"
+        case ageMS = "age_ms"
+        case completeness
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        originHostID = try values.decodeIfPresent(String.self, forKey: .originHostID)
+        basis = try values.decode(String.self, forKey: .basis)
+        lastExchangeAt = try values.decodeIfPresent(String.self, forKey: .lastExchangeAt)
+        ageMS = try values.decodeIfPresent(UInt64.self, forKey: .ageMS)
+        completeness = try values.decode(String.self, forKey: .completeness)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
+}
+public struct ScheduleUnheardHost: Codable, Sendable {
+    public let hostID: String
+    public let lastExchangeAt: String?
+    public let ageMS: UInt64?
+    public let reason: String
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case hostID = "host_id"
+        case lastExchangeAt = "last_exchange_at"
+        case ageMS = "age_ms"
+        case reason
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        hostID = try values.decode(String.self, forKey: .hostID)
+        lastExchangeAt = try values.decodeIfPresent(String.self, forKey: .lastExchangeAt)
+        ageMS = try values.decodeIfPresent(UInt64.self, forKey: .ageMS)
+        reason = try values.decode(String.self, forKey: .reason)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
+}
+public struct ScheduleCoverage: Codable, Sendable {
+    public let scope: String
+    public let unheardAfterMS: UInt64
+    public let unheardHosts: [ScheduleUnheardHost]
+    public let membership: String
+    public let coveredHostCount: UInt64
+    public let truncated: Bool
+    public let omittedConfiguredPeerCount: UInt64
+    public let omittedCoveredHostCount: UInt64
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case scope
+        case unheardAfterMS = "unheard_after_ms"
+        case unheardHosts = "unheard_hosts"
+        case membership
+        case coveredHostCount = "covered_host_count"
+        case truncated
+        case omittedConfiguredPeerCount = "omitted_configured_peer_count"
+        case omittedCoveredHostCount = "omitted_covered_host_count"
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        scope = try values.decode(String.self, forKey: .scope)
+        unheardAfterMS = try values.decode(UInt64.self, forKey: .unheardAfterMS)
+        unheardHosts = try values.decode([ScheduleUnheardHost].self, forKey: .unheardHosts)
+        membership = try values.decode(String.self, forKey: .membership)
+        coveredHostCount = try values.decode(UInt64.self, forKey: .coveredHostCount)
+        truncated = try values.decode(Bool.self, forKey: .truncated)
+        omittedConfiguredPeerCount = try values.decode(UInt64.self, forKey: .omittedConfiguredPeerCount)
+        omittedCoveredHostCount = try values.decode(UInt64.self, forKey: .omittedCoveredHostCount)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
+}
+public struct ScheduleDeclaration: Codable, Sendable {
+    public let id: String
+    public let revision: String
+    public let declarationClaimID: String
+    public let declarationOriginHostID: String?
+    public let owner: ScheduleOwner
+    public let primaryHostID: String?
+    public let standbyState: String
+    public let standbyNode: JSONValue
+    public let state: String
+    public let declaration: JSONValue
+    public let declarationBytes: UInt64
+    public let readProblem: String?
+    public let nextDeclaredFireAt: String?
+    public let nextFireState: String
+    public let nextFireBasis: String
+    public let knowledge: ScheduleKnowledge
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case id
+        case revision
+        case declarationClaimID = "declaration_claim_id"
+        case declarationOriginHostID = "declaration_origin_host_id"
+        case owner
+        case primaryHostID = "primary_host_id"
+        case standbyState = "standby_state"
+        case standbyNode = "standby_node"
+        case state
+        case declaration
+        case declarationBytes = "declaration_bytes"
+        case readProblem = "read_problem"
+        case nextDeclaredFireAt = "next_declared_fire_at"
+        case nextFireState = "next_fire_state"
+        case nextFireBasis = "next_fire_basis"
+        case knowledge
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        revision = try values.decode(String.self, forKey: .revision)
+        declarationClaimID = try values.decode(String.self, forKey: .declarationClaimID)
+        declarationOriginHostID = try values.decodeIfPresent(String.self, forKey: .declarationOriginHostID)
+        owner = try values.decode(ScheduleOwner.self, forKey: .owner)
+        primaryHostID = try values.decodeIfPresent(String.self, forKey: .primaryHostID)
+        standbyState = try values.decode(String.self, forKey: .standbyState)
+        standbyNode = try values.decode(JSONValue.self, forKey: .standbyNode)
+        state = try values.decode(String.self, forKey: .state)
+        declaration = try values.decode(JSONValue.self, forKey: .declaration)
+        declarationBytes = try values.decode(UInt64.self, forKey: .declarationBytes)
+        readProblem = try values.decodeIfPresent(String.self, forKey: .readProblem)
+        nextDeclaredFireAt = try values.decodeIfPresent(String.self, forKey: .nextDeclaredFireAt)
+        nextFireState = try values.decode(String.self, forKey: .nextFireState)
+        nextFireBasis = try values.decode(String.self, forKey: .nextFireBasis)
+        knowledge = try values.decode(ScheduleKnowledge.self, forKey: .knowledge)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
+}
+public struct SchedulesPage: Codable, Sendable {
+    public let kind: String
+    public let collection: String
+    public let asOf: String
+    public let basis: String
+    public let items: [ScheduleDeclaration]
+    public let page: PageInfo
+    public let coverage: ScheduleCoverage
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case collection
+        case asOf = "as_of"
+        case basis
+        case items
+        case page
+        case coverage
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try values.decode(String.self, forKey: .kind)
+        collection = try values.decode(String.self, forKey: .collection)
+        asOf = try values.decode(String.self, forKey: .asOf)
+        basis = try values.decode(String.self, forKey: .basis)
+        items = try values.decode([ScheduleDeclaration].self, forKey: .items)
+        page = try values.decode(PageInfo.self, forKey: .page)
+        coverage = try values.decode(ScheduleCoverage.self, forKey: .coverage)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
 }

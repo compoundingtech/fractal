@@ -115,7 +115,8 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         FleetCommand::Migrate(args) => !args.no_service,
         FleetCommand::Transports { command } => match command {
             FleetTransportsCommand::Add { no_service, .. }
-            | FleetTransportsCommand::Remove { no_service, .. } => !*no_service,
+            | FleetTransportsCommand::Remove { no_service, .. }
+            | FleetTransportsCommand::Prefer { no_service, .. } => !*no_service,
         },
         _ => false,
     };
@@ -459,7 +460,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 "This member is now {}; it announces the change when its replication worker starts.",
                 file.mode.as_str()
             );
-            refresh_fleet_worker(args.no_service)?;
+            refresh_fleet_services(args.no_service)?;
             Ok(())
         }
         FleetCommand::Transports { command } => {
@@ -648,15 +649,15 @@ async fn save_and_publish_fleet_settings(
             },
         )
         .await
-        .context("fleet.toml saved; endpoint publication did not complete; restart the replication worker to announce the saved settings")?;
+        .context("fleet.toml saved; endpoint publication did not complete; restart st3 daemon and st3 replication-worker to apply saved relay settings and announce the saved endpoints")?;
     Ok(())
 }
 
-fn refresh_fleet_worker(no_service: bool) -> Result<()> {
+fn refresh_fleet_services(no_service: bool) -> Result<()> {
     if !no_service && services_installed()? {
         fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
     } else {
-        println!("Restart st3 replication-worker for the change to take effect.");
+        println!("Restart st3 daemon and st3 replication-worker for the change to take effect.");
         println!(
             "The old worker no longer publishes endpoints after its settings change; restart it to resume publication."
         );
@@ -679,14 +680,37 @@ async fn run_fleet_transports(
     );
     let transport = match &command {
         FleetTransportsCommand::Add { transport, .. }
-        | FleetTransportsCommand::Remove { transport, .. } => transport,
+        | FleetTransportsCommand::Remove { transport, .. }
+        | FleetTransportsCommand::Prefer { transport, .. } => transport,
     };
     let enabled = file
         .transports
         .iter()
         .any(|configured| configured == transport);
-    // A repeated add never reconfigures an existing exposure, even with a different flag.
-    if matches!(&command, FleetTransportsCommand::Add { .. }) && enabled {
+    if matches!(&command, FleetTransportsCommand::Prefer { .. }) {
+        anyhow::ensure!(
+            enabled,
+            "{transport} is not enabled on this member; preference only reorders enabled transports"
+        );
+        if file.transports.first() == Some(transport) {
+            println!("{transport} is already preferred.");
+            return Ok(());
+        }
+    }
+    // Re-adding can change local preference, but never reconfigures the exposure.
+    if let FleetTransportsCommand::Add {
+        prefer, no_service, ..
+    } = &command
+        && enabled
+    {
+        if *prefer && file.transports.first() != Some(transport) {
+            file.transports.retain(|configured| configured != transport);
+            file.transports.insert(0, transport.clone());
+            file.save(&config.state_dir)?;
+            drop(lock);
+            println!("Fabric is now preferred; its existing protocol is unchanged.");
+            return refresh_fleet_services(*no_service);
+        }
         println!("Fabric is already enabled; remove it before changing its protocol.");
         return Ok(());
     }
@@ -705,8 +729,23 @@ async fn run_fleet_transports(
         .clone()
         .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
     let no_service = match command {
+        FleetTransportsCommand::Prefer {
+            transport,
+            no_service,
+        } => {
+            let index = file
+                .transports
+                .iter()
+                .position(|configured| configured == &transport)
+                .expect("preferred transport was checked as enabled");
+            file.transports[..=index].rotate_right(1);
+            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            println!("{transport} is now preferred; transport exposure is unchanged.");
+            no_service
+        }
         FleetTransportsCommand::Add {
             fabric_protocol,
+            prefer,
             no_service,
             ..
         } => {
@@ -738,7 +777,11 @@ async fn run_fleet_transports(
                 .expose(&protocol, &format!("127.0.0.1:{port}"))
                 .await
                 .context("Fabric exposure failed; fleet settings and endpoints are unchanged")?;
-            file.transports.push("fabric".into());
+            if prefer {
+                file.transports.insert(0, "fabric".into());
+            } else {
+                file.transports.push("fabric".into());
+            }
             file.fabric_protocol = Some(protocol.clone());
             endpoints.retain(|endpoint| endpoint["transport"] != "fabric");
             endpoints.push(json!({"transport":"fabric", "node":node, "protocol":protocol}));
@@ -790,8 +833,8 @@ async fn run_fleet_transports(
                 None => Err(anyhow::anyhow!("fabric is not installed")),
             };
             drop(lock);
-            // Refresh even when cleanup fails: no worker may keep using the removed carrier.
-            refresh_fleet_worker(no_service)?;
+            // Refresh even when cleanup fails: relay and worker must stop using the carrier.
+            refresh_fleet_services(no_service)?;
             if let Err(error) = result {
                 println!(
                     "Fabric endpoint removed; unexposure still needs cleanup: {error:#}. When Fabric is available, run fabric unexpose {protocol}"
@@ -805,7 +848,7 @@ async fn run_fleet_transports(
         }
     };
     drop(lock);
-    refresh_fleet_worker(no_service)
+    refresh_fleet_services(no_service)
 }
 
 /// Settings for a migrating node: its existing replication port unless one is given.

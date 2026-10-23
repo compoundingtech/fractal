@@ -66,6 +66,8 @@ Use these documents for implementation details:
   asks natively, as ids and option positions without text, retaining compact ended records forever.
 - [Model accounts](accounts.md) explains how a person declares several Claude and Codex accounts, how a
   seat binds one or a pool, and how a pooled seat at its limit restarts on another account.
+- [Demos](demos.md) explains `st demo play`: a seeded, scripted demo in the terminal interface,
+  in its own instance, with timed and key-paced beats and no model tokens.
 - [Instances](instances.md) explains `--instance NAME`: a second, fully separate st on one machine
   with its own state, sockets, service names and harness accounts, and the uninstall that removes it.
 - [Sekrets](sekrets.md) explains the opt-in gateway that runs any CLI with a credential no seat

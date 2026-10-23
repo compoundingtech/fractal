@@ -2628,6 +2628,8 @@ as waiting records until upgrade; see [rolling upgrades](../replication.md#rolli
 
 `agent.retire` permanently retires the identity at its declaring host. It requires `{ "agent": "agent/example/worker", "reason": "Work finished" }`, a selected desired claim ID in `fence.runtime_desired_revision`, and a stable idempotency key. Optional `runtime_incarnation` fences a selected process. Rust provides `agent_retire`; Swift and TypeScript provide `agentRetire`. See [terminal retirement](../agent-retirement.md) for the coordinated registry rollout and locally known retirement rule. Fresh sends to a known retired agent return 409 `recipient-retired` with `applied: "none"` and a typed `details.refusal.variant: "Retired"`. Exact accepted retries return their receipt; a lost reply remains unconfirmed. `lifecycle-unavailable` concerns incomplete/conflicting local evidence, never an offline owner alone.
 
+`agent.retire.parameters.successor` optionally names an existing eligible agent. It is recorded in the signed retirement claim after the all-member registry gate. The successor's read and close claims carry `acting_for` and the retirement claim as evidence; `Agent.mail_custody` reports `{ successor, state: "pending" }` for OLD. Numeric unread counts and completion are not available in this increment.
+
 ### Exchange carrier observations
 
 `SyncPeer` may include `last_successful_exchange` and `last_failed_exchange`, each
@@ -2645,3 +2647,28 @@ them. Idle receipts outside the sync notice set do not notify client streams;
 repeated same-carrier failures likewise stay quiet when the graph is unchanged. Existing sync notice conditions
 remain the same. Older servers omit these optional fields; older clients ignore
 the additions. No API version, scope, operation or claim shape changes.
+
+## Schedule standby public read change set
+
+Compatibility **changed**: the optional standby declaration adds an optional
+`schedule_standby` local observation to CLI subject show/history. The exact legacy
+status route exposes it inside the existing open JSON `SubjectStatus.actual`
+object as `actual.schedule_standby`; it does not add a required generated-client
+resource or operation. Existing occurrence scheduled/reached claim bodies gain
+optional `standby` detail and `reason`. These additions keep the same claim kinds.
+
+Fields: `primary_host`, `standby_host`, `after_ms`, `eligibility`, `reason`,
+nullable `primary_heartbeat_age_ms`, `heartbeat_basis`, `observed_primary_view`,
+`run_twice_warning` and `cold_standby_limit`. A current local observation is not
+a converged eligibility assertion or exclusive lease. Historical reads label
+eligibility unknown and do not inject a current heartbeat age. History remains
+JSON lines of original claims/events with the optional observation field; an
+empty history still has no claims. Use subject show to read its current warnings.
+
+Jobs must be safe to run twice. The declaration guide, subject show (structured
+and text), history and release note expose the same cold-standby limitation:
+
+If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
+
+Hosted validation must run `cargo run -p st3-client-codegen -- --check`. Generated
+files remain generated; do not hand-edit clients for open JSON observation detail.

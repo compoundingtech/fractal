@@ -28,6 +28,7 @@ pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
 pub mod declarations;
+pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
 pub mod directive_notes;
@@ -40,6 +41,7 @@ pub mod arrangements_tests;
 pub mod authored_pull_requests_tests;
 #[cfg(test)]
 pub mod schedule_active_run_tests;
+pub mod schedule_standby;
 pub mod glasses;
 pub mod mailbox_wakes;
 pub mod mailbox_changes;
@@ -176,6 +178,7 @@ pub use smallclaims::store::{
     configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
     newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
 };
+use smallclaims::windows::holds;
 
 
 pub mod accounts;
@@ -196,6 +199,7 @@ pub mod summary_list;
 // Registration stays opt-in until the shared installer certifies every source family.
 pub mod attention_ivm;
 pub mod backup;
+pub mod backup_ledgers;
 pub mod checkpoint_rules;
 pub mod harness_questions;
 pub mod checkpoint_status;
@@ -1972,6 +1976,7 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 /// keeps the caches of its projections and plugs its claim kinds into the graph.
 pub struct Store {
     pub graph: GraphStore,
+    pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub smalltalk: Arc<SmalltalkRuntime>,
 }
 
@@ -2335,7 +2340,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, standby_observations: Default::default() })
     }
 
     /// Open explicitly registered shadow views beside Smalltalk's production admission and
@@ -2350,7 +2355,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, standby_observations: Default::default() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2362,7 +2367,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, standby_observations: Default::default() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -2827,6 +2832,7 @@ impl Store {
                     return cache_local_apply_receipt_tx(transaction,
                         serde_json::from_str(&response).map_err(internal)?,local_receipt,idempotency_key);
                 }
+                schedule_standby::validate_publication(transaction, &self.origin, intent)?;
                 crate::provenance::validate_publication(transaction, intent)?;
                 message_subscriptions::validate(transaction, intent, current_index_tx(transaction).map_err(internal)?)?;
                 let owned_plan = owned.map(|options| owned_sets::plan_tx(transaction, intent, options)).transpose()?;
@@ -5412,6 +5418,24 @@ impl Store {
         WHERE started.subject=?1 AND started.kind='schedule.work-started'
           AND run.status NOT IN ('completed','cancelled','failed')
     )";
+
+    /// The newest claim of `kind` on `subject` in canonical order, never by arrival: members that
+    /// admitted the same claims in another order name the same one.
+    pub fn newest_claim_for_subject_kind(&self, subject: &str, kind: &str) -> Result<Option<ClaimRecord>> {
+        let connection = self.readers.get();
+        Ok(connection
+            .query_row(
+                /* sqlite-large-value: allow-for-now lv-h7c545c3d21a9 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+                    "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+                 FROM claims INDEXED BY claims_subject_kind_accepted_index
+                 WHERE subject=?1 AND kind=?2
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+                ),
+                params![subject, kind],
+                claim_from_row,
+            )
+            .optional()?)
+    }
 
     /// Bounded claim history for one subject/kind projection, backed by the composite index.
     pub fn claims_for_subject_kind_at(
@@ -9007,6 +9031,7 @@ pub fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
+    holds::rebuilt(claim_ids.len());
     clear_quarantined_claims_tx(transaction, "projection:planning")?;
     for id in claim_ids {
         let claim = claim_by_id_tx(transaction, &id)?
@@ -9300,7 +9325,8 @@ fn validate_message_transition(
             .filter(|kind| *kind == "message")
             .map(|_| "sent")
     };
-    if requested != "sent" && current == Some(requested) {
+    if requested != "sent" && current == Some(requested)
+        && !(requested == "read" && input.fields.contains_key("acting_for")) {
         if input.fields.contains_key("delegation") {
             return Err(St3Error::new(
                 "delegation-refused",
@@ -9338,6 +9364,23 @@ fn validate_message_transition(
             | (Some("delivered"), "read")
             | (Some("read"), "closed")
     );
+    let custody_read = requested == "read"
+        && input.fields.contains_key("acting_for")
+        && matches!(current, Some("sent" | "staged" | "read"));
+    if custody_read && current == Some("read") {
+        // OLD may have read the mail before retirement. NEW still needs its own signed
+        // receipt, but a different key must not create unlimited duplicate NEW reads.
+        let prior: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+             WHERE subject=?1 AND kind='message.read' AND actor=?2
+               AND json_extract(body,'$.fields.acting_for')=?3)",
+            params![input.subject, input.actor, input.fields.get("acting_for").and_then(Value::as_str)],
+            |row| row.get(0),
+        ).map_err(internal)?;
+        if prior {
+            return Err(St3Error::new("invalid-message-transition", "custody read is already recorded"));
+        }
+    }
     // A person's displayed message has no native harness handoff. Its explicit read receipt
     // is also delivery evidence; only the actual person recipient may skip that boundary.
     let person_read = if requested == "read"
@@ -9372,7 +9415,7 @@ fn validate_message_transition(
         && requested == "closed"
         && input.actor.as_deref() == Some("daemon/runtime");
     let delegated_close = requested == "closed" && input.fields.contains_key("delegation");
-    if !valid && !person_read && !daemon_withdrawal && !delegated_close {
+    if !valid && !custody_read && !person_read && !daemon_withdrawal && !delegated_close {
         return Err(St3Error::new(
             "invalid-message-transition",
             format!(
@@ -14343,6 +14386,7 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
         )
         .collect::<BTreeSet<_>>();
     let claims = claims_in_replay_order_tx(transaction, &subjects, &generations, None)?;
+    holds::rebuilt(claims.len());
     for run in runs {
         for table in [
             "step_runs",
@@ -14439,6 +14483,7 @@ fn rebuild_base_aggregate_tx(
         &BTreeSet::new(),
         Some(&[kind]),
     )?;
+    holds::rebuilt(claims.len());
     for claim in &claims {
         project_claim_isolated_tx(transaction, "projection:base", claim, || {
             match claim.kind.as_str() {
@@ -14999,12 +15044,16 @@ pub fn try_project_simple_replication_tx(
         reconcile_carried_step_tx(transaction, claim)
             .map_err(|error| incremental_claim_error(error, claim, "claim-project"))?;
     }
-    // Missions first, since a rebuilt run reads the revision it runs.
+    // Missions first, since a rebuilt run reads the revision it runs. Each rebuild is a stage of
+    // a staged projection lend, so its hold says which kind of rebuild took its time.
     let (trees, bases): (Vec<_>, Vec<_>) = dirty
         .iter()
         .partition(|aggregate| matches!(aggregate, Aggregate::RunTree(_) | Aggregate::RunPart(_)));
     for aggregate in bases {
-        rebuild_base_aggregate_tx(transaction, aggregate).map_err(|error| {
+        holds::stage("rebuild-base", || {
+            rebuild_base_aggregate_tx(transaction, aggregate)
+        })
+        .map_err(|error| {
             let subject = match aggregate {
                 Aggregate::Desired(subject)
                 | Aggregate::Document(subject)
@@ -15018,8 +15067,14 @@ pub fn try_project_simple_replication_tx(
     }
     for aggregate in trees {
         let (rebuilt, root) = match aggregate {
-            Aggregate::RunTree(root) => (rebuild_run_tree_tx(transaction, root), root),
-            Aggregate::RunPart(top) => (rebuild_run_part_tx(transaction, top), top),
+            Aggregate::RunTree(root) => (
+                holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root)),
+                root,
+            ),
+            Aggregate::RunPart(top) => (
+                holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top)),
+                top,
+            ),
             _ => continue,
         };
         rebuilt.map_err(|error| {
@@ -15029,7 +15084,7 @@ pub fn try_project_simple_replication_tx(
         })?;
     }
     if rebuild_planning {
-        rebuild_planning_tx(transaction)
+        holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
             .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?;
     }
     owned_sets::project_tx(transaction)
@@ -19828,6 +19883,7 @@ pub fn append_claim_with_commit_context(
                 input.fields.get("to").and_then(Value::as_str),
             )?;
         }
+        retirements::admit_mail_claim(connection, input)?;
         Ok(())
     };
     if context.assistant.is_none() {
@@ -19835,7 +19891,12 @@ pub fn append_claim_with_commit_context(
             input.fields.get("from").and_then(Value::as_str),
             ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| input.fields.contains_key(*key)))?;
     }
-    validate_claim_input(input)?;
+    // Retirement alone validates in its serialized admission after the operation replay
+    // check. Its successor eligibility refusal must win over a generic field-reference
+    // error, while a changed idempotency key must still report a mismatch first.
+    if !context.retirement_writer {
+        validate_claim_input(input)?;
+    }
     if local_retention(&input.kind)
         || (input.actor.is_none() && system_local_retention(&input.kind))
     {

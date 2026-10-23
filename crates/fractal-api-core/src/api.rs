@@ -1,3 +1,4 @@
+use crate::RetirementsStore;
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
 use crate::ConversationReadsStore;
@@ -169,6 +170,19 @@ pub fn raw_terminal_owner_splice(
 }
 
 pub use crate::delivery_presence::claude_channel_attached;
+
+/// The same answer as `claude_channel_attached`, with the delivery binding that proves it and
+/// the instant the proof lapses by itself. Both come from one presence predicate, so a push
+/// stream's deadline cannot drift from what the poll answers.
+pub fn claude_channel_attachment(
+    store: &Store,
+    subject: &str,
+    incarnation: &str,
+) -> Option<(crate::mailbox::Fence, tokio::time::Instant)> {
+    delivery_presence::attachment_window(subject, incarnation)
+        .filter(|(_, until)| tokio::time::Instant::now() <= *until)
+        .filter(|(fence, _)| store.check_mailbox(fence).is_ok())
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -378,6 +392,7 @@ impl ApiError {
             | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
+            | "custody-pending"
             | "stale-subject"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -1707,6 +1722,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         "recipient-retired"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
+        | "invalid-custody-successor"
+        | "custody-pending"
         | "not-found"
         | "forbidden"
         | "attention-migrated"
@@ -3171,10 +3188,20 @@ fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
     let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), local_host) else {
         return;
     };
+    // Eligibility above already required a live local native seat with an id.
+    let attachment_push = (item["driver"].as_str() == Some("claude")).then(|| {
+        delivery_presence::attachment_push(
+            item["id"].as_str().unwrap_or_default(),
+            item["incarnation_id"].as_str(),
+        )
+    });
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
     item["delivery"] = assessment.to_value();
+    if let Some(attachment_push) = attachment_push {
+        item["delivery"]["attachment_push"] = Value::String(attachment_push.into());
+    }
 }
 
 /// Share the live/local/native eligibility with scalar readers such as assistant summary
@@ -3639,6 +3666,13 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            // Fold the point read into a cached card. Presentation of a warm roster page
+            // must not repeat one retirement query for every retired row.
+            if state == "retired"
+                && let Some(custody) = store.mail_custody_status(&subject.subject).map_err(anyhow::Error::new)?
+            {
+                value["mail_custody"] = custody;
+            }
             if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));

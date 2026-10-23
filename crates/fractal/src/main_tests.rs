@@ -975,10 +975,15 @@ fn conversations_ls_accepts_the_read_spelling_of_its_mailbox() {
         panic!("conversations ls")
     };
     assert_eq!(args.actor.as_deref(), Some("agent/run-1/worker"));
-    assert!(
-        Cli::try_parse_from(["st3", "conversations", "ls", "agent/a", "--as", "agent/b"])
-            .is_err()
-    );
+    let cli = Cli::try_parse_from([
+        "st3", "conversations", "ls", "agent/a", "--as", "agent/b",
+    ])
+    .expect("named successor may list the retired mailbox as itself");
+    let Command::Conversations { command: MessageCommand::Ls(args) } = cli.command else {
+        panic!("conversations ls")
+    };
+    assert_eq!(args.identity.as_deref(), Some("agent/a"));
+    assert_eq!(args.actor.as_deref(), Some("agent/b"));
 }
 
 #[test]
@@ -1072,6 +1077,7 @@ async fn message_pages_encode_filters_and_preserve_unfiltered_delivery_queries()
         from: Some("person/operator"),
         subject: Some("Review: café & ready?"),
         subject_prefix: None,
+        acting_as: None,
     };
     for cursor in [None, Some("opaque+/=&cursor")] {
         message_page_filtered(&client, Some("agent/reader"), true, cursor, None, filters)
@@ -1088,6 +1094,7 @@ async fn message_pages_encode_filters_and_preserve_unfiltered_delivery_queries()
             from: None,
             subject: None,
             subject_prefix: Some("Review_%/"),
+            acting_as: None,
         },
     )
     .await
@@ -1706,6 +1713,11 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             claude_attachment_reconciled: false,
             claude_attachment_terminal: None,
             claude_readiness_fallback: ClaudeReadinessFallback::default(),
+            claude_attachment_admissions: AdmissionBucket {
+                binding: Some(("incarnation".into(), 4, "token".into())),
+                tokens: 0,
+                refilled_at_ms: 1_234,
+            },
             settle: ResumeSettle::resumed(),
         },
     };
@@ -1717,6 +1729,13 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert_eq!(back.loop_state.delivery_episode, 2);
     assert_eq!(back.loop_state.claude_attachment_phase, "blocked");
     assert_eq!(back.loop_state.claude_attachment_episode, 3);
+    // An empty admission bucket survives re-exec: a re-exec grants no fresh burst.
+    let admissions = &back.loop_state.claude_attachment_admissions;
+    assert_eq!(
+        admissions.binding,
+        Some(("incarnation".into(), 4, "token".into()))
+    );
+    assert_eq!((admissions.tokens, admissions.refilled_at_ms), (0, 1_234));
     assert_eq!(
         back.loop_state.published_timeline,
         resume.loop_state.published_timeline
@@ -2490,6 +2509,8 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
 
 #[test]
 fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
+    #[cfg(test)]
+    const SCHEDULES_SOURCE: &str = include_str!("schedules_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -2503,6 +2524,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
+        ("schedules", SCHEDULES_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
         ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
@@ -5292,6 +5314,56 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         .unwrap();
     assert_eq!(archived.status, "closed");
 
+    server.abort();
+}
+
+#[tokio::test]
+async fn successor_who_sent_mail_still_signs_one_custody_read() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let store = Arc::new(Store::open_memory("custody-sender").unwrap());
+    use fractal_daemon::{RetirementsStore as _, SeatsStoreCore as _};
+    let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = fractal_daemon::parse_intent(source, store.origin()).unwrap();
+    store.apply_internal(&intent, "custody-sender-fixture").unwrap();
+    let message = store.append_claim(&ClaimInput {
+        subject: "message/custody-sender".into(), kind: "message.sent".into(),
+        actor: Some("agent/example/new".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("agent/example/new")),
+            ("to".into(), json!("agent/example/old")),
+            ("content".into(), json!("A note before retirement")),
+            ("status".into(), json!("sent")),
+        ]), evidence: vec![], expected_subject: None,
+        idempotency_key: Some("custody-sender-send".into()),
+    }).unwrap();
+    let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
+        &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
+    let state = AppState {
+        store: store.clone(), notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
+        state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
+        client_relay: None, native_session_home: None, owning_person: None,
+        planner_default: PlannerSpec::default(),
+    };
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(socket.exists());
+    let client = Client::unix(&socket);
+    assert_eq!(read_message(&client, &message.subject).await.unwrap().status, "sent");
+    let read = read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
+    let signed = store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap();
+    assert_eq!(signed.actor.as_deref(), Some("agent/example/new"));
+    assert_eq!(signed.body["fields"]["acting_for"], "agent/example/old");
+    assert_eq!(read.status, "read");
+    read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
+    assert_eq!(store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap().id, signed.id);
     server.abort();
 }
 
