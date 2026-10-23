@@ -67,12 +67,19 @@ LOCAL = {
     'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries'],
     # The VM tests: CI's isolation-vm job, with the test archive and gateway it downloads built in place (needs /dev/kvm).
     'isolation-vm': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'isolation-vm'],
+    # The web lane as ONE shard that covers every kit play and app test (scripts/ci-local-web); it runs only when a web input changed.
+    'fractal-web': ['nix', 'develop', '.#web', '-c', 'bash', 'scripts/ci-local-web'],
 }
 # Checks that build and test the Rust workspace: tens of minutes of a shared host. They run only when named (--check) or with
 # --all, never by default, so the pre-push hook keeps signing the light checks within its wait.
-HEAVY = frozenset({'mail-redelivery-canaries', 'linux-gate', 'isolation-vm'})
+HEAVY = frozenset({'mail-redelivery-canaries', 'linux-gate', 'isolation-vm', 'fractal-web'})
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate'})
+# What the fractal-web note records about the run, as CI's aggregate note does (scripts/ci-evidence-signing): one shard, every kit
+# play and app test, for a pull request. The verifier's shard-count and input-order rules read these.
+WEB = 'fractal-web'
+WEB_INPUTS = {'kit_shard_count': '1', 'shard_results': '0=success', 'kit_inputs': 'true', 'kit_play_set': 'all',
+              'app_test_set': 'all', 'event_name': 'pull_request'}
 BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
 # The heavy checks build in one cargo target per host (~/.cache/st-test-target, or ST_EVIDENCE_TARGET), kept between runs, so a run
 # does not start cold: every run's worktree is new, so the workspace's own crates rebuild, but the dependencies do not. It lives
@@ -198,6 +205,30 @@ def governed(argv, name):
     return prefix + argv
 
 
+def web_unchanged(base):
+    """Why CI would not run the fractal-web lane for HEAD: no web-relevant path changed since HEAD's merge base with the accepted base,
+    by the base's own scripts/ci-fractal-web-changes rules. None when one did, or when that cannot be told (then the lane runs)."""
+    source = git('show', f'{base}:scripts/ci-fractal-web-changes', check=False)
+    start = git('merge-base', base, 'HEAD', check=False)
+    if source.returncode or start.returncode:
+        return None
+    diff = git('diff', '--name-only', '--no-renames', '-z', text(start), 'HEAD', check=False)
+    if diff.returncode:
+        return None
+    with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
+        path = Path(scratch) / 'ci_fractal_web_changes.py'
+        path.write_bytes(source.stdout)
+        try:
+            loader = importlib.machinery.SourceFileLoader('ci_fractal_web_changes_for_st_test', str(path))
+            module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(module)
+            changed = [name for name in diff.stdout.decode().split('\0') if name]
+            relevant = module.relevant_paths(changed)
+        except Exception:
+            return None
+    return None if relevant else f'no web input changed since {text(start)[:12]}: CI does not run the lane'
+
+
 def lane_names(base):
     """The lanes the accepted base defines in .st/required-lanes.json (none when the file is absent or unreadable: then nothing changes)."""
     done = git('show', f'{base}:.st/required-lanes.json', check=False)
@@ -208,6 +239,15 @@ def lane_names(base):
         return set(lanes) if isinstance(lanes, dict) else set()
     except (ValueError, KeyError, UnicodeDecodeError, TypeError):
         return set()
+
+
+def policy_checks(base):
+    """The checks the accepted base's skip policy names (none when it is absent or unreadable)."""
+    done = git('show', f'{base}:.st/evidence-skip-policy.json', check=False)
+    try:
+        return list(json.loads(done.stdout.decode())['checks']) if done.returncode == 0 else []
+    except (ValueError, KeyError, UnicodeDecodeError, TypeError):
+        return []
 
 
 def lane_edits(verifier_path, directory, base, check, tree):
@@ -354,7 +394,8 @@ def main(argv):
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
     parser.add_argument('--all', action='store_true', help='with no --check: the heavy checks too (' + ', '.join(sorted(HEAVY)) + ')')
-    parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree; exit 0 if all are, 3 if not')
+    parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree (a lane edit, '
+                        'and with --all a policy check that has no local command, count as covered: CI runs them); exit 0 if all are, 3 if not')
     parser.add_argument('--toolchain-sha256', help='passed to evidence-wrap: skip the nix evaluation, record this digest')
     args = parser.parse_args(argv)
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._/-]*', args.base):
@@ -379,9 +420,23 @@ def main(argv):
             verifier = Path(scratch) / 'evidence-verify'
             verifier.write_bytes(git('show', f'{args.base}:scripts/evidence-verify').stdout)
             repository = args.repository or repository_of(remote or 'origin')
-            rows = [(name,) + covered(str(verifier), Path('.'), tree, name, args.base, repository) for name in checks]
-        for name, is_covered, why in rows:
-            print(f'  {name:<20} {"covered" if is_covered else "not covered":<12} {why}')
+            lanes, rows = lane_names(args.base), []
+            for name in checks:
+                # A tree that edits a check's lane cannot be signed here (evidence-wrap refuses it): CI runs that check.
+                edits = lane_edits(str(verifier), Path('.'), args.base, name, tree) if name in lanes else []
+                unchanged = web_unchanged(args.base) if name == WEB else None
+                if edits:
+                    rows.append((name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})'))
+                elif unchanged:
+                    rows.append((name, True, 'not relevant', unchanged))
+                else:
+                    is_covered, why = covered(str(verifier), Path('.'), tree, name, args.base, repository)
+                    rows.append((name, is_covered, 'covered' if is_covered else 'not covered', why))
+            if args.all and not args.check:
+                # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
+                rows += [(name, True, 'CI runs it', 'no local command') for name in policy_checks(args.base) if name not in LOCAL]
+        for name, is_covered, label, why in rows:
+            print(f'  {name:<24} {label:<22} {why}')
         return 0 if all(row[1] for row in rows) else 3
     status = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
     if status:
@@ -418,6 +473,10 @@ def main(argv):
                     rows.append((name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'))
                     unsigned = True
                     continue
+                unchanged = web_unchanged(args.base) if name == WEB else None
+                if unchanged:
+                    rows.append((name, 'not relevant', 0, unchanged))  # nothing to run, nothing to sign: not a failure
+                    continue
                 wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
                         '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
                 if name in lanes:
@@ -433,6 +492,8 @@ def main(argv):
                     # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.
                     wrap += ['--input', f'clippy_base_sha={base_commit}']
                     environment = dict(environment or os.environ, CLIPPY_BASE_SHA=base_commit)
+                if name == WEB:
+                    wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
                 started = time.monotonic()
                 try:
                     command = wrap + ['--'] + LOCAL[name]

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Pre-push: when the tree about to be tested has no signed evidence, produce it, then let the push go.
+"""Pre-push: an agent's push goes only when its tree is covered by signed evidence; anyone else's is signed here, then goes.
+
+An agent (ST_AGENT set) on a machine whose signer is listed on main runs the tests deliberately, with `scripts/st-test --all
+--push REMOTE`, before it pushes: that runner signs what it ran. This hook only asks `scripts/st-test --status --all` whether
+HEAD's tree is covered for every check. Covered (a note, a lane edit CI runs, a check with no local command) and the push goes,
+silently; otherwise the push is REFUSED (git sees exit 1) with the uncovered checks and the command to run. The hook never runs signing
+for an agent. ST_EVIDENCE_OVERRIDE='reason' lets such a push go anyway: one line is printed and the receipt records outcome
+`override` with the reason; `git push --no-verify` stays git's own escape. A machine without a signer, or without one listed
+on main, keeps the behaviour below, as does a push by a person (no ST_AGENT).
 
 When you push the branch you have checked out, `scripts/st-test --status` says whether its head tree is covered. If
 every check that has a local command is covered the push goes, silently. If not, `scripts/st-test --push REMOTE` runs the checks
@@ -11,9 +19,11 @@ are: st-test runs `nix develop`, `pnpm install` and the tests of the pushed comm
 tree's code does run on this machine, as you, with your signing key within reach. That is what testing it means on a
 machine we trust (cooperative trust, known defect 22); it is not something the base-pinned hook protects against.
 
-  * It never blocks a push. Every failure path (an exception, a missing python3, a hung fetch, a signer that refuses,
+  * Apart from an agent's refusal above, it never blocks a push. Every failure path (an exception, a missing python3, a hung fetch, a signer that refuses,
     a failing check, a timeout) is printed and the push goes. Ctrl-C stops the run and everything under it (its process
     group) and the hook exits 0; `git push` itself gets the same Ctrl-C from the terminal, so the push ends there.
+  * ST_SKIP_EVIDENCE=1 and ST_EVIDENCE_LOCAL=off do not apply to an agent whose signer is listed (above): its push is covered,
+    overridden or refused.
   * ST_SKIP_EVIDENCE=1 means "do not wait": the push goes at once and the same signing runs in the background, as it does after
     the agent wait; a CI run that starts before a note is there runs that check in full.
   * ST_EVIDENCE_LOCAL=off means no local signing work at all (for a seat or unit where local builds are fenced): the hook says so
@@ -21,8 +31,8 @@ machine we trust (cooperative trust, known defect 22); it is not something the b
   * ST_EVIDENCE_TIME_LIMIT=SECONDS bounds the signing run (default 1200, must be a positive integer); past it the run
     is stopped (TERM, then KILL of the whole process group), that is printed, and the push goes. ST_EVIDENCE_STATUS_TIMEOUT
     bounds the "is it covered" question (default 60 s).
-  * An agent (ST_AGENT set, or no terminal on stderr) runs `git push` inside a tool call with a short timeout, so there
-    the hook waits at most ST_EVIDENCE_AGENT_LIMIT seconds (default 300: the light checks' 90th percentile, under the agents'
+  * A push with no terminal on stderr (a script, or an agent on a machine whose signer is not listed) runs inside a call with a
+    short timeout, so there the hook waits at most ST_EVIDENCE_AGENT_LIMIT seconds (default 300: the light checks' 90th percentile, under the agents'
     600 s tool timeout), prints that signing continues in the background with its log path, and lets the push go; the notes
     are pushed when the run finishes. Each note is pushed as soon as its check is signed, so a note signed within the wait is
     on the remote before git sends the branch: the first CI run sees it.
@@ -48,6 +58,7 @@ sys.dont_write_bytecode = True
 LIMIT = 1200
 AGENT_LIMIT = 300
 STATUS_LIMIT = 60
+REFUSED = 3  # the installed stub turns this, and only this, into git's refusal (exit 1): a crash never blocks a push
 BASE = 'main'
 CHILD = None
 
@@ -86,10 +97,10 @@ def say_once(name, message):
 STATE = Path.home() / '.local/state/st3/evidence-prepush'
 
 
-def receipt(tree, branches, outcome):
+def receipt(tree, branches, outcome, **extra):
     """One line per push of the checked-out head: what the hook did for it. Append only, never in the way of a push."""
     line = {'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'tree': tree, 'branch': branches[0][len('refs/heads/'):],
-            'agent': os.environ.get('ST_AGENT') or None, 'outcome': outcome}
+            'agent': os.environ.get('ST_AGENT') or None, 'outcome': outcome, **extra}
     try:
         STATE.mkdir(parents=True, exist_ok=True)
         with open(STATE / 'receipts.jsonl', 'a') as out:
@@ -168,6 +179,44 @@ def signer_listed(base):
     return keys.returncode != 0 or any(line.split(' ', 1)[0] == principal for line in keys.stdout.splitlines())
 
 
+def has_signer():
+    return bool(os.environ.get('EVIDENCE_SIGNER')) or (Path.home() / '.config/st/evidence-sign.json').exists()
+
+
+def refuse_unless_covered(script, top, remote, base, tree, pushed):
+    """An agent's push: it goes when st-test --status --all says HEAD's tree is covered (or on a logged override), else it is
+    refused with what to run. Nothing is signed here: the agent runs the tests itself."""
+    reason = (os.environ.get('ST_EVIDENCE_OVERRIDE') or '').strip()
+    if reason:
+        say(f'ST_EVIDENCE_OVERRIDE: pushing a tree that may not be covered ({reason}); recorded')
+        receipt(tree, pushed, 'override', reason=reason)
+        return 0
+    command = f'scripts/st-test --all --push {remote}'
+    try:
+        status = subprocess.run([sys.executable, str(script), '--status', '--all', '--base', base], capture_output=True, text=True,
+                                cwd=top, env=clean_environment(), timeout=positive('ST_EVIDENCE_STATUS_TIMEOUT', STATUS_LIMIT))
+    except subprocess.TimeoutExpired:
+        status = None
+    if status is not None and status.returncode == 0:
+        receipt(tree, pushed, 'covered')
+        return 0
+    if status is None or status.returncode != 3:
+        problem = 'it did not answer in time' if status is None else (status.stderr or status.stdout).strip()[-300:]
+        say(f'refused: could not tell whether this tree ({tree[:12]}) is covered ({problem}). Try the push again; '
+            f'if it still cannot tell, run `{command}` first')
+        receipt(tree, pushed, 'refused', uncovered=None)
+        return REFUSED
+    uncovered = [line.split()[0] for line in status.stdout.splitlines() if ' not covered ' in f'{line} ']
+    say(f'refused: this tree ({tree[:12]}) is not covered for: {", ".join(uncovered) or "(see below)"}')
+    print(status.stdout.rstrip(), file=sys.stderr)
+    say(f'run the tests here, which signs what they ran, then push again:\n\n    {command}\n\n'
+        'It is a long command (the heavy checks build and test the Rust workspace; this machine\'s build cap queues it): run it '
+        'as a normal long or background shell command and wait for it to finish. Only in an emergency: '
+        "ST_EVIDENCE_OVERRIDE='why' on the push lets it go and records the reason.")
+    receipt(tree, pushed, 'refused', uncovered=uncovered)
+    return REFUSED
+
+
 def hook(argv):
     global CHILD
     if os.environ.get('ST_EVIDENCE_IN_HOOK'):
@@ -195,17 +244,20 @@ def hook(argv):
         receipt(tree, pushed, name)
         return 0
 
+    script = Path(__file__).resolve().parent / 'st-test'
+    if os.environ.get('ST_AGENT') and has_signer() and script.exists() and remote in git('remote').stdout.split() \
+            and signer_listed(f'{remote}/{BASE}'):
+        return refuse_unless_covered(script, top, remote, f'{remote}/{BASE}', tree, pushed)
     if os.environ.get('ST_EVIDENCE_LOCAL') == 'off':
         return outcome('local_off', 'ST_EVIDENCE_LOCAL=off: no local signing work for this push; the pull request\'s checks run in CI')
     hurry = os.environ.get('ST_SKIP_EVIDENCE') == '1'  # "do not wait": the push goes at once and the signing runs in the background
-    script = Path(__file__).resolve().parent / 'st-test'
     if not script.exists():
         return outcome('not_signing:no_runner', 'st-test is not next to the hook; not signing')
     if remote not in git('remote').stdout.split():
         return outcome('not_signing:remote_url', f'{remote!r} is not a configured remote name (a URL?); not signing')
     if git('status', '--porcelain', '--untracked-files=no').stdout.strip():
         return outcome('not_signing:dirty', 'uncommitted changes to tracked files: not signing (the note is for the committed tree)')
-    if not os.environ.get('EVIDENCE_SIGNER') and not (Path.home() / '.config/st/evidence-sign.json').exists():
+    if not has_signer():
         say_once('no-signer', 'no signing key is set up on this machine (run scripts/evidence-keygen --name ALIAS and list its line in '
                  '.st/evidence-keys); not signing, the pull request will run in CI. On a machine that stays without a signer, hosted '
                  'CI at the exact head is the proof: push with ST_SKIP_EVIDENCE=1 and say so in the pull request. This is said once '
