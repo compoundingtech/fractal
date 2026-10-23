@@ -16,7 +16,7 @@ verifiers accept both predicate types:
 `https://compounding.tech/fractal/evidence/gate/v1` and
 `https://smalltalk.dev/evidence/gate/v1`. Acceptance of the old URI is the
 permanent signed-history decoder exception named in
-[#3032](https://github.com/compoundingtech/smalltalk/issues/3032); existing signed
+[#3032](https://github.com/compoundingtech/fractal/issues/3032); existing signed
 attestations are never rewritten. All other predicate URIs are rejected.
 The Rust observers and `scripts/evidence-sign` write
 `https://compounding.tech/fractal/evidence/gate/v1`. The dual-URI verifiers

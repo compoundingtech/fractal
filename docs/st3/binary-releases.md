@@ -1,6 +1,6 @@
 # Fractal binary releases
 
-Every pushed Git tag runs **Smalltalk tag release**. Both native builds must pass before a
+Every pushed Git tag runs **Fractal tag release**. Both native builds must pass before a
 GitHub release is published. A release is also published once a day when `main` changed since the
 last one (see [Daily releases](#daily-releases)). A rolling `edge` pre-release follows every green
 `main` commit (see [Edge releases](#edge-releases)). Each release contains:
@@ -15,7 +15,7 @@ Until **2026-11-01**, each target also ships a `smalltalk-<target>.tar.gz` compa
 archive and checksum. Its root directory keeps the historical `smalltalk-<target>`
 name, while the canonical archive uses `fractal-<target>`; all files, modes and links
 otherwise match, and publication verifies both layouts. This bridge is
-`arn:lmig:smalltalk:2026-10-20-release-artifact-aliases` in [#3032](https://github.com/compoundingtech/smalltalk/issues/3032).
+`arn:lmig:smalltalk:2026-10-20-release-artifact-aliases` in [#3032](https://github.com/compoundingtech/fractal/issues/3032).
 Old installers and release consumers can keep their asset names during this window.
 The current download installer prefers `fractal-*` and falls back to `smalltalk-*`
 only on HTTP 404 (for retained tags); checksum or other download failures fail closed.
@@ -28,15 +28,14 @@ archives need neither Nix nor Rust installed. Harness CLIs and their logins rema
 
 ## Install or update
 
-If a populated v0.3.4 store may have unsigned delegation grants, follow the
-[founder signing audit](founder-signing-audit.md) before doctor or restart. Preserve raw state and
-keys first. A build containing prevention #1269 can sign preserved unsealed work; it retains
-signature warnings from already-sealed affected payloads.
+If a populated v0.3.4 store may have unsigned delegation grants, preserve raw state and
+keys before doctor or restart. A build containing prevention #1269 can sign preserved
+unsealed work; it retains signature warnings from already-sealed affected payloads.
 
 Install the latest release with curl; neither GitHub CLI nor Rust is required:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh
 ```
 
 The script detects Linux x86_64 or Apple Silicon macOS, downloads the archive and
@@ -45,7 +44,7 @@ terminal input for the `curl | sh` form. To select an exact release or install
 without opening the interface (`vX.Y.Z` below is a placeholder; choose a published tag):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh -o install.sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh -o install.sh
 sh install.sh --tag vX.Y.Z --no-run
 ```
 
@@ -117,7 +116,7 @@ and combined checksum/source validation. They upload `smalltalk-release` as an A
 (kept 7 days) and never publish a GitHub release, so release breakage fails on `main` and not at tag
 time. Each native job also uploads its own archive and checksum as `release-<target>`, for example
 `release-x86_64-unknown-linux-gnu`; once a main commit's run has succeeded,
-`gh run download RUN_ID --repo compoundingtech/smalltalk --name release-x86_64-unknown-linux-gnu`
+`gh run download RUN_ID --repo compoundingtech/fractal --name release-x86_64-unknown-linux-gnu`
 fetches that commit's Linux archive without building it (find RUN_ID with
 `gh run list --workflow release-smalltalk.yml --branch main --commit SHA`). Tag pushes use the same jobs, then verify that the tag still
 points at the built commit, upload a draft, and publish it only after every asset is present.
@@ -146,7 +145,7 @@ The native runtime suite and documentation tests remain covered.
 
 ## Edge releases
 
-After a `main` run of **Smalltalk tag release** passes every job, its last job (`release-publish-edge`)
+After a `main` run of **Fractal tag release** passes every job, its last job (`release-publish-edge`)
 moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
 one release per commit. It builds nothing: it takes the run's `smalltalk-release` artifact, re-checks the
 checksums and the source recorded in each archive, then replaces the assets (both target archives and
@@ -167,7 +166,7 @@ Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 
 ## Daily releases
 
-**Smalltalk daily release** (`release-daily.yml`) runs at 05:17 UTC and on manual dispatch. It takes the
+**Fractal daily release** (`release-daily.yml`) runs at 05:17 UTC and on manual dispatch. It takes the
 newest `main` commit whose release run succeeded; if that commit is not already in the latest
 release, it re-checks the checksums and sources of that run's `smalltalk-release` artifact, publishes
 those same bytes under the next patch tag (the highest `vX.Y.Z` tag plus one; dispatch with `tag` to
