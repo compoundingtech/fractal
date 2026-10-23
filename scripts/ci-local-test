@@ -194,6 +194,23 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(done.returncode, 9)
         self.assertEqual([call['argv'] for call in calls], [['build', '--locked', '-p', 'fractal-drivers', '--bin', 'ci-hooks-install']])
 
+    def test_the_isolation_vm_stage_runs_its_own_script_in_the_stage_s_home_and_scratch(self):
+        (self.work / 'scripts/ci-local-isolation-vm').write_text(RECORD)
+        done, calls = self.run_local('mail-redelivery-canaries', 'isolation-vm')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        stage_calls = calls[-2:]  # after cargo's hook build and the hook install: ci-linux, then the VM script
+        self.assertEqual([call['argv'] for call in stage_calls], [['mail-redelivery-canaries'], []])
+        vm = stage_calls[-1]
+        self.assertNotEqual(vm['env']['HOME'], str(self.home))
+        self.assertTrue(vm['env']['RUNNER_TEMP'].startswith(self.tmp.name))
+        self.assertIn('ci-local: isolation-vm exit 0', done.stdout)
+
+    def test_the_isolation_vm_script_runs_only_under_ci_local(self):
+        done = subprocess.run(['bash', str(ROOT / 'scripts/ci-local-isolation-vm')], capture_output=True, text=True,
+                              env={k: v for k, v in os.environ.items() if k != 'RUNNER_TEMP'})
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('ci-local-isolation-vm runs under scripts/ci-local', done.stderr)
+
     def test_no_stage_or_a_stage_without_a_local_lane_is_refused_before_anything_runs(self):
         for stages in ((), ('conversation-model',), ('mail-redelivery-canaries', 'nonesuch')):
             with self.subTest(stages):
