@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Exercise scripts/evidence-verify against real Git repositories and real SSH signatures."""
+import contextlib
 import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import re
 import runpy
@@ -500,10 +502,11 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
-ENFORCED = ('typescript-client',)
+ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness')
 # The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
-HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'mail-redelivery-canaries', 'linux-gate', 'isolation-vm'})
-HOST_LANE_BOUND = frozenset({'mail-redelivery-canaries', 'linux-gate', 'isolation-vm'})
+# isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
+HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'linux-gate'})
+HOST_LANE_BOUND = frozenset({'linux-gate'})
 
 
 def policy_text(**overrides):
@@ -1071,6 +1074,68 @@ class LaneDefinitions(unittest.TestCase):
         self.note(commit, tree, older)
         self.assertEqual(self.verdict(tree, lane)[1]['reason'], 'wrong_definition')
 
+    def branch_behind_main(self, change):
+        """A branch made from the first base, then main changes a lane script: (new base commit, branch commit, branch tree)."""
+        self.files({'scripts/run.sh': 'changed on main\n'})
+        newer = self.f.git('rev-parse', 'HEAD')
+        self.f.git('checkout', '-q', '--detach', self.base_commit)
+        commit, tree = self.files(change)
+        return newer, commit, tree
+
+    def test_a_branch_that_only_lags_main_is_held_to_the_definition_at_its_branch_point(self):
+        newer, commit, tree = self.branch_behind_main({'src/code.rs': 'behind\n'})
+        lanes = (json.dumps(LANES), newer)
+        self.assertEqual(evidence_verify.lane_for(str(self.f.repo), tree, lanes, 'unit')['changed'], ['scripts/run.sh'])  # against main
+        lane = evidence_verify.lane_for(str(self.f.repo), tree, lanes, 'unit', self.base_commit)
+        self.assertEqual((lane['changed'], lane['sha256']), ([], self.definition(self.base_tree)['sha256']))
+        self.note(commit, tree, lane['sha256'])
+        code, result = self.verdict(tree, lane)
+        self.assertEqual((code, result['satisfied']), (0, True), result)
+        # the main tip's digest is not this branch's definition
+        tip = evidence_verify.lane_definition(str(self.f.repo), self.f.git('rev-parse', f'{newer}^{{tree}}'), tree, self.rules())['sha256']
+        self.assertNotEqual(tip, lane['sha256'])
+        commit, tree = self.files({'src/code.rs': 'behind, again\n'})
+        lane = evidence_verify.lane_for(str(self.f.repo), tree, lanes, 'unit', self.base_commit)
+        self.note(commit, tree, tip)
+        self.assertEqual(self.verdict(tree, lane)[1]['reason'], 'wrong_definition')
+
+    def test_a_branch_that_edits_its_lane_is_still_a_lane_edit_from_its_branch_point(self):
+        newer, commit, tree = self.branch_behind_main({'scripts/run.sh': 'run, but fewer tests\n'})
+        lane = evidence_verify.lane_for(str(self.f.repo), tree, (json.dumps(LANES), newer), 'unit', self.base_commit)
+        self.assertEqual(lane['changed'], ['scripts/run.sh'])
+        self.note(commit, tree, lane['sha256'])
+        self.assertEqual(self.verdict(tree, lane)[1]['reason'], 'definition_changed')
+
+    def test_the_lane_base_must_be_an_ancestor_of_the_base_with_the_same_lane_file(self):
+        newer, commit, tree = self.branch_behind_main({'src/code.rs': 'side\n'})
+        with self.assertRaises(evidence_verify.Failure) as caught:  # the branch's own commit is not a definition main accepted
+            evidence_verify.lane_for(str(self.f.repo), tree, (json.dumps(LANES), newer), 'unit', commit)
+        self.assertEqual(caught.exception.reason, 'error')
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.lane_for(str(self.f.repo), tree, (json.dumps(LANES), newer), 'unit', 'HEAD')
+        self.assertEqual(caught.exception.reason, 'error')
+        doc = json.loads(json.dumps(LANES))
+        doc['lanes']['unit']['argv'] = ['make', 'test', 'more']
+        self.f.git('checkout', '-q', '--detach', newer)
+        relaned, _ = self.files({'.st/required-lanes.json': json.dumps(doc)})
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.lane_for(str(self.f.repo), tree, (json.dumps(doc), relaned), 'unit', self.base_commit)
+        self.assertEqual(caught.exception.reason, 'definition_changed')
+
+    def test_the_cli_takes_a_lane_base_only_with_a_lane_file_or_a_policy(self):
+        code = evidence_verify.main(['--repo', str(self.f.repo), '--tree', self.base_tree, '--check', 'unit', '--keys', str(self.f.keys),
+                                     '--lane-base', self.base_commit])
+        self.assertEqual(code, 2)
+        newer, commit, tree = self.branch_behind_main({'src/code.rs': 'cli\n'})
+        self.note(commit, tree, self.definition(self.base_tree)['sha256'])
+        argv = ['--repo', str(self.f.repo), '--tree', tree, '--check', 'unit', '--keys', str(self.f.keys), '--lanes-from', newer,
+                '--command', json.dumps(['make', 'test'])]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(evidence_verify.main(argv), 1)
+        self.assertEqual(json.loads(out.getvalue())['reason'], 'definition_changed')
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(evidence_verify.main(argv + ['--lane-base', self.base_commit]), 0, out.getvalue())
+
     def test_definition_changed_when_the_signed_tree_edits_adds_or_deletes_a_listed_blob(self):
         digest = self.definition(self.base_tree)['sha256']
         for change in ({'scripts/run.sh': 'run, but fewer tests\n'}, {'scripts/extra.sh': 'x\n'}, {'config/x.json': None},
@@ -1281,8 +1346,7 @@ class CommittedPolicy(unittest.TestCase):
     def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
         modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')['require'] for check in json.loads(text)['checks']}
-        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'isolation-vm': 'off', 'genie-freshness': 'shadow',
-                                 'mail-redelivery-canaries': 'off', 'fractal-web': 'off'})
+        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'fractal-web': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
             if mode != 'off':
@@ -1306,7 +1370,7 @@ class CommittedPolicy(unittest.TestCase):
             '.github/workflows/main-upkeep.yml', '.github/workflows/main-upkeep.yml.genie.ts', '.github/workflows/workspace-ci.ts',
             'BUCK', 'BUCK.genie.ts', 'apps/fractal-web', 'buck2', 'clients/typescript/fractal-client', 'clients/typescript/fractal-scenarios',
             'clients/typescript/fractal-views', 'docs/st3/client-v0/schemas', 'fixtures', 'flake.lock', 'flake.nix', 'megarepo.kdl',
-            'megarepo.lock', 'nix/web-shell-inputs.json', 'nix/web-shell.nix', 'package.json', 'package.json.genie.ts', 'packages/fractal-sdk', 'packages/fractal-ui',
+            'megarepo.lock', 'nix/fractal-web.nix', 'nix/web-shell-inputs.json', 'nix/web-shell.nix', 'package.json', 'package.json.genie.ts', 'packages/fractal-sdk', 'packages/fractal-ui',
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-workspace.yaml.genie.ts', 'scripts/ci-fractal-web', 'scripts/ci-fractal-web-changes',
             'scripts/ci-fractal-web-gate', 'scripts/ci-fractal-web-kit-graph', 'scripts/ci-fractal-web-licenses',
             'scripts/ci-fractal-web-licenses-test', 'scripts/ci-fractal-web-test', 'scripts/ci-typescript-client', 'scripts/ci-web-shell',
@@ -1316,16 +1380,13 @@ class CommittedPolicy(unittest.TestCase):
             # lint the scenario privacy lane runs.
             'apps/ios/package.json', 'docs/st3/client-v0/fixtures', 'pnpm-source-inputs.json', 'pnpm-source-inputs.json.genie.ts',
             'scripts/check-public-repo'])}
-        # Both run on linux-test-build's archive of the same tree and are members of the linux-gate aggregate, whose list
-        # covers what its members read; sharing it gives the three one key (docs: The skip policy).
-        declared['isolation-vm'] = declared['mail-redelivery-canaries'] = declared['linux-gate']
-        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries', 'fractal-web'):
+        for check in ('linux-gate', 'typescript-client', 'genie-freshness', 'fractal-web'):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['inputs']) if rules['inputs'] else None, declared.get(check), check)
             for path in rules['inputs'] or ():
                 self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
         self.assertEqual(self.rules('typescript-client')['sample_one_in'], 5)
-        for check in ('linux-gate', 'isolation-vm', 'mail-redelivery-canaries', 'fractal-web'):
+        for check in ('linux-gate', 'fractal-web'):
             self.assertEqual(self.rules(check)['sample_one_in'], 5, check)
 
     def test_the_fractal_web_inputs_cover_every_tracked_path_the_web_lane_detector_matches(self):
@@ -1396,7 +1457,7 @@ class CommittedPolicy(unittest.TestCase):
                     self.assertIn('agent', rule.get('by_level') or {}, (check, kind))  # admitted only with its own rule
         self.assertEqual(sorted(with_host), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
         for (check, kind), rule in with_host.items():
-            self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent'], check)
+            self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent', 'queue'], check)
             override = dict(rule['by_level']['host'])
             # The first two checks admitted a host note unbound (cooperative machine trust); every check added since holds the host
             # to the lane as well (Factory, 2026-10-22), so a tree that edits its own lane never skips on a local note.
@@ -1406,6 +1467,11 @@ class CommittedPolicy(unittest.TestCase):
             self.assertIs(agent.pop('lane'), True, check)
             self.assertEqual(agent, override, check)
             self.assertEqual(override['events'], ['pull_request'], check)
+            # The queue level (a merge-queue signer's key): the host's command and inputs, held to the lane, for the merge queue only.
+            queue = dict(rule['by_level']['queue'])
+            self.assertIs(queue.pop('lane'), True, check)
+            self.assertEqual(queue.pop('events'), ['merge_group'], check)
+            self.assertEqual(queue, {key: value for key, value in override.items() if key != 'events'}, check)
             self.assertEqual(override['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
             self.assertEqual(policy['checks'][check].get('enforce', False), check in ENFORCED, check)
             rules = self.rules(check)
@@ -1420,8 +1486,28 @@ class CommittedPolicy(unittest.TestCase):
             for (check, kind), rule in with_host.items():
                 self.assertEqual(rule['by_level']['host']['command'], st_test.LOCAL[check], check)
 
+    def test_a_queue_note_never_covers_a_pull_request_and_covers_nothing_until_its_check_admits_the_merge_queue(self):
+        # Inert by construction: the level is limited to merge_group, and every check is still limited to pull requests, so the
+        # narrowed list is empty. A check's own flip (its events gaining merge_group) is what lets a queue note skip, one check at a time.
+        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        with_queue = []
+        for check, entry in policy['checks'].items():
+            for kind, rule in entry['kinds'].items():
+                if 'queue' not in (rule.get('trust_levels') or []) and 'queue' not in (rule.get('by_level') or {}):
+                    continue
+                with_queue.append((check, kind))
+                self.assertNotIn('queue', entry['trust_levels'], check)  # never the check's own list, so never `observed`
+                rules = self.rules(check)
+                level = rules['kinds'][kind]['by_level']['queue']
+                self.assertEqual((level['events'], level['lane']), (['merge_group'], True), check)
+                self.assertNotIn('pull_request', evidence_verify.narrowed_events(None, level['events']), check)
+                self.assertEqual(evidence_verify.narrowed_events(rules['events'], level['events']),
+                                 ['merge_group'] if 'merge_group' in (rules['events'] or []) else [], check)
+                self.assertEqual(evidence_verify.narrowed_events(rules['events'], level['events']), [], f'{check}: not flipped yet')
+        self.assertEqual(sorted(with_queue), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
+
     def test_every_required_check_has_a_valid_entry_that_accepts_only_the_fleet_signer(self):
-        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
+        for check in ('linux-gate', 'typescript-client', 'genie-freshness'):
             rules = self.rules(check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)
             self.assertIsNone(rules['max_age_s'], check)  # no age limit by default
@@ -1432,12 +1518,15 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/fractal/')
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
-        # fractal-web: the fleet signer only, shadow, and its whole-check note only (see the next tests).
+        for check in ('isolation-vm', 'mail-redelivery-canaries'):  # daily only: nothing in the per-PR policy waits on them
+            with self.assertRaises(evidence_verify.Failure):
+                self.rules(check)
+        # fractal-web: the fleet signer at the check level, its whole-check note only (see the next tests), enforced for pull requests.
         web = self.rules('fractal-web')
         self.assertEqual(web['trust_levels'], ('fleet',))
         self.assertIsNone(web['max_age_s'])
-        self.assertIs(web['enforce'], False)
-        self.assertNotIn('fractal-web', ENFORCED)
+        self.assertIs(web['enforce'], True)
+        self.assertIn('fractal-web', ENFORCED)
 
     def test_the_wrapper_rules_match_what_the_note_jobs_record(self):
         gate = self.rules('linux-gate')['kinds']['wrapper']
@@ -1451,16 +1540,14 @@ class CommittedPolicy(unittest.TestCase):
         common = ['attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256']
         self.assertEqual(gate['required_inputs'], common)
         self.assertEqual(gate['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
-        canaries = self.rules('mail-redelivery-canaries')['kinds']['wrapper']
-        self.assertEqual(canaries['command'], ['bash', 'scripts/ci-linux', 'mail-redelivery-canaries'])
-        self.assertEqual(canaries['required_inputs'], sorted(common + ['job', 'stage']))
-        self.assertEqual(canaries['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
+        # The daily-only checks are no longer members of the aggregate.
+        self.assertNotIn('isolation-vm', jobs)
+        self.assertNotIn('mail-redelivery-canaries', jobs)
 
-    def test_the_step_outcome_notes_of_the_other_three_checks_have_their_own_exact_rules(self):
+    def test_the_step_outcome_notes_of_the_other_two_checks_have_their_own_exact_rules(self):
         expected = {
             'genie-freshness': ['bash', 'scripts/ci-genie-freshness'],
             'typescript-client': ['bash', 'scripts/ci-typescript-client'],
-            'isolation-vm': ['isolation-vm', 'nixos-test-driver', 'transport-isolation-vm', 'sekrets-vm'],
         }
         required = ['attempt', 'flake_lock_sha256', 'job', 'step_outcomes', 'steps', 'system', 'toolchain_sha256', 'wrapper_sha256']
         for check, command in expected.items():
@@ -1470,12 +1557,12 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(wrapper['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
 
     def test_every_required_check_lists_observed_and_wrapper_and_only_the_fleet_signer(self):
-        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
+        for check in ('linux-gate', 'typescript-client', 'genie-freshness'):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['kinds']), ['observed', 'wrapper'], check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)  # the wrapper signs as fleet/ci
             # No weaker signer is admitted, except the host level for the locally signable checks (see the test for the host level).
-            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent') if check in HOST_CHECKS else None, check)
+            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent', 'queue') if check in HOST_CHECKS else None, check)
             self.assertIsNone(rules['kinds']['observed']['trust_levels'], check)
         # fractal-web lists only its whole-check note, signed by the evidence note job from the lane's jobs (never one shard's
         # note, whose command is ['bash', 'scripts/ci-fractal-web']): the observer's record is of the always-emitted fractal-web

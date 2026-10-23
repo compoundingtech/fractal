@@ -427,8 +427,10 @@ def flip_doc(text, check, entry, today):
     for i in table[2:]:
         cells = [cell.strip() for cell in lines[i].strip('|').split('|')]
         names = [part.strip() for part in cells[0].split(',')]
-        if name in names and len(cells) == 5 and cells[1] == 'false':
-            row, rest = i, [part for part in names if part != name]
+        # A name may carry a note after it: "`fractal-web` (whole-check note; ...)". The note moves with the name.
+        mine = [part for part in names if part == name or part.startswith(name + ' (')]
+        if mine and len(cells) == 5 and cells[1] == 'false':
+            row, rest, name = i, [part for part in names if part not in mine], mine[0]
     if row is None:
         raise ValueError(f'{DOC}: {check} is not in a row of the table with enforce false')
     cells = [cell.strip() for cell in lines[row].strip('|').split('|')]

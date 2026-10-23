@@ -1,13 +1,13 @@
 # When something is wrong
 
 If a populated v0.3.4 store may have unsigned delegation grants, preserve raw state and keys
-and follow the [founder signing audit](st3/founder-signing-audit.md) **before** doctor, restart or
+and follow the founder signing audit (preserve raw state and keys before maintenance) **before** doctor, restart or
 export. Doctor can seal pending work; these diagnostics are not the initial read-only capture
 for that affected history.
 
-For other stores, start with the smallest question: is the daemon reachable, is the seat ready,
+For other stores, start with the smallest question: is the daemon reachable, is the agent ready,
 or is the work waiting on a dependency? These checks use the worker and README mission from
-[missions in practice](missions-in-practice.md):
+[missions in practice](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/missions-in-practice.md):
 
 ```sh
 st doctor
@@ -20,15 +20,15 @@ st agents queue agent/garden/worker
 | What you see | Next check |
 | --- | --- |
 | Daemon unavailable | `service status` and [startup replay](#startup-replay-and-an-unavailable-api); an active process may still be recovering. |
-| Missing `st` or `pty` | [PATH and PTY](#path-pty-and-harness-login); check the daemon user's login-shell PATH too. |
+| Missing `fractal` or `pty` | [PATH and PTY](#path-pty-and-harness-login); check the daemon user's login-shell PATH too. |
 | macOS launch or permission denied | [Signing and permissions](#macos-signing-and-permissions). |
-| Seat starting or waiting | Attach to its terminal and finish login, trust, or permission prompts. |
-| Seat stopped, failed, or missing from the list | Show its exact ID and history; read its stop reason before starting it. |
-| Mission queued or blocked | Its predecessor run, step dependencies, human gate, and seat queue. |
+| Agent starting or waiting | Attach to its terminal and finish login, trust, or permission prompts. |
+| Agent stopped, failed, or missing from the list | Show its exact ID and history; read its stop reason before starting it. |
+| Mission queued or blocked | Its predecessor run, step dependencies, human gate, and agent queue. |
 | Message waiting or delivery stale | The recipient's local doctor and delivery assessment; inspect the message receipt. |
 | Remote member last seen | Check the encrypted route; a sleeping member is normal and catches up on return. See [replication checks](#replication-and-upgrade-checks). |
 
-To inspect a stopped seat and why it stopped:
+To inspect a stopped agent and why it stopped:
 
 ```sh
 st agents ls --all
@@ -37,7 +37,7 @@ st subject history agent/garden/worker --limit 20
 st terminals peek agent/garden/worker
 ```
 
-The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped seat can retain a historical terminal, and a seat with no recorded terminal may have nothing to peek.
+The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped agent can retain a historical terminal, and an agent with no recorded terminal may have nothing to peek.
 
 ## Free heap and resident memory
 
@@ -67,7 +67,7 @@ st usage --hours 24 --by agent
 st usage --hours 24 --by mission
 ```
 
-These are observed token totals. Cost is an API-equivalent estimate, and unpriced models are shown as unpriced. Account limits and stop policies can explain why a seat stopped; the seat's reason is more useful than repeatedly restarting it. See [model accounts](st3/accounts.md).
+These are observed token totals. Cost is an API-equivalent estimate, and unpriced models are shown as unpriced. Account limits and stop policies can explain why an agent stopped; the agent's reason is more useful than repeatedly restarting it. See [model accounts](st3/accounts.md).
 
 ## Recover the cause
 
@@ -77,9 +77,9 @@ Finish a first-run prompt by attaching, then detach with **Ctrl+\\**:
 st terminals attach agent/garden/worker
 ```
 
-After fixing its dependency, restart a stale running seat; explicitly start an intentionally stopped one. Resume a suspended one instead. [Seat lifecycle](seat-lifecycle.md) gives the commands and their different effects. Retry failed work through the graph after correcting its cause; preserve the failure evidence rather than completing a step just to make the display green.
+After fixing its dependency, restart a stale running agent; explicitly start an intentionally stopped one. Resume a suspended one instead. [Agent lifecycle](seat-lifecycle.md) gives the commands and their different effects. Retry failed work through the graph after correcting its cause; preserve the failure evidence rather than completing a step just to make the display green.
 
-For a Claude seat with stale delivery, check `st claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:st` says failed, select it and **Reconnect**. A ready installation does not by itself prove that a seat's channel connected.
+For a Claude agent with stale delivery, check `fractal claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:fractal` says failed, select it and **Reconnect**. A ready installation does not by itself prove that an agent's channel connected.
 
 If doctor reports an operational contradiction, inspect the bounded repair plan:
 
@@ -95,11 +95,11 @@ The runtime watches process liveness, readiness, claim leases, and message deliv
 
 A watcher cannot fix a missing harness login, choose a product preference, or make an expired provider allowance return. Follow the recorded cause, and ask a person through a structured request when only that person can settle it.
 
-See [CLI tour](st3/cli-guided-tour.md), [operational state](st3/operational-state/README.md), and [replication](st3/replication.md) for deeper diagnosis.
+See [CLI tour](https://github.com/compoundingtech/fractal/blob/main/docs/site/reference/cli.md), [operational state](st3/operational-state/README.md), and [replication](st3/replication.md) for deeper diagnosis.
 
 ## Startup replay and an unavailable API
 
-During daemon startup, `st doctor` reads a local readiness file without waiting for SQLite or
+During daemon startup, `fractal doctor` reads a local readiness file without waiting for SQLite or
 an API listener. It reports `starting`, the current recovery phase, and committed frontier/target
 when projection has begun. Full replay also reports its stage and, during base claims, processed
 claims/total; those counts describe uncommitted work, not a newer committed frontier. Updates
@@ -107,8 +107,8 @@ occur at stage boundaries and every 1,000 base claims. The record changes to `se
 both local API and paired gateway sockets have bound. Serving means the APIs accept requests;
 projection health remains a separate doctor check.
 
-`st service status` adds this readiness to the daemon service line, so a service manager's
-`active` or `running` state is not mistaken for API readiness. `st doctor --json` includes the
+`fractal service status` adds this readiness to the daemon service line, so a service manager's
+`active` or `running` state is not mistaken for API readiness. `fractal doctor --json` includes the
 local record as `startup`; if the API is unreachable during recovery it reports a failed
 startup check and exits nonzero. Once the API answers, `starting` is informational and the
 API's health checks determine the result, even before the gateway has bound.
@@ -150,15 +150,15 @@ st doctor
 
 Use the bin directory from your chosen archive or Nix route in the daemon user's login-shell
 PATH. Open a new terminal after updating your shell profile. Avoid mixing an old archive's
-`st` with a new Nix profile or another PTY install. `doctor` checks the daemon's environment;
+`fractal` with a new Nix profile or another PTY install. `doctor` checks the daemon's environment;
 working commands in your current shell alone do not prove the service sees them. Refresh
-service definitions with `st service install` after a changed executable path when they are
+service definitions with `fractal service install` after a changed executable path when they are
 manually managed. If Home Manager owns the daemon, update its pinned input and activate that
-configuration instead; follow the [Home Manager upgrade](upgrading-st.md#restart-the-services-and-verify).
+configuration instead; follow the [Home Manager upgrade](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/upgrading.md).
 
-Log in to the harness as that same OS user, attach to the affected seat and finish login/trust
+Log in to the harness as that same OS user, attach to the affected agent and finish login/trust
 prompts. Check its declared workspace and [account](st3/accounts.md) rather than copying another
-user's credentials. A missing Claude channel needs `st claude-channel status` and the connection
+user's credentials. A missing Claude channel needs `fractal claude-channel status` and the connection
 check above. A failed omp/OpenCode admission has exact boundary diagnostics; use
 [admission guidance](st3/seat-deploys.md#harness-admission-at-the-next-launch). Attach and inspect
 before restarting repeatedly or overriding admission.
@@ -167,14 +167,14 @@ before restarting repeatedly or overriding admission.
 
 Verify Python 3 is installed, the configured app path is stable, and the selected signing
 identity exists. Release executables are ad-hoc signed, not notarized. Follow macOS's explicit
-approval flow for the verified download and run `st service permissions` for the service's
+approval flow for the verified download and run `fractal service permissions` for the service's
 Full Disk Access/Developer Tools guidance. Permissions can need renewed approval after ad-hoc
 updates. Do not globally disable Gatekeeper or remove quarantine from unrelated files.
 A configured missing or wrong-team signing identity fails instead of falling back; see
 [macOS installation](st3/macos-installation.md). The optional voice helper is separate from
 ordinary agent and mission use.
 
-## Imported seats and saved sessions
+## Imported agents and saved sessions
 
 ```sh
 st import ls --all
@@ -183,10 +183,10 @@ st agents show agent/import/codex/ID
 ```
 
 Use actual IDs from discovery; these are placeholders. Check the native session's owning home,
-workspace and saved declaration. An older imported Codex seat with explicit `resume` arguments
+workspace and saved declaration. An older imported Codex agent with explicit `resume` arguments
 can time out even after installing a new binary. Follow the [exact declaration repair](seat-lifecycle.md#repair-a-codex-import-created-before-strict-resume);
-re-importing does not rewrite an existing seat. Keep exported environment values and transcript
-contents private. Inspect delivery state and stop reasons for other stale seats before deciding
+re-importing does not rewrite an existing agent. Keep exported environment values and transcript
+contents private. Inspect delivery state and stop reasons for other stale agents before deciding
 whether to resume, start or restart them.
 
 ## Replication and upgrade checks
@@ -196,7 +196,7 @@ st replication status
 st doctor
 ```
 
-Compare sources on every member and follow [two-machine checks](two-machines.md#check-what-arrived)
+Compare sources on every member and follow [two-machine checks](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/two-machines.md)
 for frontier/digest inspection and a real message receipt. A sleeping member can catch up later;
 a mixed-rules fleet cannot finish new checkpoint sealing. Equal replicated history does not prove
 equal projections or valid inner claim signatures. Review those doctor checks separately.
@@ -205,7 +205,7 @@ keys/database is not a normal troubleshooting step.
 
 ## Report an install or upgrade problem
 
-Use [Fractal GitHub issues](https://github.com/compoundingtech/fractal/issues/new/choose)
+Use [Fractal GitHub issues](https://github.com/compoundingtech/Fractal/issues/new/choose)
 with the **Install or upgrade problem** template as the single support path. Initial triage is
 owned by the Fractal distribution agent, which routes
 runtime, signing and replication failures to the relevant maintainer. No separate support
@@ -217,7 +217,7 @@ behavior. If the daemon is unavailable, say that and include its startup phase a
 time instead of waiting for doctor to succeed. Harness problems also need the harness version
 and a bounded error excerpt. Preserve timing context; replay observations are not guarantees.
 
-Review output **before posting**. Replace host names, usernames, real paths, seat, person and fleet
+Review output **before posting**. Replace host names, usernames, real paths, agent, person and fleet
 IDs, tailnet addresses and repository names with consistent invented values. Remove tokens,
 private keys, invite/pairing secrets, bearer credentials, transcript prompts, claim/document
 bodies and exported environment values. Keep source hashes, versions, error codes, field names

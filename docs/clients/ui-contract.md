@@ -192,7 +192,7 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
 - Grouped by the mission word (`words.json` → `mission`), in this order: needs you, stalled,
   unstaffed, unclaimed, queued, working, watching, held, idle, done, failed, cancelled, not started. Each group heading
   explains itself through the word's `explain` text in the detail view.
-- Tree view (toggle): the mission path as folders (`fleet/smalltalk/ci/watch/…`).
+- Tree view (toggle): the mission path as folders (`fleet/fractal/ci/watch/…`).
 - Detail: word pill, title, explanation; goals; **the decision card embedded** when a person is
   needed (the same card as Now, answerable in place); a **what you can do** card for stalled,
   failed and unstaffed missions (the stuck step, its blockers, restart the agent, retry the step,

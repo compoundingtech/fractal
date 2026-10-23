@@ -1,14 +1,16 @@
-# Fractal
+# Build your own software factory
 
-Download Fractal, then run `st`. It opens a terminal interface where you can talk to
-your coding agents and follow their work. Give them a mission with goals, constraints
-and checks; durable seats carry it through and bring you the decisions that need you.
+Fractal is an open framework for building a software factory: a system that produces
+software to meet a set of goals. Give your agents a mission with goals, constraints
+and checks; durable agents carry it through and bring you the decisions that need you.
+
+Use the `fractal` CLI to talk to your coding agents and follow their work.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh
 ```
 
-The installer selects your platform, verifies the downloaded archive and opens `st`.
+The installer selects your platform, verifies the downloaded archive and opens `fractal`.
 On the first run, choose your name and this machine's name, accept the background
 service, and choose an installed coding harness. Before it starts, setup says that the
 built-in Fractal Assistant runs an agent on your own harness account (using its usage and quota) and
@@ -19,61 +21,48 @@ After quitting the interface with **Ctrl+Q**, open it again:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
-st
+fractal
 ```
 
 Supported platforms are Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+) and macOS Apple
 Silicon with macOS 15+. The installer needs `curl`, `tar` and a SHA256 checker; macOS
 also needs Python 3. Harness CLIs and their accounts are separate. If none is
-installed, `st` still opens; install a supported harness and run `st setup` later.
+installed, `fractal` still opens; install a supported harness and run `fractal setup` later.
 For Claude, first complete its native welcome, account or API-key confirmation and
 permission-bypass consent as the same user and profile. Successful auth-status or
 print checks alone do not prove that the Assistant can authenticate.
-Neither GitHub nor `gh` is required. Native macOS build and installer tests run in CI;
-clean-machine app, launchd and permission setup still need a manual rehearsal.
+Neither GitHub nor `gh` is required. Clean-machine macOS app, launchd and permission
+setup still need a manual rehearsal; native builds do not establish that evidence.
 
-Releases also offer `fractal`: `fractal` or `fractal tui` opens the same terminal
-interface; other commands, such as `fractal work ls`, use the existing `st` CLI.
+`fractal` or `fractal tui` opens the terminal interface. Use commands such as
+`fractal work ls` to inspect mission work from your shell.
 `fractal web` opens an already-running web interface at `http://127.0.0.1:5173`
 (override with the `FRACTAL_WEB_URL` environment variable); it does not start a
 server. If no browser opener is available, it prints the URL instead.
-Installers leave an unrelated `fractal` executable untouched and keep `st` working.
-Nix installation of the new name is opt-in; see the Home Manager guide.
-The existing `st` and `st3` names and display strings remain unchanged. Their
-sunset is 60 days after the first release shipping `fractal`; the release date
-and resulting sunset date will be recorded when that release ships.
 
-Shell scripts and coding-agent hooks accept `FRACTAL_*` environment variables
-before their corresponding `ST_*` or `ST3_*` names. An explicitly empty new value
-masks the old value. Conflicting identity aliases report the variable names,
-not their values, and select neither identity. Writers keep both names equal
-during the compatibility window.
-
-**[Get started](docs/getting-started.md)** covers first-run questions, the Fractal Assistant,
-installation choices and background services. Each person currently runs their own
-fleet; start with one machine and add others when you need them.
+Read the **[Fractal documentation](https://fractal.how/docs)** or browse its
+[Introduction](docs/site/index.md),
+[installation guide](docs/site/getting-started/install.md), and
+[Understand Fractal](docs/site/concepts/index.md) pages in this repository.
+Each person currently runs their own fleet; start with one machine and add others
+when you need them.
 
 ## Guides
 
-- [Two machines](docs/two-machines.md): connect your machines and check replication.
-- [Missions in practice](docs/missions-in-practice.md): revise work, queue runs, and ask for decisions.
-- [Talking to agents](docs/talking-to-agents.md): UI, phone, CLI, attachments, and human requests.
-- [Build and run the iOS app](docs/ios-app.md): local simulator and iPhone builds, then pairing.
-- [Seat lifecycle](docs/seat-lifecycle.md): create, restart, suspend, and import seats.
-- [Upgrading st](docs/upgrading-st.md): choose a build and check recovery before changing an existing fleet.
-- [GitHub integration](docs/github-integration.md): optional repository intake, review, triage, and landing work.
-- [When something is wrong](docs/when-something-is-wrong.md): startup, health, install/upgrade diagnosis, and stop reasons.
+- [Two machines](docs/site/guides/two-machines.md): connect machines and check replication.
+- [Missions in practice](docs/site/guides/missions-in-practice.md): revise work and ask for decisions.
+- [Talking to agents](docs/site/guides/talking-to-agents.md): web app, phone, CLI and attachments.
+- [Agent lifecycle](docs/site/guides/agent-lifecycle.md): create, restart and suspend agents.
+- [Upgrading](docs/site/guides/upgrading.md): choose a build and check recovery.
+- [GitHub integration](docs/site/guides/github-integration.md): repository intake and review.
+- [Troubleshooting](docs/site/guides/troubleshooting.md): diagnose startup and health problems.
+- [iOS app](docs/site/guides/ios-app.md): build and pair the phone client.
 
 ## Reference
 
-- [Binary releases](docs/st3/binary-releases.md): archive contents, versions and verification.
-- [Nix and Home Manager](docs/getting-started.md#with-nix-and-home-manager)
-- [Daemon details](docs/getting-started.md#daemon-details)
-- [macOS installation and signing](docs/st3/macos-installation.md)
-- [Documentation index](docs/st3/README.md)
-- [Runnable examples](examples/st3/README.md)
-- [Guided CLI tour](docs/st3/cli-guided-tour.md)
-- [KDL lifecycle](docs/st3/kdl-lifecycle.md)
+- [Installation](docs/site/getting-started/install.md)
+- [Concepts](docs/site/concepts/index.md)
+- [Engineering documentation](docs/st3/README.md)
 
 [Contributing](docs/development.md#contributing) covers source builds, checks, and repository layout.
-This repository also carries st2, the previous generation; see [its guide](README.st2.md).
+This repository also carries the previous generation; see [its guide](README.st2.md).

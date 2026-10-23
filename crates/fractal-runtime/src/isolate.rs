@@ -27,6 +27,7 @@ use anyhow::{Context as _, Result};
 
 mod retirement;
 pub use retirement::{CgroupEnding, ScopeRetirementProof, end_scope_with_proof};
+pub(crate) use retirement::observe_closed_scope;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Isolation {

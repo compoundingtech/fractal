@@ -1,6 +1,6 @@
 # Fractal binary releases
 
-Every pushed Git tag runs **Smalltalk tag release**. Both native builds must pass before a
+Every pushed Git tag runs **Fractal tag release**. Both native builds must pass before a
 GitHub release is published. A release is also published once a day when `main` changed since the
 last one (see [Daily releases](#daily-releases)). A rolling `edge` pre-release follows every green
 `main` commit (see [Edge releases](#edge-releases)). Each release contains:
@@ -26,12 +26,28 @@ Each archive has `bin/st3`, `bin/fractal` and `bin/st` (relative symlinks to `st
 libc functions do not add GLIBC_2.39 requirements or loader noise. These
 archives need neither Nix nor Rust installed. Harness CLIs and their logins remain separate.
 
+The embedded web UI ships in `share/fractal-web` in both release archives and
+the Nix `st3` package. The archive installer preserves that tree at
+`../share/fractal-web` relative to the chosen bin directory, including upgrade
+rollback. On macOS it also seals a copy inside `SmallTalk.app/Contents/share/fractal-web`
+before signing, so the app's real executable can resolve its own assets.
+No Node runtime or separate web service is needed by installed releases.
+Release builders on both Linux and macOS require Nix to build those immutable
+assets; the release workflow provisions it on both platforms.
+Release staging and installers make copied assets owner-writable; Nix-store
+permissions must not prevent extraction cleanup, upgrades, or rollback.
+
+Home Manager enables the daemon's web listener at `127.0.0.1:7410` by default.
+Set `services.smalltalk.webListen = null;` to disable it, or set an explicit
+listener address. Home Manager passes its package's immutable assets explicitly
+when copying the daemon into its stable state-directory bin path. Externally
+managed binaries retain the release's executable-relative asset layout.
+
 ## Install or update
 
-If a populated v0.3.4 store may have unsigned delegation grants, follow the
-[founder signing audit](founder-signing-audit.md) before doctor or restart. Preserve raw state and
-keys first. A build containing prevention #1269 can sign preserved unsealed work; it retains
-signature warnings from already-sealed affected payloads.
+If a populated v0.3.4 store may have unsigned delegation grants, preserve raw state and
+keys before doctor or restart. A build containing prevention #1269 can sign preserved
+unsealed work; it retains signature warnings from already-sealed affected payloads.
 
 Install the latest release with curl; neither GitHub CLI nor Rust is required:
 
@@ -94,7 +110,7 @@ inspection instead of overwriting it.
 The installer does not restart
 anything or erase state. On macOS it installs `st3` in the fixed `~/Applications/SmallTalk.app` bundle, registers it with Launch Services, and updates existing daemon/replication LaunchAgent paths. Configure `ST_MACOS_SIGNING_IDENTITY` and optionally `ST_MACOS_SIGNING_TEAM` for persistent signing; no identity uses ad-hoc signing. A configured missing identity fails rather than falling back. See [macOS installation and signing](macos-installation.md). Keep the previous archive as recovery material. Installing it again is a supported rollback
 only when its database, claim and driver contracts can read the current state; see
-[upgrade and recovery](../upgrading-st.md#swap-back-or-roll-forward) and the
+[upgrade and recovery](../site/guides/upgrading.md#rollback-is-a-compatibility-decision) and the
 [0.x compatibility policy](compatibility.md). Forward-only migrations require roll-forward
 unless the release explicitly documents a downgrade. Before upgrading a healthy populated
 store, make a [claim backup](backups.md) and preserve excluded local data separately.
@@ -146,7 +162,7 @@ The native runtime suite and documentation tests remain covered.
 
 ## Edge releases
 
-After a `main` run of **Smalltalk tag release** passes every job, its last job (`release-publish-edge`)
+After a `main` run of **Fractal tag release** passes every job, its last job (`release-publish-edge`)
 moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
 one release per commit. It builds nothing: it takes the run's `smalltalk-release` artifact, re-checks the
 checksums and the source recorded in each archive, then replaces the assets (both target archives and
@@ -167,7 +183,7 @@ Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 
 ## Daily releases
 
-**Smalltalk daily release** (`release-daily.yml`) runs at 05:17 UTC and on manual dispatch. It takes the
+**Fractal daily release** (`release-daily.yml`) runs at 05:17 UTC and on manual dispatch. It takes the
 newest `main` commit whose release run succeeded; if that commit is not already in the latest
 release, it re-checks the checksums and sources of that run's `smalltalk-release` artifact, publishes
 those same bytes under the next patch tag (the highest `vX.Y.Z` tag plus one; dispatch with `tag` to

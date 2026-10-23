@@ -17,14 +17,15 @@ pub fn dispatch(arguments: &mut [OsString]) -> Dispatch {
         == Some(OsStr::new("fractal"));
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     // st and st3 retain their existing CLI parser, display strings and bare-program behavior.
+    if arguments.get(1).and_then(|argument| argument.to_str()) == Some("web") {
+        return Dispatch::Web;
+    }
     if !fractal {
         return Dispatch::Cli;
     }
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
-    match arguments.get(1).and_then(|argument| argument.to_str()) {
-        Some("tui") => arguments[1] = "ui".into(),
-        Some("web") => return Dispatch::Web,
-        _ => {}
+    if arguments.get(1).and_then(|argument| argument.to_str()) == Some("tui") {
+        arguments[1] = "ui".into();
     }
     Dispatch::Cli
 }
@@ -56,17 +57,37 @@ pub fn installed_binaries(mut files: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 pub fn web(arguments: &[OsString]) -> ExitCode {
-    if arguments.len() > 2 {
-        if arguments.len() == 3 && matches!(arguments[2].to_str(), Some("--help" | "-h")) {
-            fractal_daemon::cli_println!("Usage: fractal web\n\nOpen the running web UI (FRACTAL_WEB_URL; default http://127.0.0.1:5173). This command does not start a server.");
-            return ExitCode::SUCCESS;
-        }
-        eprintln!("Usage: fractal web");
-        return ExitCode::from(2);
-    }
+    let explicit_state = if arguments.len() == 4 && arguments[2] == "--state-dir" {
+        Some(std::path::PathBuf::from(&arguments[3]))
+    } else if arguments.len() == 2 {
+        None
+    } else {
+        let help = arguments.len() == 3 && matches!(arguments[2].to_str(), Some("--help" | "-h"));
+        fractal_daemon::cli_println!("Usage: fractal web [--state-dir DIR]\n\nOpen the daemon's local web session (default port 7410). FRACTAL_WEB_URL overrides the daemon rendezvous URL. This command does not start a server.");
+        return if help { ExitCode::SUCCESS } else { ExitCode::from(2) };
+    };
     let url = match std::env::var("FRACTAL_WEB_URL") {
         Ok(url) => url,
-        Err(std::env::VarError::NotPresent) => "http://127.0.0.1:5173".into(),
+        Err(std::env::VarError::NotPresent) => {
+            let path = explicit_state.or_else(|| {
+                fractal_daemon::config::Config::load_unvalidated(None).ok().map(|config| config.state_dir)
+            }).map(|state| state.join("web-launch-url"));
+            let result = path.ok_or_else(|| anyhow::anyhow!("cannot resolve daemon state directory"))
+                .and_then(|path| {
+                    use std::io::Read as _;
+                    let mut file = fractal_daemon::config::open_token_file(&path)?;
+                    let mut url = String::new();
+                    file.read_to_string(&mut url)?;
+                    Ok(url)
+                });
+            match result {
+                Ok(url) => url,
+                Err(error) => {
+                    eprintln!("fractal web: {error:#}; start the daemon with built web assets first");
+                    return ExitCode::from(1);
+                }
+            }
+        }
         Err(error) => {
             eprintln!("fractal web: FRACTAL_WEB_URL: {error}");
             return ExitCode::from(2);
@@ -138,6 +159,8 @@ mod tests {
     #[test]
     fn fractal_dispatch_web() {
         assert_eq!(route(&["fractal", "web"]).0, Dispatch::Web);
+        assert_eq!(route(&["st", "web"]).0, Dispatch::Web);
+        assert_eq!(route(&["st3", "web"]).0, Dispatch::Web);
     }
 
     #[test]
@@ -147,7 +170,6 @@ mod tests {
             &["fractal", "agents", "ls"],
             &["st"],
             &["st3"],
-            &["st", "web"],
             &["st3", "tui"],
         ] {
             assert_eq!(

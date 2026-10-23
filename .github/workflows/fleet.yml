@@ -575,67 +575,6 @@ jobs:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
-  evidence-gate-isolation-vm:
-    name: evidence-gate-isolation-vm
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    continue-on-error: true
-    permissions:
-      contents: read
-    outputs:
-      skip: ${{ steps.taken.outputs.skip }}
-      record: ${{ steps.taken.outputs.record }}
-      line: ${{ steps.gate.outputs.line }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Look for an existing evidence note
-        id: gate
-        env:
-          CHECK: isolation-vm
-          REPOSITORY: ${{ github.repository }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
-          HEAD_SHA: ${{ github.sha }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
-          EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_USER: ${{ github.event.pull_request.user.login }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          ACTOR: ${{ github.actor }}
-          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
-      - name: evidence satisfied by existing note
-        if: steps.gate.outputs.outcome == 'satisfied'
-        run: echo evidence satisfied by existing note
-      - name: evidence existing note is degraded
-        if: steps.gate.outputs.outcome == 'degraded'
-        run: echo evidence existing note is degraded
-      - name: evidence no note
-        if: steps.gate.outputs.outcome == 'no_note'
-        run: echo evidence no note
-      - name: evidence note rejected
-        if: steps.gate.outputs.outcome == 'rejected'
-        run: echo evidence note rejected
-      - name: evidence verifier unavailable
-        if: steps.gate.outputs.outcome == 'unavailable'
-        run: echo evidence verifier unavailable
-      - name: evidence skip taken
-        id: taken
-        if: steps.gate.outputs.skip == 'true'
-        env:
-          RECORD: ${{ steps.gate.outputs.record }}
-        run: echo evidence skip taken && printf 'skip=true\nrecord=%s\n' "$RECORD" >> "$GITHUB_OUTPUT"
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
-        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-gate-genie-freshness:
     name: evidence-gate-genie-freshness
     runs-on: ubuntu-latest
@@ -655,67 +594,6 @@ jobs:
         id: gate
         env:
           CHECK: genie-freshness
-          REPOSITORY: ${{ github.repository }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
-          HEAD_SHA: ${{ github.sha }}
-          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
-          EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_USER: ${{ github.event.pull_request.user.login }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          ACTOR: ${{ github.actor }}
-          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
-      - name: evidence satisfied by existing note
-        if: steps.gate.outputs.outcome == 'satisfied'
-        run: echo evidence satisfied by existing note
-      - name: evidence existing note is degraded
-        if: steps.gate.outputs.outcome == 'degraded'
-        run: echo evidence existing note is degraded
-      - name: evidence no note
-        if: steps.gate.outputs.outcome == 'no_note'
-        run: echo evidence no note
-      - name: evidence note rejected
-        if: steps.gate.outputs.outcome == 'rejected'
-        run: echo evidence note rejected
-      - name: evidence verifier unavailable
-        if: steps.gate.outputs.outcome == 'unavailable'
-        run: echo evidence verifier unavailable
-      - name: evidence skip taken
-        id: taken
-        if: steps.gate.outputs.skip == 'true'
-        env:
-          RECORD: ${{ steps.gate.outputs.record }}
-        run: echo evidence skip taken && printf 'skip=true\nrecord=%s\n' "$RECORD" >> "$GITHUB_OUTPUT"
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
-        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
-  evidence-gate-mail-redelivery-canaries:
-    name: evidence-gate-mail-redelivery-canaries
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    continue-on-error: true
-    permissions:
-      contents: read
-    outputs:
-      skip: ${{ steps.taken.outputs.skip }}
-      record: ${{ steps.taken.outputs.record }}
-      line: ${{ steps.gate.outputs.line }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Look for an existing evidence note
-        id: gate
-        env:
-          CHECK: mail-redelivery-canaries
           REPOSITORY: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
           HEAD_SHA: ${{ github.sha }}
@@ -827,12 +705,12 @@ jobs:
     timeout-minutes: 3
     continue-on-error: true
     needs:
-      - evidence-gate-linux-gate
-      - evidence-gate-typescript-client
-      - evidence-gate-isolation-vm
-      - evidence-gate-genie-freshness
-      - evidence-gate-mail-redelivery-canaries
-      - evidence-gate-fractal-web
+      [
+        evidence-gate-linux-gate,
+        evidence-gate-typescript-client,
+        evidence-gate-genie-freshness,
+        evidence-gate-fractal-web,
+      ]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && github.event_name == 'pull_request') }}
     permissions:
       contents: read
@@ -846,9 +724,7 @@ jobs:
           LINES: |
             ${{ needs.evidence-gate-linux-gate.outputs.line }}
             ${{ needs.evidence-gate-typescript-client.outputs.line }}
-            ${{ needs.evidence-gate-isolation-vm.outputs.line }}
             ${{ needs.evidence-gate-genie-freshness.outputs.line }}
-            ${{ needs.evidence-gate-mail-redelivery-canaries.outputs.line }}
             ${{ needs.evidence-gate-fractal-web.outputs.line }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           REPOSITORY: ${{ github.repository }}
@@ -926,7 +802,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-typescript-client","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-mail-redelivery-canaries","evidence-gate-fractal-web"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client","evidence-gate-fractal-web"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-fractal-web"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","genie-freshness","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-genie-freshness","evidence-gate-typescript-client","evidence-gate-fractal-web"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -939,7 +815,7 @@ jobs:
           from urllib.parse import quote
           from urllib.request import Request, urlopen
 
-          REQUIRED = {"linux-gate", "typescript-client", "isolation-vm", "genie-freshness", "mail-redelivery-canaries", "fractal-web"}
+          REQUIRED = {"linux-gate", "typescript-client", "genie-freshness", "fractal-web"}
 
 
           def decision(jobs, ref_status, ref, sha):
@@ -1595,14 +1471,8 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   linux-test-build:
     name: linux-test-build
-    needs:
-      [
-        pick-runner,
-        evidence-gate-linux-gate,
-        evidence-gate-mail-redelivery-canaries,
-        evidence-gate-isolation-vm,
-      ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.evidence-gate-linux-gate.outputs.skip == 'true') && (needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true') && (needs.evidence-gate-isolation-vm.outputs.skip == 'true'))) }}
+    needs: [pick-runner, evidence-gate-linux-gate]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.evidence-gate-linux-gate.outputs.skip == 'true'))) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && vars.CI_MERGE_TEST_BUILD_OWNED && (needs.pick-runner.outputs.ci1_build || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) || github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
     env:
@@ -2997,258 +2867,6 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
-  mail-redelivery-canaries:
-    name: mail-redelivery-canaries
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_mail) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
-    timeout-minutes: 120
-    defaults:
-      run:
-        shell: bash
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
-      CI_RUN_ID: ${{ github.run_id }}
-      CI_TEST_THREADS: "8"
-      CI_CACHE_DEV_SHELL: default
-    steps:
-      - name: Require the shared test producer to succeed
-        env:
-          PRODUCER_RESULT: ${{ needs.linux-test-build.result }}
-        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-      - name: Fetch the whole history without evidence tags
-        env:
-          FETCH_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
-            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
-            export GIT_CONFIG_VALUE_0
-          fi
-          head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
-          git fsck --connectivity-only --no-dangling --no-progress
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - name: Use the runner's own caches
-        run: |
-          if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - name: Restore the local Nix cache
-        id: nix-cache
-        if: (env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        uses: actions/cache/restore@v4
-        with:
-          path: "${{ runner.temp }}/st-ci-cache"
-          key: "nix5-linux-tests-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
-          restore-keys: |
-            nix5-linux-tests-${{ runner.os }}-
-            nix4-linux-tests-${{ runner.os }}-
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          extra-conf: |
-            experimental-features = nix-command flakes
-            accept-flake-config = true
-            extra-substituters = https://overeng-effect-utils.cachix.org
-            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
-            access-tokens = github.com=${{ github.token }}
-          summarize: true
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - name: Isolate test home and XDG state
-        run: |
-          # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
-          # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
-          home="$RUNNER_TEMP/test-home"
-          mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
-          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - name: Use the cached Nix outputs
-        if: (env.CI_LOCAL_CACHES != '1') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
-      - name: Prepare the historical messaging channel
-        if: (runner.os == 'Linux') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        run: |
-          binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
-      - name: Prepare provider component fixtures
-        run: |
-          system=$(nix eval --impure --raw --expr builtins.currentSystem)
-          components=$(nix build ".#checks.$system.provider-components" --no-link --print-out-paths --print-build-logs)
-          for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
-            wasm=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
-            printf 'ST2_%s_COMPONENT=%s/share/st2/providers/st2_%s_component.component.wasm\n' "$provider" "$components" "$wasm" >> "$GITHUB_ENV"
-          done
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - name: Download this run attempt’s successful test build
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.linux-test-build.outputs.artifact-id }}
-          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
-          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
-        run: python3 scripts/ci-test-archive download
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - name: Verify source, hashes and extract test archives
-        shell: bash
-        run: nix develop -c python3 scripts/ci-test-archive consume
-        env:
-          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
-          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - name: Install matching rendered hooks
-        shell: bash
-        run: nix develop -c bash scripts/ci-install-built-hooks
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - name: Summarize tested revision
-        run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - name: Require every harness to hold old mail across boot and reconnect
-        shell: bash
-        run: nix develop -c bash scripts/ci-linux mail-redelivery-canaries
-        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
-      - name: Save Nix outputs to the local Nix cache
-        if: (success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
-      - name: Save main nix-cache
-        if: (success() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && env.CI_LOCAL_CACHES != '1' && steps.nix-cache.outputs.cache-hit != 'true') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        uses: actions/cache/save@v4
-        with:
-          path: "${{ runner.temp }}/st-ci-cache"
-          key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
-      - id: build-snapshot-save
-        name: Keep valid same-source build outputs
-        if: (!cancelled() && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        env:
-          CI_SNAPSHOT_PIPELINE: ${{ github.workflow_sha }}
-        run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" pack'
-      - id: build-snapshot-upload
-        name: Retain the same-source build snapshot
-        if: (!cancelled() && steps.build-snapshot-save.outputs.publish == 'true') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.build-snapshot-save.outputs.name }}
-          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
-          overwrite: true
-      - name: Wait before retrying build snapshot retention
-        if: (!cancelled() && steps.build-snapshot-upload.outcome == 'failure') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        timeout-minutes: 1
-        shell: bash
-        run: 'echo "::warning::Build snapshot upload failed; retrying once in 15 seconds."; sleep 15'
-      - name: Retry retaining the same-source build snapshot
-        if: (!cancelled() && steps.build-snapshot-upload.outcome == 'failure') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        timeout-minutes: 5
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.build-snapshot-save.outputs.name }}
-          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
-          overwrite: true
-      - name: Retain stage logs and timings
-        uses: actions/upload-artifact@v4
-        if: (always()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        with:
-          name: mail-redelivery-canaries-logs
-          path: |
-            ${{ runner.temp }}/ci-logs/
-            target/messaging-faults/
-            target/boot-canaries/
-          if-no-files-found: ignore
-      - if: (always()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        continue-on-error: true
-        name: Take the evidence signer from the base commit
-        id: evidence-base
-        env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
-        run: |
-          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
-          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
-          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
-      - if: (always() && steps.evidence-base.outcome == 'success') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        continue-on-error: true
-        name: May this job use the signing key?
-        id: evidence-guard
-        env:
-          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_USER: ${{ github.event.pull_request.user.login }}
-        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
-      - if: (always() && steps.evidence-guard.outcome == 'success') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        continue-on-error: true
-        name: Write the signer configuration and key
-        id: evidence-configure
-        env:
-          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
-        run: |
-          set -o pipefail
-          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
-      - if: (always() && steps.evidence-configure.outcome == 'success') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        continue-on-error: true
-        name: Sign this stage result
-        env:
-          STAGE: mail-redelivery-canaries
-          STAGE_JOB: mail-redelivery-canaries
-          GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
-        run: |
-          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
-          python3 "$helper" once "$STAGE_JOB"
-          python3 "$helper" stage-facts "$RUNNER_TEMP/job-facts.json"
-          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB" \
-            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
-            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
-            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
-            --out "$RUNNER_TEMP/evidence-notes"
-      - if: (always()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        continue-on-error: true
-        name: Remove the key
-        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
-      - if: (always()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
-        continue-on-error: true
-        name: Retain the signed note
-        uses: actions/upload-artifact@v4
-        with:
-          name: evidence-note-mail-redelivery-canaries
-          path: "${{ runner.temp }}/evidence-notes/"
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: evidence covered by a trusted note
-        if: needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true'
-        env:
-          RECORDS: "${{ needs.evidence-gate-linux-gate.outputs.record }} ${{ needs.evidence-gate-mail-redelivery-canaries.outputs.record }}"
-        run: 'echo "covered by trusted evidence note: $RECORDS" >> "$GITHUB_STEP_SUMMARY"'
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
-    needs:
-      [
-        pick-runner,
-        linux-test-build,
-        evidence-gate-linux-gate,
-        evidence-gate-mail-redelivery-canaries,
-      ]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
   linux-gate:
     name: linux-gate
     needs:
@@ -3262,9 +2880,6 @@ jobs:
       - linux-tests-shard-4
       - linux-clippy
       - linux-fleet-compat
-      - mail-redelivery-canaries
-      - evidence-gate-mail-redelivery-canaries
-      - evidence-gate-isolation-vm
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -3272,14 +2887,14 @@ jobs:
       - name: Require every Linux stage to pass
         env:
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip }}
-          RESULTS: "${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.mail-redelivery-canaries.result }}"
+          RESULTS: "${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }}"
           EVENT: ${{ github.event_name }}
           MERGE_RESULTS: "${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}"
-          STAGE_SKIPS: "${{ (needs.evidence-gate-linux-gate.outputs.skip == 'true') && (needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true') && (needs.evidence-gate-isolation-vm.outputs.skip == 'true') }} false ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} false ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}"
+          STAGE_SKIPS: "${{ (needs.evidence-gate-linux-gate.outputs.skip == 'true') }} false ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}"
         run: |
           set -eu
           set -- $RESULTS
-          [ "$#" = 7 ] || { echo "incomplete base-stage results"; exit 1; }
+          [ "$#" = 6 ] || { echo "incomplete base-stage results"; exit 1; }
           if [ "$EVENT" = merge_group ]; then
             set -- $MERGE_RESULTS
             [ "$#" = 2 ] || { echo "incomplete merge-shard results"; exit 1; }
@@ -3297,7 +2912,7 @@ jobs:
             # for a failure or a cancellation.
             flag=$(printf '%s\n' "${STAGE_SKIPS:-}" | cut -d' ' -f"$position")
             if [ "${GATE_SKIP:-}" = true ] && [ "$flag" = true ] && [ "$result" = skipped ]; then
-              case "$position" in 1|3|4|5|6|8|9) continue ;; esac
+              case "$position" in 1|3|4|5|6|7|8) continue ;; esac
             fi
             exit 1
           done
@@ -3319,16 +2934,12 @@ jobs:
       - linux-tests-shard-4
       - linux-clippy
       - linux-fleet-compat
-      - mail-redelivery-canaries
       - genie-freshness
       - typescript-client
-      - isolation-vm
       - fractal-web-changes
       - fractal-web-execution
       - fractal-web
       - evidence-gate-linux-gate
-      - evidence-gate-mail-redelivery-canaries
-      - evidence-gate-isolation-vm
       - evidence-gate-genie-freshness
       - evidence-gate-typescript-client
       - evidence-gate-fractal-web
@@ -3440,7 +3051,7 @@ jobs:
         run: |
           git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
-            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
+            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,typescript-client,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
       - name: Shadow-verify the published notes
         if: ${{ always() && steps.configure.outcome == 'success' }}
         continue-on-error: true
@@ -3448,7 +3059,7 @@ jobs:
           shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
           [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
           python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \
-            --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm,fractal-web" --optional "fractal-web" --remote origin
+            --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,typescript-client,fractal-web" --optional "fractal-web" --remote origin
       - name: Remove the key
         if: always()
         continue-on-error: true
@@ -3459,256 +3070,6 @@ jobs:
         env:
           CACHE_REASON: Signs the aggregate gate result from workflow context; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-  isolation-vm:
-    name: isolation-vm
-    needs: [pick-runner, linux-test-build, evidence-gate-isolation-vm]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1_profile || needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["namespace-profile-linux-x86-64;job.priority={1};github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    timeout-minutes: 60
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
-      CI_CACHE_DEV_SHELL: default
-    steps:
-      - name: Require the shared test producer to succeed
-        env:
-          PRODUCER_RESULT: ${{ needs.linux-test-build.result }}
-        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-      - name: Fetch the whole history without evidence tags
-        env:
-          FETCH_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
-            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
-            export GIT_CONFIG_VALUE_0
-          fi
-          head=$(git rev-parse HEAD)
-          rm -f "$(git rev-parse --git-path shallow)"
-          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
-          git fsck --connectivity-only --no-dangling --no-progress
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Use the runner's own caches
-        run: |
-          if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Restore the local Nix cache
-        id: nix-cache
-        if: (env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1') && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
-        uses: actions/cache/restore@v4
-        with:
-          path: "${{ runner.temp }}/st-ci-cache"
-          key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
-          restore-keys: |
-            nix5-${{ github.job }}-${{ runner.os }}-
-            nix4-${{ github.job }}-${{ runner.os }}-
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          extra-conf: |
-            experimental-features = nix-command flakes
-            accept-flake-config = true
-            extra-substituters = https://overeng-effect-utils.cachix.org
-            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
-            access-tokens = github.com=${{ github.token }}
-          summarize: true
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Isolate test home and XDG state
-        run: |
-          # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
-          # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
-          home="$RUNNER_TEMP/test-home"
-          mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
-          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Use the cached Nix outputs
-        if: (env.CI_LOCAL_CACHES != '1') && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
-        run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
-      - name: Prepare the historical messaging channel
-        if: (runner.os == 'Linux') && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
-        run: |
-          binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
-      - name: Prepare provider component fixtures
-        run: |
-          system=$(nix eval --impure --raw --expr builtins.currentSystem)
-          components=$(nix build ".#checks.$system.provider-components" --no-link --print-out-paths --print-build-logs)
-          for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
-            wasm=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
-            printf 'ST2_%s_COMPONENT=%s/share/st2/providers/st2_%s_component.component.wasm\n' "$provider" "$components" "$wasm" >> "$GITHUB_ENV"
-          done
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Download this run attempt’s successful test build
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.linux-test-build.outputs.artifact-id }}
-          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
-          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
-        run: python3 scripts/ci-test-archive download
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Verify source, hashes and extract test archives
-        shell: bash
-        run: nix develop -c python3 scripts/ci-test-archive consume
-        env:
-          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
-          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Install matching rendered hooks
-        shell: bash
-        run: nix develop -c bash scripts/ci-install-built-hooks
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Probe KVM
-        id: kvm
-        run: |
-          if [ ! -e /dev/kvm ]; then
-            echo "::error::/dev/kvm is missing: this runner profile offers no nested virtualization"
-            exit 1
-          fi
-          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then sudo chmod 0666 /dev/kvm; fi
-          python3 - <<'EOF'
-          import fcntl, os
-          fd = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
-          version = fcntl.ioctl(fd, 0xAE00)  # KVM_GET_API_VERSION
-          vm = fcntl.ioctl(fd, 0xAE01, 0)  # KVM_CREATE_VM
-          assert version == 12, f"unexpected KVM API version {version}"
-          os.close(vm)
-          print(f"KVM API {version}: created a VM")
-          EOF
-          printf 'KVM: \x60%s\x60, CPU virtualization flag %s, VM creation succeeded\n\n| Phase | Elapsed |\n| --- | --- |\n' "$(ls -l /dev/kvm)" "$(grep -m1 -oE 'vmx|svm' /proc/cpuinfo || echo none)" >> "$GITHUB_STEP_SUMMARY"
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Build the NixOS VM test driver
-        id: driver
-        run: |
-          start=$SECONDS
-          nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
-          printf '| VM driver build | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Run all three systemd-scope tests in the VM
-        id: vmtest
-        env:
-          FRACTAL_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
-          FRACTAL_ISOLATION_WORKSPACE: ${{ github.workspace }}
-          FRACTAL_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
-          FRACTAL_ISOLATION_BUILD_WORKSPACE: ${{ env.CI_TEST_BUILD_WORKSPACE }}
-          ST_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
-          ST_ISOLATION_WORKSPACE: ${{ github.workspace }}
-          ST_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
-          ST_ISOLATION_BUILD_WORKSPACE: ${{ env.CI_TEST_BUILD_WORKSPACE }}
-        run: |
-          start=$SECONDS
-          mkdir -p "$RUNNER_TEMP/vm-out"
-          "$RUNNER_TEMP/vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/vm-out"
-          jq -r '"| VM boot | \(.boot_seconds)s |\n| systemd-scope tests in VM (extract and run) | \(.test_seconds)s |"' "${FRACTAL_ISOLATION_TIMINGS-${ST_ISOLATION_TIMINGS}}" >> "$GITHUB_STEP_SUMMARY"
-          printf '| VM test driver total | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Build the sekrets VM test driver
-        id: sekrets-driver
-        run: |
-          start=$SECONDS
-          nix build --print-build-logs --out-link "$RUNNER_TEMP/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
-          printf '| sekrets VM driver build | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Run the sekrets gateway test in the VM
-        id: sekrets-test
-        env:
-          FRACTAL_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
-          ST_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
-        run: |
-          start=$SECONDS
-          mkdir -p "$RUNNER_TEMP/sekrets-vm-out"
-          "$RUNNER_TEMP/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/sekrets-vm-out"
-          printf '| sekrets VM test | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
-        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
-      - name: Save Nix outputs
-        if: (success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')) && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
-        run: bash scripts/ci-nix-cache save
-      - if: (always()) && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
-        continue-on-error: true
-        name: Take the evidence signer from the base commit
-        id: evidence-base
-        env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
-        run: |
-          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
-          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
-          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
-      - if: (always() && steps.evidence-base.outcome == 'success') && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
-        continue-on-error: true
-        name: May this job use the signing key?
-        id: evidence-guard
-        env:
-          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_USER: ${{ github.event.pull_request.user.login }}
-        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
-      - if: (always() && steps.evidence-guard.outcome == 'success') && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
-        continue-on-error: true
-        name: Write the signer configuration and key
-        id: evidence-configure
-        env:
-          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
-        run: |
-          set -o pipefail
-          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
-      - if: (always() && steps.evidence-configure.outcome == 'success') && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
-        continue-on-error: true
-        name: Sign this job result
-        env:
-          STEP_CHECK: isolation-vm
-          STEP_COMMAND: '["isolation-vm","nixos-test-driver","transport-isolation-vm","sekrets-vm"]'
-          STEP_OUTCOMES: '{"kvm":"${{ steps.kvm.outcome }}","driver":"${{ steps.driver.outcome }}","vmtest":"${{ steps.vmtest.outcome }}","sekrets-driver":"${{ steps.sekrets-driver.outcome }}","sekrets-test":"${{ steps.sekrets-test.outcome }}"}'
-          GATE_SKIP: ${{ needs.evidence-gate-isolation-vm.outputs.skip == 'true' }}
-          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
-        run: |
-          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
-          python3 "$helper" once "$STEP_CHECK"
-          python3 "$helper" step-facts "$RUNNER_TEMP/job-facts.json"
-          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STEP_CHECK" \
-            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
-            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
-            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
-            --out "$RUNNER_TEMP/evidence-notes" \
-            --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"
-      - if: (always()) && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
-        continue-on-error: true
-        name: Remove the key
-        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
-      - if: (always()) && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
-        continue-on-error: true
-        name: Retain the signed note
-        uses: actions/upload-artifact@v4
-        with:
-          name: evidence-note-isolation-vm
-          path: "${{ runner.temp }}/evidence-notes/"
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: evidence covered by a trusted note
-        if: needs.evidence-gate-isolation-vm.outputs.skip == 'true'
-        env:
-          RECORDS: ${{ needs.evidence-gate-isolation-vm.outputs.record }}
-        run: 'echo "covered by trusted evidence note: $RECORDS" >> "$GITHUB_STEP_SUMMARY"'
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   fractal-web-changes:
     name: fractal-web-changes
     runs-on: ubuntu-latest
@@ -3914,6 +3275,7 @@ jobs:
               "apps/fractal-web/src/ui-compat/tokens.stylex.ts",
               "apps/fractal-web/src/web/AgentActions.tsx",
               "apps/fractal-web/src/web/AgentDetailsPanel.tsx",
+              "apps/fractal-web/src/web/AlertsPopover.tsx",
               "apps/fractal-web/src/web/AttentionControls.tsx",
               "apps/fractal-web/src/web/capturedChanges.ts",
               "apps/fractal-web/src/web/ChangesInspector.tsx",
