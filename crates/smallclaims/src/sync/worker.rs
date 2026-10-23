@@ -619,7 +619,7 @@ pub async fn run<B: Backend>(
         config
             .fleet
             .as_ref()
-            .is_some_and(|file| file.transports.iter().any(|name| name == transport))
+            .is_none_or(|file| file.transports.iter().any(|name| name == transport))
     };
     let tailscale = config
         .fleet
@@ -653,10 +653,11 @@ pub async fn run<B: Backend>(
         view: Arc::default(),
         view_refresh: Arc::default(),
         view_changed: watch::channel(0).0,
-        transports: Arc::new(std::sync::RwLock::new(LocalTransports {
-            tailscale: false,
-            fabric: fabric.is_some(),
-        })),
+        transports: Arc::new(std::sync::RwLock::new(LocalTransports::configured(
+            config.fleet.as_ref().map(|file| file.transports.as_slice()),
+            local_addresses().iter().any(is_tailnet_address),
+            fabric.is_some(),
+        ))),
         fabric: fabric.clone(),
         bootstrap: config.fleet.as_ref().and_then(|file| {
             let sponsor = file.sponsor.clone()?;
@@ -777,6 +778,8 @@ pub async fn run<B: Backend>(
         if let Some(address) = tailnet {
             endpoints.update(|set| set.tailscale = vec![address]);
         }
+        // Only an enabled transport gets a probe task, so availability changes cannot
+        // re-enable Tailscale when the explicit local transport list excludes it.
         if let Some(tailscale) = tailscale {
             tokio::spawn(crate::task_cpu::account(
                 "replication.tailnet",
@@ -1205,10 +1208,10 @@ async fn lock_current_settings(
     .await?
 }
 
-/// Who this node dials, and the loopback URLs that reach each, most preferred first: every
-/// current listening member other than itself, and every config peer that has never been a
-/// member. A dial-out member is never dialed. A config peer entry for a member is that
-/// member's first route from this machine.
+/// Who this node dials, with routes most preferred first: every current listening member
+/// other than itself, and every config peer that has never been a member. A dial-out
+/// member is never dialed. An explicit config peer (`--peer`) route takes precedence over
+/// the local transport list, including its disabled transports, for backward compatibility.
 pub fn dial_targets(
     view: &FleetView,
     own: &str,

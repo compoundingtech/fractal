@@ -3641,6 +3641,70 @@ async fn an_existing_member_adds_and_removes_fabric_without_rejoining() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn fabric_transport_preference_preserves_other_transports_and_existing_exposure() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    for prefer_on_add in [false, true] {
+        let name = if prefer_on_add { "preferred" } else { "appended" };
+        let mut node = anchor(root.path(), name).await;
+        node.stop_worker();
+        let mut file = configured_file(&node);
+        file.fabric = Some(fabric_shim(root.path(), name));
+        file.transports = vec!["loopback".into(), "tailscale".into()];
+        file.save(&node.state_dir()).unwrap();
+        node.start_worker();
+        node.wait_listening().await;
+        let mut args = vec!["fleet", "transports", "add", "fabric", "--no-service"];
+        if prefer_on_add {
+            args.push("--prefer");
+        }
+        let output = node.st_ok(&args);
+        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert_eq!(
+            configured_file(&node).transports,
+            if prefer_on_add {
+                vec!["fabric", "loopback", "tailscale"]
+            } else {
+                vec!["loopback", "tailscale", "fabric"]
+            }
+        );
+        // Re-adding without preference preserves the entire configured order.
+        let before = configured_file(&node);
+        node.st_ok(&["fleet", "transports", "add", "fabric", "--no-service"]);
+        assert_eq!(configured_file(&node).transports, before.transports);
+        let endpoints = node.st_json(&["fleet", "status"])["view"].clone();
+        // Preference is local: it must not expose again or accept a new protocol.
+        fs::write(
+            root.path().join("fabric-registry").join(format!("fail-expose-{name}-fabric-id")),
+            "refuse",
+        )
+        .unwrap();
+        let output = node.st_ok(&[
+            "fleet",
+            "transports",
+            "add",
+            "fabric",
+            "--prefer",
+            "--fabric-protocol",
+            "ignored",
+            "--no-service",
+        ]);
+        if !prefer_on_add {
+            assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        }
+        let preferred = configured_file(&node);
+        assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
+        assert_eq!(preferred.fabric_protocol, before.fabric_protocol);
+        assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
+        let output = node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert_eq!(configured_file(&node).transports, ["loopback", "tailscale"]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged() {
     if fractal_daemon::test_support::supervise_test() {
         return;
