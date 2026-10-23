@@ -1085,6 +1085,13 @@ and a signer level's own `events` can only narrow it further (the verifier repor
 Absent means every event the gate allows. This is how a check is enforced for pull requests while the merge queue keeps testing the combined
 tree: `"enforce": true, "events": ["pull_request"]`.
 
+The `queue` level is for a merge-queue signer: a key held in an account of its own, away from every agent seat, that fetches main and the
+pull request heads itself and signs the merged tree the queue will test. Every check the `host` level signs admits it for the `wrapper`
+kind with the host's command and inputs, `"events": ["merge_group"]` and `"lane": true`, so a queue note never covers a pull request and a
+tree that edits its own lane never skips on one. It is inert until a check's own `events` gains `merge_group`: today every check lists
+`pull_request` only, so the intersection is empty and a queue note skips nothing. That flip is made per check, on its own measured trigger,
+and `.st/evidence-keys` names the key (a `queue/NAME` line) only once it exists; deleting that line revokes it.
+
 #### Input values (`input_order`, `shard_inputs`)
 
 `required_inputs` checks only that an input is present. Two optional keys on a kind's rule check values. They apply whatever the signer level.
