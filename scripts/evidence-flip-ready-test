@@ -24,6 +24,36 @@ loader.exec_module(flip)
 flip.time.sleep = lambda seconds: None  # the retries' back-off
 NOW = datetime.datetime(2026, 10, 22, 12, 0, tzinfo=datetime.timezone.utc)
 CHECK = 'genie-freshness'
+
+
+# Every check is enforced now, so the flip has nothing left to do in this repository. These tests still need checks in shadow:
+# SHADOW holds the files the flip edits with these four put back in shadow, exactly as they were before they were flipped.
+IN_SHADOW = ('linux-gate', 'mail-redelivery-canaries', 'isolation-vm', 'genie-freshness')
+
+
+def in_shadow(path, text):
+    if path == flip.POLICY:
+        policy = json.loads(text)
+        for check in IN_SHADOW:
+            entry = policy['checks'][check]
+            entry['enforce'] = False
+            del entry['events']
+            if check == 'genie-freshness':
+                del entry['sample_one_in']  # a check without one: the flip adds it
+        return json.dumps(policy, indent=2) + '\n'
+    if path == flip.DOC:
+        rows = ''.join(f'| `{check}` | true | `pull_request` | 5 | 2026-10-23 |\n' for check in IN_SHADOW)
+        assert rows in text, 'the enforced rows of the four checks moved: update in_shadow'
+        return text.replace(rows, '| `genie-freshness`, `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |\n')
+    for test_path, name in flip.TEST_LISTS:
+        if path == test_path:
+            found = re.search(r'^( *)' + name + r' = (\(.*\))$', text, re.M)
+            listed = tuple(check for check in ast.literal_eval(found.group(2)) if check not in IN_SHADOW)
+            return text[:found.start(2)] + repr(listed) + text[found.end(2):]
+    return text
+
+
+SHADOW = {path: in_shadow(path, (ROOT / path).read_text()) for path in (flip.POLICY, flip.DOC, *(path for path, _ in flip.TEST_LISTS))}
 TEMPLATE = ('2026-10-22T05:58:31.4Z git show "$BASE_SHA:scripts/ci-evidence-gate" || { echo "evidence-decision v1 check=$CHECK '
             'decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID"; }')
 
@@ -121,7 +151,7 @@ class FlipReady(unittest.TestCase):
         subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.repo)], check=True)
         for path in (flip.POLICY, flip.DOC, flip.WORKFLOW, *(path for path, _ in flip.TEST_LISTS)):
             (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ROOT / path, self.repo / path)
+            (self.repo / path).write_text(SHADOW[path]) if path in SHADOW else shutil.copyfile(ROOT / path, self.repo / path)
         git(self.repo, 'config', 'user.name', 'Test')
         git(self.repo, 'config', 'user.email', 'test@example.com')
         git(self.repo, 'add', '-A')
@@ -460,7 +490,7 @@ class FlipReady(unittest.TestCase):
         self.assertEqual(code, 0, self.err)
         files = self.flipped()
         policy = json.loads(files[flip.POLICY])
-        before = json.loads((ROOT / flip.POLICY).read_text())
+        before = json.loads(SHADOW[flip.POLICY])
         self.assertEqual(policy['checks'][CHECK], flip.flipped_entry(before['checks'][CHECK]))
         self.assertEqual(list(policy['checks'][CHECK])[:4], ['trust_levels', 'enforce', 'events', 'sample_one_in'])
         self.assertEqual((policy['checks'][CHECK]['enforce'], policy['checks'][CHECK]['events'], policy['checks'][CHECK]['sample_one_in']),
@@ -471,7 +501,7 @@ class FlipReady(unittest.TestCase):
         self.assertIn('| `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |\n', files[flip.DOC])
         # The check is appended to each pinned tuple as it stands (it grows with every flip).
         for path, name in flip.TEST_LISTS:
-            current = ast.literal_eval(re.search(r'^ *' + name + r' = (\(.*\))$', (ROOT / path).read_text(), re.M).group(1))
+            current = ast.literal_eval(re.search(r'^ *' + name + r' = (\(.*\))$', SHADOW[path], re.M).group(1))
             self.assertIn(f'{name} = {current + (CHECK,)!r}\n', files[path])
         notes_loader = importlib.machinery.SourceFileLoader('release_notes', str(ROOT / 'scripts/release_notes.py'))
         notes = importlib.util.module_from_spec(importlib.util.spec_from_loader(notes_loader.name, notes_loader))
@@ -517,7 +547,7 @@ class FlipReady(unittest.TestCase):
         self.assertEqual(git(self.origin, 'branch', '--list', 'evidence-flip/*'), '')
 
     def test_a_policy_not_in_json_dumps_form_gets_a_minimal_textual_edit(self):
-        text = (ROOT / flip.POLICY).read_text().replace('"version": 1,', '"version":  1,')
+        text = SHADOW[flip.POLICY].replace('"version": 1,', '"version":  1,')
         new, entry = flip.flip_policy(text, 'isolation-vm')
         self.assertEqual(entry['sample_one_in'], 5)
         self.assertEqual(json.loads(new)['checks']['isolation-vm'], entry)

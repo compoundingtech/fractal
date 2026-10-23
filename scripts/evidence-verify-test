@@ -500,7 +500,7 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
-ENFORCED = ('typescript-client', 'fractal-web')
+ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'mail-redelivery-canaries', 'isolation-vm', 'genie-freshness')
 # The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
 HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'mail-redelivery-canaries', 'linux-gate', 'isolation-vm'})
 HOST_LANE_BOUND = frozenset({'mail-redelivery-canaries', 'linux-gate', 'isolation-vm'})
