@@ -144,7 +144,7 @@ Terminal workspace tabs derive presentation identity from their existing pane ke
 like the web strip's `data-tab-kind` (never from the displayed or custom title).
 `A`, `M`, and `I` identify agent, mission, and Inbox/alert panes. Agent tabs show
 reported activity (`>` working/compacting, `-` idle, `x` down/stopped/retired,
-`◆` needs person/login, `!` fault, `~` starting/unknown). `◆N` is the number of
+`◆` needs a person or a login, `!` fault, `~` starting/unknown). `◆N` is the number of
 open alerts in that subject's attention window, excluding informational updates and
 recently closed items; zero is omitted, and an unavailable window shows `◆?`.
 A separate `?` means live attention reports an open question prompt. Native question

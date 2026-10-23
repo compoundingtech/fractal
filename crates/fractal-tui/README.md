@@ -37,7 +37,7 @@ close action as `Ctrl+W` and the tab's right-click menu.
 
 Tab prefixes identify **A**gent (including its terminal), **M**ission, and **I**nbox/alert
 cards. Agent activity follows the type: `>` working/compacting, `-` idle, `x`
-down/stopped/retired, `◆` waiting on a person/login, `!` fault, `~` starting/unknown.
+down/stopped/retired, `◆` waiting on a person or a login, `!` fault, `~` starting/unknown.
 `◆N` counts open alerts for the subject (zero is quiet; `◆?` means not loaded).
 A separate `?` marks a current question prompt from live attention, including questions
 that can only be answered in the terminal or whose client-answer window expired.

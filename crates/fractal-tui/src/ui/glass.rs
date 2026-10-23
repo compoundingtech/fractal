@@ -121,15 +121,19 @@ impl TabStatuses {
 }
 
 impl TabBadge {
-    fn width(self, title: &str) -> usize {
-        let count = match self.alerts {
-            Some(count) if count > 0 => 2 + count.ilog10() as usize + 1,
-            None if !self.kind.is_empty() => 3,
-            _ => 0,
-        };
+    fn width(self, title: &str, counts: bool) -> usize {
+        let count = if counts {
+            match self.alerts {
+                Some(count) if count > 0 => 2 + count.ilog10() as usize + 1,
+                None if !self.kind.is_empty() => 3,
+                _ => 0,
+            }
+        } else if self.needs_person && !self.ask { 2 } else { 0 };
         let prefix = text::width(self.kind) + text::width(self.activity)
             + if self.ask { 2 } else { 0 } + count;
-        1 + prefix + usize::from(prefix > 0) + text::width(title) + 1
+        // Keep the pre-badge title budget (26 cells plus padding). Status chrome must not
+        // consume the last distinguishing characters of a title that previously fitted.
+        1 + prefix + usize::from(prefix > 0) + text::width(title).min(26) + 1
     }
 
     fn label(self, title: &str, width: usize, counts: bool) -> String {
@@ -151,7 +155,7 @@ impl TabBadge {
         }
         label.push_str(title);
         label.push(' ');
-        text::truncate(&label, width)
+        text::truncate(&label, width.min(self.width(title, counts)))
     }
 }
 
@@ -2442,13 +2446,13 @@ impl Ui {
             (title, self.tab_badge(tab, pane.as_ref()))
         }).collect();
         let available = area.width.saturating_sub(x - area.x);
-        let counts = tabs.iter().map(|(title, badge)| badge.width(title).min(28) + 1)
+        let counts = tabs.iter().map(|(title, badge)| badge.width(title, true) + 1)
             .sum::<usize>() <= usize::from(available);
         // Reserve both overflow markers and a tab gap before shortening any label. A selected
         // tab must never consume the space needed to reach its hidden neighbors.
         let marker = if tabs.len() > 1 { tabs.len().ilog10() as usize + 3 } else { 0 };
         let label_width = if counts { usize::from(available) }
-            else { usize::from(available).saturating_sub(2 * marker + 1) }.min(28);
+            else { usize::from(available).saturating_sub(2 * marker + 1) };
         let labels: Vec<_> = tabs.iter()
             .map(|(title, badge)| (badge.label(title, label_width, counts), badge.needs_person))
             .collect();
@@ -5400,6 +5404,30 @@ mod tests {
         assert!(ui.effects.is_empty(), "{:?}", ui.effects);
         assert!(ui.flash.is_none(), "{:?}", ui.flash);
         assert_eq!(ui.focused_pane(), Some(Pane::Agent(Some(id))));
+    }
+
+    #[test]
+    fn tab_badge_overflow_keeps_selected_and_neighbor_title_suffixes_visible() {
+        let mut ui = glass();
+        ui.glasses.glass_mut().layout = Layout::Group(Group {
+            tabs: (0..14).map(|n| Tab::pane(format!("mission:mission/fleet/example/m{n:02}"))).collect(),
+            current: 0,
+        });
+        tab_badge_strip(&ui, 120);
+        let more = ui.frame.borrow().hits.iter().find_map(|(_, hit)| match hit {
+            Hit::GlassTabMore(0, tab) => Some(*tab),
+            _ => None,
+        }).expect("the first hidden tab is reachable");
+        ui.click(Hit::GlassTabMore(0, more));
+        ui.frame.borrow_mut().hits.clear();
+        let shown = tab_badge_strip(&ui, 120);
+        assert!(shown.contains(&format!("example/m{more:02}")), "selected title: {shown}");
+        assert!(shown.contains(&format!("example/m{:02}", more - 1)), "neighbor title: {shown}");
+        for (rect, hit) in &ui.frame.borrow().hits {
+            if matches!(hit, Hit::GlassTab(..) | Hit::GlassTabMore(..)) {
+                assert!(rect.right() <= 120, "{hit:?}: {rect:?}");
+            }
+        }
     }
 
     #[test]
