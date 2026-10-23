@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
-  scripts/st-test [--check NAME]... [--all] [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
+  scripts/st-test [--check NAME]... [--all] [--rerun] [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
 
@@ -13,7 +13,10 @@ asks the verifier, from the accepted base, whether the tree is now covered, and 
 
 The tree: HEAD, the commit you are pushing. The CI gate looks up the note for the pull request head's own tree, so the tree
 you built and signed is the tree that counts even when main has moved since; the merge queue still tests the integrated tree.
-It tells you how far behind the base the branch is. The command always runs in a clean worktree of that commit, never
+A check this tree already has a passing signature for (the verifier's answer, the one asked after a run) is not run again: it
+prints `already signed`, so re-running on an unchanged tree is near instant (with --push its note is pushed as it is, so
+the remote has it too); --rerun runs it anyway. It tells you how far behind the base the branch is.
+The command always runs in a clean worktree of that commit, never
 in this checkout, so untracked or ignored files here cannot change the result. The worktree is one of a small pool of persistent
 ones per repository (~/.cache/st-test/<hash of the git common dir>/tree-N, one flock each, so no two runs share one), reset to the
 commit and stripped of untracked and ignored files before every run: the same path every time keeps cargo's fingerprints and
@@ -40,6 +43,7 @@ could not start (a refusal: dirty tree, bad argument); 3 from --status when the 
 was not signed because the tree edits that check's lane (evidence-wrap would refuse it; CI runs it).
 """
 import argparse
+import base64
 import fcntl
 import hashlib
 import importlib.machinery
@@ -387,7 +391,8 @@ def reap_stale():
     git('worktree', 'prune', check=False)
 
 
-def covered(verifier, directory, tree, check, base, repository):
+def ask_verifier(verifier, directory, tree, check, base, repository):
+    """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None."""
     command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--keys-from', base]
     if repository:
         command += ['--policy-from', base, '--repository', repository]
@@ -395,10 +400,33 @@ def covered(verifier, directory, tree, check, base, repository):
     try:
         result = json.loads(done.stdout)
     except ValueError:
-        return False, 'verifier gave no answer: ' + (done.stderr.strip().splitlines() or ['-'])[-1][:120]
+        return False, 'verifier gave no answer: ' + (done.stderr.strip().splitlines() or ['-'])[-1][:120], None
     if done.returncode == 0:
-        return True, f'covered by {result.get("kind")} {result.get("record", "")[:12]}'
-    return False, result.get('reason') or 'not covered'
+        return True, f'covered by {result.get("kind")} {result.get("record", "")[:12]}', result.get('record')
+    return False, result.get('reason') or 'not covered', None
+
+
+def covered(verifier, directory, tree, check, base, repository):
+    return ask_verifier(verifier, directory, tree, check, base, repository)[:2]
+
+
+def push_record(directory, remote, tree, record):
+    """Push the tag and note of an existing record (as evidence-wrap pushes a new one: the token travels in the environment, never in an
+    argument). Returns None, or why it failed. A record with no local refs came from the remote: nothing to push."""
+    refs = [ref for ref in (f'refs/tags/evidence/{tree}/{record}', f'refs/notes/evidence/{tree}/{record}')
+            if git('rev-parse', '--verify', '-q', ref, cwd=directory, check=False).returncode == 0]
+    if not refs:
+        return None
+    extra = {}
+    token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
+    if token:
+        header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+        extra = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader', 'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
+    pushed = git('push', '--quiet', remote, *[f'{ref}:{ref}' for ref in refs], cwd=directory, env=extra, check=False)
+    if pushed.returncode != 0:
+        message = pushed.stderr.decode(errors='replace')
+        return message.replace(token, '***').strip()[-400:] if token else message.strip()[-400:]
+    return None
 
 
 LOG_UNIT = 'evidence-log.service'
@@ -452,6 +480,7 @@ def main(argv):
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
     parser.add_argument('--push', metavar='REMOTE', help='push the signed notes here after they verify')
     parser.add_argument('--repository', metavar='OWNER/NAME', help='default: from the remote\'s GitHub URL; without it the policy is not applied')
+    parser.add_argument('--rerun', action='store_true', help='run a check even when this tree already has a passing signature for it')
     parser.add_argument('--attempt', default='1')
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
@@ -527,7 +556,7 @@ def main(argv):
             rows, failed, unsigned = [], False, False
             lanes = lane_names(args.base)
             target, target_lock = shared_target(tree_target) if any(name in HEAVY for name in checks) else (None, None)
-            unmaterialized = materialize_members(directory)
+            unmaterialized, materialized = None, False  # the members are fetched only once a check has to run
             for name in checks:
                 if unmaterialized:
                     rows.append((name, 'NOT RUN', 0, unmaterialized))
@@ -538,6 +567,21 @@ def main(argv):
                     rows.append((name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'))
                     unsigned = True
                     continue
+                if not args.rerun:
+                    # Already signed for this tree (or its input key): nothing to measure again. Asked the way it is asked after a run.
+                    signed, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository)
+                    if signed:
+                        # With --push the covering note must also be on the remote (an earlier run may not have pushed it): push it as it is.
+                        failure = push_record(directory, args.push, tree, record) if args.push else None
+                        rows.append((name, 'already signed' if not failure else 'push failed', 0, why if not failure else failure))
+                        failed = failed or bool(failure)
+                        continue
+                if not materialized:
+                    unmaterialized, materialized = materialize_members(directory), True
+                    if unmaterialized:
+                        rows.append((name, 'NOT RUN', 0, unmaterialized))
+                        failed = True
+                        continue
                 wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
                         '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
                 if name in lanes:

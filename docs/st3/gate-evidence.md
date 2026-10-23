@@ -1365,6 +1365,9 @@ run with `--push` then starts that unit without waiting (`systemctl --user start
 `ST_EVIDENCE_LOG_NUDGE`): a pass counts only once the log lists it, so the agent's record is logged in seconds instead of at the next
 2-minute pull. The pull itself is the unit's, with the log key's grant; st-test never signs the log. Asking is best effort and never
 changes the result.
+A check the tree already has a passing signature for (the verifier's answer, the same one `st-test` asks after a run) is not run again:
+it prints `already signed` and, with `--push`, pushes that note as it is, so re-running on an unchanged tree is near instant. A failed
+record is not a signature. `--rerun` runs the check anyway. The megarepo members are fetched only once a check has to run.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
 counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); with `--all`, every check of the skip policy is listed, and
 one without a local command (isolation-vm, fractal-web today) reads `CI runs it`.
