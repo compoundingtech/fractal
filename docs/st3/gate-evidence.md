@@ -1361,7 +1361,9 @@ the record it used.
 
 `scripts/st-test` runs the whole per-PR suite: each required check that has a local command (today `typescript-client`, `genie-freshness`
 and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and means the same) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
-records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
+records the exit code and output digest. The checks that do not build (`typescript-client`, `genie-freshness`) run alongside
+`linux-gate`, one after another in a lane of their own, as CI runs them on runners of their own: their output is kept and printed after
+linux-gate's, never interleaved, and the summary lists every check as before (`ST_EVIDENCE_SERIAL=1` runs them one after another). The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a clean
