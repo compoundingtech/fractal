@@ -2459,6 +2459,17 @@ impl Client {
             .and_then(|result| result);
         let (status, bytes) = outcome?;
         if !(200..300).contains(&status) {
+            // A schedule collection has no missing-item 404. An older router may answer an
+            // empty Axum 404 rather than a client envelope: report unsupported, never scan.
+            if status == 404 && path.split('?').next() == Some("/v1/client/schedules") {
+                let error = ErrorEnvelope {
+                    api_version: "st3.client.v0".into(), error_version: "st3.client.error.v0".into(),
+                    request_id: String::new(), code: ErrorCode::UnsupportedCapability,
+                    message: "this server does not support schedules.list; upgrade the server".into(),
+                    retryable: false, retry_after_ms: None, details: Default::default(),
+                };
+                return Err(ClientError::Api(error.code.clone(), error.message.clone(), Box::new(error)));
+            }
             if status == 404 && bytes.is_empty() && path.starts_with("/v1/client/launches/") {
                 let error = ErrorEnvelope {
                     api_version: "st3.client.v0".into(),
@@ -3439,6 +3450,34 @@ mod tests {
             }
             lines
         })
+    }
+
+    #[test]
+    fn schedule_models_preserve_unknown_fields_and_state_strings() {
+        let wire: serde_json::Value=serde_json::from_str(include_str!("../../../docs/st3/client-v0/fixtures/schedules-page.json")).unwrap();
+        let decoded: Envelope<SchedulesPage>=serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.value.items[0].state,"future-state");
+        assert_eq!(decoded.value.items[0].standby_state,"future-state");
+        assert_eq!(decoded.value.items[0].knowledge.completeness,"unknown");
+        assert_eq!(serde_json::to_value(decoded).unwrap(),wire);
+    }
+    #[test]
+    fn schedule_reads_encode_explicit_parameters_and_keep_old_server_unsupported() {
+        runtime().block_on(async {
+            let fixture=include_str!("../../../docs/st3/client-v0/fixtures/schedules-page.json");
+            let directory=tempfile::tempdir().unwrap(); let socket=directory.path().join("schedules.sock");
+            let error=serde_json::json!({"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/old","code":"not-found","message":"unknown route","retryable":false,"details":{}}).to_string();
+            let server=scripted_server(&socket,vec![(0,200,fixture.into()),(0,404,error),(0,404,String::new())]);
+            let client=Client::unix_as(&socket,"person/ada");
+            let page=client.schedules_list(Some("next&cursor"),Some(1),Some(300000)).await.unwrap();
+            assert_eq!(page.value.items.len(),1);
+            assert!(matches!(client.schedules_list(None,None,None).await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            assert!(matches!(client.schedules_list(None,None,None).await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            let lines=server.await.unwrap();
+            assert_eq!(lines.len(),3);
+            assert_eq!(lines[0],"GET /v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000 HTTP/1.1");
+            assert_eq!(lines[1],"GET /v1/client/schedules HTTP/1.1");
+        });
     }
 
     #[test]

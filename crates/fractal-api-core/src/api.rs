@@ -171,6 +171,19 @@ pub fn raw_terminal_owner_splice(
 
 pub use crate::delivery_presence::claude_channel_attached;
 
+/// The same answer as `claude_channel_attached`, with the delivery binding that proves it and
+/// the instant the proof lapses by itself. Both come from one presence predicate, so a push
+/// stream's deadline cannot drift from what the poll answers.
+pub fn claude_channel_attachment(
+    store: &Store,
+    subject: &str,
+    incarnation: &str,
+) -> Option<(crate::mailbox::Fence, tokio::time::Instant)> {
+    delivery_presence::attachment_window(subject, incarnation)
+        .filter(|(_, until)| tokio::time::Instant::now() <= *until)
+        .filter(|(fence, _)| store.check_mailbox(fence).is_ok())
+}
+
 #[derive(Clone)]
 pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
@@ -3175,10 +3188,20 @@ fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
     let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), local_host) else {
         return;
     };
+    // Eligibility above already required a live local native seat with an id.
+    let attachment_push = (item["driver"].as_str() == Some("claude")).then(|| {
+        delivery_presence::attachment_push(
+            item["id"].as_str().unwrap_or_default(),
+            item["incarnation_id"].as_str(),
+        )
+    });
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
     item["delivery"] = assessment.to_value();
+    if let Some(attachment_push) = attachment_push {
+        item["delivery"]["attachment_push"] = Value::String(attachment_push.into());
+    }
 }
 
 /// Share the live/local/native eligibility with scalar readers such as assistant summary

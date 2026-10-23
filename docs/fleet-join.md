@@ -165,7 +165,8 @@ successful contact; authentication, admission, membership and projection failure
 
 ## Transports
 
-The worker dials listening members using local overrides, Tailscale, Fabric, then loopback routes.
+The worker dials listening members using local overrides, then enabled Tailscale/Fabric
+routes in local `fleet.toml` preference order, then loopback routes.
 Successful inbound exchanges suppress redundant reverse dials. Graph/network wakes request prompt
 sync; unreachable peers use adaptive network backoff. This is connection recovery, not a retry of
 broken local work. A connection pushes and pulls history while its backlog drains.
@@ -173,21 +174,25 @@ broken local work. A connection pushes and pulls history while its backlog drain
 ### Changing an existing member's transports
 
 ```text
-st fleet transports add fabric [--fabric-protocol PROTOCOL] [--no-service]
+st fleet transports add fabric [--prefer] [--fabric-protocol PROTOCOL] [--no-service]
 st fleet transports remove fabric [--no-service]
+st fleet transports prefer <tailscale|fabric> [--no-service]
 ```
 
 Run these commands on the member whose transports should change. They update the existing
 `fleet.toml`, publish `fleet.member-endpoints` immediately, and refresh the service using the
 same path as `st fleet mode`. Run them with the local daemon running. The member's name,
 identity, secret, signing key and graph history stay intact.
-The command currently supports Fabric; changing Tailscale is outside this command's scope.
+Add and remove support Fabric. Prefer reorders either enabled Tailscale or Fabric
+without changing enablement or exposure; it rejects disabled carriers and is a
+no-op when already first. It preserves the remaining carriers' relative order.
 
 Adding Fabric requires a listening member with a configured replication port and a working
 local `fabric` command. Use `st fleet mode listening` first for a dial-out member. Add exposes
 `127.0.0.1:PORT` before saving or announcing the Fabric endpoint; if exposure fails, settings
 and endpoints are unchanged. The protocol defaults to the saved `fabric_protocol`, or
-`st3/fleet/FLEET_ID`. Re-adding an enabled transport changes nothing; to change its protocol,
+`st3/fleet/FLEET_ID`. Re-adding an enabled transport changes nothing unless `--prefer`
+moves it first; the saved protocol and exposure remain unchanged. To change its protocol,
 remove it and add it with `--fabric-protocol PROTOCOL`. Configure Fabric trust and grants on
 the peers as described below.
 

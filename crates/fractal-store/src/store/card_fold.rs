@@ -150,7 +150,7 @@ impl CardReads {
         // terminal overlay. Read the accepted retirements once per chunk, while this
         // card fold is cold, rather than querying each row on every presentation.
         for chunk in loaded.chunks(CHUNK) {
-            let mut retirements = connection.prepare_cached(&format!(
+            let mut retirements = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hdccc004d481c owner=fractal_store::store::card_fold TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT claims.subject, claims.id FROM json_each(?1) subjects
                  CROSS JOIN claims INDEXED BY claims_subject_kind_index
                    ON claims.subject=subjects.value AND claims.kind='agent.retired'
