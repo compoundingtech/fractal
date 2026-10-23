@@ -15,6 +15,9 @@ export PATH="$work/platform-bin:$PATH"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 export FRACTAL_MACOS_INSTALL_HOME="$work/macos-home" ST_MACOS_INSTALL_HOME="$work/macos-home"
 mkdir -p "$work/package/bin" "$work/installed"
+mkdir -p "$work/package/share/fractal-web/assets"
+printf 'new-web\n' > "$work/package/share/fractal-web/index.html"
+printf 'new-script\n' > "$work/package/share/fractal-web/assets/main.js"
 cp "${INSTALL_RELEASE_TEST_SCRIPT:-$repo/scripts/install-release}" "$work/package/install.sh"
 for binary in st3 pty; do
   printf '#!/bin/sh\necho new-%s\n' "$binary" > "$work/package/bin/$binary"
@@ -32,6 +35,14 @@ for binary in st3 pty; do
 done
 test ! -e "$work/installed/stui"
 test ! -L "$work/installed/stui"
+test "$(cat "$work/share/fractal-web/index.html")" = new-web
+test "$(cat "$work/share/fractal-web/assets/main.js")" = new-script
+# Missing assets fail before replacing either commands or the installed web tree.
+mv "$work/package/share/fractal-web/index.html" "$work/package/share/fractal-web/index.saved"
+if install_fixture --bin-dir "$work/installed"; then exit 1; fi
+test "$("$work/installed/st")" = new-st3
+test "$(cat "$work/share/fractal-web/index.html")" = new-web
+mv "$work/package/share/fractal-web/index.saved" "$work/package/share/fractal-web/index.html"
 # Missing payload and directory collisions must fail before replacing installed files.
 rm "$work/package/bin/pty"
 if install_fixture --bin-dir "$work/installed"; then exit 1; fi
@@ -130,6 +141,7 @@ chmod 0700 "$work/prior/st3" "$work/prior/pty" "$work/prior/stui"
 rm "$work/prior/st"
 ln -s /previous/st3 "$work/prior/st"
 export INSTALL_FAIL_DEST="$work/prior/pty"
+printf 'previous-web\n' > "$work/share/fractal-web/index.html"
 if install_fixture --bin-dir "$work/prior" --quiet; then exit 1; fi
 for name in st3 pty stui; do
   test "$(cat "$work/prior/$name")" = "previous-$name"
@@ -138,6 +150,7 @@ done
 test "$(readlink "$work/prior/st")" = /previous/st3
 test ! -e "$work/prior/.smalltalk-install.lock"
 python3 -c 'import os,sys; assert sorted(os.listdir(sys.argv[1])) == ["pty", "st", "st3", "stui"]' "$work/prior"
+test "$(cat "$work/share/fractal-web/index.html")" = previous-web
 rm "$INSTALL_FAIL_MARKER"
 export INSTALL_FAIL_DEST="$work/fresh/pty"
 if install_fixture --bin-dir "$work/fresh" --quiet; then exit 1; fi

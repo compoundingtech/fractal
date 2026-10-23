@@ -35,11 +35,15 @@ for binary in "${binaries[@]}"; do
     echo "missing executable: $binary" >&2; exit 1;
   }
 done
+web_source="$source_dir/../share/fractal-web"
+[[ -f $web_source/index.html ]] || { echo "missing web assets: share/fractal-web/index.html" >&2; exit 1; }
 for name in "${binaries[@]}" st stui; do
   [[ ! -d $bin_dir/$name ]] || { echo "refusing to replace directory: $name" >&2; exit 1; }
 done
 mkdir -p "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd)
+web_dir="$(dirname "$bin_dir")/share/fractal-web"
+web_replaced=false
 stage=
 locked=false
 rollback_ready=false
@@ -78,6 +82,12 @@ cleanup() {
         fi
       done
     fi
+    if $web_replaced; then
+      rm -rf -- "$web_dir" || restored=false
+      if [[ -e $stage/previous-web ]]; then
+        mv "$stage/previous-web" "$web_dir" || restored=false
+      fi
+    fi
   fi
   if $restored; then
     [[ -z $stage ]] || rm -rf "$stage"
@@ -115,6 +125,8 @@ for name in "${binaries[@]}" st stui; do
     cp -pP "$bin_dir/$name" "$stage/previous/$name"
   fi
 done
+cp -R "$web_source" "$stage/web"
+chmod -R u+w "$stage/web"
 for binary in "${binaries[@]}"; do
   cp "$source_dir/$binary" "$stage/$binary"
   chmod 0755 "$stage/$binary"
@@ -158,6 +170,12 @@ PY
   macos=true
 fi
 rollback_ready=true
+mkdir -p "$(dirname "$web_dir")"
+if [[ -e $web_dir || -L $web_dir ]]; then
+  mv "$web_dir" "$stage/previous-web"
+fi
+web_replaced=true
+mv "$stage/web" "$web_dir"
 for name in "${binaries[@]}" st; do
   if [[ $macos == true && $name == st3 ]]; then continue; fi
   mv -f "$stage/$name" "$bin_dir/$name"

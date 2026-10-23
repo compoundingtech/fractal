@@ -636,6 +636,7 @@
         "flake.nix",
         "megarepo.kdl",
         "megarepo.lock",
+        "nix/fractal-web.nix",
         "nix/web-shell-inputs.json",
         "nix/web-shell.nix",
         "package.json",
