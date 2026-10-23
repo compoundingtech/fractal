@@ -120,8 +120,10 @@ KEPT_SEAT = ('ST_AGENT', 'ST_SKIP_EVIDENCE')  # exact names, plus every ST_EVIDE
 
 # The directories every check's PATH is made of, in this order (those that exist), plus the one `nix` is in: cargo's build scripts record
 # PATH, so two seats whose PATHs differ (their own tools, state directories, dev shells) would rebuild nearly the whole workspace in one
-# pool tree. The perf dev shell fixes its PATH the same way. ST_EVIDENCE_PATH=keep leaves the caller's PATH alone.
-CHECK_PATH = ('~/.local/bin', '/run/current-system/sw/bin', '/nix/var/nix/profiles/default/bin', '/usr/bin', '/bin')
+# pool tree. The perf dev shell fixes its PATH the same way. ~/.cargo/bin stays in it: `cargo clippy -V` prints `clippy 0.1.97` with it and
+# `clippy 0.1.97 (2d8144b788 2026-07-07)` without, and the clippy ratchet's baseline holds the former (measured on hetz, 2026-10-23).
+# ST_EVIDENCE_PATH=keep leaves the caller's PATH alone.
+CHECK_PATH = ('~/.local/bin', '~/.cargo/bin', '/run/current-system/sw/bin', '/nix/var/nix/profiles/default/bin', '/usr/bin', '/bin')
 
 
 def check_path():
