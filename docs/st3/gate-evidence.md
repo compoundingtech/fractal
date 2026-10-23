@@ -866,7 +866,7 @@ Six non-required jobs, `evidence-gate-<check>` for each required check (`linux-g
 a trusted note already covers the run's tree. They hold `contents: read` only, write nothing and dispatch
 nothing, and every problem becomes `decision=run`. **Every required check now consumes its gate's decision**: `genie-freshness` and `typescript-client`
 (by skipping their steps), and the Linux group (below); the `fractal-web` execution shards consume theirs the same way
-(its entry is shadow, so it never says skip).
+(enforced for pull requests since 2026-10-23, like the others).
 
 ### What a skip does
 
@@ -979,7 +979,7 @@ key stops the skip by itself. Paths are literal and relative; an under-declared 
 keeps running the real job for one run in N even when a note matches, chosen by a hash of the check, the key and
 the head, so a retry behaves the same; the gate prints `decision=run` with a reason starting `sampled`.
 
-`linux-gate` declares its inputs too (shadow only: `enforce` stays false, `sample_one_in` 5). The list is the Rust test stage's
+`linux-gate` declares its inputs too (enforced for pull requests since 2026-10-23, `sample_one_in` 5). The list is the Rust test stage's
 (`doc/fleet/factory/nix-evidence/rust-test-declared-inputs`, a textual scan of what the Rust sources name) plus what the other
 members of the aggregate read: the whole of `.github` (workflows, the clippy and fleet-compat baselines) and `scripts` (the stage
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
@@ -993,7 +993,7 @@ artifact name, and `upgrade-impact`, which reads the fragments, always runs. The
 the first runs are shadow: a miss shows up as a satisfied note beside a failing real job, and `scripts` and `.github` are declared
 whole until a per-file list is reviewed against a trace of what each stage opens.
 
-`fractal-web` declares its inputs too (shadow only, `sample_one_in` 5). The list is every path the lane's detector
+`fractal-web` declares its inputs too (enforced for pull requests since 2026-10-23, `sample_one_in` 5). The list is every path the lane's detector
 (`scripts/ci-fractal-web-changes`, embedded in `fractal-web-changes`) matches, written as the directories and files that exist. That
 includes four paths the lane reads although no web source names them, which the detector now matches too: `apps/ios/package.json`
 (a workspace member, so the frozen install reads it), `docs/st3/client-v0/fixtures` (an SDK unit test opens `timeline-conformance.json`),
@@ -1014,7 +1014,7 @@ those scripts. The aggregate `linux-gate` note signs its input key like a stage 
 before the partitions (`needs.evidence-gate-linux-gate.outputs.skip` on the shards, clippy and fleet-compat), so the four shards
 share one key.
 
-`isolation-vm` and `mail-redelivery-canaries` declare the same list (shadow only too: `enforce` stays false, `sample_one_in` 5),
+`isolation-vm` and `mail-redelivery-canaries` declare the same list (enforced for pull requests since 2026-10-23, `sample_one_in` 5),
 so the three lanes share one input key. Both are members of the `linux-gate` aggregate, whose list already covers what its members
 read, and neither reads anything outside it. The canaries are `scripts/ci-linux mail-redelivery-canaries`, which runs
 `scripts/ci-mail-redelivery-canaries`: a fixed set of the Rust tests from `linux-test-build`'s archive, with the `ci` profile of
