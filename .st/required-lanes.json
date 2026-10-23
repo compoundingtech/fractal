@@ -20,6 +20,44 @@
         "."
       ]
     },
+    "ci-script-tests": {
+      "argv": [
+        "nix",
+        "develop",
+        ".#genie",
+        "-c",
+        "bash",
+        "scripts/ci-script-tests"
+      ],
+      "definition_paths": [
+        ".st",
+        "flake.lock",
+        "flake.nix",
+        "scripts"
+      ],
+      "tree_inputs": [
+        ".config/daily-only.filterset",
+        ".gitattributes",
+        ".github",
+        ".gitignore",
+        ".st",
+        "apps/fractal-web/.gitignore",
+        "apps/fractal-web/src/changelog/seen.ts",
+        "crates/fractal/tests/daemon_load.rs",
+        "crates/fractal/tests/messaging_faults.rs",
+        "docs/st3/gate-evidence.md",
+        "flake.lock",
+        "flake.nix",
+        "megarepo.lock",
+        "nix",
+        "package.json",
+        "packages/fractal-ui/.gitignore",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "scripts",
+        "src/main.rs"
+      ]
+    },
     "isolation-vm": {
       "argv": [
         "nix",

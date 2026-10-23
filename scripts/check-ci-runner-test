@@ -380,7 +380,7 @@ for raw in cache_conditions:
                             'vars.CI_OUTAGE_FAST_QUEUE': switch,
                             'env.CI_LOCAL_CACHES': local,
                             **{f'needs.evidence-gate-{gate}.outputs.skip': skip for gate in (
-                                'genie-freshness', 'typescript-client', 'linux-gate', 'mail-redelivery-canaries', 'isolation-vm')},
+                                'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'mail-redelivery-canaries', 'isolation-vm')},
                         }.items():
                             expression = expression.replace(token, repr(value))
                         expression = expression.replace('!(', 'not (')

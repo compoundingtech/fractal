@@ -17,7 +17,8 @@ The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces t
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
 on `main` are `linux-gate`, `isolation-vm`, `genie-freshness`,
-`typescript-client` and `mail-redelivery-canaries`,
+`typescript-client` and `mail-redelivery-canaries` (`ci-script-tests`, the CI scripts' own tests on their declared inputs, runs beside
+`genie-freshness` and joins the required list once it has run green on `main`),
 and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)).
 
 Every **ready** pull request, including a fork, gets the Linux gate, the isolation VM, the
@@ -737,7 +738,7 @@ the check (`enforce: true`); under a shadow entry the line reads `decision=run r
 and names the record. `fractal-web` has such a shadow entry; `fractal-web-kit` has none, so
 its decision is `run` with `reason=no-record`. `claims PATH…` and
 `inputs CHECK` print the plugin's path ownership and declared inputs.
-`scripts/web-skip-proof-test` (in `genie-freshness`) covers key stability, the app/kit
+`scripts/web-skip-proof-test` (in `ci-script-tests`) covers key stability, the app/kit
 split, base-pinned rules and the policy path.
 
 The strict kit play lane runs every indexed story at both 440/1440 widths and

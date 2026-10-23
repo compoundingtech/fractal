@@ -672,7 +672,7 @@ class StTest(unittest.TestCase):
     def test_the_real_table_lists_only_checks_with_a_command_and_prints_them(self):
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list'], capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness'])
+        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'ci-script-tests'])
 
     def test_a_heavy_check_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
@@ -714,8 +714,8 @@ class StTest(unittest.TestCase):
 
     def test_a_heavy_check_runs_only_when_named_or_with_all(self):
         # The pre-push hook runs st-test with no --check: a check that builds the whole workspace must not start on every push.
-        for args, names in (([], ['typescript-client', 'genie-freshness']),
-                            (['--all'], ['typescript-client', 'genie-freshness', 'mail-redelivery-canaries', 'linux-gate', 'isolation-vm']),
+        for args, names in (([], ['typescript-client', 'genie-freshness', 'ci-script-tests']),
+                            (['--all'], ['typescript-client', 'genie-freshness', 'ci-script-tests', 'mail-redelivery-canaries', 'linux-gate', 'isolation-vm']),
                             (['--check', 'mail-redelivery-canaries'], ['mail-redelivery-canaries'])):
             done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)

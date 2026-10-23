@@ -581,6 +581,148 @@
       },
       "require": "shadow"
     },
+    "ci-script-tests": {
+      "trust_levels": [
+        "fleet"
+      ],
+      "enforce": true,
+      "events": [
+        "pull_request"
+      ],
+      "sample_one_in": 5,
+      "inputs": [
+        ".config/daily-only.filterset",
+        ".gitattributes",
+        ".github",
+        ".gitignore",
+        ".st",
+        "apps/fractal-web/.gitignore",
+        "apps/fractal-web/src/changelog/seen.ts",
+        "crates/fractal/tests/daemon_load.rs",
+        "crates/fractal/tests/messaging_faults.rs",
+        "docs/st3/gate-evidence.md",
+        "flake.lock",
+        "flake.nix",
+        "megarepo.lock",
+        "nix",
+        "package.json",
+        "packages/fractal-ui/.gitignore",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "scripts",
+        "src/main.rs"
+      ],
+      "kinds": {
+        "observed": {
+          "command": [
+            "github-actions",
+            "{repository}",
+            ".github/workflows/fleet.yml",
+            "{check}"
+          ],
+          "runner_prefix": "github:{repository}/"
+        },
+        "wrapper": {
+          "command": [
+            "bash",
+            "scripts/ci-script-tests"
+          ],
+          "required_inputs": [
+            "flake_lock_sha256",
+            "toolchain_sha256",
+            "wrapper_sha256",
+            "system",
+            "attempt",
+            "job",
+            "steps",
+            "step_outcomes"
+          ],
+          "bind_inputs": {
+            "flake_lock_sha256": "flake.lock"
+          },
+          "trust_levels": [
+            "fleet",
+            "host",
+            "agent",
+            "queue"
+          ],
+          "by_level": {
+            "host": {
+              "command": [
+                "nix",
+                "develop",
+                ".#genie",
+                "-c",
+                "bash",
+                "scripts/ci-script-tests"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ]
+            },
+            "agent": {
+              "command": [
+                "nix",
+                "develop",
+                ".#genie",
+                "-c",
+                "bash",
+                "scripts/ci-script-tests"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            },
+            "queue": {
+              "command": [
+                "nix",
+                "develop",
+                ".#genie",
+                "-c",
+                "bash",
+                "scripts/ci-script-tests"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "merge_group"
+              ],
+              "lane": true
+            }
+          }
+        }
+      },
+      "require": "shadow"
+    },
     "mail-redelivery-canaries": {
       "trust_levels": [
         "fleet"

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# The `ci-script-tests` required check: the CI scripts' own self-tests that read only the files its skip-policy entry declares as inputs
+# (.st/evidence-skip-policy.json, checks.ci-script-tests.inputs). A pull request that touches none of them reuses an earlier signature.
+#
+# The tests run in a sparse copy of the tree that holds ONLY those inputs (scripts/ci-sparse-tree), so a test that reads anything else
+# fails here instead of being skipped on a stale signature: the declared inputs cannot drift from what the tests read. The tests that
+# read crates/, apps/ or the whole tree stay in `genie-freshness` (scripts/ci-genie-freshness).
+# It needs git, python3, tar, jq, zstd and ssh-keygen (the genie shell), and no network.
+set -euo pipefail
+. "$(dirname "$0")/script-test-supervisor"
+. "$(dirname "$0")/git-env-clean"
+root=$(cd "$(dirname "$0")/.." && pwd)
+sparse=$(mktemp -d "${TMPDIR:-/tmp}/ci-script-tests.XXXXXX")
+trap 'rm -rf "$sparse"' EXIT
+python3 "$root/scripts/ci-sparse-tree" --repo "$root" --check ci-script-tests --into "$sparse" --link repos
+cd "$sparse"
+. scripts/ci-parallel-tests
+
+python3 scripts/script-process-test
+parallel_tests \
+  ci-ready-pr-test ci-draft-admission-test ci-workflow-concurrency-test check-ci-runner-test ci-namespace-usage-test \
+  ci-mail-redelivery-canaries-test ci-test-partitions-test ci-test-archive-test ci-build-memory-test ci-evidence-source-test \
+  ci-queue-watch-test check-main-ci-test ci-perf-cache-test ci-perf-slot-test ci-perf-scope-test \
+  ci-cache-audit-test ci-genie-cache-cleanup-test web-skip-proof-test ci-evidence-observe-test evidence-lane-trace-test \
+  evidence-gc-test evidence-log-test ci-signed-tree-test ci-evidence-slo-test evidence-keygen-test \
+  st-test-test ci-local-test evidence-prepush-test evidence-presign-worker-test evidence-queue-signer-test \
+  evidence-wrap-test ci-evidence-signing-test evidence-publish-test ci-evidence-shadow-test nix-check-facts-test \
+  ci-evidence-gate-test evidence-flip-ready-test ci-evidence-presign-notice-test evidence-sign-hardening-test ci-daily-long-report-test \
+  ci-nextest-flaky-test nix-typescript-client-test nix-evidence-job-test ci-nextest-test ci-sparse-tree-test

@@ -600,7 +600,7 @@ environment fingerprint, so a check's note can carry more over time; the reposit
 which inputs a check must carry.
 
 The `linux-gate` aggregate records only the members of `linux-gate`: it leaves out the evidence gate jobs, the
-`fractal-web` lane and the two separate checks `genie-freshness` and `typescript-client`, which have their own notes
+`fractal-web` lane and the three separate checks `genie-freshness`, `ci-script-tests` and `typescript-client`, which have their own notes
 (the note job still waits for them, to publish those notes). It refuses, making no note, when the gate of a member
 said skip (`evidence-gate-linux-gate`, `evidence-gate-mail-redelivery-canaries`, `evidence-gate-isolation-vm`; a gate
 added later counts too unless it belongs to a separate check) or when a member reports `skipped` (only the merge-queue
@@ -630,7 +630,7 @@ lower-case names with nonempty string values (a shard number, a test set). It ca
 one, and anything malformed makes no note. The aggregate note ignores the jobs of the separate `fractal-web` lane
 (`fractal-web` and `fractal-web-*`) and its gate's decision: that lane is skipped whenever no web path changed, which must not
 stop the `linux-gate` verdict, and it has its own whole-check note (below).
-It ignores `genie-freshness` and `typescript-client` the same way, and their gates' decisions.
+It ignores `genie-freshness`, `ci-script-tests` and `typescript-client` the same way, and their gates' decisions.
 
 The `fractal-web` lane runs only when web paths changed, in one shard on pull requests and two on the merge queue (when kit
 inputs changed). Each `fractal-web-execution` shard signs its own result (check `fractal-web`, command `["bash",
@@ -893,8 +893,8 @@ writes the record id to the job summary. The wiring is deliberately conservative
   note job `needs` every `evidence-gate-*` job, so it sees them all: the `linux-gate` note refuses when any gate but
   `fractal-web`'s says skip, and the `fractal-web` note when that one does. Each
   gate a job reads is one of that job's own `needs`, which a test checks.
-- A skip of `genie-freshness` skips the tests of this machinery too (`ci-evidence-gate-test`,
-  `evidence-verify-test`, `genie --check`) for that tree. That is accepted because the note is for the same tree and
+- A skip of `genie-freshness` or `ci-script-tests` skips the tests of this machinery too (`evidence-verify-test`, `genie --check` and the
+  rest of `genie-freshness`; `ci-evidence-gate-test` and the other script tests in `ci-script-tests`) for that tree. That is accepted because the note is for the same tree and
   a change to those files is a protected path that always runs in full; a reader must not assume they ran.
 - What is protected and what is bound otherwise. The protected paths are the gate, the verifier, both of their
   tests, the policy, the evidence keys, the workflow source (`fleet.yml.genie.ts`), the helper module it imports
@@ -1014,6 +1014,19 @@ those scripts. The aggregate `linux-gate` note signs its input key like a stage 
 before the partitions (`needs.evidence-gate-linux-gate.outputs.skip` on the shards, clippy and fleet-compat), so the four shards
 share one key.
 
+**`ci-script-tests`: the CI scripts' self-tests, keyed on what they read.** `genie-freshness` used to run every self-test of the CI machinery with the
+whole tree as its key, so every pull request paid for them (about 7 minutes). Measured with `strace` (2026-10-23), 44 of the 47 tests read only
+`scripts/`, `.github/`, `.st/`, `nix/` and about fifteen root and config files; they are most of the test time (`ci-evidence-gate-test` alone is
+two minutes). They now are the check `ci-script-tests` (`scripts/ci-script-tests`), whose skip-policy entry declares exactly those paths as `inputs`:
+a pull request that touches none of them reuses an earlier signature. The check runs the tests in a **sparse copy of the tree holding only the declared
+inputs** (`scripts/ci-sparse-tree`, a one-commit git repository; the megarepo members under `repos/` are linked in, pinned by `megarepo.lock`), so a
+test that reads anything else fails instead of passing on a stale signature: the list cannot drift from what the tests read, and adding a read outside it
+is a reviewed change to the list (policy, `.st/required-lanes.json`, and the list in `scripts/evidence-verify-test`). The three tests that read
+`crates/`, `apps/` or the whole tree (`evidence-verify-test`, `check-ci-test-paths`, `ci-fractal-web-test`) stay in `genie-freshness` with the lints, the
+licenses and `genie --check`; its key is still the whole tree and its run is about a minute. Both scripts run their tests in parallel
+(`scripts/ci-parallel-tests`, `GENIE_FRESHNESS_JOBS`, default 6). The new check has a gate job, a workflow job, a lane, a `scripts/st-test` entry and the
+same levels as `genie-freshness`; it becomes a required check in the ruleset only after the change has merged and its job has run green on `main`.
+
 `isolation-vm` and `mail-redelivery-canaries` declare the same list (enforced for pull requests since 2026-10-23, `sample_one_in` 5),
 so the three lanes share one input key. Both are members of the `linux-gate` aggregate, whose list already covers what its members
 read, and neither reads anything outside it. The canaries are `scripts/ci-linux mail-redelivery-canaries`, which runs
@@ -1052,7 +1065,7 @@ as `fleet/ci`) are listed for **every** required check, each with the exact comm
 - `linux-gate`: `["linux-gate", "aggregate", <the aggregate's needed jobs, sorted>]`, without the gate jobs, `fractal-web-*`,
   `genie-freshness` and `typescript-client`;
 - `mail-redelivery-canaries`: the stage command `["bash", "scripts/ci-linux", "mail-redelivery-canaries"]`;
-- `genie-freshness`: `["bash", "scripts/ci-genie-freshness"]`; `typescript-client`: `["bash", "scripts/ci-typescript-client"]`;
+- `genie-freshness`: `["bash", "scripts/ci-genie-freshness"]`; `ci-script-tests`: `["bash", "scripts/ci-script-tests"]`; `typescript-client`: `["bash", "scripts/ci-typescript-client"]`;
   `isolation-vm`: `["isolation-vm", "nixos-test-driver", "transport-isolation-vm", "sekrets-vm"]`;
 - `fractal-web` (shadow, `wrapper` only): `["fractal-web", "aggregate", "fractal-web", "fractal-web-changes", "fractal-web-execution"]`,
   the whole-check note the aggregate note job signs from the lane's jobs, which must also carry `kit_shard_count`, `shard_results`,
@@ -1074,7 +1087,7 @@ A kind's rule may also name `by_level`: for one signer level (the first part of 
 host-signed local note (its command is the `nix develop ...` line `scripts/st-test` runs) can satisfy a check whose CI step wrapper records a
 different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
-`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only.
+`host` level is admitted for the `wrapper` kind of `genie-freshness`, `ci-script-tests` and `typescript-client`, for pull requests only.
 A level's rule may also say `"lane": true` (default false): that level's notes are then held to the lane of the check in
 `.st/required-lanes.json` at the same accepted base as the policy, exactly as `--lanes-from` holds any note: the tree must not change
 the lane's definition paths (`definition_changed`) and the note must carry that base's `lane_definition_sha256` (`wrong_definition`); a base
@@ -1137,6 +1150,7 @@ note covers.
 | `mail-redelivery-canaries` | true | `pull_request` | 5 | 2026-10-23 |
 | `isolation-vm` | true | `pull_request` | 5 | 2026-10-23 |
 | `genie-freshness` | true | `pull_request` | 5 | 2026-10-23 |
+| `ci-script-tests` | true | `pull_request` | 5 | 2026-10-23 |
 
 `typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
 trusted note, 254 of which would have skipped (the rest were sampled or touched a protected file), and not one satisfied note sat beside a failing
@@ -1357,7 +1371,7 @@ Agents push signatures (Nathan, 2026-10-19). An agent signing account has its ow
 `scripts/evidence-keygen --level agent --name ALIAS` under that account (the alias is invented, never a seat or host name; keep the
 alias-to-account mapping private). Its line goes into `.st/evidence-keys` with a pull request, like a host key, and is read from the
 accepted base, so a change can never vouch for its own key. The skip policy admits `agent` exactly where it admits `host` (the `wrapper`
-kind of `genie-freshness` and `typescript-client`, the `scripts/st-test` command, `pull_request` only, never `observed` and never the merge
+kind of `genie-freshness`, `ci-script-tests` and `typescript-client`, the `scripts/st-test` command, `pull_request` only, never `observed` and never the merge
 queue) with one addition, `"lane": true`: an agent note must be signed against the lane definition of the accepted base (of the pull
 request's branch point, for a head tree: see "Which lane definition a pull request is held to"), so a tree that edits the lane's own scripts
 never skips on an agent's note. The trust is still cooperative (the key's account runs the code it signs
@@ -1374,7 +1388,7 @@ the record it used.
 
 ### Running the checks locally (`scripts/st-test`)
 
-`scripts/st-test` runs each required check that has a local command (today `typescript-client`, `genie-freshness`,
+`scripts/st-test` runs each required check that has a local command (today `typescript-client`, `genie-freshness`, `ci-script-tests`,
 `mail-redelivery-canaries`, `linux-gate` and `isolation-vm`, in that order; `--list --all` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
 records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how

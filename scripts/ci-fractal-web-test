@@ -341,7 +341,7 @@ freshness = blocks["genie-freshness"]
 assert "scripts/ci-genie-freshness" in freshness
 guard = (root / "scripts/ci-genie-freshness").read_text()
 assert "python3 scripts/ci-fractal-web-licenses --check-lockfile" in guard
-assert "python3 scripts/ci-fractal-web-licenses-test" in guard
+assert "ci-fractal-web-licenses-test" in guard  # run by the guard's parallel runner (scripts/ci-parallel-tests)
 assert "ci-fractal-web-test" in guard and "genie --check" in guard
 lanes = (root / "scripts/ci-fractal-web").read_text()
 assert lanes.index("lane \"Frozen install\" pnpm install --frozen-lockfile") < lanes.index("run_streams stream_scenarios"), "the install runs before the parallel streams"
