@@ -2662,7 +2662,7 @@ fn mark_unanswered(pending: &mut [Pending]) -> bool {
 /// The followed agents whose conversation shows a session they have since left: st resolves an
 /// agent to its session when a subscription starts, so after a restart that subscription keeps
 /// the old one (Nathan's message to a restarted seat sat at "sending…" because it landed in the
-/// new session, which his Fractal TUI was not showing). Each is named once per new session.
+/// new session, which his stui was not showing). Each is named once per new session.
 fn moved_sessions(
     conversing: &[String],
     model: &Model,

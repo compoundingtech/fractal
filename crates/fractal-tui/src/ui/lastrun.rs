@@ -1,6 +1,6 @@
 //! Whether the Fractal TUI before this one ended cleanly.
 //!
-//! A Fractal TUI that is killed from outside (SIGKILL) or aborts cannot restore the terminal, so its
+//! A stui that is killed from outside (SIGKILL) or aborts cannot restore the terminal, so its
 //! window keeps its last picture and looks frozen (Nathan, 2026-10-05). Each running Fractal TUI keeps
 //! a small file under `$XDG_CACHE_HOME/st3/stui/runs/` (the cache, not the state: a device
 //! with no st state must stay free of it), removed when it exits by any route that

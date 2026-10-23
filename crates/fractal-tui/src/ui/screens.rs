@@ -3109,7 +3109,7 @@ fn tree_listing(
 }
 
 /// Each path's folders, with a folder that holds only one folder joined to it on one line
-/// (Nathan, 2026-10-01): `fleet/fractal/operations/` rather than three nested folders.
+/// (Nathan, 2026-10-01): `fleet/smalltalk/operations/` rather than three nested folders.
 fn compact_folders(paths: &[Vec<String>]) -> Vec<Vec<String>> {
     use std::collections::{BTreeMap, BTreeSet};
     // What each folder holds: its subfolders by name, and a leaf as the empty name.

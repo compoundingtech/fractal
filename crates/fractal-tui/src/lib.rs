@@ -180,7 +180,7 @@ fn watch_terminal_hangup() {
     // consuming input. Once the PTY is gone there is no terminal left to restore, so end the
     // process even if crossterm is stuck.
     //
-    // Nathan, 2026-10-17: Fractal TUI on a macOS laptop ended again and again with no panic, no signal and no
+    // Nathan, 2026-10-17: stui on a macOS laptop ended again and again with no panic, no signal and no
     // line in exits.log (`silent_exits` in its counters, a draft restored as unclean). This
     // thread was the one place that ends the process without a trace, and on macOS a single
     // look at "readable, nothing queued" was enough. It now needs the look to hold for a

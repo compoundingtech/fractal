@@ -1417,7 +1417,7 @@ mod tests {
 
     #[test]
     fn a_delivery_by_the_current_channel_plugin_leaves_no_empty_shell_behind() {
-        // Nathan, 2026-10-05: "I see xml in Fractal TUI tonight": plugin:st-channel:st was not a name
+        // Nathan, 2026-10-05: "I see xml in stui tonight": plugin:st-channel:st was not a name
         // the delivery recognised, so its envelope was taken out and `<channel …></channel>` stayed.
         let delivery = "<channel source=\"plugin:st-channel:st\" from=\"person/example\" messageId=\"message/c4\" threadId=\"message/c4\" identity=\"fleet/example/quay\">\n<smalltalk-message id=\"c4\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/c4\">\nhow is it going?\n</smalltalk-message>\nThe person reads replies in st, not in the agent's session.\n</channel>";
         let shown = BTreeSet::from(["message/c4".to_owned()]);
