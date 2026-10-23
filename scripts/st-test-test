@@ -751,6 +751,7 @@ class PerCrate(StTest):
         self.calls = Path(self.tmp.name) / 'fake-calls'
         fake = Path(self.tmp.name) / 'fake-run.py'
         fake.write_text(FAKE_RUN)
+        st_test.LOCAL['rust-tests'] = ['python3', 'scripts/ci-rust-test-result']  # StTest's patcher restores the table
         patcher = mock.patch.object(st_test, 'RUN_TESTS', [sys.executable, str(fake)])
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -765,6 +766,12 @@ class PerCrate(StTest):
                                                                          'crates': {'base': {'extra': []}, 'top': {'extra': []}}}))
         for script in ('rust-test-keys', 'ci-rust-test-result'):
             shutil.copy(ROOT / 'scripts' / script, self.work / 'scripts' / script)
+        # The real rust-tests policy entry and a lane for it: the verifier then judges every note by the repository's rules.
+        policy = json.loads(json.dumps(POLICY))
+        policy['checks']['rust-tests'] = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['rust-tests']
+        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
+        (self.work / '.st/required-lanes.json').write_text(json.dumps({'version': 1, 'lanes': {'rust-tests': {
+            'argv': ['python3', 'scripts/ci-rust-test-result'], 'definition_paths': ['.st', 'scripts'], 'tree_inputs': ['.']}}}))
         git(self.work, 'add', '.')
         git(self.work, 'commit', '-q', '-m', 'workspace')
         git(self.work, 'push', '-q', 'origin', 'main')
@@ -846,6 +853,59 @@ class PerCrate(StTest):
         code, out, err = self.run_crates('--crate', 'nope')
         self.assertEqual(code, 1, out + err)
         self.assertIn('not a workspace crate of this tree: nope', out)
+
+    def members(self, *extra):
+        verifier = ROOT / 'scripts/evidence-verify'
+        # The gate copies the accepted base's verifier and scripts/rust-test-keys side by side; so does this.
+        side = Path(self.tmp.name) / 'side'
+        side.mkdir(exist_ok=True)
+        for name in ('evidence-verify', 'rust-test-keys'):
+            shutil.copy(ROOT / 'scripts' / name, side / name)
+        keys = Path(self.tmp.name) / 'keys'
+        keys.write_text(git(self.work, 'show', 'origin/main:.st/evidence-keys') + '\n')
+        done = subprocess.run([sys.executable, str(side / 'evidence-verify'), '--repo', str(self.work), '--revision', 'HEAD', '--check', 'rust-tests',
+                               '--members', '--policy-from', 'origin/main', '--repository', 'org/repo', '--keys', str(keys), *extra],
+                              capture_output=True, text=True, env=GIT_ENV)
+        return done.returncode, json.loads(done.stdout)
+
+    def test_the_verifier_is_satisfied_only_when_every_member_has_a_note_for_its_own_key(self):
+        code, result = self.members()
+        self.assertEqual((code, result['reason']), (1, 'crate_uncovered'), result)
+        self.assertEqual(sorted(result['missing']), ['base', 'top'])
+        self.run_crates()
+        code, result = self.members()
+        self.assertEqual(code, 0, result)
+        self.assertEqual((result['satisfied'], result['members'], sorted(result['crates'])), (True, 2, ['base', 'top']))
+        self.assertEqual(result['trust_level'], 'host')
+        self.assertTrue(result['enforce'] is False and result['policy'] is True)
+        self.commit('crates/top/src/lib.rs', '// changed\n')
+        code, result = self.members()
+        self.assertEqual((code, sorted(result['missing'])), (1, ['top']), 'base is below top and keeps its note')
+        self.run_crates()
+        self.assertEqual(self.members()[0], 0)
+
+    def test_a_failed_crate_note_keeps_the_members_check_unsatisfied(self):
+        self.run_crates(FAKE_FAIL='top')
+        code, result = self.members()
+        self.assertEqual((code, result['missing']), (1, {'top': 'check_failed'}))
+
+    def test_members_project_prints_every_crates_key_for_the_gate_to_fetch(self):
+        code, result = self.members('--project')
+        self.assertEqual(code, 0)
+        self.assertEqual((sorted(result['crates']), result['members']), (['base', 'top'], 2))
+        for crate in result['crates'].values():
+            self.assertEqual(len(crate['key']), 40)
+            self.assertEqual(crate['refspecs'][1], f"+refs/notes/evidence-input/rust-tests/{crate['key']}/*:refs/notes/evidence-input/rust-tests/{crate['key']}/*")
+
+    def test_a_tree_without_a_manifest_the_verifier_can_read_is_an_error_never_a_pass(self):
+        git(self.work, 'rm', '-q', 'crates/top/Cargo.toml')
+        git(self.work, 'commit', '-q', '-m', 'break')
+        code, result = self.members()
+        self.assertEqual((code, result['reason']), (1, 'error'), result)
+        git(self.work, 'rm', '-q', '-r', 'crates', 'Cargo.toml')
+        git(self.work, 'commit', '-q', '-m', 'no workspace')
+        code, result = self.members()
+        self.assertEqual((code, result['reason']), (1, 'error'), result)
 
     def test_status_names_the_crates_to_run(self):
         code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
