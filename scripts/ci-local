@@ -37,10 +37,18 @@ scratch_root=${CI_LOCAL_SCRATCH_ROOT:-$HOME/.cache/ci-local}
 mkdir -p "$scratch_root"
 chmod go-w "$scratch_root"
 scratch=$(mktemp -d "$scratch_root/run.XXXXXX")
-# The stages' TMPDIR is short and on disk: tests put Unix sockets several levels below it, a socket path is limited to 108 bytes, and
-# under the scratch above (~/.cache/ci-local/run.XXXXXX/tmp) the daemons' sockets in the delivery-probe and seat tests no longer fit.
-# /var/tmp is on disk on the build hosts (/tmp may be a small tmpfs); CI_LOCAL_TMP_ROOT names another root.
-tmp=$(mktemp -d "${CI_LOCAL_TMP_ROOT:-/var/tmp}/cl.XXXXXX")
+# The stages' TMPDIR is short: tests put Unix sockets several levels below it, a socket path is limited to 108 bytes, and under the
+# scratch above (~/.cache/ci-local/run.XXXXXX/tmp) the daemons' sockets in the delivery-probe and seat tests no longer fit. It is in
+# RAM (/dev/shm) when that has 20 GiB free, else on disk (/var/tmp; /tmp may be a small tmpfs); CI_LOCAL_TMP_ROOT names another root.
+# The tests' SQLite stores sync every commit, and that wait, not CPU, is most of their time: on a build host the linux-gate tests took
+# 849 s on /dev/shm against 1518 s on disk at 6 threads, using about 3.3 GB of it at 12 threads (2026-10-23). 20 GiB leaves room
+# for the checkpoint tests, which refuse a filesystem with less than about 17 GB free, and for a second run.
+tmp_root=${CI_LOCAL_TMP_ROOT:-}
+if [ -z "$tmp_root" ]; then
+  tmp_root=/var/tmp
+  if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -ge $((20 * 1024 * 1024)) ]; then tmp_root=/dev/shm; fi
+fi
+tmp=$(mktemp -d "$tmp_root/cl.XXXXXX")
 trap 'rm -rf "$scratch" "$tmp"' EXIT
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
@@ -130,9 +138,11 @@ if [[ " $* " == *" tests "* ]]; then
 fi
 cargo build --locked -p fractal-drivers --bin ci-hooks-install
 bash scripts/ci-install-built-hooks
-# A build host is shared and test binaries run outside the build admission gate: the stages' tests run 6 at a time unless
-# CI_TEST_THREADS says otherwise (CI's runners use 8 on a machine of their own), at low CPU and IO priority.
-export CI_TEST_THREADS=${CI_TEST_THREADS:-6}
+# A build host is shared and test binaries run outside the build admission gate: the stages' tests run 12 at a time unless
+# CI_TEST_THREADS says otherwise (CI's runners use 8 on a machine of their own), at low CPU and IO priority. On a 16-core build host
+# with the TMPDIR in RAM, 12 threads took the linux-gate tests from 849 s to 519 s at a peak of 18 GB used (2026-10-23); on disk,
+# 12 threads made six timing-sensitive tests retry, so the two go together.
+export CI_TEST_THREADS=${CI_TEST_THREADS:-12}
 low=()
 if command -v ionice >/dev/null 2>&1; then low+=(ionice -c 3); fi
 if command -v nice >/dev/null 2>&1; then low+=(nice -n 10); fi

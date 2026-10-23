@@ -435,6 +435,32 @@ class StTest(unittest.TestCase):
     def pool(self):
         return next((self.home / '.cache/st-test').iterdir())
 
+    def test_the_light_checks_run_alongside_the_one_that_builds_and_their_output_follows_it(self):
+        self.commit('b.txt', 'two')
+        marks = Path(self.tmp.name) / 'marks'
+        stamp = 'import sys, time; open(sys.argv[1], "a").write(f"{sys.argv[2]} {time.time()}\\n")'
+        build = ['sh', '-c', f'{sys.executable} -c \'{stamp}\' {marks} build-start; sleep 2; echo BUILD-OUTPUT; '
+                             f'{sys.executable} -c \'{stamp}\' {marks} build-end']
+        light = ['sh', '-c', f'{sys.executable} -c \'{stamp}\' {marks} light-start; echo LIGHT-OUTPUT']
+        with mock.patch.dict(st_test.LOCAL, {'demo': build, 'light': light}, clear=True), \
+                mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+            code, out, err = self.run_st_test('--check', 'demo', '--check', 'light')
+            self.assertEqual(code, 0, out + err)
+            times = dict(line.split() for line in marks.read_text().splitlines())
+            self.assertLess(float(times['light-start']), float(times['build-end']))  # it ran during the build, not after it
+            # Its output is kept and printed after the build lane under its own header, never interleaved with the build's.
+            self.assertLess(out.index('----- st-test: light output -----'), out.index('LIGHT-OUTPUT'))
+            self.assertLess(out.index('LIGHT-OUTPUT'), out.index('st-test: tree'))
+            self.assertRegex(out, r'demo +passed')
+            self.assertRegex(out, r'light +passed')
+            marks.unlink()
+            self.commit('c.txt', 'three')
+            code, out, err = self.run_st_test('--check', 'demo', '--check', 'light', extra_env={'ST_EVIDENCE_SERIAL': '1'})
+            self.assertEqual(code, 0, out + err)
+            times = dict(line.split() for line in marks.read_text().splitlines())
+            self.assertGreater(float(times['light-start']), float(times['build-end']))  # one after another, in the listed order
+            self.assertNotIn('----- st-test:', out)
+
     def test_a_check_that_builds_uses_its_trees_kept_target_and_another_does_not(self):
         self.commit('b.txt', 'two')
         seen = Path(self.tmp.name) / 'seen'

@@ -1171,7 +1171,7 @@ accepted base like everything else here. Nothing calls it yet and no check sets 
 asserts that every committed check is `off`. Making any check `reject` is a separate reviewed change, and making it a required status
 check is a repository ruleset change that is not made here. A pass for a tree is never evidence for the combined tree the merge queue tests.
 
-### Lane definitions (`.st/required-lanes.json`, nothing reads it yet)
+### Lane definitions (`.st/required-lanes.json`)
 
 A note says a check passed; what the check RAN is decided by scripts that live in the tree under test, so an agent could change them and still hold a
 valid note. `.st/required-lanes.json` (read from the accepted base, strictly validated) names, per lane, the exact `argv`, the `definition_paths`
@@ -1180,10 +1180,12 @@ valid note. `.st/required-lanes.json` (read from the accepted base, strictly val
 IDENTICAL in the verified tree and at BASE, otherwise `definition_changed` (the change edits its own checker, so the signed path is refused and CI
 runs); and the note must carry `lane_definition_sha256`, the digest of those blobs at BASE plus the argv, otherwise `wrong_definition`. A check with
 no lane entry is `no_lane`; a broken lane file or a definition path missing at the base is an error (exit 2 under `--require-all`), never a reject.
-The committed file lists the two lanes `scripts/st-test` can run today, with the same argv (a test pins that) and deliberately wide definition paths
-(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for genie-freshness): a change to any script then always runs in CI. They are to be tightened
-only with a read trace of the lane (a later change). No producer writes the digest yet, nothing passes `--lanes-from`, and no gate reads the file, so
-this changes no behaviour; when a gate does read it, `.st/required-lanes.json` must join that gate's protected paths.
+The committed file lists every lane `scripts/st-test` can run, with the same argv (a test pins that) and deliberately wide definition paths
+(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for most lanes): a change to any script then always runs in CI. They are to be tightened
+only with a read trace of the lane (a later change). The file is in use: `scripts/st-test` and `scripts/evidence-wrap` write the digest, the
+verifier holds every lane-bound signer level (`"lane": true`) to it, and the gate reads it from the base, so `.st/required-lanes.json` is one of
+the gate's protected paths. A pull request's head is held to the definition at its branch point (see "Which lane definition a pull request is held
+to").
 
 Producer half: `scripts/evidence-wrap --lanes-from BASE` (and `scripts/st-test`, which passes its base for every check the base's lane file defines)
 refuses any command that is not the lane's argv, refuses a tree whose lane definition differs from BASE (nothing is signed; CI runs the check, and the
@@ -1359,7 +1361,9 @@ the record it used.
 
 `scripts/st-test` runs the whole per-PR suite: each required check that has a local command (today `typescript-client`, `genie-freshness`
 and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and means the same) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
-records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
+records the exit code and output digest. The checks that do not build (`typescript-client`, `genie-freshness`) run alongside
+`linux-gate`, one after another in a lane of their own, as CI runs them on runners of their own: their output is kept and printed after
+linux-gate's, never interleaved, and the summary lists every check as before (`ST_EVIDENCE_SERIAL=1` runs them one after another). The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a clean
@@ -1475,9 +1479,11 @@ as to CI's aggregate note; its host and agent levels admit it for `pull_request`
 lane, so `--status` reads `not relevant` (covered) and a run skips it, neither a failure nor a note.
 
 **Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
-is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory on disk,
-`/var/tmp/cl.XXXXXX` (`CI_LOCAL_TMP_ROOT` names another root; tests put Unix sockets several levels below it, and a socket path is limited to
-108 bytes, which the daemons' sockets in the delivery-probe and seat tests exceeded under the scratch), because a dev shell's `TMPDIR` is
+is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory,
+`/dev/shm/cl.XXXXXX` when `/dev/shm` has 20 GiB free and `/var/tmp/cl.XXXXXX` on disk otherwise (`CI_LOCAL_TMP_ROOT` names another root;
+tests put Unix sockets several levels below it, and a socket path is limited to 108 bytes, which the daemons' sockets in the delivery-probe
+and seat tests exceeded under the scratch; in RAM the tests' SQLite commits do not wait for a disk sync: on a build host the linux-gate tests
+took 849 s there against 1518 s on disk, and 519 s with 12 threads, at about 3.3 GB of `/dev/shm`), because a dev shell's `TMPDIR` is
 under `/tmp`, which on some build hosts is a small tmpfs (tests that need tens of GB of scratch are refused there) or holds a stray
 `/tmp/.git` (tests that look for the enclosing repository find it); a host's preloaded allocator (`LD_PRELOAD`) is dropped, as no
 CI runner has one (the `malloc_trim` tests fail under it); the stages compile without sccache (`RUSTC_WRAPPER` is unset, as CI compiles
@@ -1502,7 +1508,7 @@ since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the
 configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
 rustup homes (the dependency cache) and `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues: the
 stage takes an ordinary heavy admission slot, with no priority of its own. Test binaries run outside that gate, so on a
-shared host the stages' tests run 6 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
+shared host the stages' tests run 12 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
 `ionice -c 3` and `nice -n 10`: an unbounded run (one test per core) held the dev host's IO pressure above its alarm line. The shim is handed the dev shell's own cargo as
 `CARGO_REAL` (`CI_LOCAL_CARGO`, or the first cargo on PATH outside the account's home that is not the shim): a build host's
 default real cargo may source a saved dev shell environment from another day, and on 2026-10-22 one such file put an older

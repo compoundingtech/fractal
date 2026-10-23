@@ -28,6 +28,7 @@ impl Ui {
             words: needs_words.then(|| reason.clone()).flatten(),
         });
         self.hide_pending_answers();
+        self.refresh_tab_statuses();
         if self.tab() == 0 {
             self.select(self.selected[0]);
         }
@@ -60,6 +61,7 @@ impl Ui {
             }
             attention => *attention = Load::Ready(vec![pending.item]),
         }
+        self.refresh_tab_statuses();
         if let Some(chosen) = chosen
             && let Some(position) = self.listing_for(0, 40).ids.iter().position(|id| id == &chosen)
         {

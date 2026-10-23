@@ -34,6 +34,21 @@ between splits; `Ctrl+T`, `Ctrl+V`, `Ctrl+X` and `Ctrl+W` open a tab, split righ
 close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens or focuses the Inbox tab; `Ctrl+Q` quits.
 Middle-click a tab to close it: press and release over the same tab. This uses the same
 close action as `Ctrl+W` and the tab's right-click menu.
+
+Tab prefixes identify **A**gent (including its terminal), **M**ission, and **I**nbox/alert
+cards. Agent activity follows the type: `>` working/compacting, `-` idle, `x`
+down/stopped/retired, `◆` waiting on a person or a login, `!` fault, `~` starting/unknown.
+`◆N` counts open alerts for the subject (zero is quiet; `◆?` means not loaded).
+The existing standalone `◆` stays immediately before the agent or mission name when
+its reported state needs a person; the alert count is separate and does not replace it.
+A separate `?` marks a current question prompt from live attention, including questions
+that can only be answered in the terminal or whose client-answer window expired.
+Question identity comes from the native question kind or the exact named question
+tool call; cached calls without an open live prompt cannot set it. Mission tabs
+aggregate their agents' current question prompts; Inbox aggregates all of them.
+Counts drop first in a narrow strip; type, activity and question markers precede the
+truncated name. Overflow markers still reach hidden tabs.
+
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
 attaches the agent's terminal. `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
