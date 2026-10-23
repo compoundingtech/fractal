@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# The isolation-vm lane on this machine, for a note signed here: what CI's isolation-vm job runs, with the inputs it downloads from
+# linux-test-build built in place. Run by `scripts/ci-local isolation-vm` (inside the pinned dev shell, with a home of its own and
+# RUNNER_TEMP a scratch directory), never directly.
+#
+#   1. KVM: the VM tests need /dev/kvm read-write and a VM that can be created (CI's "Probe KVM").
+#   2. The workspace test archive linux-test-build produces (`cargo nextest archive` with CI's own filter) and the standalone
+#      production gateway (`cargo build -p fractal --bin st3`, refused when it carries test-support or a test profile).
+#   3. The transport isolation VM driver, run with the archive (all three systemd-scope tests), then the sekrets VM driver, run with
+#      the gateway. TMPDIR is this run's scratch: the drivers keep their VM state there, so two runs never share it.
+set -euo pipefail
+: "${RUNNER_TEMP:?ci-local-isolation-vm runs under scripts/ci-local}"
+out="$RUNNER_TEMP/isolation-vm"
+archives="$out/ci-test-archives"
+mkdir -p "$archives" "$out/tmp" "$out/vm-out" "$out/sekrets-vm-out"
+
+if [ ! -e /dev/kvm ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+  echo "ci-local-isolation-vm: /dev/kvm is missing or not read-write for this user; the VM tests cannot run here" >&2
+  exit 2
+fi
+python3 - <<'EOF'
+import fcntl, os
+fd = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
+version = fcntl.ioctl(fd, 0xAE00)  # KVM_GET_API_VERSION
+vm = fcntl.ioctl(fd, 0xAE01, 0)  # KVM_CREATE_VM
+assert version == 12, f"unexpected KVM API version {version}"
+os.close(vm)
+print(f"KVM API {version}: created a VM")
+EOF
+
+targets=$(python3 scripts/ci-nextest-targets)
+cargo nextest archive --workspace --locked --profile ci -E "$targets" --archive-file "$archives/workspace.tar.zst"
+cargo build --locked -p fractal --bin st3 --message-format=json > "$archives/production-build.json"
+gateway=$(python3 - "$archives/production-build.json" <<'EOF'
+import json, sys
+artifacts = [json.loads(line) for line in open(sys.argv[1]) if line.startswith('{')]
+binaries = [item for item in artifacts if item.get('reason') == 'compiler-artifact'
+            and item['target']['name'] == 'st3' and item.get('executable')]
+if len(binaries) != 1 or 'test-support' in binaries[0]['features'] or binaries[0]['profile']['test']:
+    sys.exit('ci-local-isolation-vm: standalone production gateway feature/profile identity required')
+print(binaries[0]['executable'])
+EOF
+)
+cp "$gateway" "$archives/sekrets-st3"
+
+workspace=$(pwd)
+nix build --print-build-logs --out-link "$out/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
+FRACTAL_ISOLATION_ARCHIVE="$archives/workspace.tar.zst" ST_ISOLATION_ARCHIVE="$archives/workspace.tar.zst" \
+FRACTAL_ISOLATION_WORKSPACE="$workspace" ST_ISOLATION_WORKSPACE="$workspace" \
+FRACTAL_ISOLATION_BUILD_WORKSPACE="$workspace" ST_ISOLATION_BUILD_WORKSPACE="$workspace" \
+FRACTAL_ISOLATION_TIMINGS="$out/vm-timings.json" ST_ISOLATION_TIMINGS="$out/vm-timings.json" \
+TMPDIR="$out/tmp" "$out/vm-driver/bin/nixos-test-driver" --output_directory "$out/vm-out"
+
+nix build --print-build-logs --out-link "$out/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
+FRACTAL_SEKRETS_BINARY="$archives/sekrets-st3" ST_SEKRETS_BINARY="$archives/sekrets-st3" \
+TMPDIR="$out/tmp" "$out/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$out/sekrets-vm-out"
+echo "ci-local-isolation-vm: both VM tests passed"

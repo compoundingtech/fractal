@@ -64,10 +64,12 @@ LOCAL = {
     'mail-redelivery-canaries': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'mail-redelivery-canaries'],
     # The stages a linux-gate skip covers (the tests, clippy, fleet compatibility and the canaries), in one run.
     'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries'],
+    # The VM tests: CI's isolation-vm job, with the test archive and gateway it downloads built in place (needs /dev/kvm).
+    'isolation-vm': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'isolation-vm'],
 }
 # Checks that build and test the Rust workspace: tens of minutes of a shared host. They run only when named (--check) or with
 # --all, never by default, so the pre-push hook keeps signing the light checks within its wait.
-HEAVY = frozenset({'mail-redelivery-canaries', 'linux-gate'})
+HEAVY = frozenset({'mail-redelivery-canaries', 'linux-gate', 'isolation-vm'})
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate'})
 BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')

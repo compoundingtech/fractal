@@ -1341,7 +1341,7 @@ the record it used.
 ### Running the checks locally (`scripts/st-test`)
 
 `scripts/st-test` runs each required check that has a local command (today `typescript-client`, `genie-freshness`,
-`mail-redelivery-canaries` and `linux-gate`, in that order; `--list --all` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
+`mail-redelivery-canaries`, `linux-gate` and `isolation-vm`, in that order; `--list --all` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
 records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
@@ -1408,8 +1408,18 @@ keep the caller's environment. Tests set these variables in the caller and requi
 refuse when it is started with `LD_PRELOAD`.
 
 
+**The VM tests (`scripts/ci-local isolation-vm`).** `isolation-vm`'s local command is `nix develop -c bash scripts/ci-local
+isolation-vm`, which runs `scripts/ci-local-isolation-vm` in the stages' own home: it probes `/dev/kvm` (read-write, and a VM can be
+created), builds in place what CI's isolation-vm job downloads from linux-test-build (the workspace test archive, `cargo nextest
+archive` with CI's own filter, and the standalone production gateway, refused when it carries `test-support` or a test profile), then
+builds and runs the transport isolation VM driver with that archive and the sekrets VM driver with that gateway, with `TMPDIR` in the
+run's scratch. Its lane (`.st/required-lanes.json`) declares `.config/nextest.toml`, `.st`, `flake.lock`, `flake.nix`,
+`nix/sekrets-vm.nix`, `nix/transport-isolation-vm.nix` and `scripts`; its wrapper rule admits `host` and `agent` notes for
+`pull_request` with that command (`by_level`, `lane: true`), and the check-level trust stays `fleet`, so the `observed` kind stays CI's.
+A machine without a usable `/dev/kvm` cannot sign it: the run fails and CI runs the check.
+
 **Heavy checks and Linux gate stages (`scripts/ci-local`).** A check that builds and tests the Rust workspace
-(`mail-redelivery-canaries` and `linux-gate`) is heavy: minutes to tens of minutes of a shared build host. st-test runs it only when
+(`mail-redelivery-canaries`, `linux-gate` and `isolation-vm`) is heavy: minutes to tens of minutes of a shared build host. st-test runs it only when
 it is named (`--check NAME`) or with `--all`, never by default, so the pre-push hook keeps signing the light checks within its
 wait. Their local command is
 `nix develop -c bash scripts/ci-local STAGE...`; `linux-gate`'s runs the four stages a `linux-gate` skip covers, `tests clippy
