@@ -1455,13 +1455,18 @@ builds and runs the transport isolation VM driver with that archive and the sekr
 run's scratch. Its lane (`.st/required-lanes.json`) declares `.config/nextest.toml`, `.st`, `flake.lock`, `flake.nix`,
 `nix/sekrets-vm.nix`, `nix/transport-isolation-vm.nix` and `scripts`. A machine without a usable `/dev/kvm` fails it.
 
-**Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch, its `TMPDIR`
-included, is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another), because a dev shell's `TMPDIR` is
+**Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
+is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory on disk,
+`/var/tmp/cl.XXXXXX` (`CI_LOCAL_TMP_ROOT` names another root; tests put Unix sockets several levels below it, and a socket path is limited to
+108 bytes, which the daemons' sockets in the delivery-probe and seat tests exceeded under the scratch), because a dev shell's `TMPDIR` is
 under `/tmp`, which on some build hosts is a small tmpfs (tests that need tens of GB of scratch are refused there) or holds a stray
 `/tmp/.git` (tests that look for the enclosing repository find it); a host's preloaded allocator (`LD_PRELOAD`) is dropped, as no
 CI runner has one (the `malloc_trim` tests fail under it); the stages compile without sccache (`RUSTC_WRAPPER` is unset, as CI compiles
 when its cache is unavailable), because a cache server started inside the run keeps the run's `HOME` and `TMPDIR`, removed at exit, and the
-account's builds share that one server, so every compile through it failed afterwards (the kept build directory is the local cache); and the
+account's builds share that one server, so every compile through it failed afterwards (the kept build directory is the local cache);
+each test process gets a `TMPDIR` of its own under the run's (`scripts/ci-test-tmpdir`, set as the cargo target runner, which nextest
+honours for every test and every listing), because one test that left an empty `.git` at the top of a shared `TMPDIR` made every later
+test there see a repository that is not one (a CI runner is fresh for every job); and the
 stages run with a CI runner's umask, 022, in a scratch no one else can
 write to (the secrets gateway's tests refuse a group-writable directory, and some hosts' umask is 002). st-test runs every check by
 default, `linux-gate` with the others: there is no subset for signing. `linux-gate`'s local command is
