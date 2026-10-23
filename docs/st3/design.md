@@ -45,13 +45,13 @@ that represents a database transaction.
 
 `st launch preview` validates and renders a planner-authored launch candidate.
 `st apply FILE... --as ACTOR` previews and then atomically applies authored KDL for seats,
-missions and schedules. In [free mode](kdl-lifecycle.md#free-mode) any agent may publish, as itself. A failed
+missions and schedules. In [free mode](../site/reference/configuration.md#free-mode) any agent may publish, as itself. A failed
 declaration rejects the complete publication.
 
 Removing a prior declaration from a later file has no effect. A cancellation, stop, repair, or new
 desired declaration must state the change.
 
-See the [KDL lifecycle](kdl-lifecycle.md) for the complete operator workflow.
+See [Configuration and KDL](../site/reference/configuration.md) for the complete operator workflow.
 
 ## Missions and work
 
