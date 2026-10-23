@@ -110,7 +110,8 @@ async fn failed_generations_leave_no_follow_presence_or_opened_entries_before_di
     let app = Router::new()
         .route("/v1/client/collections/stream", get(collections))
         .route("/v1/client/capabilities", get(capabilities))
-        .route("/v1/client/runtimes/{id}", get(runtime))
+        // Resource IDs contain a slash: runtimes_get("runtime/demo") preserves both segments.
+        .route("/v1/client/runtimes/{*id}", get(runtime))
         .route("/v1/client/actions", post(action))
         .with_state(FakeServer { bookkeeping: bookkeeping.clone(), cleaned: cleaned_tx });
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
@@ -123,11 +124,16 @@ async fn failed_generations_leave_no_follow_presence_or_opened_entries_before_di
             commands_tx.send(Command::Follow { runtime_ids: vec!["runtime/demo".into()], generation }).unwrap();
             loop {
                 let update = updates_rx.recv_timeout(Duration::from_secs(5)).expect("feed must report the failed generation");
-                if let Update::Terminal { generation: result, update: TerminalUpdate::Ended { .. } } = update {
+                if let Update::Terminal { generation: result, update: TerminalUpdate::Ended { reason, .. } } = update {
                     assert_eq!(result, generation);
+                    assert!(reason.contains("fixture refuses before the first screen"), "unexpected failure before subscribing: {reason}");
                     break;
                 }
             }
+            assert_eq!(
+                bookkeeping.blocking_lock().subscriptions, generation as usize,
+                "the server must receive this generation's Subscribe before its failure"
+            );
             let id = cleaned_rx.recv_timeout(Duration::from_secs(5)).expect("failed subscription must be explicitly cleaned up");
             assert_eq!(id, format!("terminal/{generation}"));
             let state = bookkeeping.blocking_lock();
