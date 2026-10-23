@@ -683,6 +683,7 @@ class PerCrate(StTest):
         self.assertEqual(record['filterset'], 'package(=base) or package(=top)')
         self.assertRegex(record['source_inputs'], r'^[0-9a-f]{40}$')
         self.assertRegex(record['test_list_sha256'], r'^[0-9a-f]{64}$')
+        self.assertRegex(record['ignored_list_sha256'], r'^[0-9a-f]{64}$')
         self.assertIn('2 of 2 crates run and signed', out)
 
     def test_an_unchanged_tree_runs_nothing_and_a_change_runs_the_crate_and_its_dependents_only(self):

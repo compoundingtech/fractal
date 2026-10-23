@@ -341,6 +341,7 @@ class Result(unittest.TestCase):
         self.assertEqual((first['tests_run'], first['tests_ignored']), (2, 1))
         self.assertNotEqual(first['test_list_sha256'], second['test_list_sha256'])
         self.assertEqual(json.loads(self.run_result('alpha', '--summary').stdout), first)
+        self.assertNotEqual(first['ignored_list_sha256'], second['ignored_list_sha256'], 'the ignored names are signed too')
 
     def test_an_unreadable_report_or_a_missing_variable_is_a_refusal_not_a_pass(self):
         env = dict(os.environ, RUST_TEST_JUNIT='/nonexistent/junit.xml', RUST_TEST_CRATE='alpha')

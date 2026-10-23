@@ -2,13 +2,14 @@
 """One crate's result out of a nextest run's JUnit file (docs/per-crate-test-signing.md).
 
   RUST_TEST_JUNIT=FILE RUST_TEST_CRATE=NAME scripts/ci-rust-test-result            print the result, exit 0 iff no test of the crate failed
-  RUST_TEST_JUNIT=FILE RUST_TEST_CRATE=NAME scripts/ci-rust-test-result --summary  print {"tests_run", "tests_ignored", "test_list_sha256"} and stop
+  RUST_TEST_JUNIT=FILE RUST_TEST_CRATE=NAME scripts/ci-rust-test-result --summary  print {"tests_run", "tests_ignored", "test_list_sha256", "ignored_list_sha256"} and stop
 
 The crate and the file come from the environment so the recorded argv stays the one the skip policy pins. The printed result is one sorted
 line per test, `pass`, `flaky` (passed on a retry; nextest counts it as passed, as the CI gate does), `FAIL` or `skip`, then a summary;
 its sha256 is the digest the signer records. `tests_run` counts the tests that ran, `tests_ignored` those nextest reports as skipped (the
 `#[ignore]`d tests CI does not run either; they are counted and signed, not hidden), and `test_list_sha256` is the digest of the sorted
-names of the tests that ran, so a record names the exact test list it covers. A suite belongs to a crate when its name is the crate's or starts
+names of the tests that ran, so a record names the exact test list it covers; `ignored_list_sha256` is the same for the ignored ones, so a test
+that silently moves to #[ignore] changes the record. A suite belongs to a crate when its name is the crate's or starts
 with `<crate>::` (nextest's binary id). A crate with no suite ran no test: tests_run is 0 and it passes.
 """
 import hashlib
@@ -43,7 +44,9 @@ def results(junit, crate):
 
 def summary(found):
     ran = sorted(name for status, name in found if status != 'skip')
-    return {'tests_run': len(ran), 'tests_ignored': len(found) - len(ran), 'test_list_sha256': hashlib.sha256('\n'.join(ran).encode()).hexdigest()}
+    ignored = sorted(name for status, name in found if status == 'skip')
+    return {'tests_run': len(ran), 'tests_ignored': len(ignored), 'test_list_sha256': hashlib.sha256('\n'.join(ran).encode()).hexdigest(),
+            'ignored_list_sha256': hashlib.sha256('\n'.join(ignored).encode()).hexdigest()}
 
 
 def main(argv):

@@ -477,6 +477,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
                 '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base,
                 '--input', f'crate={crate}', '--input', f'source_inputs={keys[crate]}', '--input', f'tests_run={facts["tests_run"]}',
                 '--input', f'tests_ignored={facts["tests_ignored"]}', '--input', f'test_list_sha256={facts["test_list_sha256"]}',
+                '--input', f'ignored_list_sha256={facts["ignored_list_sha256"]}',
                 '--input', f'filterset={filterset}', '--input', f'run_command_sha256={run_sha}']
         if RUST_TESTS in lanes:
             wrap += ['--lanes-from', lane_base]
