@@ -170,15 +170,22 @@ pub fn proof_pending(fence: &crate::mailbox::Fence, owner: u64, failures: u8) {
     }
 }
 pub fn clear_proof_pending(fence: &crate::mailbox::Fence, owner: u64, valid: bool) {
-    if let Ok(mut rows) = presence().uncertain.lock()
-        && rows.get(&fence.subject).is_some_and(|r| {
+    let cleared = presence().uncertain.lock().is_ok_and(|mut rows| {
+        let matches = rows.get(&fence.subject).is_some_and(|r| {
             r.fence.incarnation == fence.incarnation
                 && r.fence.epoch == fence.epoch
                 && r.fence.token == fence.token
                 && (r.owner == owner || (valid && r.owner < owner))
-        })
-    {
-        rows.remove(&fence.subject);
+        });
+        if matches {
+            rows.remove(&fence.subject);
+        }
+        matches
+    });
+    if cleared {
+        // A push stream that held its first attachment frame back while the proof was pending
+        // looks again once it clears.
+        notify(&fence.subject);
     }
 }
 pub fn pending_proof(subject: &str, incarnation: &str) -> Option<crate::mailbox::Fence> {

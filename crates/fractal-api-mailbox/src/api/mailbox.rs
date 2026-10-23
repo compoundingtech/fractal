@@ -999,6 +999,15 @@ async fn stream_with_timers_inner<F, S, H>(
             .await;
             match evaluated {
                 Ok(Some(proof)) => {
+                    // While another stream's ownership proof for this binding is pending, a new
+                    // attachment is a new effect and is held: only a stream that already pushed
+                    // `attached: true` keeps it. The poll answers the same way. The pending
+                    // proof's clearing wakes this stream again.
+                    let held = proof.is_some()
+                        && !matches!(attachment_sent, Some((true, _)))
+                        && delivery_presence::pending_proof(&fence.subject, &fence.incarnation)
+                            .is_some();
+                    let proof = if held { None } else { proof };
                     // The proof holds through `until` inclusive, so wake just after it.
                     attachment_deadline = proof
                         .as_ref()
@@ -1604,6 +1613,44 @@ mod tests {
             !delivery_presence::push_capable(&other),
             "only the exact pushed binding"
         );
+    }
+
+    // While another stream's ownership proof for the binding is pending, a new push stream is
+    // told "not attached" (the poll answers the same), and the clearing of that proof pushes the
+    // attachment. A stream that already pushed `attached: true` keeps it when a proof goes
+    // pending, even across a beat refresh.
+    #[tokio::test]
+    async fn pending_ownership_proof_holds_a_new_attachment_push_but_not_an_established_one() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let subject = "agent/attachment-push-pending-proof";
+        let (title, delivery) = attachment_seat(&state, subject);
+        // As in the wake test above: the deadline must not stand in for the wake under test.
+        delivery_presence::shorten_window(subject, Duration::from_secs(120));
+        delivery_presence::proof_pending(&delivery, 1, 1);
+        let mut stream =
+            controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        report_title(&mut stream, true).await;
+        assert_eq!(next_attachment(&mut stream).await, (false, None));
+        assert!(
+            !crate::api::claude_channel_attached(&state.store, subject, "current"),
+            "the poll agrees while the proof is pending"
+        );
+        delivery_presence::clear_proof_pending(&delivery, 1, true);
+        assert_eq!(
+            next_attachment(&mut stream).await,
+            (true, Some(delivery.epoch))
+        );
+        delivery_presence::proof_pending(&delivery, 2, 1);
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), next(&mut stream.socket))
+                .await
+                .is_err(),
+            "an established stream keeps its attachment while a proof is pending"
+        );
+        delivery_presence::clear_proof_pending(&delivery, 2, true);
     }
 
     // Planned T3: a channel that stops reporting is pushed unattached at its own deadline.
