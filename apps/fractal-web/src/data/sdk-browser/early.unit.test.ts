@@ -12,7 +12,9 @@ import * as Tracer from 'effect/Tracer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { EARLY_COLLECTIONS_GLOBAL, peekEarlyBootstrap, takeEarlyCollections } from './early.ts'
-import { FIRST_FRAME_SPAN, type FollowEvent, St3, St3Live, type WindowValue } from './mod.ts'
+import { FIRST_FRAME_SPAN, type FollowEvent, St3, St3Live, type WindowValue } from '@fractal/sdk/effect'
+import { Layer } from 'effect'
+import { BrowserSt3Platform } from './platform.ts'
 
 const API_VERSION = 'st3.client.v0'
 const EARLY_ID = 'wf-early-0123456789abcdef'
@@ -224,13 +226,12 @@ describe('St3Live adopting the early socket', () => {
           St3Live({
             baseUrl: 'http://gateway.test',
             maxFollows: 4,
-            adoptEarlyCollections: true,
             fetch: async () => new Response(JSON.stringify({ api_version: API_VERSION, snapshot, value: {} })),
             socket: () => {
               freshSockets += 1
               return { onopen: null, onmessage: null, onclose: null, onerror: null, send() {}, close() {} } satisfies CollectionSocket
             },
-          }),
+          }).pipe(Layer.provide(BrowserSt3Platform())),
         ),
         Effect.scoped,
         Effect.withTracer(tracer),

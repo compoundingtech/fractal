@@ -9,6 +9,8 @@ import * as Effect from 'effect/Effect'
 import * as Fiber from 'effect/Fiber'
 import * as Stream from 'effect/Stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Layer } from 'effect'
+import { BrowserSt3Platform } from './platform.ts'
 
 import {
   advertisedSubscriptionLimit,
@@ -19,7 +21,7 @@ import {
   St3,
   St3Live,
   type WindowValue,
-} from './mod.ts'
+} from '@fractal/sdk/effect'
 
 /** Collections a window follow can name; the wire CollectionName also carries unfollowable ones. */
 type WindowCollection = Extract<FollowSpec, { readonly _tag: 'Window' }>['collection']
@@ -173,7 +175,7 @@ const run = (
     onSubscribeSent: (id) => gateway.sentSubscribeIds.push(id),
     onFollowSubscribeSent: (event) => gateway.sentFollowSubscribes.push(event),
     ...(onDiagnostics === undefined ? {} : { onDiagnostics }),
-  })
+  }).pipe(Layer.provide(BrowserSt3Platform({ adoptEarlyCollections: false })))
   return Effect.gen(function* () {
     yield* settle
     yield* test(gateway)
@@ -307,7 +309,7 @@ describe('follow admission', () => {
       maxFollows: 1,
       socket: gateway.factory,
       fetch: gateway.fetch,
-    })
+    }).pipe(Layer.provide(BrowserSt3Platform({ adoptEarlyCollections: false })))
     const states: string[] = []
     return Effect.runPromise(
       Effect.gen(function* () {
@@ -329,7 +331,7 @@ describe('follow admission', () => {
       maxFollows: 1,
       socket: gateway.factory,
       fetch: gateway.fetch,
-    })
+    }).pipe(Layer.provide(BrowserSt3Platform({ adoptEarlyCollections: false })))
     const states: string[] = []
 
     await Effect.runPromise(

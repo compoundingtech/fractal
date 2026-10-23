@@ -13,7 +13,6 @@ import * as Exit from 'effect/Exit'
 import * as Option from 'effect/Option'
 import * as Tracer from 'effect/Tracer'
 
-import type { EarlyAdoption } from './early.ts'
 import { type TraceContext, traceContextOf } from './trace.ts'
 
 export const FIRST_FRAME_SPAN = 'wf.ux.first_frame'
@@ -36,7 +35,7 @@ export interface FirstFrames {
     /** Bounded: the window collection name, otherwise the kind. */
     readonly label: string
     /** The early-connect subscribe answered this attempt: link its context and start at its send. */
-    readonly adopted?: EarlyAdoption
+    readonly adopted?: { readonly traceparent: string; readonly subscribeSentAt: number }
   }) => FirstFrameAttempt
 }
 

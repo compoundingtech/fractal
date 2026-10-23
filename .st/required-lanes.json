@@ -20,6 +20,54 @@
         "."
       ]
     },
+    "isolation-vm": {
+      "argv": [
+        "nix",
+        "develop",
+        "-c",
+        "bash",
+        "scripts/ci-local",
+        "isolation-vm"
+      ],
+      "definition_paths": [
+        ".config/nextest.toml",
+        ".st",
+        "flake.lock",
+        "flake.nix",
+        "nix/sekrets-vm.nix",
+        "nix/transport-isolation-vm.nix",
+        "scripts"
+      ],
+      "tree_inputs": [
+        ".cargo",
+        ".config/nextest.toml",
+        ".github",
+        "Cargo.lock",
+        "Cargo.toml",
+        "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
+        "claude-channel",
+        "clients",
+        "components",
+        "crates",
+        "docs/st2",
+        "docs/st3",
+        "docs/vrs",
+        "evals",
+        "examples",
+        "fixtures",
+        "flake.lock",
+        "flake.nix",
+        "nix",
+        "plugins",
+        "scripts",
+        "slo",
+        "src",
+        "templates",
+        "tests",
+        "vendor",
+        "wit"
+      ]
+    },
     "linux-gate": {
       "argv": [
         "nix",
@@ -138,7 +186,7 @@
       ],
       "tree_inputs": [
         "apps/fractal-web/package.json",
-        "apps/fractal-web/packages/fractal-sdk/package.json",
+        "packages/fractal-sdk/package.json",
         "apps/fractal-web/src/folders/core.mts",
         "apps/ios",
         "clients/typescript",
@@ -161,10 +209,10 @@
         "apps/fractal-web/binding.gyp",
         "apps/fractal-web/package.json5",
         "apps/fractal-web/package.yaml",
-        "apps/fractal-web/packages/fractal-sdk/binding.gyp",
-        "apps/fractal-web/packages/fractal-sdk/package.json5",
-        "apps/fractal-web/packages/fractal-sdk/package.yaml",
-        "apps/fractal-web/packages/fractal-sdk/pnpm-workspace.yaml",
+        "packages/fractal-sdk/binding.gyp",
+        "packages/fractal-sdk/package.json5",
+        "packages/fractal-sdk/package.yaml",
+        "packages/fractal-sdk/pnpm-workspace.yaml",
         "apps/fractal-web/pnpm-workspace.yaml",
         "apps/node_modules",
         "binding.gyp",

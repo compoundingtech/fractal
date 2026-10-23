@@ -1,6 +1,7 @@
+import type { CollectionSocketFactory } from '@fractal/client'
 import { expect, it, vi } from 'vitest'
 
-import { browserSocket, wrapTraceFetch } from './trace.ts'
+import { browserSocket, traceQuerySocket, wrapTraceFetch } from './trace.ts'
 
 const TRACEPARENT = '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01'
 
@@ -67,4 +68,26 @@ it('closes a native browser socket synchronously without the prohibited reserved
   } finally {
     vi.unstubAllGlobals()
   }
+})
+
+it('propagates valid upgrade context through the browser URL and preserves factory headers', () => {
+  const socket = { onopen: null, onmessage: null, onclose: null, onerror: null, send() {}, close() {} }
+  const inner = vi.fn<CollectionSocketFactory>(() => socket)
+  const factory = traceQuerySocket(inner)
+  const headers = { traceparent: TRACEPARENT, tracestate: 'wf=1' }
+  expect(factory('wss://gateway.test/collections?existing=1', ['collections'], headers)).toBe(socket)
+  const [url, protocols, forwarded] = inner.mock.calls[0]!
+  const traced = new URL(url)
+  expect(traced.searchParams.get('existing')).toBe('1')
+  expect(traced.searchParams.get('traceparent')).toBe(TRACEPARENT)
+  expect(traced.searchParams.get('tracestate')).toBe('wf=1')
+  expect(protocols).toEqual(['collections'])
+  expect(forwarded).toBe(headers)
+})
+
+it('does not add query context for invalid upgrade traceparents', () => {
+  const inner = vi.fn<CollectionSocketFactory>()
+  const headers = { traceparent: 'invalid', tracestate: 'wf=1' }
+  traceQuerySocket(inner)('wss://gateway.test/collections', [], headers)
+  expect(inner).toHaveBeenCalledExactlyOnceWith('wss://gateway.test/collections', [], headers)
 })
