@@ -393,7 +393,8 @@ p99 1500 ms, since refreshers fold at most once a second. Its paths are `publish
 `publish agents` and `publish attention`, timed by the refresher: each publication that advances
 its cut is one sample, from the first claim this node committed after the previous cut to the
 new publication. Replicated claims carry another node's clock and start no sample, a
-publication more than 10,000 claims after the previous one (a catch-up) is none, and
+publication more than 10,000 claims after the previous one (a catch-up) is none (the
+`st.slo.projection_fresh.skipped` counter counts each, by collection), and
 attention's first publication after no window read it (attention folds only while one does)
 is none either. Both targets appear on
 `GET /v1/client/request-latency` and in `st doctor`. `daemon_load` keeps its 300 ms
@@ -413,9 +414,16 @@ card carries one read without agents. The first roster refolds every card. At st
 the roster head at once; after the projections are replaced it waits until something reads the
 agents list, so no bound on that wait is promised.
 
+The terminal UI reads it: `fractal-ui-model::missions::adapt` takes each mission's and step's word,
+owner and note from the presentation and derives none of them. A row without a presentation, or
+with a word the client does not know, reads `unknown` (in `words.json`), and the list shows the
+row's raw `state` with "st does not say", which is true of an older st and of a card st leaves
+unsaid until its first agents roster. The summary's count of active missions reads
+`missions::row_word`, the word from the row and its gates alone.
+
 | Field | Meaning |
 |---|---|
-| `word` | The mission word: one of the thirteen `mission` ids in `words.json`. |
+| `word` | The mission word: one of the thirteen `mission` ids in `words.json` that st serves. The fourteenth, `unknown`, is the client's own, for a row without a presentation it can read. |
 | `system` | The mission is st's own or a standing observer (see [Graph flags](#graph-flags)). |
 | `who` | Who must act now: `{kind, person, agent, label}`. `kind` is `person` (with `person`), `agent` (with `agent`), `st` or `nobody`. Every reader sees the same row; a client says "you" when the person is its reader. |
 | `steps[]` | The steps of the open runs, or of the latest run when none is open, in display order: `{id, path, title, word, owner, note, attempts, blockers[], keep_open}`. The step `word` is one of `needs_you`, `done`, `working`, `ready`, `waiting`, `cancelled`, `failed` or `pending`. `owner` is shaped like `who`. |
@@ -450,8 +458,8 @@ changing in a newer roster. A roster publication wakes the refresher.
 
 | | Derivation | Differs from this contract |
 |---|---|---|
-| Terminal UI | `crates/fractal-ui-model/src/missions.rs` (496 lines); `crates/fractal-tui/src/ui/screens.rs` `display_rank` and `what_you_can_do` | Sorts working before needs you. Finds the stuck agent only among agents already working on the mission, so an unstaffed mission's idle agent never appears. Retry and restart print CLI hints. |
-| Phone | `apps/ios/missionsView.ts` (163 lines) and parts of `presentation.ts` | Calls decision "alert", has no `not_started`, reads every run's steps, has no who-must-act, stuck step or actions. |
+| Terminal UI | Moved: reads the presentation. `crates/fractal-tui/src/ui/screens.rs` `display_rank` and `what_you_can_do` remain | Sorts working before needs you. Finds the stuck agent only among agents already working on the mission, so an unstaffed mission's idle agent never appears. Retry and restart print CLI hints. |
+| Phone | Moved: `apps/ios/missionsView.ts` reads the presentation; a row without one reads `unknown` and shows its raw `state` with "st does not say" | Has no stuck step or actions yet. |
 | Fractal | None live; the unmounted `shell/Sidebar.tsx` groups by `must_act` | Nothing to delete; reads the projection when it adds Missions. |
 
 Settled: the word for decision is "needs you"; `not_started` is a word; steps come from the open

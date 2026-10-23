@@ -230,6 +230,8 @@ pub trait RuntimeStartsStore {
     fn runtime_start_revoked(&self, id: &str) -> Result<bool>;
     fn revoke_runtime_start(&self, id: &str, request: &str) -> Result<()>;
     fn finish_runtime_start(&self, id: &str, result: &Value) -> Result<()>;
+    /// Recover only exact retained nonlaunch proof, validated under the writer fence.
+    fn close_runtime_start_from_stored_witness(&self, id: &str) -> Result<bool>;
     /// Revocation alone cannot close a dispatched worker. Decide this under the
     /// same writer that dispatch uses, before retaining never-dispatched proof.
     fn cancel_undispatched_runtime_start(&self, id: &str) -> Result<bool>;
@@ -859,6 +861,48 @@ impl RuntimeStartsStore for Store {
         Ok(())
     }
 
+    /// Recover an already retained nonlaunch witness without inspecting or controlling
+    /// a runtime that may belong to an older operation. Validate against the current
+    /// operation snapshot under the same writer fence as dispatch and revocation.
+    fn close_runtime_start_from_stored_witness(&self, id: &str) -> Result<bool> {
+        self.connection
+            .batched(|tx| -> Result<bool> {
+                let operation =
+                    tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+                if !operation.finished || operation.revoked_by.is_none() {
+                    return Ok(false);
+                }
+                let Some(result) = operation.result.as_ref() else {
+                    return Ok(false);
+                };
+                let kind = result["closure_proof"]["witness"]["kind"].as_str();
+                if !matches!(kind, Some("before-backend" | "native-rejection" | "never-dispatched"))
+                    || (kind == Some("never-dispatched") && operation.dispatched)
+                    || !result["error"].is_string()
+                    || result["producer_closed"] != true
+                    || result["verification"] != "producer-closed"
+                    || result["closure_kind"].as_str() != kind
+                {
+                    return Ok(false);
+                }
+                // Reconstruct the entire proof from the writer-owned admission
+                // snapshot, including original request receipts, then compare its
+                // content-addressed identity as well as the result's bound fields.
+                let mut expected = result.clone();
+                closed_runtime_start_result(&operation, self.origin(), &mut expected)?;
+                if expected != *result {
+                    return Ok(false);
+                }
+                tx.execute(
+                    /* sqlite-large-value: allow-for-now lv-hae4fa84d446d owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1 WHERE id=?1",
+                    [id],
+                )?;
+                release_evidence(tx, id)?;
+                Ok(true)
+            })
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+    }
+
     fn finish_runtime_start(&self, id: &str, result: &Value) -> Result<()> {
         self.connection.batched(|tx| -> Result<()> {
             let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
@@ -1090,7 +1134,7 @@ impl RuntimeStartsStore for Store {
         self.connection
             .batched(|tx| {
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-hae4fa84d446d owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h9ed5e63d218e owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1 WHERE id=?1",
                     [id],
                 )?;
                 release_evidence(tx, id)

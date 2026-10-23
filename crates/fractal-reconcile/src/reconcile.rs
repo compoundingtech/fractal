@@ -1,5 +1,6 @@
 #[path = "reconcile_rollout.rs"]
 pub mod rollouts;
+pub mod schedule_declaration_clock;
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
 use crate::DeliveryStore;
@@ -57,6 +58,8 @@ pub mod run_report;
 pub mod start_spacing;
 pub mod start_jobs;
 pub mod waits;
+#[cfg(test)]
+mod schedule_standby_selection_tests;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -814,10 +817,12 @@ impl NativeRuntime {
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
-        let mut producer_entered = false;
-        self.start_checked_inner(member, guard, &mut producer_entered)
+        // The backend owns its launch boundary and returns an exact StartRejected
+        // witness when it can prove that no producer was created.
+        let mut backend_entered = false;
+        self.start_checked_inner(member, guard, &mut backend_entered)
             .map_err(|error| {
-                if producer_entered {
+                if backend_entered {
                     error
                 } else {
                     error.context(fractal_runtime::StartRejected {
@@ -831,7 +836,7 @@ impl NativeRuntime {
         &self,
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
-        producer_entered: &mut bool,
+        backend_entered: &mut bool,
     ) -> Result<()> {
         let executable = launch_executable()?;
         let environment =
@@ -881,7 +886,7 @@ impl NativeRuntime {
                     .get(crate::rollout::PREDECESSOR_ENV)
                     .context("rollout launch needs its predecessor fence")?;
                 if let Some(guard) = guard {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     runtime.spawn_after_checked(
                         &member.runtime_id,
                         &launch,
@@ -895,7 +900,7 @@ impl NativeRuntime {
                         guard,
                     )
                 } else {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     runtime.spawn_after(
                         &member.runtime_id,
                         &launch,
@@ -910,7 +915,7 @@ impl NativeRuntime {
                 }
             } else {
                 if let Some(guard) = guard {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     return runtime.spawn_checked(
                         &member.runtime_id,
                         &launch,
@@ -922,7 +927,7 @@ impl NativeRuntime {
                         guard,
                     );
                 }
-                *producer_entered = true;
+                *backend_entered = true;
                 runtime.spawn(
                     &member.runtime_id,
                     &launch,
@@ -935,13 +940,13 @@ impl NativeRuntime {
             }
         } else {
             if let Some(guard) = guard {
-                *producer_entered = true;
+                *backend_entered = true;
                 return self
                     .exec
                     .spawn_checked(&member.runtime_id, &launch, &cwd, &environment, guard)
                     .map(|_| ());
             }
-            *producer_entered = true;
+            *backend_entered = true;
             self.exec
                 .spawn(&member.runtime_id, &launch, &cwd, &environment)
                 .map(|_| ())
@@ -1074,6 +1079,8 @@ pub struct Reconciler<R = NativeRuntime> {
     #[cfg(any(test, feature = "test-support"))]
     background_wake_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// A locally selected future standby tick is not a replicated scheduling claim.
+    standby_due_ticks: Mutex<HashMap<String, (String, u64, i64)>>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
     /// never enters the replicated graph; durable diagnostic dedupe survives a restart.
@@ -1254,6 +1261,7 @@ impl Reconciler<NativeRuntime> {
             #[cfg(any(test, feature = "test-support"))]
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            standby_due_ticks: Mutex::new(HashMap::new()),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1401,6 +1409,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             #[cfg(any(test, feature = "test-support"))]
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            standby_due_ticks: Mutex::new(HashMap::new()),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -3249,6 +3258,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                                             ),
                                         ]),
                                     )?;
+                                    // Keep the old incarnation visible while its declaration is
+                                    // replacing it. A running wrapper is not a completed relaunch.
+                                    let mut fields = member_fields(
+                                        member,
+                                        &observation.status,
+                                        observation.incarnation_id.as_deref(),
+                                        true,
+                                    );
+                                    if let Some(incarnation) = &observation.incarnation_id {
+                                        fields.insert(
+                                            "restarting_from".into(),
+                                            Value::String(incarnation.clone()),
+                                        );
+                                    }
+                                    self.record_once(&subject.subject, "runtime.observed", fields)?;
                                     self.reconcile_runtime_stop(
                                         &subject.subject,
                                         &member.runtime_id,
@@ -6746,6 +6770,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 evidence.push(token);
             }
             fields.insert("host".into(), Value::String(self.host.clone()));
+            if self.store.latest_actual_value(subject)?.is_some_and(|actual| {
+                actual_field(&actual, "restarting_from").is_some_and(Value::is_string)
+            }) {
+                fields.insert("restarting_from".into(), Value::Null);
+            }
             self.record_once_with_evidence(subject, "runtime.observed", fields, evidence)?;
             return Ok(true);
         }
@@ -7312,11 +7341,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 expected_subject: None,
                 idempotency_key: Some(format!("start-failed:{operation_id}")),
             };
+            let mut absent = member_fields(member, "absent", None, false);
+            if self.store.latest_actual_value(&subject.subject)?.is_some_and(|actual| {
+                actual_field(&actual, "restarting_from").is_some_and(Value::is_string)
+            }) {
+                absent.insert("restarting_from".into(), Value::Null);
+            }
             let observed = ClaimInput {
                 subject: subject.subject.clone(),
                 kind: "runtime.observed".into(),
                 actor: None,
-                fields: member_fields(member, "absent", None, false),
+                fields: absent,
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: Some(format!("start-absent:{operation_id}")),
@@ -7357,11 +7392,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
+        let mut starting = member_fields(member, "starting", incarnation.as_deref(), false);
+        if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
+            && let Some(from) = actual_field(&previous, "restarting_from")
+        {
+            starting.insert("restarting_from".into(), from.clone());
+        }
         let observed = ClaimInput {
             subject: subject.subject.clone(),
             kind: "runtime.observed".into(),
             actor: None,
-            fields: member_fields(member, "starting", incarnation.as_deref(), false),
+            fields: starting,
             evidence: placement_evidence,
             expected_subject: None,
             idempotency_key: Some(format!("start-observed:{operation_id}")),
@@ -8854,6 +8895,41 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(exit_code) = observation.exit_code {
             fields.insert("exit_code".into(), Value::from(exit_code));
         }
+        // Reuse the observation needed for record-once deduplication. Unmarked agents
+        // need no extra actual-state query or harness fold on this hot path.
+        let previous = self.store.latest_observation(&subject.subject, "runtime.observed")?;
+        if subject.kind == "agent"
+            && let Some(from) = previous.as_ref()
+                .and_then(|claim| claim.body.pointer("/fields/restarting_from"))
+                .and_then(Value::as_str)
+        {
+            let replacement_ready = observation
+                .incarnation_id
+                .as_deref()
+                .is_some_and(|current| current != from)
+                && observation.status == "running"
+                && (member.driver.is_none()
+                    || self
+                        .store
+                        .current_harness(&subject.subject)?
+                        .is_some_and(|harness| {
+                            Some(harness.incarnation_id.as_str())
+                                == observation.incarnation_id.as_deref()
+                                && harness.is_ready()
+                        }));
+            fields.insert(
+                "restarting_from".into(),
+                if replacement_ready { Value::Null } else { Value::String(from.into()) },
+            );
+        }
+        if subject.kind == "agent" && previous.as_ref()
+            .and_then(|claim| claim.body.pointer("/fields/restarting_from"))
+            .is_some_and(Value::is_null)
+        {
+            // Keep the explicit clear stable: omitting it on the next pass would
+            // append an otherwise identical observation just to remove the field.
+            fields.insert("restarting_from".into(), Value::Null);
+        }
         let mut evidence = Vec::new();
         if member.kind == MemberKind::Exec {
             // Launch receipts stay on the runtime's node. Carry the launched declaration as
@@ -8893,7 +8969,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .collect();
             }
         }
-        self.record_once_with_evidence(&subject.subject, "runtime.observed", fields, evidence)
+        self.record_once_with_previous(&subject.subject, "runtime.observed", fields, evidence, previous.as_ref())
     }
 
     /// An unchanged diagnostic is one durable operation per affected subject and code, even
@@ -8985,10 +9061,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         fields: BTreeMap<String, Value>,
         evidence: Vec<String>,
     ) -> Result<()> {
-        if self
-            .store
-            .latest_observation(subject, kind)?
-            .is_some_and(|claim| {
+        let previous = self.store.latest_observation(subject, kind)?;
+        self.record_once_with_previous(subject, kind, fields, evidence, previous.as_ref())
+    }
+
+    fn record_once_with_previous(
+        &self,
+        subject: &str,
+        kind: &str,
+        fields: BTreeMap<String, Value>,
+        evidence: Vec<String>,
+        previous: Option<&crate::model::ClaimRecord>,
+    ) -> Result<()> {
+        if previous.is_some_and(|claim| {
                 claim.body.get("fields")
                     == Some(&serde_json::to_value(&fields).unwrap_or(Value::Null))
                     && claim.body.get("evidence") == Some(&serde_json::json!(evidence))
@@ -9782,7 +9867,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if view.status == "ready" && view.agentless {
                         let reason = awaited_run(run, &step, view)?
                             .map(|after| format!("waiting for `{after}` to complete"));
-                        changed |= self.store.set_step_state(
+                        changed |= self.store.set_step_state_unless_terminal(
                             &view.subject,
                             "working",
                             reason.as_deref(),
@@ -13876,7 +13961,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         step: &RuntimeStep<'_>,
     ) -> Result<bool> {
         if view.agentless {
-            return self.store.set_step_state(
+            return self.store.set_step_state_unless_terminal(
                 &view.subject,
                 "failed",
                 Some("the active execution timeout expired"),
@@ -13970,7 +14055,28 @@ impl<R: RuntimeControl> Reconciler<R> {
         )
     }
 
-    /// Record this schedule's next occurrence and arm its timer.
+    /// A late standby wake cannot turn a past candidate into new catch-up policy.
+    fn standby_candidate_current(spec: &crate::model::ScheduleSpec, occurrence: u64,
+        last: Option<u64>, now: i64) -> Result<bool> {
+        if last.is_some_and(|last| last >= occurrence) { return Ok(false); }
+        if spec.at_unix_ms.is_some() { return Ok(last.is_none()); }
+        if let Some(calendar) = &spec.calendar {
+            // A skip candidate was selected in advance. At its firing, compare it to the
+            // current tick, not the NEXT tick that a new skip selection would choose.
+            let policy = if spec.catch_up == "skip" { "latest" } else { &spec.catch_up };
+            return Ok(calendar_occurrence(calendar, last, now, policy, spec.max_catch_up)?.0 == occurrence);
+        }
+        let (Some(interval), Some(anchor)) = (spec.every_ms, spec.anchor_unix_ms) else { return Ok(false) };
+        if now < anchor { return Ok(false); }
+        let current = (now - anchor) as u64 / interval;
+        Ok(match spec.catch_up.as_str() {
+            "latest" | "skip" => occurrence == current,
+            "all" => occurrence <= current && current.saturating_sub(occurrence).saturating_add(1)
+                <= u64::from(spec.max_catch_up.unwrap_or(0)),
+            _ => false,
+        })
+    }
+
     fn reconcile_schedule(&self, schedule: &DesiredSubject) -> Result<()> {
         self.store
             .owned_desired_guard(schedule)
@@ -13978,7 +14084,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(spec) = owned_schedule_spec(&self.store, schedule)? else {
             return Ok(());
         };
-        if spec.stopped || spec.host != self.host {
+        if spec.stopped || (spec.host != self.host
+            && !spec.standby.as_ref().is_some_and(|standby| standby.host == self.host)) {
             return Ok(());
         }
         if self.schedule_has_open_work(&schedule.subject)? {
@@ -14082,7 +14189,55 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             scheduled_at
         };
-        let operation = format!("{}:{revision}:{occurrence}", schedule.subject);
+        let (occurrence, scheduled_at) = if spec.host != self.host {
+            let mut pending = self.standby_due_ticks.lock().unwrap_or_else(PoisonError::into_inner);
+            // Keep a preselected skip tick through its wake: selecting afresh when due
+            // would always choose the next tick. Revalidate revision and catch-up window.
+            let candidate = match pending.get(&schedule.subject) {
+                Some((selected_revision, tick, at)) if selected_revision == &revision
+                    && *at <= now && Self::standby_candidate_current(&spec, *tick, last, now)? => (*tick, *at),
+                _ => (occurrence, scheduled_at),
+            };
+            pending.insert(schedule.subject.clone(), (revision.clone(), candidate.0, candidate.1));
+            candidate
+        } else {
+            self.standby_due_ticks.lock().unwrap_or_else(PoisonError::into_inner).remove(&schedule.subject);
+            (occurrence, scheduled_at)
+        };
+        // Before a future standby tick, arm only a local wake. The next parent pass
+        // revalidates ownership, revision, occurrence and eligibility before any claim.
+        if spec.host != self.host && scheduled_at > now_ms() as i64 {
+            self.arm_restart(&format!("standby-due:{}:{revision}:{}:{occurrence}", schedule.subject, self.host),
+                scheduled_at as u128);
+            return Ok(());
+        }
+        let standby_detail = if spec.host == self.host { None } else {
+            // A known reached/run fact defeats a fresh standby start, regardless of origin.
+            if self.store.mission_run(&Store::scheduled_mission_run_subject(&schedule.subject, occurrence))?.is_some() {
+                return Ok(());
+            }
+            match crate::schedule_standby::readiness(&self.store, &schedule.subject, &spec, &revision,
+                occurrence, self.started_at_unix_ms, now_ms())? {
+                crate::schedule_standby::Readiness::Ready(detail) => Some(detail),
+                crate::schedule_standby::Readiness::Wait { key, until } => {
+                    self.arm_restart(&key, until);
+                    return Ok(());
+                },
+                crate::schedule_standby::Readiness::Held => return Ok(()),
+            }
+        };
+        let mut scheduled_fields = BTreeMap::from([
+            ("revision".into(), Value::String(revision.clone())),
+            ("occurrence".into(), Value::from(occurrence)),
+            ("scheduled_at_unix_ms".into(), Value::String(scheduled_at.to_string())),
+        ]);
+        crate::schedule_standby::add_detail(&mut scheduled_fields, standby_detail.as_ref());
+        let operation = if standby_detail.is_some() {
+            // Publication attempts are per host; the occurrence run identity stays shared.
+            format!("{}:{revision}:{occurrence}:standby:{}", schedule.subject, self.host)
+        } else {
+            format!("{}:{revision}:{occurrence}", schedule.subject)
+        };
         if !self
             .armed_schedules
             .lock()
@@ -14091,22 +14246,36 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(());
         }
-        let request = self.store.append_claim(&ClaimInput {
-            subject: schedule.subject.clone(),
-            kind: "schedule.occurrence-scheduled".into(),
-            actor: None,
-            fields: BTreeMap::from([
-                ("revision".into(), Value::String(revision.clone())),
-                ("occurrence".into(), Value::from(occurrence)),
-                (
-                    "scheduled_at_unix_ms".into(),
-                    Value::String(scheduled_at.to_string()),
-                ),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some(format!("clock-wake:{operation}")),
-        })?;
+        let wake_key = format!("clock-wake:{operation}");
+        let request = (|| -> Result<crate::model::ClaimRecord> {
+            if standby_detail.is_some()
+                && let Some(existing) = self.store.operation_claim(&wake_key)? {
+                // A later local retry has a new heartbeat age. Keep the original publication
+                // observation; the due callback still checks current role/history/readiness.
+                anyhow::ensure!(existing.origin == self.host && existing.subject == schedule.subject
+                    && existing.kind == "schedule.occurrence-scheduled"
+                    && existing.body["fields"]["revision"].as_str() == Some(revision.as_str())
+                    && existing.body["fields"]["occurrence"].as_u64() == Some(occurrence),
+                    "the standby scheduling operation does not match this host and occurrence");
+                return Ok(existing);
+            }
+            Ok(self.store.append_claim(&ClaimInput {
+                subject: schedule.subject.clone(),
+                kind: "schedule.occurrence-scheduled".into(),
+                actor: None,
+                fields: scheduled_fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(wake_key),
+            })?)
+        })();
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => {
+                self.armed_schedules.lock().unwrap_or_else(PoisonError::into_inner).remove(&operation);
+                return Err(error);
+            },
+        };
         // The claim's instant remains authoritative when tzdata changes after arming.
         let scheduled_at = request
             .body
@@ -14162,23 +14331,28 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 // A timer can outlive a replication catch-up or another armed wake. Check at
                 // admission as well as arming, including reached facts from older revisions.
-                let ready = schedule_admission_ready(&store, &host, &schedule_peers, started_at)
-                    .unwrap_or(false)
-                    && owned_schedule_spec(&store, &schedule_declaration)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|spec| !spec.stopped && spec.host == host);
-                let already_reached = store
-                    .claims_for(&schedule_subject, Some("schedule.occurrence-reached"))
-                    .map(|claims| {
-                        claims.iter().any(|claim| {
-                            claim.body["fields"]["occurrence"]
-                                .as_u64()
-                                .is_some_and(|value| value >= occurrence)
-                        })
-                    })
-                    .unwrap_or(true);
-                if !ready || already_reached {
+                let current_spec = owned_schedule_spec(&store, &schedule_declaration).ok().flatten();
+                let mut takeover = None;
+                let owner_ready = match current_spec.as_ref().filter(|spec| !spec.stopped) {
+                    Some(spec) if spec.host == host => true,
+                    Some(spec) if spec.standby.as_ref().is_some_and(|standby| standby.host == host) => {
+                        match crate::schedule_standby::readiness(&store, &schedule_subject, spec,
+                            &revision, occurrence, started_at, now_ms()) {
+                            Ok(crate::schedule_standby::Readiness::Ready(detail)) => { takeover = Some(detail); true },
+                            _ => false,
+                        }
+                    },
+                    _ => false,
+                };
+                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at)
+                    .unwrap_or(false);
+                let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
+                let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
+                    .filter_map(|claim| claim.body["fields"]["occurrence"].as_u64()).max());
+                let already_reached = reached_history.is_err() || last_reached.is_some_and(|last| last >= occurrence);
+                let candidate_current = takeover.is_none() || current_spec.as_ref().is_some_and(|spec|
+                    Self::standby_candidate_current(spec, occurrence, last_reached, now_ms() as i64).unwrap_or(false));
+                if !ready || already_reached || !candidate_current {
                     armed
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -14186,18 +14360,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                     signal_changed(&notify, &event_notify);
                     return;
                 }
+                let mut reached_fields = BTreeMap::from([
+                    ("revision".into(), Value::String(revision.clone())),
+                    ("occurrence".into(), Value::from(occurrence)),
+                    ("scheduled_at_unix_ms".into(), Value::String(scheduled_at.to_string())),
+                ]);
+                crate::schedule_standby::add_detail(&mut reached_fields, takeover.as_ref());
                 let reached = store.append_claim(&ClaimInput {
                     subject: schedule_subject.clone(),
                     kind: "schedule.occurrence-reached".into(),
                     actor: None,
-                    fields: BTreeMap::from([
-                        ("revision".into(), Value::String(revision.clone())),
-                        ("occurrence".into(), Value::from(occurrence)),
-                        (
-                            "scheduled_at_unix_ms".into(),
-                            Value::String(scheduled_at.to_string()),
-                        ),
-                    ]),
+                    fields: reached_fields,
                     evidence: vec![request.id],
                     expected_subject: None,
                     idempotency_key: Some(format!("clock-reached:{operation}")),
@@ -14220,6 +14393,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 format!("cannot read mission/{} head: {error}", work.mission),
                             ),
                         };
+                    let failure_code = if takeover.is_some() { "standby-work-unavailable" } else { failure_code };
                     let Some(selected_revision) = selected_revision else {
                         let _ = store.append_claim(&ClaimInput {
                             subject: schedule_subject.clone(),
@@ -14333,7 +14507,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(spec) = owned_schedule_spec(&self.store, schedule)? else {
             return Ok(());
         };
-        if spec.host != self.host {
+        let on_standby = spec.host != self.host
+            && spec.standby.as_ref().is_some_and(|standby| standby.host == self.host);
+        if spec.host != self.host && !on_standby {
             self.schedule_workspace_retries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -14401,6 +14577,35 @@ impl<R: RuntimeControl> Reconciler<R> {
                 )?;
                 continue;
             };
+            if on_standby {
+                // Do not take over a primary's already-reached or mid-run request.
+                if request.origin != self.host { continue; }
+                if self.store.selected_desired_revision(&schedule.subject)?.as_deref() != field("revision") {
+                    self.fail_schedule_work(schedule, &request.id, "standby-role-changed", "the standby schedule revision changed before work started")?;
+                    continue;
+                }
+                let history = self.store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
+                let other_reached = history.iter().any(|claim| claim.origin != self.host
+                    && claim.body["fields"]["occurrence"].as_u64().is_some_and(|known| known >= occurrence));
+                let prior = history.iter().filter_map(|claim| claim.body["fields"]["occurrence"].as_u64())
+                    .filter(|known| *known < occurrence).max();
+                if other_reached || self.store.mission_run(&Store::scheduled_mission_run_subject(&schedule.subject, occurrence))?.is_some()
+                    || !Self::standby_candidate_current(&spec, occurrence, prior, now_ms() as i64)? {
+                    self.fail_schedule_work(schedule, &request.id, "standby-occurrence-unavailable", "the occurrence is already reached, already run, or outside the current catch-up selection")?;
+                    continue;
+                }
+                let current_revision = self.store.selected_desired_revision(&schedule.subject)?.unwrap_or_default();
+                match crate::schedule_standby::readiness(&self.store, &schedule.subject, &spec,
+                    &current_revision, occurrence, self.started_at_unix_ms, now_ms())? {
+                    crate::schedule_standby::Readiness::Ready(_) => {},
+                    crate::schedule_standby::Readiness::Wait { key, until } => { self.arm_restart(&key, until); continue; },
+                    crate::schedule_standby::Readiness::Held => continue,
+                }
+                if self.store.mission_spec(mission.strip_prefix("mission/").unwrap_or(mission), Some(revision))?.is_none() {
+                    self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable", "the standby has no requested mission revision; this occurrence will not retry")?;
+                    continue;
+                }
+            }
             let retry = self
                 .schedule_workspace_retries
                 .lock()
@@ -14419,6 +14624,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let suffix = &occurrence_subject.trim_start_matches("mission-run/")[..16];
             let workspace = Path::new(root).join(suffix);
             if let Err(error) = fs::create_dir_all(&workspace) {
+                if on_standby {
+                    self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable",
+                        &format!("standby workspace {} is unavailable: {error}; this occurrence will not retry", workspace.display()))?;
+                    continue;
+                }
                 let until = now_ms().saturating_add(SCHEDULE_WORKSPACE_RETRY_MS);
                 self.schedule_workspace_retries
                     .lock()
@@ -14475,6 +14685,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                             occurrence,
                         ),
                         None => {
+                            if on_standby {
+                                self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable", "the standby has no schedule owner run; this occurrence will not retry")?;
+                                continue;
+                            }
                             waiting.push(format!(
                                 "request {}: its owner run {owner} is not stored here yet",
                                 request.id
@@ -14494,6 +14708,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Ok(run) => run,
                 Err(error) if error.code == "mission-run-capacity" => continue,
                 Err(error) if start_waits_for_replication(&error) => {
+                    if on_standby {
+                        self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable", &error.to_string())?;
+                        continue;
+                    }
                     waiting.push(format!("request {}: {error}", request.id));
                     continue;
                 }
@@ -18356,6 +18574,8 @@ pub mod tests {
     mod gate_on_demand;
     mod github_watch_selection;
     mod incremental_deadlines;
+    #[cfg(test)]
+    mod schedule_standby_parent;
     pub mod mission_eval_reuse;
     mod ownership_guard_tests;
     mod pull_request_run_tests;
@@ -18366,6 +18586,7 @@ pub mod tests {
     mod run_report_tests;
     mod start_spacing_loop;
     mod start_preemption;
+    mod terminal_step_guard;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
@@ -19887,18 +20108,38 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
     }
 
+    /// A pass of the loop can also write to a subject the plan read, such as the mission run,
+    /// between planning and applying. The apply then refuses the plan as `stale-subject`, and an
+    /// operator would plan again, so this does too.
     fn apply_source_beside_the_loop(store: &Store, source: &str, idempotency_key: &str) {
         let intent = parse_intent(source, "node").unwrap();
-        let mission = beside_the_loop(|| {
-            store.mission(
-                &intent,
-                crate::model::IntentInput {
-                    kdl: source.into(),
-                    source_name: None,
-                },
-            )
-        });
-        beside_the_loop(|| store.apply(&intent, &mission.subject_tokens, idempotency_key));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let mission = beside_the_loop(|| {
+                store.mission(
+                    &intent,
+                    crate::model::IntentInput {
+                        kdl: source.into(),
+                        source_name: None,
+                    },
+                )
+            });
+            let applied = beside_the_loop(|| {
+                match store.apply(&intent, &mission.subject_tokens, idempotency_key) {
+                    Ok(_) => Ok(true),
+                    Err(error)
+                        if error.code == "stale-subject" && std::time::Instant::now() < deadline =>
+                    {
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
+                }
+            });
+            if applied {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]
@@ -25806,6 +26047,178 @@ agent "test/worker" { workspace "/tmp"; command "true"; name "X"; restart "never
         }).unwrap();
         store.rename_agent("agent/test/worker", Some("X again"), "relabel-x").unwrap();
         reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.starts.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn declaration_restart_marker_reuses_deduplication_reads_for_unmarked_agents() {
+        for agents in [1, 16] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let source = format!("version 2\n{}", (0..agents).map(|index| {
+                format!("agent \"control/{index}\" {{ workspace \"/tmp\"; harness \"codex\" {{}} }}\n")
+            }).collect::<String>());
+            apply_source(&store, &source, "unmarked-controls");
+            let runtime = Arc::new(FakeRuntime::default());
+            let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+            let desired = store.desired_subjects().unwrap();
+            for subject in &desired {
+                let member = subject.member.as_ref().unwrap();
+                reconciler.record_member_as(subject, member, &RuntimeObservation {
+                    runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+                    exit_code: None, incarnation_id: Some("stable".into()),
+                }, false).unwrap();
+            }
+            let cut = store.index().unwrap();
+            // The pre-change observation path: build fields, then record-once dedupe.
+            let baseline = smallclaims::sqlite::work::SqliteWorkScope::start();
+            for subject in &desired {
+                let member = subject.member.as_ref().unwrap();
+                reconciler.record_once(&subject.subject, "runtime.observed",
+                    member_fields(member, "running", Some("stable"), false)).unwrap();
+            }
+            let baseline = baseline.finish();
+            let revised = smallclaims::sqlite::work::SqliteWorkScope::start();
+            for subject in &desired {
+                let member = subject.member.as_ref().unwrap();
+                reconciler.record_member_as(subject, member, &RuntimeObservation {
+                    runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+                    exit_code: None, incarnation_id: Some("stable".into()),
+                }, false).unwrap();
+            }
+            let revised = revised.finish();
+            assert_eq!(revised.statements, baseline.statements, "unmarked agents add no statements");
+            assert_eq!(revised.vm_steps, baseline.vm_steps, "unmarked agents add no SQL work");
+            assert_eq!(store.index().unwrap(), cut, "unchanged agents append no observation");
+            eprintln!("unmarked agents={agents} baseline={baseline:?} revised={revised:?}");
+        }
+    }
+
+    #[test]
+    fn declaration_restart_marker_survives_shutdown_and_clears_on_ready_incarnation() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = r#"version 2
+agent "example/relaunch" { workspace "/tmp"; harness "codex" {}; env { REVISION "one" }; restart "never" }
+"#;
+        apply_source(&store, source, "relaunch-one");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        )
+        // A ready seat is asked for its handoff before a planned restart; do not wait for it.
+        .with_restart_prepare_deadline(std::time::Duration::ZERO);
+        reconciler.reconcile_once().unwrap();
+        let runtime_id = runtime.starts.lock().unwrap()[0].clone();
+        // The fake runtime names each start's incarnation; launch evidence is keyed by it.
+        let started = |nth: usize| {
+            store
+                .observations_for("agent/example/relaunch", "runtime.action.succeeded")
+                .unwrap()
+                .into_iter()
+                .filter(|claim| claim.body.pointer("/fields/action") == Some(&serde_json::json!("start")))
+                .nth(nth)
+                .and_then(|claim| claim.body.pointer("/fields/incarnation_id").and_then(Value::as_str).map(str::to_owned))
+                .unwrap()
+        };
+        let old = started(0);
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(old.clone()),
+        });
+        reconciler.reconcile_once().unwrap();
+        assert!(
+            store
+                .latest_actual_value("agent/example/relaunch")
+                .unwrap()
+                .unwrap()["restarting_from"]
+                .is_null()
+        );
+        let replacement_cut = store.index().unwrap();
+        apply_source(&store, &source.replace("/tmp", "/var/tmp"), "relaunch-two");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(
+            runtime.stops.lock().unwrap().as_slice(),
+            std::slice::from_ref(&runtime_id)
+        );
+        let marker = || {
+            store
+                .latest_actual_value("agent/example/relaunch")
+                .unwrap()
+                .unwrap()["restarting_from"]
+                .clone()
+        };
+        assert_eq!(marker(), old.as_str());
+        let cut = store.index().unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(marker(), old.as_str());
+        assert_eq!(
+            store
+                .observations_for("agent/example/relaunch", "runtime.observed")
+                .unwrap()
+                .iter()
+                .filter(|claim| claim.store_index > cut)
+                .count(),
+            0,
+            "unchanged shutdown must not alternate running and restarting observations"
+        );
+        // The old wrapper is gone: the replacement start is observed under its own incarnation.
+        runtime.ptys.lock().unwrap().clear();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.starts.lock().unwrap().len(), 2);
+        let new = started(1);
+        assert_ne!(new, old);
+        assert_eq!(marker(), old.as_str());
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(new.clone()),
+        });
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(marker(), old.as_str());
+        store
+            .append_claim(&ClaimInput {
+                subject: "agent/example/relaunch".into(),
+                kind: "harness.observed".into(),
+                actor: None,
+                fields: serde_json::from_value(
+                    serde_json::json!({"state":"idle","driver":"codex","incarnation_id":new}),
+                )
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert!(marker().is_null());
+        let finished_cut = store.index().unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(store.observations_for("agent/example/relaunch", "runtime.observed").unwrap()
+            .iter().filter(|claim| claim.store_index > finished_cut).count(), 0, "ready clear must remain stable");
+        let replacement_observations = store.observations_for("agent/example/relaunch", "runtime.observed")
+            .unwrap().into_iter().filter(|claim| claim.store_index > replacement_cut).count();
+        assert_eq!(replacement_observations, 4,
+            "cutover, starting, new running, and ready clear; no per-pass claims");
+
+        // An explicit stop during a later cutover ends the replacement interval.
+        apply_source(&store, source, "relaunch-back");
+        reconciler.reconcile_once().unwrap(); // asks the ready seat for its handoff
+        reconciler.reconcile_once().unwrap(); // the zero deadline has passed
+        assert_eq!(marker(), new.as_str());
+        apply_source(&store, r#"version 2
+stop "agent/example/relaunch"
+"#, "stop-relaunch");
+        runtime.ptys.lock().unwrap()[0].status = "exited".into();
+        runtime.ptys.lock().unwrap()[0].exit_code = Some(0);
+        reconciler.reconcile_once().unwrap();
+        assert!(marker().is_null());
         assert_eq!(runtime.starts.lock().unwrap().len(), 2);
     }
 

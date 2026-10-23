@@ -83,7 +83,9 @@ Credentials expire according to the member's API policy (currently thirty days).
 challenge and run the pairing command again to replace a route's grant. List and revoke devices
 on the member with `st devices --as person/avery ls` and
 `st devices --as person/avery revoke device/DEVICE_ID --reason "Retired laptop grant"`.
-Re-pairing creates a new grant; revoke any old grant that is no longer needed. Removing the
+Re-pairing creates a new grant; revoke any old grant that is no longer needed. A revocation is
+final: every member treats the grant as revoked, whatever order it received the pairing and the
+revocation in, and nothing pairs the same grant again. Removing the
 local profile makes the terminal UI select local mode again but does not revoke the server-side grants.
 
 ## Isolated verification

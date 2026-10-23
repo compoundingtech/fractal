@@ -1533,6 +1533,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st schedules ls": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
       "st schema claims": {
         "actor": "none",
         "accepts_person": false,

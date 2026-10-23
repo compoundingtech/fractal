@@ -578,12 +578,13 @@ mission "example/check" state="ready" {
         args.push("--no-gate-check");
         daemon.command(&args);
         assert!(!workspace.join("gate-ran").exists());
-        assert!(
+        // The listing reads the latest published snapshot, which can trail the apply.
+        wait_for("the published mission to be listed", || {
             daemon
                 .command(&["missions", "ls", "--all"])
                 .to_string()
                 .contains("example/check")
-        );
+        });
     }
 }
 
@@ -1107,8 +1108,13 @@ fn a_check_answers_for_each_gate_and_publish_refuses_a_broken_one() {
     PUBLISHER,
     "--workspace",
     workspace,]);
-    let listed = daemon.command(&["missions", "ls"]);
-    assert!(listed.to_string().contains("orchid/replay"), "{listed}");
+    // The listing reads the latest published snapshot, which can trail the apply.
+    wait_for("the corrected mission to be listed", || {
+        daemon
+            .command(&["missions", "ls"])
+            .to_string()
+            .contains("orchid/replay")
+    });
 
     // A gate for another host, or in a workspace a run creates later, is unchecked, not broken.
     let elsewhere = root.path().join("elsewhere.kdl");

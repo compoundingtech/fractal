@@ -20,7 +20,7 @@ type CancellationWaker = Mutex<Option<Waker>>;
 
 struct State {
     parent: Option<ReadBudget>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     work: Option<WorkClock>,
     route: Arc<str>,
     callsite: &'static Location<'static>,
@@ -60,7 +60,24 @@ impl ReadBudget {
     pub fn new(route: impl Into<Arc<str>>, duration: Duration) -> Self {
         Self(Arc::new(State {
             parent: None,
-            deadline: Instant::now() + duration,
+            deadline: Some(Instant::now() + duration),
+            work: None,
+            route: route.into(),
+            callsite: Location::caller(),
+            read_site: OnceLock::new(),
+            cancelled: AtomicBool::new(false),
+            reported: AtomicBool::new(false),
+            cancellation_waiters: Mutex::new(Vec::new()),
+        }))
+    }
+
+    /// A streaming operation owns its cancellation independently of the request
+    /// that returned its headers. Dropping the stream still interrupts its reads.
+    #[track_caller]
+    pub fn cancellable(route: impl Into<Arc<str>>) -> Self {
+        Self(Arc::new(State {
+            parent: None,
+            deadline: None,
             work: None,
             route: route.into(),
             callsite: Location::caller(),
@@ -74,9 +91,13 @@ impl ReadBudget {
     /// An event wait may last longer than one query. A child does not extend its parent.
     #[track_caller]
     pub fn child(&self, duration: Duration) -> Self {
+        let deadline = match (self.0.deadline, Instant::now().checked_add(duration)) {
+            (Some(parent), Some(child)) => Some(parent.min(child)),
+            (parent, child) => parent.or(child),
+        };
         Self(Arc::new(State {
             parent: Some(self.clone()),
-            deadline: self.0.deadline.min(Instant::now() + duration),
+            deadline,
             work: None,
             route: self.0.route.clone(),
             callsite: Location::caller(),
@@ -129,7 +150,7 @@ impl ReadBudget {
 
     pub fn expired(&self) -> bool {
         self.0.cancelled.load(Ordering::Acquire)
-            || Instant::now() >= self.0.deadline
+            || self.0.deadline.is_some_and(|deadline| Instant::now() >= deadline)
             || self.0.parent.as_ref().is_some_and(Self::expired)
             || self.0.work.as_ref().is_some_and(WorkClock::expired)
     }
@@ -143,7 +164,7 @@ impl ReadBudget {
                 "st3: read cancelled route={:?} callsite={} deadline_elapsed={} work_elapsed={}",
                 self.0.route,
                 self.0.read_site.get().copied().unwrap_or(self.0.callsite),
-                Instant::now() >= self.0.deadline,
+                self.0.deadline.is_some_and(|deadline| Instant::now() >= deadline),
                 self.0.work.as_ref().is_some_and(WorkClock::expired),
             );
         }
@@ -158,7 +179,24 @@ impl ReadBudget {
     }
 
     pub fn remaining(&self) -> Duration {
-        self.0.deadline.saturating_duration_since(Instant::now())
+        self.0.deadline.map_or(Duration::MAX, |deadline| {
+            deadline.saturating_duration_since(Instant::now())
+        })
+    }
+
+    /// Cancellation-only work does not install an artificial timer.
+    pub(crate) async fn deadline_elapsed(&self) {
+        match self.0.deadline {
+            Some(deadline) => tokio::time::sleep(deadline.saturating_duration_since(Instant::now())).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    pub(crate) fn park(&self) {
+        match self.0.deadline {
+            Some(deadline) => std::thread::park_timeout(deadline.saturating_duration_since(Instant::now())),
+            None => std::thread::park(),
+        }
     }
 
     /// Admission waits subscribe to every ancestor, so parent cancellation wakes both
@@ -309,7 +347,7 @@ pub(crate) fn lock<T>(
         }
         check()?;
         if let Some(budget) = &budget {
-            std::thread::park_timeout(budget.remaining());
+            budget.park();
         } else {
             std::thread::park();
         }
@@ -319,6 +357,20 @@ pub(crate) fn lock<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_cancellation_has_no_request_deadline_but_bounds_its_children() {
+        let stream = ReadBudget::cancellable("/stream");
+        assert!(stream.0.deadline.is_none());
+        assert!(stream.check().is_ok());
+        assert!(stream.child(Duration::MAX).0.deadline.is_none());
+        assert!(stream.child(Duration::ZERO).check().is_err());
+        let child = stream.child(Duration::from_secs(15));
+        assert!(child.check().is_ok());
+        stream.cancel();
+        assert!(stream.check().is_err());
+        assert!(child.check().is_err());
+    }
 
     #[test]
     fn worker_budget_keeps_parent_cancellation_and_refuses_another_thread() {

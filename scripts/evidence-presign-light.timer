@@ -1,0 +1,10 @@
+[Unit]
+Description=Pre-sign worker, light class, every 2min (one head per tick; a tick still running skips the next)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

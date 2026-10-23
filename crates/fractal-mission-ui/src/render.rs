@@ -62,6 +62,7 @@ pub struct Glyphs {
     pub needs_you: &'static str,
     pub failed: &'static str,
     pub pending: &'static str,
+    pub unknown: &'static str,
     pub expanded: &'static str,
     pub collapsed: &'static str,
     pub arrow: &'static str,
@@ -77,6 +78,7 @@ impl Default for Glyphs {
             needs_you: "◆",
             failed: "✕",
             pending: "▱",
+            unknown: "?",
             expanded: "▾ ",
             collapsed: "▸ ",
             arrow: " → ",
@@ -109,6 +111,7 @@ pub fn step_style(
         StepState::NeedsYou => (glyphs.needs_you, palette.person, "needs you"),
         StepState::Failed => (glyphs.failed, palette.fault, "failed"),
         StepState::Pending => (glyphs.pending, palette.surface2, "later"),
+        StepState::Unknown => (glyphs.unknown, palette.surface2, "unknown"),
     }
 }
 

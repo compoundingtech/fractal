@@ -141,6 +141,7 @@ pub fn word_style(word: Word, spinner: &'static str) -> (&'static str, Color) {
         Word::Failed => ("✕", theme::FAULT),
         Word::Cancelled => ("⊘", theme::QUIET),
         Word::NotStarted => ("○", theme::QUIET),
+        Word::Unknown => ("?", theme::QUIET),
     }
 }
 
@@ -1799,6 +1800,7 @@ fn display_rank(word: Word) -> u8 {
         Word::Cancelled => 10,
         Word::Done => 11,
         Word::NotStarted => 12,
+        Word::Unknown => 13,
     }
 }
 
@@ -1849,7 +1851,7 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
             current = Some(mission.word);
             let (_, color) = word_style(mission.word, spinner);
             items.push(Item::Header {
-                title: mission.word.name().into(),
+                title: mission.label(),
                 count: missions
                     .iter()
                     .filter(|other| other.word == mission.word)
@@ -1979,7 +1981,7 @@ pub fn mission_detail(
     let inner = width.saturating_sub(4);
     doc.line(Line::from(vec![
         span(
-            format!(" {glyph} {} ", mission.word.name()),
+            format!(" {glyph} {} ", mission.label()),
             Style::default()
                 .fg(theme::CRUST)
                 .bg(color)
@@ -2624,7 +2626,7 @@ pub fn worktree_detail(
             });
             missions.line(Line::from(vec![
                 span(label, theme::fg(color)),
-                span(mission.word.name(), theme::fg(color)),
+                span(mission.label(), theme::fg(color)),
             ]));
         }
     }
@@ -2803,7 +2805,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
         doc.line(Line::from(vec![
             span(format!("{glyph} "), theme::strong(color)),
             span(mission.title.clone(), theme::bold()),
-            span(format!("  {}", mission.word.name()), theme::fg(color)),
+            span(format!("  {}", mission.label()), theme::fg(color)),
         ]));
         doc.line(Line::from(span(mission.id.clone(), theme::dim())));
         doc.line(Line::from(span(mission.word.explain(), theme::fg(color))));
@@ -3216,7 +3218,7 @@ pub fn missions_tree(world: &World, spinner: &'static str, system: bool) -> List
                     span(path.last().cloned().unwrap_or_default(), theme::bold()),
                 ],
                 vec![span(
-                    format!("{} {done}/{total}", mission.word.name()),
+                    format!("{} {done}/{total}", mission.label()),
                     theme::fg(color),
                 )],
             )
