@@ -8,5 +8,5 @@ pnpm --filter @fractal/client test
 pnpm --filter @fractal/client typecheck
 pnpm --filter @fractal/views test
 pnpm --filter @fractal/views typecheck
-pnpm --filter smalltalk-ios-starter exec tsc --noEmit -p .
-pnpm --filter smalltalk-ios-starter test
+pnpm --filter fractal-ios-starter exec tsc --noEmit -p .
+pnpm --filter fractal-ios-starter test
