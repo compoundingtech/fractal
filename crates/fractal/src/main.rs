@@ -74,6 +74,7 @@ use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
 mod cli_help;
+mod demo;
 mod setup;
 mod onboarding;
 mod change_cli;
@@ -95,6 +96,7 @@ mod fleet_cli;
 mod launch_cli;
 mod migrate_cli;
 mod replication_cli;
+mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
 mod work_cli;
@@ -212,6 +214,16 @@ enum Command {
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
     #[command(version = fractal_drivers::version::display_version())]
     Ui(fractal_tui::Args),
+    /// Play a scripted demo of st in the terminal interface, in its own instance.
+    ///
+    /// A demo is one KDL file: the agents, missions, conversations and documents it starts
+    /// from, and beats that each do one visible thing after a delay or when you press the
+    /// advance key. Its agents are scripted, so it costs no tokens and plays the same every
+    /// time. See docs/st3/demos.md and examples/demos.
+    Demo {
+        #[command(subcommand)]
+        command: DemoCommand,
+    },
     /// Inspect Git-backed changes and their separate ref/index/evidence freshness.
     Changes(change_cli::ChangesArgs),
     /// Validate and publish KDL files containing seats, missions and schedules.
@@ -242,6 +254,11 @@ enum Command {
     Missions {
         #[command(subcommand)]
         command: MissionViewCommand,
+    },
+    /// List locally replicated schedule declarations and their knowledge limits.
+    Schedules {
+        #[command(subcommand)]
+        command: schedules_cli::SchedulesCommand,
     },
     /// Create and review a durable planner-backed launch.
     Launch {
@@ -420,6 +437,36 @@ enum Command {
     ReplicationWorker(ReplicationWorkerArgs),
     #[command(hide = true)]
     Driver(DriverArgs),
+}
+
+#[derive(Subcommand)]
+enum DemoCommand {
+    /// Reset the instance, seed the demo, and play it in the terminal interface.
+    ///
+    /// Needs an instance, so your own fleet is never touched: st --instance demo demo play
+    /// FILE. Each run erases that instance's graph and starts from the beginning. It refuses
+    /// an instance that holds a graph or config a demo did not make, unless --reset. Press the
+    /// advance key (F8 unless the file names another) for each beat that waits for a key, and
+    /// Ctrl+Q to end; the demo's daemon and agents stop with it.
+    Play {
+        /// The demo file.
+        file: PathBuf,
+        /// Erase an instance a demo did not make: its graph, its interface cache and its
+        /// config. Without it, a demo plays only in a new instance or one a demo made.
+        #[arg(long)]
+        reset: bool,
+    },
+    /// Check a demo file and list its beats, without playing it.
+    Check {
+        /// The demo file.
+        file: PathBuf,
+    },
+    /// The process a scripted agent runs: it waits for the demo player to end.
+    #[command(hide = true)]
+    Seat {
+        #[arg(long)]
+        player: u32,
+    },
 }
 
 #[derive(Args)]
@@ -930,7 +977,10 @@ enum FleetTransportsCommand {
         /// Use this protocol instead of the saved protocol or st3/fleet/FLEET_ID.
         #[arg(long)]
         fabric_protocol: Option<String>,
-        /// Leave the replication worker restart to the operator.
+        /// Prefer Fabric over other automatic routes, including when already enabled.
+        #[arg(long)]
+        prefer: bool,
+        /// Leave the daemon and replication worker restarts to the operator.
         #[arg(long)]
         no_service: bool,
     },
@@ -938,7 +988,15 @@ enum FleetTransportsCommand {
     Remove {
         #[arg(value_parser = ["fabric"])]
         transport: String,
-        /// Leave the replication worker restart to the operator.
+        /// Leave the daemon and replication worker restarts to the operator.
+        #[arg(long)]
+        no_service: bool,
+    },
+    /// Prefer an enabled transport without changing exposure or removing any carrier.
+    Prefer {
+        #[arg(value_parser = ["tailscale", "fabric"])]
+        transport: String,
+        /// Leave the daemon and replication worker restarts to the operator.
         #[arg(long)]
         no_service: bool,
     },
@@ -4596,6 +4654,9 @@ fn cli_main() -> ExitCode {
     if let Command::Ui(options) = cli.command {
         return run_terminal_ui(options, cli.endpoint.as_deref());
     }
+    if let Command::Demo { command } = cli.command {
+        return run_demo(command);
+    }
     // Set the CLI identity only after the TUI path has chosen its stui client identity.
     fractal_client::set_client_name(format!("st {}", fractal_drivers::version::machine_version()));
     if let Command::Up(args) = &cli.command {
@@ -4641,6 +4702,60 @@ fn run_terminal_ui(mut options: fractal_tui::Args, endpoint: Option<&str>) -> Ex
             }
         }
         fractal_tui::run(options)
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("st: {}", plain_error(&error));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `st demo`: like the terminal interface, it runs before the CLI runtime, because it opens one.
+fn run_demo(command: DemoCommand) -> ExitCode {
+    let result = (|| -> Result<()> {
+        match command {
+            DemoCommand::Check { file } => {
+                let demo = demo::load(&file)?;
+                println!(
+                    "{}: {} agents, {} seed actions, {} beats; advance key {}",
+                    demo.title.as_deref().unwrap_or(&demo.name),
+                    demo.agents.len(),
+                    demo.seed.len(),
+                    demo.beats.len(),
+                    demo.advance.to_uppercase()
+                );
+                for (index, beat) in demo.beats.iter().enumerate() {
+                    let wait = match beat.wait {
+                        demo::Wait::Key => "key".to_owned(),
+                        demo::Wait::For(delay) => format!("{:.1}s", delay.as_secs_f64()),
+                    };
+                    println!(
+                        "{:>3}  line {:<4} {wait:>6}  {}",
+                        index + 1,
+                        beat.line,
+                        beat.action.describe()
+                    );
+                }
+                Ok(())
+            }
+            DemoCommand::Seat { player } => demo::seat(player),
+            DemoCommand::Play { file, reset } => {
+                let instance = fractal_daemon::instance::current().context(
+                    "a demo plays in its own instance, so your fleet is never touched: st --instance demo demo play FILE",
+                )?;
+                let demo = demo::load(&file)?;
+                // The demo acts as its own people and agents; a seat's identity must not leak in.
+                for name in ["ST_AGENT", "ST3_PERSON", "ST3_ENDPOINT", "ST3_INCARNATION"] {
+                    // SAFETY: no other thread exists yet; the player starts after this.
+                    unsafe { std::env::remove_var(name) };
+                }
+                demo::play(demo, &instance, reset, |playback| {
+                    fractal_tui::run(fractal_tui::Args::default().with_playback(playback))
+                })
+            }
+        }
     })();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -5071,6 +5186,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
+        Command::Demo { .. } => unreachable!("a demo runs before the CLI runtime"),
         Command::Up(_) => unreachable!(),
         Command::Skill(_) => unreachable!(),
         Command::Evidence(_) => unreachable!(),
@@ -5115,6 +5231,7 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Activity(args) => run_activity(&endpoint, args, cli.json).await,
+        Command::Schedules { command } => schedules_cli::run(&endpoint, config.person.as_deref(), command, cli.json).await,
         Command::Devices(args) => {
             run_devices(endpoint.clone(), config.person.as_deref(), args, cli.json).await
         }
@@ -5951,6 +6068,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
     }
+    // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
+    store.trim_locally(config.trim.local);
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
@@ -6022,7 +6141,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto)}),
             ),
             ("status".into(), Value::String("running".into())),
@@ -6255,9 +6374,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
             let activation_store = store.clone();
-            let checkpoint_context = config
-                .checkpoint
-                .enabled
+            // A member that trims locally still runs the pass, which only finishes a trim it had
+            // already committed.
+            let checkpoint_context = (config.checkpoint.enabled || config.trim.local)
                 .then(|| fractal_daemon::store::CheckpointContext {
                     now_unix_ms: 0,
                     configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
@@ -7409,6 +7528,12 @@ async fn run_inspect(client: &Client, args: InspectArgs, json_output: bool) -> R
         ))
         .await?;
     let mut shown = json!({ "status": status, "recent_claims": claims.claims });
+    if let Some(standby) = shown["status"]["subjects"].as_array().and_then(|subjects|
+        subjects.iter().find_map(|subject| subject.pointer("/actual/schedule_standby"))) {
+        let standby = standby.clone();
+        shown["schedule_standby"] = standby;
+    }
+
     // Who signed a message a person wrote, and whether that checks.
     if args.subject.starts_with("message/")
         && let Some(provenance) = message_provenance(client, &args.subject).await
@@ -7438,6 +7563,14 @@ async fn run_trace_to(
         client.clone()
     };
     let client = &client;
+    let schedule_standby = if let Some(subject) = args.subject.as_deref().filter(|subject| subject.starts_with("schedule/")) {
+        status_for(client, subject).await?.subjects.into_iter()
+            .find_map(|subject| subject.actual.and_then(|actual| actual.get("schedule_standby").cloned()))
+    } else { None };
+    if !json_output && schedule_standby.is_some() {
+        writeln!(output, "{}", fractal_daemon::schedule_standby::RUN_TWICE_WARNING)?;
+        writeln!(output, "{}", fractal_daemon::schedule_standby::COLD_STANDBY_LIMIT)?;
+    }
     let claims = trace_claims(client, &args).await?;
     let mut cursor = args.after_index.unwrap_or_default();
     for claim in claims {
@@ -7446,7 +7579,9 @@ async fn run_trace_to(
         }
         cursor = cursor.max(claim.store_index);
         if json_output {
-            writeln!(output, "{}", serde_json::to_string(&claim)?)?;
+            let mut shown = serde_json::to_value(&claim)?;
+            if let Some(standby) = &schedule_standby { shown["schedule_standby"] = standby.clone(); }
+            writeln!(output, "{}", serde_json::to_string(&shown)?)?;
         } else {
             write_trace_claim(output, &claim)?;
         }
@@ -7486,7 +7621,9 @@ async fn run_trace_to(
                 return Ok(());
             }
             if json_output {
-                writeln!(output, "{}", serde_json::to_string(&event)?)?;
+                let mut shown = serde_json::to_value(&event)?;
+                if let Some(standby) = &schedule_standby { shown["schedule_standby"] = standby.clone(); }
+                writeln!(output, "{}", serde_json::to_string(&shown)?)?;
             } else {
                 let claims: ClaimsPage = client
                     .get(&format!(
@@ -14061,6 +14198,9 @@ struct NativeLoopState {
     claude_attachment_terminal: Option<ClaudeAttachmentTerminal>,
     #[serde(default)]
     claude_readiness_fallback: ClaudeReadinessFallback,
+    /// Admissions for attachment-dependent writes, carried across re-exec with the binding.
+    #[serde(default)]
+    claude_attachment_admissions: AdmissionBucket,
     /// This image's own settle. A replacement image draws a new one, so it is never carried.
     #[serde(skip)]
     settle: ResumeSettle,
@@ -14072,6 +14212,58 @@ struct PendingClaudeAttachment {
     phase: String,
     input: ClaimInput,
     input_digest: String,
+    /// Whether this operation may have reached the daemon. A sent operation is always resolved
+    /// as it is; only one never sent can be withdrawn. A resume file from before this field
+    /// cannot say, so it counts as sent.
+    #[serde(default = "pending_attachment_was_sent")]
+    attempted: bool,
+}
+
+fn pending_attachment_was_sent() -> bool {
+    true
+}
+
+/// Every attachment-dependent write is preceded by a GET that runs the endpoint's full authority
+/// check. A pushed value never replaces that admission, and a flapping channel must not turn it
+/// back into a once-a-second poll: each mailbox binding gets a burst of two admissions, then one
+/// every ten seconds. An empty bucket waits, and the next admission publishes the latest phase,
+/// so intermediate phases coalesce. Keyed by binding and carried across re-exec, so neither a
+/// reconnect nor a re-exec grants a fresh burst.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct AdmissionBucket {
+    binding: Option<(String, u64, String)>,
+    tokens: u32,
+    refilled_at_ms: u64,
+}
+
+const ADMISSION_BURST: u32 = 2;
+const ADMISSION_REFILL_MS: u64 = 10_000;
+
+impl AdmissionBucket {
+    fn take(&mut self, fence: &fractal_daemon::mailbox::Fence, now_ms: u64) -> bool {
+        let binding = Some((fence.incarnation.clone(), fence.epoch, fence.token.clone()));
+        if self.binding != binding {
+            *self = Self {
+                binding,
+                tokens: ADMISSION_BURST,
+                refilled_at_ms: now_ms,
+            };
+        }
+        // A wall clock stepped backwards grants nothing and restarts the interval.
+        if now_ms < self.refilled_at_ms {
+            self.refilled_at_ms = now_ms;
+        }
+        let earned = (now_ms - self.refilled_at_ms) / ADMISSION_REFILL_MS;
+        if earned > 0 {
+            self.tokens = (u64::from(self.tokens) + earned).min(u64::from(ADMISSION_BURST)) as u32;
+            self.refilled_at_ms += earned * ADMISSION_REFILL_MS;
+        }
+        if self.tokens == 0 {
+            return false;
+        }
+        self.tokens -= 1;
+        true
+    }
 }
 
 // One terminal rejection inhibits publication for this binding, including re-exec.
@@ -16579,6 +16771,13 @@ async fn publish_claude_readiness_fallback(
             return Ok(false);
         }
     }
+    // Publishing readiness is a write: on a push connection the pushed value only says whether
+    // to try, and the GET below, under the admission bucket, still admits it.
+    if let Some(pushed) = mailbox.pushed_attachment()
+        && (!pushed.attached || !state.claude_attachment_admissions.take(fence, now_ms))
+    {
+        return Ok(false);
+    }
     let checked =
         checked_claude_attachment(client, &fence.subject, &fence.incarnation, fence).await;
     state
@@ -16638,8 +16837,19 @@ async fn check_claude_attachment(
     state: &mut NativeLoopState,
 ) -> Result<()> {
     let fence = &mailbox.fence;
-    let mut checked = checked_claude_attachment(client, subject, incarnation, fence).await;
-    state.claude_readiness_fallback.observe_attachment(&checked, current_unix_ms()? as u64);
+    // On a connection that has pushed attachment, the pushed value alone feeds the phase. Until
+    // it has (an older daemon, or a new connection), the GET does, as before; never both.
+    let pushed = mailbox.pushed_attachment();
+    // Admissions are rationed only where the phase comes from push; without push every tick
+    // already makes its GET, exactly as before.
+    let mut from_push = pushed.is_some();
+    let mut checked = match pushed {
+        Some(attachment) => Ok(attachment),
+        None => checked_claude_attachment(client, subject, incarnation, fence).await,
+    };
+    state
+        .claude_readiness_fallback
+        .observe_attachment(&checked, current_unix_ms()? as u64);
     // Readiness is independent of diagnostic publication. A rejected or uncertain
     // POST must not silence a current subscription's readiness report.
     report_claude_attachment(mailbox, &checked, state.claude_attachment_terminal.as_ref())?;
@@ -16648,21 +16858,56 @@ async fn check_claude_attachment(
             return Err(claude_attachment_parked_error(terminal));
         }
         // A changed binding is not sufficient: the endpoint must admit its current
-        // ownership before this publisher leaves its parked state.
-        checked.as_ref().map_err(|error| {
-            anyhow::anyhow!("validating replacement Claude attachment ownership: {error:#}")
-        })?;
+        // ownership before this publisher leaves its parked state. A pushed value is
+        // not that admission.
+        if from_push {
+            if !state
+                .claude_attachment_admissions
+                .take(fence, current_unix_ms()? as u64)
+            {
+                return Ok(());
+            }
+            checked_claude_attachment(client, subject, incarnation, fence)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("validating replacement Claude attachment ownership: {error:#}")
+                })?;
+        } else {
+            checked.as_ref().map_err(|error| {
+                anyhow::anyhow!("validating replacement Claude attachment ownership: {error:#}")
+            })?;
+        }
         state.claude_attachment_terminal = None;
         state.claude_attachment_reconciled = false;
     }
     if state.claude_attachment_pending.is_some() {
+        if from_push
+            && !state
+                .claude_attachment_admissions
+                .take(fence, current_unix_ms()? as u64)
+        {
+            return Ok(());
+        }
         // Resolve the identical operation before advancing the acknowledged episode.
-        let published =
-            publish_pending_claude_attachment(client, subject, incarnation, fence, state).await;
+        let published = publish_pending_claude_attachment(
+            client,
+            subject,
+            incarnation,
+            fence,
+            from_push,
+            state,
+        )
+        .await;
         finish_claude_attachment_publication(published, mailbox, &checked, state)?;
         // Recovery publication needs an admission check AFTER the pending operation
-        // resolved; the earlier check was only used to keep readiness reporting.
-        checked = checked_claude_attachment(client, subject, incarnation, fence).await;
+        // resolved; the earlier check was only used to keep readiness reporting. The
+        // publication below makes that admission itself before it posts.
+        let pushed = mailbox.pushed_attachment();
+        from_push = pushed.is_some();
+        checked = match pushed {
+            Some(attachment) => Ok(attachment),
+            None => checked_claude_attachment(client, subject, incarnation, fence).await,
+        };
         report_claude_attachment(mailbox, &checked, state.claude_attachment_terminal.as_ref())?;
     }
     let attached = checked.as_ref().is_ok_and(|attachment| attachment.attached);
@@ -16678,6 +16923,14 @@ async fn check_claude_attachment(
     if state.claude_attachment_reconciled && state.claude_attachment_phase == phase {
         return Ok(());
     }
+    if from_push
+        && !state
+            .claude_attachment_admissions
+            .take(fence, current_unix_ms()? as u64)
+    {
+        // Not reconciled: a later tick publishes whatever the phase is by then.
+        return Ok(());
+    }
     let reason = claude_attachment_reason(&checked);
     let input =
         claude_attachment_diagnostic(fence, state.claude_attachment_episode, phase, &reason);
@@ -16689,10 +16942,12 @@ async fn check_claude_attachment(
         phase: phase.into(),
         input,
         input_digest,
+        attempted: false,
     });
     state.claude_attachment_reconciled = false;
     let published =
-        publish_pending_claude_attachment(client, subject, incarnation, fence, state).await;
+        publish_pending_claude_attachment(client, subject, incarnation, fence, from_push, state)
+            .await;
     finish_claude_attachment_publication(published, mailbox, &checked, state)
 }
 
@@ -16786,6 +17041,8 @@ fn report_claude_attachment(
     let terminal =
         terminal.filter(|fault| same_claude_attachment_binding(&fault.fence, &mailbox.fence));
     let mut report: Value = serde_json::from_str(&native_delivery_report("claude-channel", None))?;
+    // This driver takes attachment pushed on its title stream; see check_claude_attachment.
+    report["attachment_push"] = json!(true);
     report["ready"] = json!(checked.as_ref().is_ok_and(|attachment| attachment.attached));
     report["reason"] = json!(match terminal {
         Some(fault) => format!(
@@ -16801,8 +17058,9 @@ fn report_claude_attachment(
         }
         None => Value::Null,
     };
+    // Sent when it changes; the daemon's ten-second Ping echoes it meanwhile.
     if let Some(subscription) = &mailbox.subscription {
-        subscription.report(report);
+        subscription.report_if_changed(report);
     }
     Ok(())
 }
@@ -16873,6 +17131,7 @@ async fn publish_pending_claude_attachment(
     subject: &str,
     incarnation: &str,
     fence: &fractal_daemon::mailbox::Fence,
+    push: bool,
     state: &mut NativeLoopState,
 ) -> Result<()> {
     let Some(pending) = state.claude_attachment_pending.as_ref() else {
@@ -16922,6 +17181,11 @@ async fn publish_pending_claude_attachment(
             "the pending Claude attachment diagnostic request was changed or malformed",
         ));
     }
+    let (phase, input, attempted) = (
+        pending.phase.clone(),
+        pending.input.clone(),
+        pending.attempted,
+    );
     let Some(next_episode) = state.claude_attachment_episode.checked_add(1) else {
         return Err(retire_claude_attachment(
             state,
@@ -16931,11 +17195,28 @@ async fn publish_pending_claude_attachment(
     };
     // Validate the current title binding before retrying a retained operation.
     // This result is not reused as recovery proof.
-    let result: Result<ClaimRecord> = async {
-        let _ = checked_claude_attachment(client, subject, incarnation, fence).await?;
-        client.post("/v1/claims", &pending.input).await
+    let result: Result<Option<ClaimRecord>> =
+        match checked_claude_attachment(client, subject, incarnation, fence).await {
+            Err(error) => Err(error),
+            // On a push connection this admission can withdraw a write it disagrees with, never
+            // choose a phase. Only a never-sent operation is withdrawn; a sent one is resolved as
+            // it is, so its outcome stays exactly once.
+            Ok(admitted) if push && !attempted && admitted.attached != (phase == "attached") => {
+                Ok(None)
+            }
+            Ok(_) => {
+                if let Some(pending) = state.claude_attachment_pending.as_mut() {
+                    pending.attempted = true;
+                }
+                client.post("/v1/claims", &input).await.map(Some)
+            }
+        };
+    if matches!(result, Ok(None)) {
+        // Withdrawn before sending: a later tick recomputes and publishes the current phase.
+        state.claude_attachment_pending = None;
+        state.claude_attachment_reconciled = false;
+        return Ok(());
     }
-    .await;
     if let Err(error) = result {
         // A mismatch of this SAME immutable request/key or a checkpointed claim cannot
         // be resolved by reposting it; park visibly without assuming whether it committed.
@@ -16962,7 +17243,7 @@ async fn publish_pending_claude_attachment(
         }
         return Err(error);
     }
-    state.claude_attachment_phase = pending.phase.clone();
+    state.claude_attachment_phase = phase;
     state.claude_attachment_episode = next_episode;
     state.claude_attachment_reconciled = true;
     state.claude_attachment_pending = None;
@@ -17106,6 +17387,12 @@ impl NativeMailbox {
             None => std::future::pending().await,
         }
     }
+    /// The Claude channel attachment pushed on the current connection, if it has pushed one.
+    fn pushed_attachment(&self) -> Option<fractal_daemon::mailbox::Attachment> {
+        self.subscription
+            .as_ref()
+            .and_then(fractal_daemon::mailbox::Subscription::attachment)
+    }
     fn accept(&mut self, frame: Option<fractal_daemon::mailbox::Frame>, runtime_id: &str) -> Result<()> {
         match frame {
             Some(fractal_daemon::mailbox::Frame::Replay { nonce }) => {
@@ -17144,6 +17431,8 @@ impl NativeMailbox {
                 self.replayed = true;
                 Ok(())
             }
+            // The subscription keeps attachment apart from this queue.
+            Some(fractal_daemon::mailbox::Frame::Attachment { .. }) => Ok(()),
             Some(fractal_daemon::mailbox::Frame::Fenced { reason }) => anyhow::bail!("{reason}"),
             None => anyhow::bail!("native mailbox subscription ended"),
         }

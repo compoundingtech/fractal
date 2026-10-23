@@ -123,6 +123,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "account_limit_seats",
         "local_latest_slots",
         "local_resource_projection_pending",
+        // Member-local preparation state and queues, rebuildable from canonical claims.
+        "local_resource_preparation",
+        "local_resource_preparation_claims",
+        "local_resource_preparation_pending",
+        "local_resource_preparation_dirty",
         "local_glass_head_pending",
         "local_glass_head_dirty",
         "local_directive_note_pending",

@@ -1,10 +1,12 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
+import { Button as AriaButton, Dialog, DialogTrigger, Pressable } from 'react-aria-components'
 import { interactionVars as interaction, colorVars as c, typeVars as t, radiusVars as r, geometryVars as g } from '../composition-tokens.stylex'
 import { SidebarStatus as StatusGlyph } from '../sidebar/SidebarStatus'
 import { Icon } from './Icons'
 import { paneHeaderStyles } from './Pane'
 import { ChromeControl } from './ChromeControl'
+import { Popover } from './Controls'
 import { NarrowLayoutContext } from './NarrowLayout'
 import type { AgentStatus } from '../sidebar/model'
 
@@ -141,7 +143,7 @@ export function ThreadHeader({
   nativeActions?: React.ReactNode
   actionPortalRef?: React.Ref<HTMLDivElement>
   terminalAvailable?: boolean
-  /** Why the terminal is unavailable. With `terminalAvailable` false, a set reason shows the toggle disabled and described by it; without one the toggle stays hidden. */
+  /** Why the terminal is unavailable. With `terminalAvailable` false, a set reason shows the toggle disabled and described by it; without one the toggle stays hidden. A narrow header has no terminal control: the phone host places `PhoneTerminalToggle` beside its workspace tabs. */
   terminalDisabledReason?: string
   onOpen?: () => void
   onCommit?: () => void
@@ -154,7 +156,7 @@ export function ThreadHeader({
   onToggleSidebar?: () => void
   /** The expand toggle opens the sidebar as a sheet (narrow hosts): its open state and dialog id, for `aria-expanded`/`aria-controls`. */
   sidebarSheet?: { readonly open: boolean; readonly id: string }
-  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. Every header control becomes a 44px touch target and the header clears the left/right safe-area insets; the host owns the top inset. */
+  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, the terminal control leaves the header (the host renders `PhoneTerminalToggle` in its tab row), and one Agent details button opens `panelOpen`'s sheet. Every header control becomes a 44px touch target and the header clears the left/right safe-area insets; the host owns the top inset. */
   narrow?: boolean
 }) {
   // The `narrow` prop is authoritative for the header's own controls: they size as 44px touch targets even when the host did not provide the context.
@@ -189,6 +191,29 @@ export function ThreadHeader({
   )
 }
 
+/**
+ * The phone terminal toggle, placed by the host at the trailing end of its workspace tab row: a 44px button whose
+ * visible **Terminal** label names it, so its meaning never depends on a tooltip. Unavailable, it stays focusable and
+ * `aria-disabled`, keeps `aria-pressed="false"`, is described by the reason, and opens that reason in a popover on
+ * press instead of toggling.
+ */
+export function PhoneTerminalToggle({ pressed, onPress, disabledReason }: { readonly pressed: boolean; readonly onPress: () => void; readonly disabledReason?: string }) {
+  const reasonId = React.useId()
+  const content = <><Icon name="drawer" /><span>Terminal</span></>
+  if (disabledReason === undefined) {
+    return <AriaButton aria-label="Terminal" aria-pressed={pressed} onPress={onPress} data-narrow-terminal {...stylex.props(styles.terminalTouch, pressed && styles.terminalPressed)}>{content}</AriaButton>
+  }
+  return <DialogTrigger>
+    <Pressable>
+      <button type="button" aria-label="Terminal" aria-pressed={false} aria-disabled="true" aria-describedby={reasonId} data-narrow-terminal {...stylex.props(styles.terminalTouch, styles.terminalDisabled)}>{content}</button>
+    </Pressable>
+    <span id={reasonId} hidden>{disabledReason}</span>
+    <Popover placement="bottom end">
+      <Dialog aria-label="Terminal unavailable" {...stylex.props(styles.terminalReason)}>{disabledReason}</Dialog>
+    </Popover>
+  </DialogTrigger>
+}
+
 
 export function TerminalDrawer({ lines, open, height, onHeight }: { lines: readonly string[]; open: boolean; height: number; onHeight: (value: number) => void }) {
   if (!open) return null
@@ -218,6 +243,11 @@ const styles = stylex.create({
   actions: { marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 1, minWidth: 0, maxWidth: '100%' },
   outlineXs: { height: g.controlSm, display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap', flexShrink: 0, paddingInline: 6, borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, backgroundColor: 'rgba(255, 255, 255, 0.025)', color: c.fg, borderRadius: r.control, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: 1 } },
   outlineTouch: { height: g.touchTarget },
+  // Same quiet chrome as ChromeControl (borderless, filled on hover and while pressed), widened by its visible label.
+  terminalTouch: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4, flexShrink: 0, boxSizing: 'border-box', minWidth: g.touchTarget, height: g.touchTarget, paddingInline: 8, borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: c.fgMuted, fontFamily: 'inherit', fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, whiteSpace: 'nowrap', cursor: 'pointer', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
+  terminalPressed: { backgroundColor: c.rowActive, color: c.fg, ':hover': { backgroundColor: c.rowActive, color: c.fg } },
+  terminalDisabled: { opacity: 0.64, cursor: 'default', ':hover': { backgroundColor: 'transparent', color: c.fgMuted } },
+  terminalReason: { maxWidth: 280, padding: 8, fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fg, outline: 'none' },
   drawer: { display: 'flex', flexDirection: 'column', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.borderStrong, backgroundColor: c.canvas, flexShrink: 0, minHeight: 0 },
   drawerHead: { height: 32, display: 'flex', alignItems: 'center', gap: 12, paddingInline: 12 },
   drawerLabel: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fgMuted, fontWeight: t.weightMedium },

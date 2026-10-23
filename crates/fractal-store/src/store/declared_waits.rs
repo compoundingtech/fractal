@@ -110,7 +110,7 @@ pub(crate) fn declared_wait_at(
 ) -> rusqlite::Result<Option<DeclaredWaitView>> {
     let snapshot = snapshot_unix_ms.to_string();
     let row = connection
-        .prepare_cached(&canonical_sql(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h096687cee622 owner=fractal_store::store::declared_waits TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id, kind, json_extract(body, '$.fields.wait_on'), accepted_at_unix_ms FROM claims
              WHERE subject=?1
                AND kind IN ('work.claimed','work.progress','work.wait-ended','work.released','work.submitted','work.failed')
@@ -119,7 +119,7 @@ pub(crate) fn declared_wait_at(
                AND (length(accepted_at_unix_ms), accepted_at_unix_ms) <= (length(?3), ?3)
              ORDER BY CANONICAL_DESC(claims) LIMIT 1",
         ))?
-        .query_row(params![subject, attempt, snapshot], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h94ba207bbd04 owner=fractal_store::store::declared_waits TODO=trace-statement-and-value-representation */ params![subject, attempt, snapshot], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -223,12 +223,12 @@ impl Store {
         smallclaims::touched::note_read(|| watch.to_owned());
         let connection = self.readers.get();
         Ok(connection
-            .prepare_cached(&canonical_sql(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8ee72e7eb136 owner=fractal_store::store::declared_waits TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT json_extract(body, '$.fields.reason') FROM claims
                  WHERE subject=?1 AND kind='subscription.watch-ended'
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1",
             ))?
-            .query_row([watch], |row| row.get::<_, Option<String>>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-he565a00d965c owner=fractal_store::store::declared_waits TODO=trace-statement-and-value-representation */ [watch], |row| row.get::<_, Option<String>>(0))
             .optional()?
             .flatten())
     }

@@ -283,6 +283,10 @@ Top-level schedules are also valid authored declarations: `st apply schedules.kd
 and publishes them without creating a mission run. Each schedule names the mission it will
 request at its declared times. Other top-level execution members still require a mission run.
 
+[`st schedules ls`](schedules-list.md) lists locally replicated declarations with recorded owners,
+nominal next declared ticks and explicit per-row knowledge age/unheard-host coverage. It does not
+contact the hosts or inspect occurrence history.
+
 The origin of the `mission-run.created` claim advances the mission run. It also materializes the run declarations.
 
 A replica stores the run and its steps. It can accept eligible work claims, but it does not evaluate the run.
@@ -2012,6 +2016,15 @@ Each such request records `schedule.work-failed` with the code `schedule-stopped
 schedule again never starts work from before the stop.
 
 The schedule does not assign work. The referenced mission defines its work selectors.
+
+### Optional automatic standby
+
+See [Automatic schedule standby](schedule-standby.md) for the `standby { host
+"archive"; after "5m" }` declaration and all-member adoption requirement.
+Jobs must be safe to run twice: while hosts cannot hear each other a job may run
+on both; write jobs so a second run is harmless.
+
+If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
 
 ## Mission revisions
 

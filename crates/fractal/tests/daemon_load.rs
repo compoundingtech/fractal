@@ -886,10 +886,9 @@ fn absolute_failures(report: &Report) -> Vec<String> {
     failures
 }
 
-/// Whether reads refused while a published list refolds fail the run. They are reported only
-/// until the store keeps serving each list through a chunked replication receive: today it
-/// withdraws every list once per backlog chunk (#3553). That fix turns this on.
-const AVAILABILITY_GATED: bool = false;
+/// Whether reads refused while a published list refolds fail the run. The store keeps serving
+/// each list through a chunked replication receive (#3553), so a withdrawn list is a failure.
+const AVAILABILITY_GATED: bool = true;
 
 /// What a published list says when it is withdrawn and has not folded again, as a failure key
 /// keeps it (cut at 90 characters): the code where the client keeps it, else the message, for a

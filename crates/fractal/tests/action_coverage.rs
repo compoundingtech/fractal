@@ -2528,6 +2528,51 @@ async fn glasses_save_delete_and_read_survive_stale_bases_and_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_schedules_list_pages_declarations_across_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.apply(r#"version 2
+schedule "a" { host "action-coverage"; at "2100-01-01T00:00:00Z"; work { mission "example/harvest"; workspace "/tmp/harvest" } }
+schedule "b" { host "action-coverage"; at "2100-01-02T00:00:00Z"; work { mission "example/harvest"; workspace "/tmp/harvest" } }
+"#, "schedule-list-declarations");
+    let mut original = None;
+    for pass in 0..2 {
+        let first = cli_value(daemon.cli(PERSON, &[
+            "schedules", "ls", "--as", PERSON, "--limit", "1", "--unheard-after", "1m",
+        ]).await);
+        assert_eq!(first["value"]["collection"], "schedules");
+        assert_eq!(first["value"]["basis"], "local-replicated-declarations");
+        assert_eq!(first["value"]["coverage"]["unheard_after_ms"], 60_000);
+        assert_eq!(first["value"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(first["value"]["items"][0]["id"], "schedule/a");
+        assert_eq!(first["value"]["items"][0]["primary_host_id"], "host/action-coverage");
+        assert_eq!(first["value"]["page"]["has_more"], true);
+        let cursor = first["value"]["page"]["next_cursor"].as_str().unwrap();
+        let second = cli_value(daemon.cli(PERSON, &[
+            "schedules", "ls", "--as", PERSON, "--limit", "1", "--unheard-after", "1m",
+            "--cursor", cursor,
+        ]).await);
+        assert_eq!(second["value"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(second["value"]["items"][0]["id"], "schedule/b");
+        assert_eq!(second["value"]["page"]["has_more"], false);
+        let declarations = [
+            first["value"]["items"][0]["declaration"].clone(),
+            second["value"]["items"][0]["declaration"].clone(),
+        ];
+        if let Some(expected) = &original {
+            assert_eq!(&declarations, expected);
+        } else {
+            original = Some(declarations);
+        }
+        if pass == 0 {
+            daemon.restart().await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_reads_preserve_operational_views_after_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;

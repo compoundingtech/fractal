@@ -3641,6 +3641,176 @@ async fn an_existing_member_adds_and_removes_fabric_without_rejoining() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn fabric_transport_preference_preserves_other_transports_and_existing_exposure() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    for prefer_on_add in [false, true] {
+        let name = if prefer_on_add { "preferred" } else { "appended" };
+        let mut node = anchor(root.path(), name).await;
+        node.stop_worker();
+        let mut file = configured_file(&node);
+        file.fabric = Some(fabric_shim(root.path(), name));
+        file.transports = vec!["loopback".into(), "tailscale".into()];
+        file.save(&node.state_dir()).unwrap();
+        node.start_worker();
+        node.wait_listening().await;
+        let mut args = vec!["fleet", "transports", "add", "fabric", "--no-service"];
+        if prefer_on_add {
+            args.push("--prefer");
+        }
+        let output = node.st_ok(&args);
+        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert_eq!(
+            configured_file(&node).transports,
+            if prefer_on_add {
+                vec!["fabric", "loopback", "tailscale"]
+            } else {
+                vec!["loopback", "tailscale", "fabric"]
+            }
+        );
+        // Re-adding without preference preserves the entire configured order.
+        let before = configured_file(&node);
+        node.st_ok(&["fleet", "transports", "add", "fabric", "--no-service"]);
+        assert_eq!(configured_file(&node).transports, before.transports);
+        let endpoints = node.st_json(&["fleet", "status"])["view"].clone();
+        // Preference is local: it must not expose again or accept a new protocol.
+        fs::write(
+            root.path().join("fabric-registry").join(format!("fail-expose-{name}-fabric-id")),
+            "refuse",
+        )
+        .unwrap();
+        let output = node.st_ok(&[
+            "fleet",
+            "transports",
+            "add",
+            "fabric",
+            "--prefer",
+            "--fabric-protocol",
+            "ignored",
+            "--no-service",
+        ]);
+        if !prefer_on_add {
+            assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        }
+        let preferred = configured_file(&node);
+        assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
+        assert_eq!(preferred.fabric_protocol, before.fabric_protocol);
+        assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
+        let output = node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert_eq!(configured_file(&node).transports, ["loopback", "tailscale"]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "preference").await;
+    node.stop_worker();
+    let mut file = configured_file(&node);
+    file.fabric = Some(fabric_shim(root.path(), &node.name));
+    file.transports = vec!["loopback".into(), "tailscale".into()];
+    file.save(&node.state_dir()).unwrap();
+    node.start_worker();
+    node.wait_listening().await;
+    node.st_ok(&["fleet", "transports", "add", "fabric", "--no-service"]);
+    node.stop_worker();
+    let registry = root.path().join("fabric-registry");
+    let calls = fs::read(registry.join("calls")).unwrap();
+    let endpoints = node.st_json(&["fleet", "status"])["view"].clone();
+    let path = fractal_daemon::config::FleetFile::path(&node.state_dir());
+
+    // Observe actual lock contention, then change another setting while holding it.
+    // The CLI must load after acquiring the same settings lock, not before.
+    let lock = fractal_daemon::config::FleetFile::lock_settings(&node.state_dir()).unwrap();
+    let barrier = root.path().join("prefer-lock");
+    fs::create_dir(&barrier).unwrap();
+    let mut prefer = node
+        .command(&["fleet", "transports", "prefer", "fabric", "--no-service"])
+        .env("ST3_TEST_REMOVAL_WRITE_BARRIER", &barrier)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let cli = prefer.id().to_string();
+    wait_until("preference CLI contends on settings lock", 20, || async {
+        fs::read_to_string(barrier.join("contended"))
+            .is_ok_and(|pids| pids.lines().any(|pid| pid == cli))
+    })
+    .await;
+    assert!(prefer.try_wait().unwrap().is_none());
+    let mut before = configured_file(&node);
+    before.fabric_protocol = Some("preserved/under-lock".into());
+    before.save(&node.state_dir()).unwrap();
+    let old_file = fs::File::open(&path).unwrap();
+    let old_inode = old_file.metadata().unwrap().ino();
+    let old_bytes = fs::read(&path).unwrap();
+    drop(lock);
+    let output = prefer.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Restart st3 daemon and st3 replication-worker")
+    );
+    let preferred = configured_file(&node);
+    assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
+    assert_eq!(preferred.fabric_protocol, before.fabric_protocol);
+    assert_ne!(fs::metadata(&path).unwrap().ino(), old_inode);
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    use std::io::Read as _;
+    let mut retained_bytes = Vec::new();
+    (&old_file).read_to_end(&mut retained_bytes).unwrap();
+    assert_eq!(retained_bytes, old_bytes, "atomic save must replace, not truncate");
+
+    let inode = fs::metadata(&path).unwrap().ino();
+    let bytes = fs::read(&path).unwrap();
+    let output = node.st_ok(&["fleet", "transports", "prefer", "fabric", "--no-service"]);
+    assert!(output.contains("already preferred"));
+    assert!(!output.contains("Restart"));
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    node.st_ok(&["fleet", "transports", "prefer", "tailscale", "--no-service"]);
+    assert_eq!(configured_file(&node).transports, ["tailscale", "fabric", "loopback"]);
+    assert_eq!(configured_file(&node).fabric_protocol, before.fabric_protocol);
+    assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
+    assert_eq!(fs::read(registry.join("calls")).unwrap(), calls);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transport_prefer_refuses_disabled_carriers_without_saving() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "disabled-preference").await;
+    node.stop_worker();
+    let path = fractal_daemon::config::FleetFile::path(&node.state_dir());
+    let before = fs::read(&path).unwrap();
+    let endpoints = node.st_json(&["fleet", "status"])["view"].clone();
+    for transport in ["tailscale", "fabric"] {
+        let output = node.st(&["fleet", "transports", "prefer", transport, "--no-service"]);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("{transport} is not enabled"))
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -5255,3 +5425,6 @@ mission "orchard/release" state="ready" {
     let shown = older.st_json(&["missions", "show", run["subject"].as_str().unwrap()]);
     assert_eq!(shown["provenance"]["reason"], "Approved release source.");
 }
+
+#[path = "fleet/schedule_standby.rs"]
+mod schedule_standby;

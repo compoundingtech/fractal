@@ -4,6 +4,7 @@ pub mod arrangements;
 pub mod custom;
 pub mod accountable;
 pub mod directive_notes;
+pub mod full_value;
 pub mod glasses;
 pub mod harness_questions;
 pub mod owned_terminals;
@@ -3527,6 +3528,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("exit_code", integer()),
             ("exit_signal", integer()),
             ("incarnation_id", string()),
+            ("restarting_from", string()),
             ("adopted", boolean()),
             ("driver", string()),
             ("host", string()),
@@ -3973,12 +3975,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
         ],
         "schedule.occurrence-scheduled" => &[
+            ("standby", object()),
+            ("reason", string()),
             ("occurrence", integer()),
             ("revision", string()),
             ("at_unix_ms", integer()),
             ("scheduled_at_unix_ms", string()),
         ],
         "schedule.occurrence-reached" => &[
+            ("standby", object()),
+            ("reason", string()),
             ("occurrence", integer()),
             ("revision", string()),
             ("at_unix_ms", integer()),

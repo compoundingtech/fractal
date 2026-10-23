@@ -106,3 +106,11 @@ same output directory resumes completed outcomes, including failures; it is only
 valid with the same input snapshot, simulation source and native revision.
 Keep the source and binary hashes with the reports. Never discard a failed
 outcome when resuming an interrupted audit.
+
+`claims-v7.json` is generated the same way from the declared-waits registry
+(`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v7.json`).
+It adds `work.wait-ended`, which closes a declared wait, and the `wait_on` field the work claim
+kinds carry; it also picks up the registry changes main made since v6 was generated. The
+simulation selects v7 and records that filename in its audit summary; v1 to v6 stay fixed. The new
+kind changes the shared RNG stream, so v6's never-trim characterization `[34]` does not apply: with
+v7 every one of the 17 fixed seeds trims a checkpoint, including seed 34, and `NEVER_TRIMS` is empty.
