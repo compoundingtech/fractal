@@ -1099,9 +1099,10 @@ class EndToEnd(unittest.TestCase):
         """Each fractal-web-execution shard signs its own note; the policy accepts only the whole-check note the evidence note job
         signs from the lane's jobs. One shard's note, even shard 1 of 2 or a pull request's only shard, never satisfies the
         check. A pull request's one-shard whole-check note covers a pull request run (it ran everything a pull request runs);
-        the policy keeps it out of the merge queue with its events, which the committed shadow entry has not turned on yet."""
+        the policy keeps it out of the merge queue with its events (pull_request only)."""
         entry = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['fractal-web']
-        self.assertIs(entry['enforce'], False)
+        self.assertIs(entry['enforce'], True)  # turned on for pull requests only; the merge queue keeps running it
+        self.assertEqual(entry['events'], ['pull_request'])
         self.assertEqual(entry.get('require', 'off'), 'off')
         self.assertEqual(entry['trust_levels'], ['fleet'])
         self.assertEqual(sorted(entry['kinds']), ['wrapper'])  # the always-emitted fractal-web job passes without running the lane

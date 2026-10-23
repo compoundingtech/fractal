@@ -1432,12 +1432,12 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/smalltalk/')
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
-        # fractal-web: the fleet signer only, shadow, and its whole-check note only (see the next tests).
+        # fractal-web: the fleet signer at the check level, its whole-check note only (see the next tests), enforced for pull requests.
         web = self.rules('fractal-web')
         self.assertEqual(web['trust_levels'], ('fleet',))
         self.assertIsNone(web['max_age_s'])
-        self.assertIs(web['enforce'], False)
-        self.assertNotIn('fractal-web', ENFORCED)
+        self.assertIs(web['enforce'], True)
+        self.assertIn('fractal-web', ENFORCED)
 
     def test_the_wrapper_rules_match_what_the_note_jobs_record(self):
         gate = self.rules('linux-gate')['kinds']['wrapper']
