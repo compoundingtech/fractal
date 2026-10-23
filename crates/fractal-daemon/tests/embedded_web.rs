@@ -15,7 +15,9 @@ async fn browser_admission_matrix() {
         use std::os::unix::fs::PermissionsExt as _;
         assert_eq!(std::fs::metadata(root.path().join("web-launch-url")).unwrap().permissions().mode() & 0o777, 0o600);
     }
-    let server = tokio::spawn(prepared.serve(api::tests_shared::state(root.path())));
+    let mut state = api::tests_shared::state(root.path());
+    state.owning_person = Some("person/robin".into());
+    let server = tokio::spawn(prepared.serve(state));
     let client = Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let url = format!("http://{address}");
     assert_eq!(client.get(&url).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
@@ -39,6 +41,7 @@ async fn browser_admission_matrix() {
     let mut upgrade = format!("ws://{address}/v1/client/collections/stream").into_client_request().unwrap();
     upgrade.headers_mut().insert(header::COOKIE, cookie.parse().unwrap());
     upgrade.headers_mut().insert(header::ORIGIN, url.parse().unwrap());
+    upgrade.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, "st3.client.collections.v0".parse().unwrap());
     let (socket, response) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
     assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
     drop(socket);
@@ -63,4 +66,27 @@ async fn missing_assets_or_person_only_degrades_browser_listener() {
         let response = app.oneshot(Request::builder().uri("/v1/schema").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
+}
+
+#[test]
+fn local_web_collection_session_keeps_its_authority_and_original_expiry() {
+    use api::client_v0::{LocalWebSession, authenticate, revalidate_session};
+    use axum::{body::Body, http::Request};
+    let root = tempfile::tempdir().unwrap();
+    let mut state = api::tests_shared::state(root.path());
+    state.owning_person = Some("person/robin".into());
+    let expiry = api::client_now_ms() + 60_000;
+    let request = Request::builder().extension(LocalWebSession {
+        person: "person/robin".into(), id: "a".repeat(64), expires_at: expiry,
+    }).body(Body::empty()).unwrap();
+    let session = authenticate(&state, &request, "unix").unwrap();
+    let current = revalidate_session(&state, &session).unwrap();
+    assert_eq!(current.transport, "local-web");
+    assert_eq!(current.authority_actor, "person/robin");
+    assert_eq!(current.grant_expires_at, Some(expiry));
+    let mut expired = session.clone();
+    expired.grant_expires_at = Some(0);
+    assert!(revalidate_session(&state, &expired).is_err());
+    state.owning_person = Some("person/blair".into());
+    assert!(revalidate_session(&state, &session).is_err());
 }

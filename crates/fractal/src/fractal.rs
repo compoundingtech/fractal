@@ -170,7 +170,6 @@ mod tests {
             &["fractal", "agents", "ls"],
             &["st"],
             &["st3"],
-            &["st", "web"],
             &["st3", "tui"],
         ] {
             assert_eq!(

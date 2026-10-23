@@ -3,6 +3,7 @@ use std::{collections::VecDeque, net::{Ipv4Addr, SocketAddr}, path::{Path, PathB
 use axum::{Router, body::Body, extract::{Request, State}, http::{header, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}};
 use base64::Engine as _;
 use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq as _;
 use tokio::net::TcpListener;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7410";
@@ -130,11 +131,12 @@ async fn admit(web: &Web, mut request: Request, next: Next) -> Response {
     let cookie = request.headers().get(header::COOKIE).and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').find_map(|part| part.trim().strip_prefix("fractal_local=")))
         .map(str::to_owned);
+    let mut expires_at = None;
     let result = {
         let mut credentials = web.credentials.lock().expect("web credentials poisoned");
         credentials.sessions.retain(|(_, issued)| issued.elapsed() < SESSION_LIFETIME);
         if let Some(token) = token {
-            if token != credentials.token { return StatusCode::FORBIDDEN.into_response(); }
+            if !bool::from(token.as_bytes().ct_eq(credentials.token.as_bytes())) { return StatusCode::FORBIDDEN.into_response(); }
             let minted = secret().and_then(|session| {
                 let next = secret()?;
                 publish(&web.credential_path, web.port, &next)?;
@@ -150,9 +152,15 @@ async fn admit(web: &Web, mut request: Request, next: Next) -> Response {
                 ]).into_response()),
                 Err(_) => Some(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
             }
-        } else if !credentials.sessions.iter().any(|(session, _)| Some(session.as_str()) == cookie.as_deref()) {
+        } else if let Some((_, issued)) = credentials.sessions.iter().find(|(session, _)| {
+            cookie.as_deref().is_some_and(|cookie| bool::from(session.as_bytes().ct_eq(cookie.as_bytes())))
+        }) {
+            expires_at = Some(crate::api::client_now_ms()
+                + SESSION_LIFETIME.saturating_sub(issued.elapsed()).as_millis());
+            None
+        } else {
             Some(StatusCode::UNAUTHORIZED.into_response())
-        } else { None }
+        }
     };
     if let Some(response) = result { response } else {
         request.headers_mut().remove(header::AUTHORIZATION);
@@ -161,6 +169,7 @@ async fn admit(web: &Web, mut request: Request, next: Next) -> Response {
         request.extensions_mut().insert(crate::api::client_v0::LocalWebSession {
             person: web.person.clone(),
             id: hex::encode(Sha256::digest(cookie.expect("admitted cookie").as_bytes())),
+            expires_at: expires_at.expect("admitted session expiry"),
         });
         next.run(request).await
     }
