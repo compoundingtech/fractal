@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """scripts/st-test against real repositories: the tree it signs (the head), the lag, failures, refusals."""
 import contextlib
+import fcntl
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -447,6 +449,27 @@ class StTest(unittest.TestCase):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'CARGO_TARGET_DIR': '/elsewhere'})[0], 0)
         self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # not heavy: no kept target
         self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', 'none'])
+
+    def test_one_run_at_a_time_builds_and_tests_in_the_kept_target(self):
+        """Two runs on different trees sharing the target once relinked binaries under each other's tests: the lock is exclusive."""
+        target = self.home / '.cache/st-test-target'
+        target.mkdir(parents=True)
+        holder = subprocess.Popen([sys.executable, '-c', 'import fcntl, sys, time; f = open(sys.argv[1], "w"); fcntl.flock(f, fcntl.LOCK_SH); '
+                                   'print("held", flush=True); time.sleep(1.5)', str(target.parent / 'st-test-target.lock')],
+                                  stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.assertEqual(holder.stdout.readline().strip(), 'held')
+        err = io.StringIO()
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), contextlib.redirect_stderr(err):
+            got, lock = st_test.shared_target()
+        self.addCleanup(lock.close)
+        self.assertGreater(time.monotonic() - started, 1.0)  # it waited for the other run
+        self.assertEqual(got, target)
+        self.assertIn('another run is using', err.getvalue())
+        with open(target.parent / 'st-test-target.lock', 'w') as other:
+            with self.assertRaises(BlockingIOError):  # and holds it exclusively, so a third run waits too
+                fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)
 
     def test_a_worktree_left_by_a_killed_run_is_removed_by_the_next_run(self):
         self.commit('b.txt', 'two')

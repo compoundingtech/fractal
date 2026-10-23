@@ -162,21 +162,27 @@ def size_gb(path):
 
 
 def shared_target():
-    """The kept target for the heavy checks and a lock held while they use it, or (None, None) when it is off or the caller set one."""
+    """The kept target for the heavy checks and a lock held while they use it, or (None, None) when it is off or the caller set one.
+
+    The lock is exclusive for the whole run, builds and tests: cargo's own lock orders builds, but not one run's builds against another
+    run's tests, so two runs on different trees sharing the target once relinked st3 under each other's tests (a test ran the other
+    tree's binary, and "Text file busy" retries), and a note could then name a tree whose binaries were not the ones tested. A second
+    run waits for the first, and says so."""
     if os.environ.get('ST_EVIDENCE_TARGET') == 'off' or os.environ.get('CARGO_TARGET_DIR'):
         return None, None
     target = Path(os.environ.get('ST_EVIDENCE_TARGET') or Path.home() / '.cache/st-test-target')
     target.mkdir(parents=True, exist_ok=True)
     lock = open(target.parent / f'{target.name}.lock', 'w')
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # nobody else is using it: the moment to keep it small
-        # Only a directory cargo made (it writes CACHEDIR.TAG into a target) is emptied: never one a caller named for something else.
-        if (target / 'CACHEDIR.TAG').is_file() and size_gb(target) > TARGET_MAX_GB:
-            shutil.rmtree(target, ignore_errors=True)
-            target.mkdir(parents=True, exist_ok=True)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        pass
-    fcntl.flock(lock, fcntl.LOCK_SH)  # held until this run ends; cargo's own lock orders the builds inside it
+        print(f'st-test: another run is using {target}; waiting for it (one run builds and tests in it at a time)', file=sys.stderr, flush=True)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    # Nobody else is using it: the moment to keep it small. Only a directory cargo made (it writes CACHEDIR.TAG into a target) is
+    # emptied: never one a caller named for something else.
+    if (target / 'CACHEDIR.TAG').is_file() and size_gb(target) > TARGET_MAX_GB:
+        shutil.rmtree(target, ignore_errors=True)
+        target.mkdir(parents=True, exist_ok=True)
     return target, lock
 
 

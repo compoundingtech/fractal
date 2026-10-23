@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test lets one run at a time build and test in the kept build directory: two runs on different trees sharing it could test each other's binaries",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Notes, commands and checks are unchanged. A second heavy st-test run on a host waits for the first instead of overlapping it."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change; ST_EVIDENCE_TARGET=off also builds in the run's own worktree."}
+}
