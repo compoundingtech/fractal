@@ -13,7 +13,7 @@ use super::direct;
 use super::glass::GlassWrite;
 use super::view::{Load, MissionPreview};
 use super::{AgentControl, Effect, Guard, Ui};
-use crate::feed::{self, Command, Inventories, Inventory, TerminalUpdate, Window};
+use crate::feed::{self, Command, Inventories, Inventory, Window};
 use crate::model::{self, Collection, Model};
 use anyhow::Result;
 use crossterm::{
@@ -31,10 +31,13 @@ use std::{
     io,
     sync::{
         Arc, Mutex, mpsc,
-        atomic::{AtomicBool, Ordering},
+        atomic::Ordering,
     },
     time::{Duration, Instant},
 };
+
+#[path = "live_attach.rs"]
+mod attach;
 
 /// A message sent from here that st has not reported back yet.
 struct Pending {
@@ -428,6 +431,7 @@ enum Fetched {
     /// A direct stream to an agent's (or a shell's) PTY session.
     Native {
         agent: String,
+        generation: u64,
         direct: Direct,
     },
     /// Attaching again after the stream dropped: the new stream, or why not.
@@ -436,10 +440,11 @@ enum Fetched {
         outcome: Result<Direct, String>,
     },
     /// A shell's attach was refused for a reason that passes; it is being tried again.
-    AttachWaiting { agent: String, reason: String },
+    AttachWaiting { agent: String, generation: u64, reason: String },
     /// st gave no direct stream; follow its view of the terminal instead.
     NativeFailed {
         agent: String,
+        generation: u64,
         runtime_ids: Vec<String>,
         reason: String,
     },
@@ -534,7 +539,6 @@ pub fn run(context: Context) -> Result<()> {
     // The agent or session whose conversation the feed holds.
     let mut conversing: Vec<String> = Vec::new();
     let mut opens: BTreeMap<String, Instant> = BTreeMap::new();
-    let mut terminal_opens: BTreeMap<String, Instant> = BTreeMap::new();
     let mut answers: BTreeMap<String, AnswerTiming> = BTreeMap::new();
     let mut landed_answers: Vec<Instant> = Vec::new();
     // The session each conversation was last subscribed again for, so it is asked once.
@@ -613,12 +617,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut terminal_runtimes_by_agent: BTreeMap<String, Vec<String>> = BTreeMap::new();
     // The fleet host that owns each opened terminal, so a dropped stream attaches again directly.
     let mut terminal_owners: BTreeMap<String, String> = BTreeMap::new();
-    // When a terminal was asked for, while it connects: the wait is shown, and a long one named.
-    let mut attach_started: Option<Instant> = None;
-    // Why the attach in progress is waiting, when st refused it for a reason that passes.
-    let mut attach_note: Option<String> = None;
-    // Whether a shell's attach is still wanted: its retries stop once its tab is gone.
-    let mut attach_wanted: BTreeMap<String, Arc<AtomicBool>> = BTreeMap::new();
+    let mut attach = attach::State::default();
     // The cursor shape last set, so it changes only when the attached terminal asks.
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
@@ -681,21 +680,9 @@ pub fn run(context: Context) -> Result<()> {
         {
             ui.flash = None;
         }
-        // A terminal still connecting says how long it has waited, so a slow st does not look
-        // like a stuck screen (Nathan, 2026-10-05: attaching took a long time).
-        if let (Some(started), Some(view)) = (attach_started, ui.terminal.as_mut())
-            && view.native.is_none()
-            && view.ended.is_none()
-            && view
-                .stale
-                .as_deref()
-                .is_some_and(|stale| stale.starts_with("connecting"))
-        {
-            view.stale = Some(match &attach_note {
-                Some(reason) => format!("{} · {reason}, trying again", connecting_text(started.elapsed())),
-                None => connecting_text(started.elapsed()),
-            });
-        }
+        let (_, selected) = ui.focus();
+        attach.select(&mut ui, selected.as_deref());
+        attach.tick(&mut ui);
         if extras.live && Instant::now() >= limit_next {
             limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
             let client = client.clone();
@@ -995,60 +982,7 @@ pub fn run(context: Context) -> Result<()> {
                     save_cache(cache_path.as_deref(), &person, &model);
                     changed = true;
                 }
-                feed::Update::Terminal(update) => match update {
-                    TerminalUpdate::Attached {
-                        terminal_id,
-                        attachment_id,
-                        incarnation,
-                    } => {
-                        attached = Some(Following {
-                            terminal_id,
-                            attachment_id,
-                            incarnation,
-                        });
-                    }
-                    TerminalUpdate::Screen(screen) => {
-                        if let Some(view) = ui.terminal.as_mut() {
-                            view.lines = screen_lines(&screen);
-                            view.cursor = screen
-                                .cursor
-                                .visible
-                                .then_some((screen.cursor.row, screen.cursor.column));
-                            view.stale = None;
-                            if !screen.title.is_empty() {
-                                view.title = format!("{} · {}", view.name, screen.title);
-                            }
-                        }
-                    }
-                    TerminalUpdate::Reconnecting(reason) => {
-                        if let Some(view) = ui.terminal.as_mut() {
-                            view.stale = Some(reason);
-                        }
-                    }
-                    TerminalUpdate::Ended { restarted, reason } => {
-                        if ui
-                            .terminal
-                            .as_ref()
-                            .is_some_and(|view| view.ended.is_none())
-                        {
-                            super::slo::METRICS.add("dead_terminal_tabs", 1);
-                        }
-                        attached = None;
-                        match ui.terminal.as_mut() {
-                            Some(view) => {
-                                view.ended = Some(if restarted {
-                                    "Terminal restarted; open it again to follow the new one".into()
-                                } else {
-                                    reason
-                                })
-                            }
-                            None if !restarted => {
-                                ui.flash(format!("Could not open the terminal: {reason}"))
-                            }
-                            None => {}
-                        }
-                    }
-                },
+                feed::Update::Terminal { generation, update } => attach.apply_terminal_update(&mut ui, generation, update, &mut attached),
             }
         }
         while let Ok(result) = fetched.try_recv() {
@@ -1296,35 +1230,8 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
-                Fetched::Native { agent, direct } => {
-                    attach_note = None;
-                    let waited = attach_started.take().map(|at| at.elapsed());
-                    if let Some(waited) = waited.filter(|waited| *waited >= Duration::from_secs(3))
-                    {
-                        ui.flash(format!(
-                            "Attached after {}s: st was slow to answer",
-                            waited.as_secs()
-                        ));
-                    }
-                    let (rows, columns) = ui.terminal_size.get();
-                    let route = direct.route.clone();
-                    if let Some(view) = ui
-                        .terminal_view_mut(&agent)
-                        .filter(|view| view.native.is_none())
-                    {
-                        // The route stays in the header, so the person can always see it.
-                        view.name = format!("{} · {route}", view.name);
-                        view.title = view.name.clone();
-                        view.native = Some(super::pty::NativeTerminal::spawn(
-                            direct.stream,
-                            &direct.name,
-                            direct.incarnation,
-                            rows,
-                            columns,
-                        ));
-                        view.stale = None;
-                    }
-                    ui.flash(format!("Attached · {route}"));
+                msg @ (Fetched::Native { .. } | Fetched::NativeFailed { .. } | Fetched::AttachWaiting { .. }) => {
+                    attach.apply_fetched(&mut ui, msg, &commands);
                 }
                 Fetched::Reattached { agent, outcome } => {
                     if let Some(native) = ui
@@ -1337,38 +1244,6 @@ pub fn run(context: Context) -> Result<()> {
                             // Still unreachable: the next try waits longer.
                             Err(reason) => native.retry_failed(reason),
                         }
-                    }
-                }
-                Fetched::AttachWaiting { agent, reason } => {
-                    if ui.terminal_view(&agent).is_some() {
-                        if ui.terminal.as_ref().is_some_and(|view| view.agent == agent) {
-                            attach_note = Some(reason);
-                        }
-                    } else if let Some(wanted) = attach_wanted.remove(&agent) {
-                        // Its tab is gone (closed by any route): stop asking.
-                        wanted.store(false, Ordering::Relaxed);
-                    }
-                }
-                Fetched::NativeFailed {
-                    agent,
-                    runtime_ids,
-                    reason,
-                } => {
-                    attach_note = None;
-                    if terminal_opens.remove(&agent).is_some() {
-                        super::slo::METRICS.add("terminal_open_errors", 1);
-                    }
-                    attach_started = None;
-                    if agent.starts_with("terminal/") {
-                        // A shell has no other view to fall back to.
-                        if let Some(view) = ui.terminal_view_mut(&agent) {
-                            view.ended = Some(format!("could not attach: {reason}"));
-                        }
-                    } else if ui.terminal_view(&agent).is_some() {
-                        ui.flash(format!(
-                            "No direct terminal ({reason}); showing st's view of it"
-                        ));
-                        let _ = commands.send(Command::Follow { runtime_ids });
                     }
                 }
             }
@@ -1417,12 +1292,9 @@ pub fn run(context: Context) -> Result<()> {
                 if shown_tab == 1 {
                     let _ = commands.send(Command::Unfollow);
                     attached = None;
-                    view.stale = Some("paused while hidden".into());
+                    if !attach::retryable(view) { view.stale = Some("paused while hidden".into()); }
                 } else if tab == 1 {
-                    let _ = commands.send(Command::Follow {
-                        runtime_ids: runtime_ids.clone(),
-                    });
-                    view.stale = Some("reconnecting".into());
+                    attach.resume_fallback(view, runtime_ids, &commands);
                 }
             }
             shown_tab = tab;
@@ -1695,7 +1567,7 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 Effect::OpenTerminal { agent } => {
-                    terminal_opens.insert(agent.clone(), Instant::now());
+                    let (generation, wanted, serial) = attach.begin(&mut ui, &agent);
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
                     // it; st's screen view (the feed follows it on its socket) only when st cannot
                     // give a direct stream.
@@ -1731,60 +1603,64 @@ pub fn run(context: Context) -> Result<()> {
                         Some(owner) => terminal_owners.insert(agent.clone(), owner.clone()),
                         None => terminal_owners.remove(&agent),
                     };
-                    attach_started = Some(Instant::now());
-                    attach_note = None;
                     let _ = commands.send(Command::Unfollow);
-                    let wanted = Arc::new(AtomicBool::new(true));
-                    if let Some(earlier) = attach_wanted.insert(agent.clone(), wanted.clone()) {
-                        earlier.store(false, Ordering::Relaxed);
-                    }
                     {
                         let client = client.clone();
                         let tx = fetched_tx.clone();
+                        let task_agent = agent.clone();
                         let agent = agent.clone();
                         let fallback = ui.terminal_fallback;
-                        runtime.spawn(async move {
+                        let task = runtime.spawn(async move {
                             // A shell has no other view to fall back to, and one started a moment ago
                             // can be refused while st settles which host runs it: wait, say why, retry.
                             let delays: &[Duration] = if agent.starts_with("terminal/") {
-                                &ATTACH_RETRY_DELAYS
+                                &attach::RETRY_DELAYS
                             } else {
                                 &[]
                             };
-                            let attached = retry_attach(
-                                delays,
-                                || wanted.load(Ordering::Relaxed),
-                                |reason| {
-                                    let _ = tx.send(Fetched::AttachWaiting {
-                                        agent: agent.clone(),
-                                        reason: reason.to_owned(),
-                                    });
-                                },
-                                || {
-                                    attach_known_then_direct(
-                                        &client,
-                                        &agent,
-                                        known.clone(),
-                                        &runtime_ids,
-                                        owner.as_deref(),
-                                        fallback,
-                                    )
-                                },
-                            )
-                            .await;
+                            let attached = attach::phase("attach setup", attach::DEADLINE, async {
+                                let _permit = serial.acquire_owned().await
+                                    .map_err(|_| "attach setup cancelled".to_owned())?;
+                                retry_attach(
+                                    delays,
+                                    || wanted.load(Ordering::Relaxed),
+                                    |reason| {
+                                        let _ = tx.send(Fetched::AttachWaiting {
+                                            agent: agent.clone(),
+                                            generation,
+                                            reason: reason.to_owned(),
+                                        });
+                                    },
+                                    || {
+                                        attach_known_then_direct(
+                                            &client,
+                                            &agent,
+                                            known.clone(),
+                                            &runtime_ids,
+                                            owner.as_deref(),
+                                            fallback,
+                                        )
+                                    },
+                                ).await
+                            }).await;
                             // Its tab closed while it waited: nobody is left to hear the outcome.
                             if !wanted.load(Ordering::Relaxed) {
+                                if let Ok(direct) = attached { attach::close(direct); }
                                 return;
                             }
-                            let _ = tx.send(match attached {
-                                Ok(direct) => Fetched::Native { agent, direct },
+                            if let Err(error) = tx.send(match attached {
+                                Ok(direct) => Fetched::Native { agent, generation, direct },
                                 Err(reason) => Fetched::NativeFailed {
                                     agent,
+                                    generation,
                                     runtime_ids,
                                     reason,
                                 },
-                            });
+                            }) && let Fetched::Native { direct, .. } = error.0 {
+                                attach::close(direct);
+                            }
                         });
+                        attach.tasks.insert(task_agent, task);
                     }
                     {
                         ui.park_for(&agent);
@@ -1806,11 +1682,7 @@ pub fn run(context: Context) -> Result<()> {
                     let _ = commands.send(Command::Unfollow);
                     attached = None;
                     terminal_runtimes = None;
-                    if let Some(view) = &ui.terminal
-                        && let Some(wanted) = attach_wanted.remove(&view.agent)
-                    {
-                        wanted.store(false, Ordering::Relaxed);
-                    }
+                    if let Some(view) = &ui.terminal { attach.cancel(&view.agent); }
                     ui.terminal = None;
                 }
                 Effect::TerminalKey(key) => {
@@ -2104,7 +1976,7 @@ pub fn run(context: Context) -> Result<()> {
         ui.step_terminal_hold();
         ui.step_default_view();
         ui.step_terminal_tabs();
-        terminal_opens.retain(|target, _| ui.terminal_view(target).is_some());
+        attach.opens.retain(|target, _| ui.terminal_view(target).is_some());
         ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
@@ -2192,7 +2064,7 @@ pub fn run(context: Context) -> Result<()> {
                 true
             }
         });
-        terminal_opens.retain(|target, at| {
+        attach.opens.retain(|target, at| {
             if ui.terminal_ready_visible(target) {
                 super::slo::METRICS.observe("terminal_open_ms", at.elapsed());
                 false
@@ -3425,8 +3297,9 @@ mod tests {
             Some(&fractal_client::ErrorCode::NotFound),
             "terminal/x"
         )));
-        // A refusal that passes waits about a minute and a half before the tab gives up.
-        assert!(super::ATTACH_RETRY_DELAYS.iter().sum::<Duration>() >= Duration::from_secs(90));
+        // Transient shell discovery may retry briefly, but a phase timeout is never retried.
+        assert_eq!(super::attach::RETRY_DELAYS.iter().sum::<Duration>(), Duration::from_secs(3));
+        assert!(!super::worth_retrying("raw terminal stream timed out"));
     }
 
     #[test]
@@ -3839,6 +3712,32 @@ mod tests {
             connecting_text(Duration::from_secs(12)),
             "connecting 12s, st is slow to answer"
         );
+    }
+
+
+    #[test]
+    fn attach_deadline_retry_key_reopens_the_same_terminal() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ui = Ui::new(crate::ui::demo::world());
+        ui.live = true;
+        let agent = "terminal/attach-deadline-test";
+        ui.open_in_glass(
+            crate::ui::Pane::Terminal(agent.into()),
+            crate::ui::glass::Open::Here,
+        );
+        ui.terminal = Some(crate::ui::TerminalView {
+            agent: agent.into(),
+            name: "shell".into(),
+            title: "shell".into(),
+            lines: Vec::new(),
+            cursor: None,
+            stale: Some("failed: raw terminal stream timed out · Ctrl+R to retry".into()),
+            ended: None,
+            native: None,
+        });
+        ui.effects.clear();
+        ui.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(matches!(ui.effects.as_slice(), [Effect::OpenTerminal { agent: opened }] if opened == agent));
     }
 
     use super::*;
@@ -5152,6 +5051,7 @@ struct Direct {
     route: String,
 }
 
+
 /// A direct stream to `subject`'s PTY session: st's raw terminal stream, fenced to the
 /// terminal's incarnation and routed to the host that owns it. `subject` is an agent (its
 /// terminal is the first of `runtime_ids` that has one) or a shell's terminal. With `expected`,
@@ -5169,30 +5069,6 @@ fn connecting_text(waited: Duration) -> String {
     }
 }
 
-/// How long a shell's attach keeps trying after st refuses it for a reason that passes: about a
-/// minute and a half in all.
-const ATTACH_RETRY_DELAYS: [Duration; 20] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
-    Duration::from_secs(3),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-];
 
 /// Whether an attach refused with `reason` may work a moment later: st cannot tell yet which host
 /// runs the terminal, that host is briefly out of reach, or st asked for a pause. A terminal that
@@ -5267,46 +5143,49 @@ async fn attach_direct(
     owner: Option<&str>,
     fallback: bool,
 ) -> Result<Direct, String> {
-    let mut found = Vec::new();
-    if subject.starts_with("terminal/") {
-        // A shell just started may take a moment before its screen exists.
-        let mut tries = 0;
-        let screen = loop {
-            match client.terminal_screen(subject).await {
-                Ok(screen) => break screen,
-                Err(_) if tries < 10 => {
-                    tries += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let found = attach::phase("terminal discovery", attach::DISCOVERY, async {
+        let mut found = Vec::new();
+        if subject.starts_with("terminal/") {
+            // A shell just started may take a moment before its screen exists.
+            let mut tries = 0;
+            let screen = loop {
+                match client.terminal_screen(subject).await {
+                    Ok(screen) => break screen,
+                    Err(_) if tries < 10 => {
+                        tries += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    Err(error) => return Err(error.plain()),
                 }
-                Err(error) => return Err(error.plain()),
-            }
-        };
-        found.push((
-            subject.trim_start_matches("terminal/").replace('/', "."),
-            subject.to_owned(),
-            screen.value.runtime_incarnation,
-            owner.map(str::to_owned),
-        ));
-    } else {
-        for id in runtime_ids {
-            let Ok(envelope) = client.runtimes_get(id).await else {
-                continue;
             };
-            let Resource::Runtime(runtime) = envelope.value else {
-                continue;
-            };
-            if let (Some(terminal), Some(incarnation)) =
-                (runtime.terminal_id, runtime.incarnation_id)
-            {
-                found.push((
-                    runtime.runtime_id,
-                    terminal,
-                    incarnation,
-                    Some(runtime.owner_host_id).filter(|host| !host.is_empty()),
-                ));
+            found.push((
+                subject.trim_start_matches("terminal/").replace('/', "."),
+                subject.to_owned(),
+                screen.value.runtime_incarnation,
+                owner.map(str::to_owned),
+            ));
+        } else {
+            for id in runtime_ids {
+                let Ok(envelope) = client.runtimes_get(id).await else {
+                    continue;
+                };
+                let Resource::Runtime(runtime) = envelope.value else {
+                    continue;
+                };
+                if let (Some(terminal), Some(incarnation)) =
+                    (runtime.terminal_id, runtime.incarnation_id)
+                {
+                    found.push((
+                        runtime.runtime_id,
+                        terminal,
+                        incarnation,
+                        Some(runtime.owner_host_id).filter(|host| !host.is_empty()),
+                    ));
+                }
             }
         }
-    }
+        Ok(found)
+    }).await?;
     let mut reason = "the agent has no terminal right now".to_owned();
     for (name, terminal, incarnation, runtime_owner) in found {
         if expected.is_some_and(|expected| expected != incarnation) {
@@ -5326,6 +5205,7 @@ async fn attach_direct(
         .await
         {
             Ok(direct) => return Ok(direct),
+            Err(error) if error.ends_with("timed out") => return Err(error),
             Err(error) => reason = error,
         }
     }
@@ -5345,7 +5225,7 @@ async fn attach_terminal(
     fallback: bool,
 ) -> Result<Direct, String> {
     let (name, incarnation) = identity;
-    let opened = direct::open(
+    let opened = attach::phase("direct open", attach::DIRECT, direct::open(
         client,
         &direct::Terminal {
             subject,
@@ -5355,7 +5235,7 @@ async fn attach_terminal(
             expected,
             fallback,
         },
-    )
+    ))
     .await?;
     let route = match opened {
         direct::Opened::Stream {
@@ -5373,14 +5253,16 @@ async fn attach_terminal(
         }
         direct::Opened::UseGateway { route } => route,
     };
-    let attachment = client
-        .raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
-        .await
-        .map_err(|error| format!("{route}: {}", error.plain()))?;
-    let stream = client
-        .raw_terminal_stream(&attachment)
-        .await
-        .map_err(|error| format!("{route}: {}", error.plain()))?;
+    let attachment = attach::phase("raw terminal attachment", attach::GATEWAY, async {
+        client.raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
+            .await.map_err(|error| format!("{route}: {}", error.plain()))
+    }).await?;
+    // An unused capability opens no PTY and expires on the server after 60 seconds.
+    // Once upgraded, dropping the stream cancels its bridge, including on task abort.
+    let stream = attach::phase("raw terminal stream", attach::GATEWAY, async {
+        client.raw_terminal_stream(&attachment).await
+            .map_err(|error| format!("{route}: {}", error.plain()))
+    }).await?;
     stream
         .into_std()
         .map(|stream| Direct {
