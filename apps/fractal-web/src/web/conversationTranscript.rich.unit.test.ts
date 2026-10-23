@@ -1,5 +1,5 @@
-import type { CollectionFrame, TimelineEntry } from '@smalltalk/st3-client'
-import { decodeConversationChunk } from '@st3/sdk/effect'
+import type { CollectionFrame, TimelineEntry } from '@fractal/client'
+import { decodeConversationChunk } from '@fractal/sdk/effect'
 import { describe, expect, it } from 'vitest'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { mapConversationFeed, prepareTranscriptTurns } from './conversationTranscript.ts'

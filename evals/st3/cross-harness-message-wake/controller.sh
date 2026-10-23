@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}}"
 
 receipt_deadline_seconds="${WAKE_RECEIPT_DEADLINE_SECONDS:-120}"
 turn_stage_deadline_seconds="${WAKE_TURN_STAGE_DEADLINE_SECONDS:-300}"
 startup_deadline_seconds="${WAKE_STARTUP_DEADLINE_SECONDS:-180}"
 idle_deadline_seconds="${WAKE_IDLE_DEADLINE_SECONDS:-300}"
-run_tag="mission-run:$ST_MISSION_RUN"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+run_tag="mission-run:${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
 
 # shellcheck source=participants.sh
 source ./participants.sh
@@ -26,8 +29,9 @@ persist_state() {
   printf '%s\n' "$state" >controller-state.json
 }
 
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 state="$(jq -n \
-  --arg run "$ST_MISSION_RUN" \
+  --arg run "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" \
   --argjson receipt "$receipt_deadline_seconds" \
   --argjson turn "$turn_stage_deadline_seconds" \
   '{run: $run, deadlines_seconds: {receipt: $receipt, turn_stage: $turn}, agents: {}, phases: {}}')"
@@ -101,11 +105,12 @@ wait_for_exact_idle() {
 
 render_prompt() {
   local phase=$1 token=$2 peer=$3
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   sed \
     -e "s|{{PHASE}}|$phase|g" \
     -e "s|{{TOKEN}}|$token|g" \
     -e "s|{{PEER}}|$peer|g" \
-    -e "s|{{RUN}}|$ST_MISSION_RUN|g" \
+    -e "s|{{RUN}}|${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}|g" \
     prompts/participant.md
 }
 

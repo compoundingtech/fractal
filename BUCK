@@ -13,9 +13,9 @@ alias(name = "package_command_runtime", actual = "@rules//:package_command_runti
 filegroup(
     name = "typecheck",
     srcs = {
-        "clients/typescript/st3-client/typecheck": "//clients/typescript/st3-client:typecheck",
-        "clients/typescript/st3-client/typecheck_schema": "//clients/typescript/st3-client:typecheck_schema",
-        "clients/typescript/st3-views/typecheck": "//clients/typescript/st3-views:typecheck",
+        "clients/typescript/fractal-client/typecheck": "//clients/typescript/fractal-client:typecheck",
+        "clients/typescript/fractal-client/typecheck_schema": "//clients/typescript/fractal-client:typecheck_schema",
+        "clients/typescript/fractal-views/typecheck": "//clients/typescript/fractal-views:typecheck",
     },
     visibility = ["PUBLIC"],
 )

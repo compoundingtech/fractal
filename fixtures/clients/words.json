@@ -46,6 +46,11 @@
       "name": "stopped"
     },
     {
+      "glyph": "○",
+      "id": "retired",
+      "name": "retired"
+    },
+    {
       "glyph": "?",
       "id": "unknown",
       "name": "not managed"
@@ -129,6 +134,12 @@
       "glyph": "○",
       "id": "not_started",
       "name": "not started"
+    },
+    {
+      "explain": "st does not say: an older st, or one that has not read its agents yet",
+      "glyph": "?",
+      "id": "unknown",
+      "name": "unknown"
     }
   ],
   "tabs": [

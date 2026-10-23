@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""check-native-names on throwaway repositories: a retired name in a tracked or unignored file fails, an ignored
+or binary file does not, and the clean tree passes."""
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+SCRIPT = Path(__file__).resolve().parent / 'check-native-names'
+ENV = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+ENV.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null')
+RETIRED = 'con' + 'voy'
+
+
+def check(root):
+    return subprocess.run([sys.executable, str(SCRIPT), str(root)], capture_output=True, text=True, env=ENV)
+
+
+with tempfile.TemporaryDirectory() as scratch:
+    root = Path(scratch)
+    subprocess.run(['git', 'init', '-q', str(root)], check=True, env=ENV)
+    (root / 'README.md').write_text('native names only\n')
+    (root / '.gitignore').write_text('ignored.txt\n')
+    (root / 'ignored.txt').write_text(f'{RETIRED}\n')
+    (root / 'image.bin').write_bytes(b'\xff\xfe' + RETIRED.encode())
+    subprocess.run(['git', '-C', str(root), 'add', 'README.md', '.gitignore', 'image.bin'], check=True, env=ENV)
+    done = check(root)
+    assert done.returncode == 0, done.stderr
+    (root / 'pages').mkdir()
+    (root / 'pages' / 'new.md').write_text(f'The {RETIRED.upper()} tool\n')
+    done = check(root)
+    assert done.returncode == 1 and 'pages/new.md' in done.stderr, 'an unignored untracked file is read, case-insensitively'
+    (root / 'pages' / 'new.md').write_text('st2 ' + 'compile x\n')
+    assert check(root).returncode == 1
+    (root / 'pages' / 'new.md').write_text('fine\n')
+    assert check(root).returncode == 0
+print('passed: a retired name in a tracked or unignored text file fails; ignored and binary files are not read')
