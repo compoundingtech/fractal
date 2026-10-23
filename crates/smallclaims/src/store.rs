@@ -6057,7 +6057,7 @@ impl Store {
             |row| row.get::<_, bool>(0),
         )?;
         anyhow::ensure!(!previously_used, "cannot bind a used default store to a shard");
-        connection.execute("INSERT INTO meta(key, value) VALUES ('shard_id', ?1)", [id.as_str()])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hef1ca5e8b2ef owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('shard_id', ?1)", [id.as_str()])?;
         Ok(())
     }
 
