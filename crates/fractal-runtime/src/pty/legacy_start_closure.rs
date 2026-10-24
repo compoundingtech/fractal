@@ -415,9 +415,34 @@ mod tests {
                 if line? == "proof-child-ready" { ready = true; break; }
             }
             anyhow::ensure!(ready, "non-dumpable child did not become ready");
-            owner_process_has_operation(
+            // PR_SET_DUMPABLE does not deny a reader with CAP_SYS_PTRACE.
+            // Hosted runners may grant that capability. Remove it only from
+            // this test thread while exercising the real kernel denial, then
+            // restore the reader before checking the result; never skip the
+            // unreadable-producer assertion or weaken production enumeration.
+            #[repr(C)]
+            struct Header { version: u32, pid: i32 }
+            #[repr(C)]
+            #[derive(Clone, Copy, Default)]
+            struct Capabilities { effective: u32, permitted: u32, inheritable: u32 }
+            // Linux capability ABI v3 contains two 32-bit words.
+            let mut header = Header { version: 0x2008_0522, pid: 0 };
+            let mut capabilities = [Capabilities::default(); 2];
+            // SAFETY: the ABI-sized buffers remain alive for each syscall;
+            // pid=0 addresses only the calling test thread.
+            let read = unsafe { libc::syscall(libc::SYS_capget, &mut header, capabilities.as_mut_ptr()) };
+            anyhow::ensure!(read == 0, "read test reader capabilities: {}", std::io::Error::last_os_error());
+            let original = capabilities;
+            const CAP_SYS_PTRACE: u32 = 19;
+            capabilities[0].effective &= !(1 << CAP_SYS_PTRACE);
+            let dropped = unsafe { libc::syscall(libc::SYS_capset, &header, capabilities.as_ptr()) };
+            anyhow::ensure!(dropped == 0, "restrict test reader capabilities: {}", std::io::Error::last_os_error());
+            let observed = owner_process_has_operation(
                 Path::new(&format!("/proc/{}", child.id())), OPERATION, child.id(),
-            ).err().context("unreadable producer was incorrectly excluded")
+            );
+            let restored = unsafe { libc::syscall(libc::SYS_capset, &header, original.as_ptr()) };
+            anyhow::ensure!(restored == 0, "restore test reader capabilities: {}", std::io::Error::last_os_error());
+            observed.err().context("unreadable producer was incorrectly excluded")
         })();
         let _ = child.kill();
         let _ = child.wait();
