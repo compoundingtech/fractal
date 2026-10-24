@@ -73,6 +73,36 @@ unchanged ticks and restarts. Failed activation does not prune builds.
 The deployment-owned build helper must leave build cleanup to the integrator;
 it must not prune artifacts before publication or remove the rollback target.
 
+## Build helper inputs and snapshot I/O
+
+Set `FRACTAL_INTEGRATOR_BUILD_SCRIPT` to this directory's `build-and-swap.sh`.
+The helper takes `SOURCE_DIR SHA NAME` arguments and requires:
+
+| Environment variable | Value |
+| --- | --- |
+| `FRACTAL_BUILD_ROOT` | Deployment-owned parent of per-name production directories (`<root>/<name>/builds/<sha>`) |
+| `FRACTAL_BUILD_SNAPSHOT_ROOT` | Deployment-owned snapshot parent, outside the source clone and on its filesystem |
+
+The helper creates detached worktrees at `<snapshot-root>/<name>/<sha>-<pid>`.
+Its per-name build lock protects stale snapshot reclamation; only matching
+revision/PID snapshot directories are reclaimed. Snapshot roots on another
+filesystem or inside the source clone fail loudly before worktree creation.
+`prepare-dependencies.py SOURCE_DIR SNAPSHOT_DIR [MANIFEST_PATH]` copies the
+private/vendor overlay, hardlinks installed dependency files, and redirects
+workspace symlinks into the snapshot. It is resolved beside the shell helper.
+An `EXDEV` hardlink failure emits an immediate warning before copying;
+the final warning and `dependencyFiles.linked` / `dependencyFiles.copied`
+manifest/receipt fields count the actual hardlinks and fallback copies.
+Production state, manifests, snapshots, private overlay and credentials remain
+deployment-owned. The helper stages `current`; it never prunes immutable builds
+or publishes Devnet. The integrator alone prunes current plus one rollback build
+after the published edge confirms activation.
+
+The helper uses `gate-slot` admission by default; `FRACTAL_BUILD_ADMISSION=fallback`
+explicitly reuses a caller's admission timeout and builds with `nice -n 19`.
+The deployment supplies Git, GNU coreutils, `flock`, Python, Node and the private
+build entry point. These scripts do not provision the private build code.
+
 ## Tick observability
 
 Every tick reads `servedSha` from `/build-identity.json` (`rev`) at the published `devnet url <purpose> --remote` edge.
