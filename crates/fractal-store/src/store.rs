@@ -258,6 +258,7 @@ pub mod coordination;
 pub mod agent_view;
 pub mod conversation_reads;
 pub use conversation_reads::Owner as ConversationOwner;
+pub mod conversation_deliveries;
 pub mod usage_period;
 pub mod runtime;
 pub mod published_views;
@@ -670,7 +671,7 @@ pub struct AgentWorkQueue {
 
 /// smalltalk's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6a0f08109ee2 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h967324b862ed owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -986,6 +987,37 @@ BEGIN
     INSERT INTO message_index(subject, created_index, closed)
     SELECT subject, MIN(store_index), MAX(kind = 'message.closed')
     FROM claims WHERE subject = OLD.subject GROUP BY subject;
+END;
+
+-- Qualified native identities attached to a newly appended mailbox consumption
+-- receipt in its existing writer savepoint. This is owner-local receipt provenance,
+-- not a replicated claim or transcript payload. There is no historical backfill.
+CREATE TABLE IF NOT EXISTS local_native_delivery_receipts_v2 (
+    claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE CASCADE,
+    claim_hash TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    store_index INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS local_native_delivery_identity_v2
+ON local_native_delivery_receipts_v2(session_id, native_id, actor, origin, store_index);
+CREATE INDEX IF NOT EXISTS local_native_delivery_owner_cut_v2
+ON local_native_delivery_receipts_v2(actor, store_index);
+-- A changed, repaired or deleted physical claim no longer carries the original proof.
+-- No trigger reconstructs or guesses a native identity from a claim body.
+CREATE TRIGGER IF NOT EXISTS local_native_delivery_update_v2
+AFTER UPDATE OF id, subject, kind, actor, origin, body ON claims
+WHEN OLD.id IS NOT NEW.id OR OLD.subject IS NOT NEW.subject OR OLD.kind IS NOT NEW.kind
+  OR OLD.actor IS NOT NEW.actor OR OLD.origin IS NOT NEW.origin OR OLD.body IS NOT NEW.body
+BEGIN
+    DELETE FROM local_native_delivery_receipts_v2 WHERE claim_id=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS local_native_delivery_delete_v2 AFTER DELETE ON claims
+WHEN OLD.kind='message.read'
+BEGIN
+    DELETE FROM local_native_delivery_receipts_v2 WHERE claim_id=OLD.id;
 END;
 
 CREATE TABLE IF NOT EXISTS capabilities (
@@ -2088,7 +2120,7 @@ pub fn stale_pull_request_request_tx(
     Ok(None)
 }
 
-fn migrate_schema(connection: &Connection) -> Result<()> {
+pub fn migrate_schema(connection: &Connection) -> Result<()> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version == 0 || (13..=fractal_schema::STORAGE_VERSION).contains(&version)
     {
@@ -20150,6 +20182,7 @@ pub struct ClaimCommitContext<'a> {
     pub identity_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
+    pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
 }
 
 pub fn append_claim_with_commit_context(
@@ -20498,6 +20531,15 @@ pub fn append_claim_with_commit_context(
             })()?;
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
+            }
+            if outcome.1 && let Some(native) = context.native_receipt {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-hd287e9bfd382 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_native_delivery_receipts_v2
+                     (claim_id,claim_hash,session_id,native_id,actor,origin,store_index) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![outcome.0.id, crate::conversation_delivery::receipt_fingerprint(&outcome.0.subject,
+                        input.actor.as_deref().unwrap_or_default(), &graph.origin, &outcome.0.body).map_err(internal)?,
+                        native.session_id,native.message_id,input.actor,graph.origin,outcome.0.store_index],
+                ).map_err(internal)?;
             }
             if context.signature.is_some() {
                 // An idempotent repeat does not append/consume a signature. Remove its

@@ -29,6 +29,14 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/mailbox/receipts", post(receipt))
 }
 
+#[derive(serde::Deserialize)]
+pub struct ReceiptRequest {
+    #[serde(flatten)]
+    receipt: Receipt,
+    #[serde(default)]
+    native_receipt: Option<crate::conversation_delivery::NativeReceipt>,
+}
+
 /// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
 /// into this router: real native custody controls and the daemon use `router`.
 #[cfg(feature = "test-support")]
@@ -217,9 +225,9 @@ fn authorize(fence: &Fence, peer: Option<&NativeDeliveryPeer>) -> Result<(), Api
 pub async fn receipt(
     State(state): State<AppState>,
     peer: Option<Extension<NativeDeliveryPeer>>,
-    Json(request): Json<Receipt>,
+    Json(payload): Json<ReceiptRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
-    let mut request = request;
+    let mut request = payload.receipt;
     request.fence = storage_fence(&state, request.fence)?;
     authorize(&request.fence, peer.as_ref().map(|p| &p.0))?;
     if request.fence.component != "delivery"
@@ -229,6 +237,13 @@ pub async fn receipt(
             "invalid-mailbox-receipt",
             "only the delivery component can publish staged, delivered or read",
         )));
+    }
+    if payload.native_receipt.as_ref().is_some_and(|proof| !proof.valid())
+        || payload.native_receipt.is_some() && (request.lifecycle != "read"
+            || peer.as_ref().unwrap().0.transport != "claude-channel")
+    {
+        return Err(ApiError::bad(St3Error::new("invalid-native-receipt",
+            "a native record identity requires a Claude consumption receipt")));
     }
     let input = ClaimInput {
         subject: request.message.clone(),
@@ -265,7 +280,8 @@ pub async fn receipt(
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
                     return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
                 }
-                store.append_mailbox_receipt_outcome(&input, &request.fence)
+                store.append_native_mailbox_receipt_outcome(&input, &request.fence,
+                    payload.native_receipt.as_ref())
             })?
         } else { store.append_mailbox_receipt_outcome(&input, &request.fence)? };
         // A message this store cannot read is treated as a work wake.
