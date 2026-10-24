@@ -183,6 +183,7 @@ use smallclaims::windows::holds;
 
 pub mod accounts;
 pub mod runtime_starts;
+pub mod reboot_witness;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod roster_admission;
 
@@ -12666,7 +12667,11 @@ fn operational_repair_plan_with_legacy_starts_tx(
             "revoked-legacy-runtime-start",
             &operation.subject,
             vec![operation.subject.clone()],
-            "the owner daemon proved the revoked legacy terminal producer physically closed",
+            if evidence["witness_kind"] == "reboot" {
+                "the owner daemon proved closure across a recent reboot with authenticated preboot and fresh relaunch-store witnesses"
+            } else {
+                "the owner daemon proved the revoked legacy terminal producer physically closed"
+            },
             BTreeMap::from([
                 // Bind private admission/result data without returning launch
                 // environments or other secrets in the public repair plan.

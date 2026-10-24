@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Revoked legacy starts can use daemon-authored recent-reboot witnesses with complete preboot and fresh postboot relaunch-store scans",
+  "replay": {"status": "none", "detail": "No replay or projection rebuild."},
+  "schema": {"status": "none", "detail": "The manifest is an owner-local pinned observation; no new replicated claim kind or database table."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and canonical digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Adds st repair reboot-witness capture and its authenticated endpoint. The witness remains within revoked-legacy-runtime-start; repair.applied retains its four fields and encodes evidence in reason for older peers."},
+  "downtime": {"status": "none", "detail": "Capture does not reboot or stop anything. A separately authorized reboot is required before this witness can repair a start."},
+  "manual": {"status": "changed", "detail": "Capture as the transport-bound agent before an authorized reboot. The next boot must begin within ten minutes. Review and apply a fresh exact repair plan after reboot. Incomplete stores, unknown restore inputs, labels, same boot, tamper and foreign-host evidence refuse."},
+  "recovery": {"status": "none", "detail": "No flag editing or registry deletion. A refused seat stays trapped for the reviewer."}
+}

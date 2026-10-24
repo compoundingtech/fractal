@@ -708,6 +708,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/doctor", get(operations::doctor))
         .route("/v1/repair", get(operations::operational_repair_plan))
         .route("/v1/repair/apply", post(operations::apply_operational_repair))
+        .route("/v1/repair/reboot-witness/capture", post(operations::capture_reboot_witness))
         .route("/v1/backup", get(operations::backup_export))
         .route("/v1/replication/status", get(replication::replication_status))
         .route("/v1/replication/records", get(replication::replication_records))
@@ -7379,27 +7380,9 @@ fn doctor_report_with_operation_drift(
             message: error.to_string(),
         }),
     }
-    match operations::owner_operational_repair_plan(state) {
-        Ok(plan) if plan.items.is_empty() => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "pass".into(),
-            message: "the graph has no repairable operational contradictions".into(),
-        }),
-        Ok(plan) => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "warn".into(),
-            message: format!(
-                "{} graph-authorized repairs are available; inspect `st repair dry-run` token {}",
-                plan.items.len(),
-                plan.token
-            ),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "fail".into(),
-            message: format!("could not compute the operational repair plan: {error}"),
-        }),
-    }
+    checks.push(operations::operational_repair_check(
+        operations::owner_operational_repair_plan(state),
+    )?);
     checks.push(
         terminal_exec_gates_check(&state.store).unwrap_or_else(|error| DoctorCheck {
             name: "terminal-exec-gates".into(),

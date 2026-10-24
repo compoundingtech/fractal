@@ -186,6 +186,13 @@ producer metadata. The owner daemon must positively enumerate no matching seat/w
 systemd units and no live owner-user process carrying the exact start-operation label.
 Unreadable or incomplete evidence refuses repair. A null PID or an older operation tag alone
 never authorizes cleanup.
+Dry-run, apply, and doctor return HTTP 422 `legacy-start-proof-unavailable` when native
+capture cannot establish that proof. Process-read refusals expose only `stage`, `pid`,
+and the numeric OS `errno` when available; they never expose environment contents or
+native error paths. Other capture refusals report `stage: native-capture`. A live process
+whose environment is inaccessible remains an unknown producer, even if its name resembles
+a host service or its current parent is root-owned. It is not skipped or reported as a
+successful empty plan.
 
 Dry-run includes the physical evidence in the item and token. Apply captures fresh evidence,
 keeps the runtime spawn lock through the normal writer transaction, and refuses a changed token
@@ -195,6 +202,46 @@ The replicated `repair.applied` schema is unchanged: legacy operation IDs and na
 are JSON text appended to its existing `reason` string. Older peers can admit this receipt
 without knowing the new repair class; unknown fields would instead quarantine it. Repairs
 without legacy closures retain the original reason and never emit an extra field.
+
+#### Recent reboot witness for a revoked legacy start
+
+Linux also supports a narrow `reboot` witness within this same repair class.
+Before an independently authorized reboot, the owning daemon can capture an observation:
+
+```sh
+st repair reboot-witness capture --subject agent/OWNER/SEAT --as "$ST_AGENT" --json
+```
+
+Capture requires the transport-bound agent, holds the runtime spawn fence through
+owner-local persistence, and never accepts an imported manifest file. The observation
+is not replicated and does not authorize either a reboot or a repair. The exact start
+must still be revoked. Its manifest binds the owner host/user, old kernel boot ID,
+capture time, explicit store contract, negative-scan counts/digests, and exclusions.
+
+The next boot's `btime` must fall no more than ten minutes after capture
+(`REBOOT_WITNESS_MAX_PREBOOT_AGE_MS`). A same-boot, missing, tampered, foreign-host,
+too-old, or incomplete witness refuses with HTTP 422 `legacy-start-proof-unavailable`.
+After reboot, the ordinary filtered dry-run and apply each scan the same stores
+again under the spawn fence. The token binds the authenticated manifest digest,
+both boot IDs, new boot time, and fresh scan evidence. Any newly present exact
+operation label, changed store contract, unreadable store, unknown generator,
+unknown restore adapter/schema, or scan-size limit refuses; that seat stays trapped
+and must return to the repair reviewer.
+
+The closed store set covers all states of the configured/native/legacy PTY registries
+and launch-operation records, referenced PTY-file restore inputs, effective systemd
+user-unit and manager environments including every EnvironmentFile, user crontab,
+XDG autostart and user generator output, and supported tmux restore inputs. A bounded
+fixed-string search additionally covers the explicitly named home-state roots.
+Only exact non-relaunch artifacts are excluded; the manifest publishes that list.
+SQLite ledger files are excluded from the byte search, not from revoked-operation
+eligibility checks. PTY logs containing retained tmux snapshot events are not
+blanket-excluded. This is a closed source-supported store contract, not a claim
+that arbitrary user-authored programs anywhere in the filesystem are understood.
+
+The manifest remains owner-local. Successful repair keeps the existing four-field
+`repair.applied` schema and embeds witness JSON in its `reason`, so older peers do
+not need a new claim kind or field.
 
 
 Run on the owning host after deploying the daemon:

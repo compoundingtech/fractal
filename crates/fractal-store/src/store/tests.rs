@@ -46,6 +46,42 @@ fn legacy_repair_fixture(store: &Store) -> Value {
 }
 
 #[test]
+fn reboot_witness_is_local_authenticated_and_token_bound_without_receipt_schema_change() {
+    let store = Store::open_memory("node").unwrap();
+    let mut evidence = legacy_repair_fixture(&store);
+    assert!(store.reboot_witness_for("agent/example-legacy", "legacy-op").unwrap().is_none());
+    let manifest = json!({"version":1,"host":"node","operation_id":"legacy-op",
+        "runtime_id":"legacy-runtime","boot_id":"old","captured_at_unix_ms":1000});
+    let record = store.retain_reboot_witness("legacy-op", &manifest, "agent/operator").unwrap();
+    assert_eq!(store.reboot_witness_for("agent/example-legacy", "legacy-op").unwrap().unwrap().digest, record.digest);
+    let replicated_count: i64 = store.readers.get().query_row(
+        "SELECT COUNT(*) FROM claims WHERE kind='runtime.start.reboot-witness'", [], |row| row.get(0)).unwrap();
+    assert_eq!(replicated_count, 0);
+    evidence["witness_kind"] = json!("reboot");
+    evidence["manifest_digest"] = json!(record.digest);
+    evidence["old_boot_id"] = json!("old");
+    evidence["current_boot_id"] = json!("new");
+    let plan = store.operational_repair_plan_with_legacy_starts(std::slice::from_ref(&evidence)).unwrap();
+    let mut changed = evidence.clone(); changed["current_boot_id"] = json!("another");
+    assert_eq!(store.apply_operational_repair_with_legacy_starts(&plan.token, &[changed]).unwrap_err().code, "stale-repair-plan");
+    let result = store.apply_operational_repair_with_legacy_starts(&plan.token, &[evidence]).unwrap();
+    let body: String = store.readers.get().query_row("SELECT body FROM claims WHERE id=?1",
+        [result.receipt_claim_id.unwrap()], |row| row.get(0)).unwrap();
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["fields"].as_object().unwrap().len(), 4);
+    assert!(body["fields"]["reason"].as_str().unwrap().contains("manifest_digest"));
+}
+
+#[test]
+fn reboot_witness_refuses_an_operation_that_is_not_revoked() {
+    let store = Store::open_memory("node").unwrap();
+    legacy_repair_fixture(&store);
+    // sqlite-large-value: allow-for-now lv-h78a5d0873de6 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation
+    store.connection.write().execute("UPDATE local_runtime_starts SET revoked_by=NULL WHERE id='legacy-op'", []).unwrap();
+    assert!(store.retain_reboot_witness("legacy-op", &json!({}), "agent/operator").is_err());
+}
+
+#[test]
 fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");

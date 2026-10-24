@@ -38,6 +38,7 @@ pub use process::{
     ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token,
 };
 pub use pty::{
-    Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, PtyObservation, PtyRuntime,
+    Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, PtyObservation, PtyRuntime,
     PtySpawnTimeout, PtySpawnTimeoutPhase, TerminalSize,
+    RebootWitnessManifest, RebootWitnessProof, RebootWitnessScan, REBOOT_WITNESS_MAX_PREBOOT_AGE_MS,
 };
