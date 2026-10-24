@@ -2169,7 +2169,7 @@ enum RepairCommand {
     DryRun {
         /// Compatibility actor for guarded callers; this GET does not require an actor.
         #[arg(long = "as")]
-        actor: Option<String>,
+        ignored_actor: Option<String>,
         /// Restrict repair items to these exact subjects (repeatable).
         #[arg(long = "subject")]
         subjects: Vec<String>,
@@ -4230,7 +4230,7 @@ struct MessageStatusArgs {
     idempotency_key: Option<String>,
     /// Compatibility actor for guarded callers; this GET does not require an actor.
     #[arg(long = "as")]
-    actor: Option<String>,
+    ignored_actor: Option<String>,
 }
 
 #[derive(Args)]
@@ -5464,8 +5464,8 @@ fn guard_mutating_cli_actor(
                 "an agent repair apply needs explicit --as {own}"
             ))?)
         }
-        Command::Repair { command: RepairCommand::DryRun { actor, .. } } => actor.as_deref(),
-        Command::Conversations { command: MessageCommand::Status(args) } => args.actor.as_deref(),
+        Command::Repair { command: RepairCommand::DryRun { ignored_actor, .. } } => ignored_actor.as_deref(),
+        Command::Conversations { command: MessageCommand::Status(args) } => args.ignored_actor.as_deref(),
         _ => None,
     };
     if let Some(actor) = repair_actor {
@@ -10544,8 +10544,8 @@ fn repair_apply_guidance(token: &str, own: Option<&str>) -> String {
 
 async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) -> Result<()> {
     match command {
-        RepairCommand::DryRun { subjects, classes, actor } => {
-            notice_ignored_read_actor(actor.as_deref());
+        RepairCommand::DryRun { subjects, classes, ignored_actor } => {
+            notice_ignored_read_actor(ignored_actor.as_deref());
             let path = repair_plan_path(&subjects, &classes)?;
             let plan: OperationalRepairPlan = client.get(&path).await?;
             validate_repair_plan_filters(&plan, &subjects, &classes)?;
