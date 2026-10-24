@@ -378,12 +378,6 @@ fn cancellation_stops_owned_work(restart: bool) {
         unsafe { libc::flock(lane.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
         0
     );
-    // The default spacing, not the helper's fastest cap: at 600 passes a minute the finally gate
-    // can start while the cancelled gate that ignores TERM is still being killed, and it is killed
-    // too (#3745).
-    let config = root.path().join("config/st3/config.toml");
-    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-    std::fs::write(&config, "[reconcile]\nmax_passes_per_minute = 30\n").unwrap();
     let mut daemon = Daemon::start(root.path());
     let source = r#"version 2
 mission "orchid/cancellation" state="ready" {
