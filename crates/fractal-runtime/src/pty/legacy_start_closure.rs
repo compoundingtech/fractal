@@ -437,7 +437,9 @@ mod tests {
                 "reader_pid={} uid={} euid={} {caps} userns={} producer_procfs_pid={pid} producer_namespace_pid={reported_pid} producer_dumpable=0 (post-exec readiness, unchanged while blocked on stdin) producer_state={state} environ_errno={errno:?} owner_uid={owner_uid} producer_uids={uids:?} metadata_uid={metadata_uid}",
                 std::process::id(), unsafe { libc::getuid() }, unsafe { libc::geteuid() }, namespace.display(),
             );
-            anyhow::ensure!(uids.contains(&owner_uid) && metadata_uid == owner_uid,
+            // Match production's owner test: non-dumpable procfs metadata may
+            // be root-owned even though the status UIDs identify the owner.
+            anyhow::ensure!(uids.contains(&owner_uid) || metadata_uid == owner_uid,
                 "positive owner-pid inclusion failed: {diagnostics}");
             anyhow::ensure!(matches!(state, "S" | "R"), "producer is not live: {diagnostics}");
             let error = owner_process_has_operation(&path, OPERATION, pid)
