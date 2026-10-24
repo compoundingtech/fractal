@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Adapt standing GitHub repository watches from three to six to ten minutes while quiet",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "Quiet cadence is in-memory observer/revision scheduling state, separate from provider cursors and cached responses."},
+  "rules": {"status": "none", "detail": "Watch delivery and admission rules are unchanged; no per-thread pollers are introduced."},
+  "compatibility": {"status": "changed", "detail": "Standing repository observers start at three minutes, advance to six then ten minutes when facts are unchanged, and reset to three minutes on any observed fact change. Existing standing every=30s declarations adapt by identity without rewriting live state. Explicit non-standing intervals, including faster 30s observers, remain unchanged. Pagination continues at one second; provider rate-limit retry deadlines remain authoritative."},
+  "downtime": {"status": "none", "detail": "No data migration or daemon restart is performed by this change."},
+  "manual": {"status": "none", "detail": "New standing declarations use every=3m. Refresh remains immediate and resets active cadence; a new revision starts immediately at active cadence."},
+  "recovery": {"status": "none", "detail": "Restart resets quiet cadence to active without clearing ETags, response bodies or provider cursor state. Binary rollback requires no migration."}
+}
