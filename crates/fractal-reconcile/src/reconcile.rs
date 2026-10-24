@@ -29969,8 +29969,12 @@ mission "orchid/final-launch" state="ready" timeout="1m" {
         // Default30 start spacing is independently covered by deterministic gate controls.
         reconciler.set_max_passes_per_minute(600).unwrap();
         let task = tokio::spawn(reconciler.clone().run());
+        // Headroom for a loaded build host, where a debug test shares the CPU with others: well
+        // under FULL_PASS_INTERVAL_MS, so a lost wake still fails instead of a full pass hiding it.
+        const CONVERGES_WITHIN: Duration = Duration::from_secs(15);
+        assert!(CONVERGES_WITHIN.as_millis() < crate::incremental::FULL_PASS_INTERVAL_MS);
 
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(CONVERGES_WITHIN, async {
             loop {
                 if runtime
                     .started_members
@@ -29994,7 +29998,7 @@ mission "orchid/final-launch" state="ready" timeout="1m" {
         apply_source_beside_the_loop(&store, &cancellation, "cancel-convergence-stop");
         notify.notify_one();
 
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(CONVERGES_WITHIN, async {
             loop {
                 let current = beside_the_loop(|| store.mission_run(&run.id)).unwrap();
                 let cleaned = beside_the_loop(|| store.desired_subjects())

@@ -106,8 +106,22 @@ class CiLocal(unittest.TestCase):
             self.assertEqual(env['PATH'].split(':')[0], str(self.bin), 'the other entries keep their order')
             # Last, so cargo finds the dev shell's clippy before the rustup proxy there.
             self.assertEqual(env['PATH'].split(':')[-1], f'{self.home}/.cargo/bin')
-        self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '6', 'a shared host: six test threads, not nproc')
+        self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '12', 'a shared host: twelve test threads, not nproc')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
+
+    def test_the_tmpdir_is_in_ram_when_dev_shm_has_room_and_on_disk_otherwise(self):
+        if not (os.path.isdir('/dev/shm') and os.access('/dev/shm', os.W_OK)):
+            self.skipTest('no writable /dev/shm here')
+        for free_kb, root in ((30 * 1024 * 1024, '/dev/shm'), (19 * 1024 * 1024, '/var/tmp')):
+            with self.subTest(free_kb=free_kb):
+                (self.bin / 'df').write_text(f'#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "tmpfs 1 1 {free_kb} 1% /dev/shm"\n')
+                (self.bin / 'df').chmod(0o755)
+                self.log.unlink(missing_ok=True)
+                done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TMP_ROOT='')
+                self.assertEqual(done.returncode, 0, done.stderr)
+                tmpdir = Path(calls[-1]['env']['TMPDIR'])
+                self.assertEqual((str(tmpdir.parent), tmpdir.name[:3]), (root, 'cl.'))
+                self.assertFalse(tmpdir.exists(), 'removed when the run ends')
 
     def test_each_test_process_gets_a_tmpdir_of_its_own_through_the_cargo_target_runner(self):
         done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TARGET_TRIPLE='x86_64-unknown-linux-gnu')

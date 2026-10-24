@@ -7379,7 +7379,7 @@ fn doctor_report_with_operation_drift(
             message: error.to_string(),
         }),
     }
-    match state.store.operational_repair_plan() {
+    match operations::owner_operational_repair_plan(state) {
         Ok(plan) if plan.items.is_empty() => checks.push(DoctorCheck {
             name: "operational-repair".into(),
             status: "pass".into(),
