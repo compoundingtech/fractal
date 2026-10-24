@@ -17,9 +17,12 @@ devnet up <purpose> --ready-path / -- scripts/devnet/launch.sh <purpose> <build-
   to `unix:/run/user/$(id -u)/st3-client.sock`; set it for a different gateway.
 - Preview exports `WF_ALLOWED_HOSTS=127.0.0.1,localhost,<edge-host>` and reads the
   credential into `WF_ST_AUTHORIZATION` with a `Bearer ` prefix, as required by the
-  public Vite gateway plugin. `WF_VITE_CONFIG` defaults to `vite.config.ts`.
-  Config paths and the working directory resolve relative to the app, not the
-  caller. Preview needs installed app dependencies (Vite), Bash, and Python 3.
+  public Vite gateway plugin. Preview requires `WF_VITE_CONFIG`: a deployment-owned
+  composition config that admits the Devnet edge Host and Origin. The public
+  `vite.config.ts` is loopback-only and cannot serve edge traffic; setting allowed
+  hosts alone does not change its gateway admission policy. Config paths and the
+  working directory resolve relative to the app, not the caller. Preview needs
+  installed app dependencies (Vite), Bash, and Python 3.
 - Immutable launch keeps `<purpose> <build-dir>` compatibility; purpose is unused.
   The build directory resolves with `realpath` from the caller's directory. It
   exports `WF_PORT=$PORT` and passes `WF_ST_CREDENTIAL_FILE` to the build's
@@ -28,5 +31,5 @@ devnet up <purpose> --ready-path / -- scripts/devnet/launch.sh <purpose> <build-
   the public `server/main.mts` host, which has a separate configuration contract.
 
 Deployments keep credentials and private composition outside the repository.
-A private preview composition can select `WF_VITE_CONFIG=private/vite.config.ts`;
+A private preview composition can set `WF_VITE_CONFIG=private/vite.config.ts`;
 these launchers do not supply private configs, servers, relays, or build tools.
