@@ -946,6 +946,48 @@ class PerCrate(StTest):
         self.assertNotEqual(big, st_test.filterset_input(crates[:-1] + ['other']))
         self.assertEqual(big, st_test.filterset_input(list(crates)))
 
+    def test_signing_jobs_come_from_the_environment_and_a_bad_value_is_the_default(self):
+        for value, expected in (('3', 3), ('0', 1), ('-2', 1), ('x', 8), ('', 8)):
+            with mock.patch.dict(os.environ, {'ST_TEST_SIGN_JOBS': value}):
+                self.assertEqual(st_test.sign_jobs(), expected, value)
+        with mock.patch.dict(os.environ):
+            os.environ.pop('ST_TEST_SIGN_JOBS', None)
+            self.assertEqual(st_test.sign_jobs(), 8)
+
+    def test_the_shared_toolchain_digest_is_none_when_it_cannot_be_named_so_each_wrap_reports_for_itself(self):
+        self.assertIsNone(st_test.shared_toolchain('/nonexistent/evidence-wrap'))
+
+    def test_every_crate_is_signed_when_the_signatures_run_side_by_side(self):
+        for jobs in ('1', '8'):
+            with mock.patch.dict(os.environ, {'ST_TEST_SIGN_JOBS': jobs}):
+                git(self.work, 'checkout', '-q', '-B', f'jobs{jobs}', 'main')
+                code, out, err = self.run_crates()
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual(self.crate_records(), [('base', 0), ('top', 0)], jobs)
+            git(self.work, 'checkout', '-q', 'feature')
+            for ref in git(self.work, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence', 'refs/tags/evidence', 'refs/notes/evidence-input').split():
+                git(self.work, 'update-ref', '-d', ref)
+
+    def test_the_records_of_a_run_are_pushed_together_with_their_input_index_refs(self):
+        origin = Path(self.tmp.name) / 'origin.git'
+        def remote_refs():
+            return subprocess.run(['git', '-C', str(origin), 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/', 'refs/notes/evidence', 'refs/notes/evidence-input/'],
+                                  capture_output=True, text=True, check=True).stdout.split()
+        before = len(remote_refs())
+        code, out, err = self.run_crates('--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        refs = remote_refs()[:]
+        self.assertEqual(len(refs) - before, 8, 'four refs for each of the two records: tag, note and both input index refs')
+        self.assertEqual(sum('evidence/input/rust-tests/' in ref for ref in refs), 2)
+        self.assertEqual(sum('evidence-input/rust-tests/' in ref for ref in refs), 2)
+
+    def test_a_push_that_fails_is_a_failed_row_not_a_silent_success(self):
+        git(self.work, 'remote', 'set-url', '--push', 'origin', '/nonexistent/origin.git')
+        code, out, err = self.run_crates('--push', 'origin')
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('rust-tests:push', out)
+        self.assertIn('push of 8 refs failed', out)
+
     def test_status_names_the_crates_to_run(self):
         code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
         self.assertEqual(code, 3, out + err)
