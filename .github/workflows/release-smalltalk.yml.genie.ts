@@ -1,6 +1,6 @@
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
@@ -35,8 +35,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         ".github/workflows/release-smalltalk.yml",
         ".github/workflows/release-smalltalk.yml.genie.ts",
         ".gitignore",
-        "crates/st-build-stamp/**",
-        "crates/st-drivers/src/version.rs",
+        "crates/fractal-build-stamp/**",
+        "crates/fractal-drivers/src/version.rs",
         "install.sh",
         "scripts/download-install-test",
         "scripts/linux-release-cc",
@@ -92,7 +92,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
           }
         },
         {
-          "name": "Test install entry points and isolated app transactions",
+          "name": "Test release names, install entry points and isolated app transactions",
           "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-smalltalk-edge-test\npython3 scripts/compat-baseline-release-test\n"
         },
         {
@@ -165,7 +165,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
           }
         },
         buildSnapshotPrepare,
-        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }).map(step => ({ ...step, if: "runner.os == 'Linux'" })),
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         {
           name: 'Provide the pinned Linux host C compiler',
           if: "runner.os == 'Linux'",
@@ -255,13 +255,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "RUN_URL": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       },
       "steps": [
-        {
-          "uses": "actions/checkout@v4",
-          "with": {
-            "fetch-depth": 0,
-            "persist-credentials": false
-          }
-        },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         {
           "uses": "actions/download-artifact@v4",
           "with": {
@@ -290,12 +284,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "SOURCE_SHA": "${{ github.sha }}"
       },
       "steps": [
-        {
-          "uses": "actions/checkout@v4",
-          "with": {
-            "fetch-depth": 0
-          }
-        },
+        ...fullHistoryCheckoutSteps(),
         {
           "uses": "actions/download-artifact@v4",
           "with": {

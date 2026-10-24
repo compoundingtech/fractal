@@ -4,7 +4,7 @@ import { once } from 'node:events'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
-import { loadWorld } from '@smalltalk/st3-scenarios'
+import { loadWorld } from '@fractal/scenarios'
 
 // Run in the web Nix shell: its Playwright driver and Chromium are also used by the kit gate.
 const started = performance.now()
@@ -154,11 +154,27 @@ try {
   const page = positive.page
   const roster = page.getByRole('navigation', { name: 'Agent roster', exact: true })
   const agent = roster.getByRole('row').filter({ has: page.locator('[data-wf-agent-ref]'), hasText: 'Sprout Builder' })
-  const noFolders = async () => {
-    // Only the adapter's Unfiled grouping row may lack an agent identity in this empty world.
-    const groups = await roster.getByRole('row').filter({ hasNot: page.locator('[data-wf-agent-ref]') })
-      .evaluateAll(rows => rows.map(row => row.getAttribute('data-sidebar-tree-key')))
-    assert(groups.every(key => key === 'wf/unfiled'), `Unexpected folder rows: ${JSON.stringify(groups)}`)
+  const noUserFolders = async () => {
+    // Project and Unfiled groups are generated views, not user-created folders.
+    // User folders keep their arrangement IDs; they have no separate row-key prefix.
+    const folders = await roster.getByRole('row').filter({ hasNot: page.locator('[data-wf-agent-ref]') })
+      .evaluateAll(rows => rows.map(row => row.getAttribute('data-sidebar-tree-key'))
+        .filter(key => key !== 'wf/unfiled' && !key?.startsWith('wf/project/')))
+    assert.deepEqual(folders, [], `Unexpected user folder rows: ${JSON.stringify(folders)}`)
+  }
+  const agentInProject = async () => {
+    const projectKey = `wf/project/${encodeURIComponent('~/src/sprout')}`
+    const project = roster.locator(`[data-sidebar-tree-key="${projectKey}"]`)
+    await project.getByText('~/src/sprout', { exact: true }).waitFor({ state: 'visible' })
+    const parentKey = await agent.evaluate(row => {
+      const level = Number(row.getAttribute('aria-level'))
+      const rows = [...row.closest('[role="treegrid"]').querySelectorAll('[role="row"]')]
+      for (let index = rows.indexOf(row) - 1; index >= 0; index--) {
+        if (Number(rows[index].getAttribute('aria-level')) < level) return rows[index].getAttribute('data-sidebar-tree-key')
+      }
+      return null
+    })
+    assert.equal(parentKey, projectKey, 'Sprout Builder must appear under its project group')
   }
   // Use the adopted recording's frame boundaries for the empty-to-populated transcript proof.
   const advanceReplayTo = async (offset) => {
@@ -176,12 +192,13 @@ try {
   await page.clock.runFor(100)
   assert.equal(await agent.count(), 0, 'before +2s: Sprout Builder must not exist')
   assert.equal(await page.getByText(sentence, { exact: true }).count(), 0, 'before timed conversation: sentence must not exist')
-  await noFolders()
+  await noUserFolders()
   await page.clock.runFor(2000)
   await page.clock.runFor(32) // Publish the SDK/React animation-frame batch after frame delivery.
   await agent.waitFor({ state: 'visible' })
   assert.equal(await agent.count(), 1, 'after +2s: replay inserts Sprout Builder')
-  await noFolders()
+  await noUserFolders()
+  await agentInProject()
   await advanceReplayTo(Math.floor((2000 + threadCreated.at_ms) / 2))
   await agent.click()
   assert(new URL(page.url()).pathname.startsWith('/w/agent/'), 'agent selection must navigate in-app')
@@ -219,8 +236,9 @@ try {
   await page.clock.runFor(2000)
   await page.clock.runFor(32)
   await agent.waitFor({ state: 'visible' })
-  await noFolders()
-  console.log('PASS in-app navigation and reload preserve scenario; onboarding has no folders')
+  await noUserFolders()
+  await agentInProject()
+  console.log('PASS in-app navigation and reload preserve scenario; onboarding has no user folders and groups its agent by project')
   await positive.context.close()
 
   const negative = await context(true)

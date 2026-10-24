@@ -8,17 +8,17 @@ harness transcript files.
 
 Proposed changes extensions (not implemented): [per-turn files, patches, and branch Changes scope](turn-diff-design.md).
 
-The reusable Rust package is [`crates/st3-client`](../../../crates/st3-client) and supports both the
+The reusable Rust package is [`crates/fractal-client`](../../../crates/fractal-client) and supports both the
 local Unix socket and authenticated paired HTTP over Tailscale or optional Fabric. The Swift package is
-[`clients/swift/St3Client`](../../../clients/swift/St3Client). The Expo TypeScript client is
-[`clients/typescript/st3-client`](../../../clients/typescript/st3-client). Regenerate all three
-clients' contract tables with `cargo run -p st3-client-codegen`;
-CI and local verification use `cargo run -p st3-client-codegen -- --check` for byte stability.
+[`clients/swift/FractalClient`](../../../clients/swift/FractalClient). The Expo TypeScript client is
+[`clients/typescript/fractal-client`](../../../clients/typescript/fractal-client). Regenerate all three
+clients' contract tables with `cargo run -p fractal-client-codegen`;
+CI and local verification use `cargo run -p fractal-client-codegen -- --check` for byte stability.
 No digest of the contract is committed: a line every schema change rewrites made any two of them
 conflict, and `--check` already fails when any generated file differs from its source. When generated
 client files conflict in a merge, resolve the schema and template files, take either side of every
-generated file (`git checkout --theirs -- clients crates/st3-client/src/contract.rs
-crates/st3-client/src/generated.rs`), and run the generator again; never edit generated files by
+generated file (`git checkout --theirs -- clients crates/fractal-client/src/contract.rs
+crates/fractal-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
@@ -47,6 +47,58 @@ fields from untyped excess-property bags.
 The collections socket's `CollectionCommand` and `CollectionFrame` definitions live in the same
 schema as HTTP resources. The operation manifest's `streams` section names its route, protocol,
 command/frame definitions, and subscription bound; see [collections](collections.md).
+
+### Paired client diagnostics
+
+`POST /v1/client/diagnostics` requires `write.client-diagnostics` and a live paired
+device credential. New default limited and full-control pairings include the scope;
+existing grants are unchanged and must be re-paired to acquire it. The Unix route
+also requires a paired bearer; it is not an arbitrary observation/OTLP write API.
+
+Route support and the active pairing's permission are advertised by
+`GET /v1/client/capabilities`: `write.client-diagnostics` version 1 is `granted`
+or `ungranted`. Upload starts only when it is granted; older daemons that omit
+the capability are not probed with POST. A separate unauthenticated health
+feature is unnecessary for this paired-only route.
+
+`ClientDiagnosticsBatch` version 1 carries 1–32 events within 128 KiB, including
+launch/sequence IDs, build/runtime/update metadata, occurrence/capture times,
+severity and one allowlisted payload. Stacks contain at most 32 categorized numeric
+frames, never error messages, symbols, URLs, headers, personal paths or raw native
+dumps. Ingestion reconstructs the allowlist again, discards unknown keys and replaces
+unsafe version strings with `unknown`; malformed/beyond-bound reports are refused.
+
+Pairing determines the device, person and grant. A single durable transaction writes
+the sanitized node-local `client.launch`, `client.js-error`, `client.native-crash` or
+`client.hang` observations and retry receipts. Only then does the envelope return
+`acknowledged_event_ids`; repeated device/event IDs are acknowledged without another
+observation, even across payload kinds. Diagnostics observations have a 7-day local
+retention window; server retry/deduplication receipts remain for 30 days independently
+of observation trimming. Admission allows 256 new events per device per minute;
+retries do not consume that allowance. These observations never replicate desired
+state. Their Local retention is declared in `crates/fractal-schema/retention.toml`,
+alongside the other node-local observations; schema registration reads that shared
+policy. This distinction does not change either retention window or runtime behavior.
+
+The receipt table and its indexes are installed idempotently on every store open,
+including an existing storage-version-19 database. This is backward-compatible
+local storage: older binaries ignore the table, existing rows/columns and
+checkpoint/operation rules are unchanged. No migration version or local storage
+compatibility digest bump is required; the published diagnostics vocabulary and
+client contract digests do change. Reopening preserves diagnostic receipts.
+
+Admission refusal returns HTTP 429 with public error code `rate-limited`.
+Phones honour `Retry-After` when supplied, otherwise use bounded backoff. Terminal
+4xx validation refusals discard the rejected batch so it cannot block later
+reports; 401/403 retain reports and pause that client until pairing changes.
+
+The existing OTLP exporter maps diagnostic severity and occurrence time to log
+severity and `timeUnixNano`, while `observedTimeUnixNano` is server acceptance time.
+Build/update IDs are log attributes, not metric labels. MetricKit reports explicitly
+mark their interval-end occurrence approximation and synthetic interval launch ID;
+an unclean previous launch is an inferred breadcrumb, not proof of a crash.
+See [iOS diagnostics](../../../apps/ios/README.md) for capture, bounded offline
+retention, limitations and on-phone verification.
 
 ### Person directive notes
 
@@ -84,6 +136,7 @@ advertisement from every active member. Pending unsigned local membership change
 also block publication until the replication writer seals them. Fence legacy
 peers before enabling notes: advertisements do not discover unknown legacy peers.
 Launch delivery, change notifications, and UI authoring are outside this read-path slice.
+
 
 ### Phone observations
 
@@ -171,9 +224,35 @@ server; it must not infer `"standing"`, `"owner"`, or `"bounded"` from other fie
 Like the other forward-compatible response enums, the wire schema accepts future strings.
 Generated clients decode an unfamiliar value as `Unknown` without dropping the roster row;
 this differs from an absent field, which means no lifecycle was declared.
-See [agent declarations](../kdl-lifecycle.md#definitions-do-not-start-work).
+See [agent declarations](../../site/reference/configuration.md#definitions-do-not-start-work).
 
 ### Agent activity and human blocking
+
+A declaration-driven relaunch reports `state: "restarting"` while the previous runtime stops
+and its replacement waits for current-incarnation harness readiness. A first launch remains
+`starting`. Current human blocking, faults, moves, suspension and failures retain their existing
+states. Runtime observation status still records the actual process state; `restarting` is the
+client presentation of the replacement interval. Exited/stopped/vanished observations without
+an active start fall through to their underlying state. Live presentation is bounded to two
+minutes from the selected runtime observation's acceptance time; after that, it exposes the
+underlying state without clearing the durable marker or changing recovery. The existing roster
+validity deadline also expires agents windows without a new claim. Missing acceptance metadata
+cannot certify the restart presentation.
+
+Older receivers retain a new-field runtime observation as an authenticated unknown-field waiting
+record rather than projecting it; other known records can continue to sync. A differing registry
+compatibility digest does not itself refuse wire-log replication, but graph projections are not
+compared as equal across those digests. Landing waits for the #2596 heal-writer successor to
+be deployed and the old-registry long-lag scheduler control to pass. With those gates met,
+rolling relaunches do not require an offline member to upgrade first: it keeps the new
+observation visibly waiting until ordinary upgrade admission. Do not rely on marker display
+or projection parity on older members.
+
+The generated agent-state type is an open string. Consumers requiring `running` treat
+`restarting` as not yet ready. `agents new --wait` keeps waiting (first starts are unchanged);
+`agents restart` also requires a different incarnation before completing. CLI prints the state;
+its unrecognized-state help remains the starting explanation. stui/phone/web rendering is not
+qualified by this daemon PR and must not be described as verified.
 
 An agent's `harness_state` describes activity independently of its optional `blocked_on`, `ask`,
 and diagnostic `reason`. A current `blocked_on: "human"` observation with ready, working, or idle
@@ -201,6 +280,50 @@ own `id`, its `subagent_type`, a one-line `description`, its `driver` and `sessi
 subagent is part of its agent, not a resource of its own, and has no actions. The list is read
 per request, so a lease that runs out leaves it at the next read without a new claim. A daemon
 older than the field omits it; clients read a missing list as empty.
+
+### Native harness inventory
+
+`GET /v1/client/harness-inventory/{agent}` uses `read.projections` and requires
+`owner_host_id`, `session_id`, `native_session_id`, `runtime_incarnation`, and `collection`.
+Signed owner reads preserve the authenticated actor and every fence. A stale owner, managed/native
+session or incarnation is refused; evidence is checked again after the read.
+The managed OMP channel records a pending native binding from its `session` frame and confirms it
+only on a matching `ready` frame. Recording, confirmation, and pending-candidate cleanup respect
+the current provider ownership sequence; a predecessor cannot delete a successor's candidate.
+Until confirmation, or after a provider has a recorded terminal exit, inventory reads return
+`stale-fence`. A startup ownership placeholder without an exit is not a terminal provider.
+Live native branch switches complete the same `session`/`ready` handshake on the existing channel
+without resetting mail or approval state. Cold-resume expected-session requirements apply only to
+the initial confirmed binding. Channel re-exec recovers that completed bootstrap from its existing
+same-provider durable ready binding; a later pending branch still refuses inventory reads.
+
+Collections are `files`, `skills`, `skill-commands`, and `slash-commands`. Responses distinguish
+`supported`, `unsupported`, and `unavailable`, with explicit `coverage`, `full_inventory`, reason,
+native observation time, and bounded items. An unobserved source does not assert a native session.
+The OMP interactive source exposes enabled skill commands and dynamic extension/prompt commands,
+not complete loaded skills or builtins. Thus `skills` is unsupported; `skill-commands` and
+`slash-commands` never claim full inventory. Items contain only native invocation names, kinds and
+source categories: no descriptions, source paths, prompt/skill bodies, or credentials.
+
+File inventory lists one visible directory relative to the native session's observed workspace.
+The native process supplies its actual held cwd's device/inode, not metadata from a reopened path.
+The owner opens every root ancestor without following symlinks and checks that identity before
+enumeration; substituted roots expire the read. A symlinked root ancestor is unavailable, even
+when otherwise legitimate. The source withholds files if harness context differs from process cwd.
+It never descends into hidden directories, follows entry links, reads file contents or returns
+absolute paths. Dot-prefixed entries, special files and non-UTF-8 names are omitted.
+The scan is bounded at 10,000 directory entries, including hidden/nonmatching entries; exceeding
+that bound is unavailable rather than a truncated complete listing.
+Owner metadata failures and scan-bound refusal use HTTP 503 `inventory-unavailable`, preserved
+through signed remote reads; they are not reported as an empty supported page or transport failure.
+
+Optional `directory` applies only to files; `prefix` matches names. Pages default to 50 items and
+accept 1–200. A continuation cursor expires after 60 seconds and binds actor, all session/owner
+fences, filters, limit and source revision. Its payload and original expiry are authenticated with
+a domain-separated owner HMAC; editing or transferring bindings cannot renew a page. Directory
+mutation or changed native evidence expires it. The producer observes native startup/session/turn
+boundaries and publishes changed snapshots,
+not keepalives. It has no complete-registry reload subscription or instantaneous freshness promise.
 
 ## Boundary and transport
 
@@ -453,7 +576,7 @@ a managed declaration return `not-found`; conflicting declarations or a stop wit
 unambiguous predecessor return `validation-failed`. No directory is inferred from the seat ID.
 
 For the full attach, stop/start, and suspend/resume recipe, see
-[seat lifecycle](../../seat-lifecycle.md#find-a-workspace-and-return-to-an-interactive-seat).
+[agent lifecycle](../../seat-lifecycle.md#find-a-workspace-and-return-to-an-interactive-agent).
 
 ### Applied subject definitions
 
@@ -504,11 +627,12 @@ the server returns `validation-failed` rather than an incomplete AST or KDL docu
 The optional `agent_messages` field adds a **daily estimate**, also shown by `st usage` and
 the terminal UI. It counts distinct agent-to-agent message subjects, excluding people, daemon sends and
 explicit delivery-probe/test tags, probe/soak seats and the audit's named test-title prefixes.
-Receipts and duplicate send claims add no messages. Bodies are never classified. Counts are
-backfilled atomically on the first usage-estimate request after upgrade, not during daemon
-startup. That first request can take longer; it never returns partially backfilled counts.
-Until then, daily counters are not maintained; the first request rebuilds them from every
-retained send. Once initialized, counts are maintained in each writer transaction. Full UTC
+Receipts and duplicate send claims add no messages. Bodies are never classified. After an
+upgrade, the daemon counts every retained send in the background, in pages of at most 500
+send claims, each its own writer turn, resuming from its cursor after a restart. Opening the
+store does no backfill. A usage-estimate request that arrives before the last page completes
+the rest atomically itself, so it can take longer; it never returns partially backfilled
+counts. Once initialized, counts are maintained in each writer transaction. Full UTC
 days use daily recipient counters; the first and last partial days use an indexed send-time
 range.
 An estimate inside an already-pinned read snapshot with an uninitialized cache folds that
@@ -644,11 +768,40 @@ The Rust methods are `Client::slo_list()` and `Client::slo_history(id, since_ms,
 Swift has `sloList()` and `sloHistory(id:sinceMS:untilMS:steps:)`, and TypeScript `sloList()` and
 `sloHistory(id, { since_ms, until_ms, steps })`.
 
+### Documents
+
+Clients read documents through three reads under `read.projections`; the `documents`
+capability (version 1) says a daemon serves all three. Documents are read-only here.
+
+- `document.get` (`GET /v1/client/documents/content?name=`) reads `doc/NAME@HASH`, or the
+  latest version of `doc/NAME`. The answer keeps `reference` and `bytes` and adds `name`,
+  `version` (the hash), `size`, `changed_at_unix_ms` (when that version was bound to its name),
+  `latest` and `owner`; `reference` is always the exact version read. A pinned version this host
+  does not hold answers 404 `document-not-synced` (retryable: it shows once it syncs); an unknown
+  name answers 404 `not-found`. Older daemons answer only `reference` and `bytes`, and refuse a
+  bare name with `invalid-document-reference`.
+- `documents.list` (`GET /v1/client/documents`) is `/v1/documents` for clients: `prefix`, `name`,
+  `history`, `cursor` and `limit` (1–200, default 100), in name order with each name's newest
+  version first. Each `DocumentItem` carries `reference`, `name`, `version`, `size`,
+  `changed_at_unix_ms`, `latest` and `owner`; `next_cursor` continues with the same filters.
+- `document-references.get` (`GET /v1/client/document-references?subject=`) names the
+  documents of a `message/…` (the document that is its content, `source: content`, then each
+  `doc/…` link in its whole text, `source: body`), a `step-run/RUN/STEP` (its pinned
+  documents, `source: step`), or a `mission/…` or `mission-run/…` (its steps' pinned documents,
+  each once, with `step`). `complete` is false when a message's text lives on a machine that
+  did not answer; its references then come from the preview. Links are found as
+  `fractal_ui_model::documents::document_links` finds them.
+
+Rust has `document_get`, `documents_list(prefix, history, cursor, limit)` and
+`document_references_get(subject)`; Swift `documentGet(name:)`, `documentsList(prefix:history:cursor:limit:)`
+and `documentReferencesGet(subject:)`; TypeScript `documentGet(name)`,
+`documentsList({ prefix, history, cursor, limit })` and `documentReferencesGet(subject)`.
+
 ### Clients connected now
 
 A client may name itself and its build in an `x-st3-client` header on every request and stream,
 for example `stui 0.1.0+a0c135e3`, `smalltalk-ios 1.0 (42)` or `st 0.1.0+a0c135e3`. The Rust
-crate sends what `st3_client::set_client_name` was given; the TypeScript client takes `client` in
+crate sends what `fractal_client::set_client_name` was given; the TypeScript client takes `client` in
 its options, and Swift `client:` in its initializer. The header is optional, and st shows it as
 reported: it is never identity or authority, and no client is refused, slowed or warned for its
 version.
@@ -683,8 +836,31 @@ waiting episode. `source_kind`, `episode`, `source_id`, `priority`, `requested_a
 `action_parameters` describe the source and its current remedy. Completed, cancelled, removed,
 retired, or replaced sources disappear before cleanup; a failed run can retain its own fault.
 Pending held subscription requests are not attention sources. Historical `attention.*` claims
-remain audit data. Both raw legacy mutation routes and `attention.resolve` return
-`attention-migrated`; capabilities mark that action unsupported.
+remain audit data. `attention.resolve` returns `attention-migrated`; capabilities mark
+that client action unsupported. The raw resolve and withdraw routes support only the
+narrow source adapters in [person delegation](../person-delegation.md).
+
+`GET /v1/client/attention?history=true` (also `/alerts`) and
+`GET /v1/client/now?history=true` without `actor` or `owner_run` now return **only closed
+source resolutions**, separate from open Home. Previously the history flag was ignored
+and these reads returned the open list; older daemons still do so. An older daemon's
+open result is not closed-history evidence. No in-repository caller currently sends
+these history requests. Attention history returns 422 `validation-failed` for `actor`, `owner_run`, `status`,
+`owner`, `native_only=true`, or a `state` other than `resolved`. Unfiltered Now history
+returns 422 `validation-failed` for `status`, `owner`, `native_only=true`, or a non-resolved state. Now with
+`actor` or `owner_run` keeps the existing work-filtered open/combined behavior and its
+validation even with `history=true`; that request does not enter the closed-history path.
+
+Only closed history sends the optional `page.omitted_items`. This count is approximate:
+it can undercount decoded rows that fail to bind to their original, and overcount damaged
+rows whose owner or relevance is unknown. Zero does not establish complete history.
+Sparse pages can be empty with `has_more=true`; follow the bounded cursor and preserve
+incomplete-history information. SQL still classifies bounded JSON per candidate, while
+known noise rows skip Rust body decoding; the existing indexed plan is not a measured
+SQL-cost guarantee. A known owner's oversized original returns 503 on exact detail,
+while another person's detail is 404; an unreadable row with no established owner is
+also 404 for a person session. The [delegation guide](../person-delegation.md) gives
+the row, byte, cursor and all-receiver Operations rollout boundaries.
 
 An agent asks through `work.ask` (`person_id`, `title`, `reason`, and exactly one of `step_id` or
 `new_run`). Claimed work requires its current generation, definition, attempt, readiness, and
@@ -727,7 +903,7 @@ wording) gets a new card, so an action through the old one returns `stale-fence`
 nothing. A client then re-reads attention and, if a card of the same `attention_kind` for the
 same `source_id` is open, acts once more through it; it does not retry the old card. A review st
 no longer asks returns `validation-failed`, and its message says why: who already answered it
-and how, or what moved on since it was asked. The terminal UI does both on its live and classic screens.
+and how, or what moved on since it was asked. The terminal UI does both.
 
 Clients must evict removed source cards and replace their window from fresh snapshots on
 reconnect. The iOS cache version is 4 and the terminal UI's is 3; older cached cards are discarded. Offline
@@ -804,7 +980,7 @@ imply that an active claim is making progress.
 
 A trusted local agent session (`--as agent/PATH` on the local Unix API) holds every scope a person's
 local session holds and may invoke every action, recorded with the agent as its actor; see
-[free mode](../kdl-lifecycle.md#free-mode). Glasses stay a person's own: an agent session reads and
+[free mode](../../site/reference/configuration.md#free-mode). Glasses stay a person's own: an agent session reads and
 writes none. Each action keeps its own fences, and a review still needs its named reviewer.
 
 `GET /v1/client/agent-queues/{agent_id}` returns one `AgentQueue` value for a seat: its
@@ -998,7 +1174,7 @@ are grandfathered: their older claims do not contain the caller-key association.
 expires those rows or rewrites those claims. A separate follow-up deletes the fixed legacy
 cohort **30 days after actual deployment**, outside realistic client retry horizons. Operations
 must record the deployment timestamp and due date in
-[the legacy cleanup follow-up](https://github.com/compoundingtech/smalltalk/issues/1741).
+[the legacy cleanup follow-up](https://github.com/compoundingtech/fractal/issues/1741).
 That future deletion is an explicit legacy exception, not an indefinite dedupe guarantee.
 
 Cleanup adds, drops and changes **no indexes**. It seeks the first rowid above a persisted legacy
@@ -1280,9 +1456,10 @@ credential bound to that key. The resulting session returns the exact delegated 
 device-session actor, and granted scopes.
 Pairing codes expire after five minutes and reveal no fleet secret. The remote device cannot
 request its own actor or scopes. By default the trusted local begin grants projection reads,
-glasses reads and control, terminal reads, attention control, and launch control. The begin
-request may narrow that default with `scopes`, a non-empty subset of exactly those limited
-scopes (`read.projections`, `read.glasses`, `control.glasses`, `terminal.read`,
+client diagnostics writes, glasses reads and control, terminal reads, attention control,
+and launch control. The begin request may narrow that default with `scopes`, a non-empty
+subset of those limited scopes (`read.projections`, `write.client-diagnostics`,
+`read.glasses`, `control.glasses`, `terminal.read`,
 `control.attention`, `control.launches`); any other scope, or `scopes` combined with
 `full_control`, is rejected with a validation error. `st devices --as person/alex pair
 --read-only "Wall display"` requests `read.projections`, `read.glasses`, and `terminal.read`, so
@@ -1360,6 +1537,16 @@ every request and revalidate it immediately before returning the response. Envel
 default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an explicit
 `response-budget-exceeded` error, mapped by MCP to `incomplete`, never silently clipped data.
 
+`attention` and `attention-rich` accept optional `agent_id` for one exact canonical agent.
+`st_alerts_list` exposes this selector and already returns the rich actionable request,
+episode, target and evidence when present; an extra detail call is not routinely required.
+Matching uses the same agent association disclosed in each row's `agent_id`, never title
+search or alias resolution. Only matching owner-visible published alerts are paged, with
+filtering before offset selection and byte packing. Continuations bind the exact selector,
+grant, policy and disclosure class; unfiltered requests retain existing fleet pagination.
+An empty page means no matching published alerts, not absence of work or priorities.
+This narrows output pagination, not native publication scanning, and adds no read authority.
+
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
 `agent/...` identifier. `st_agents_list` exposes the same selector: for a known agent,
 `{"agent_id":"agent/chief-of-staff"}` returns at most that agent's existing metadata row,
@@ -1390,7 +1577,7 @@ authoritative grant, revocation, expiry, exact scope, policy revision and releva
 binding. Revocation between handler preflight and the writer transaction denies the synchronous
 write. Agent recipient existence remains required; allowlist membership is not checked.
 
-`crates/st-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
+`crates/fractal-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
 Both transports use the same seven closed tools and paired-only `st3-client.sock` gateway.
 The adapter holds only a scoped bearer, never an approval key. The current HTTP frontend is
 loopback/no-auth for the recorded personal-tunnel dogfood exception; OAuth is the next
@@ -1400,13 +1587,13 @@ paths return an empty 404.
 
 The flake's `packages.st-chatgpt` builds only the adapter executable with the shared locked
 Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
-`nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt` at a published commit.
+`nix build github:compoundingtech/fractal/<commit>#st-chatgpt` at a published commit.
 The shared `checks.st3` suite includes the adapter's Rust tests.
 
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
 
 ```sh
-nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p st3-client-codegen && cargo build -j 2 -p st-chatgpt -p st3 --features st3/test-support --bin st-chatgpt --bin st3 --example chatgpt_fixture && cargo test -j 2 -p st-chatgpt && cargo test -j 2 -p st3 --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
+nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal --features fractal/test-support --bin st-chatgpt --bin st3 --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
 ```
 
 The script starts the repository API harness with its own persistent store, paired gateway,
@@ -1591,8 +1778,8 @@ shape and paging behavior, including legacy cursors; they do not receive the new
 SQL cuts or byte-bounded paging behavior. Gateways preserve the negotiation when relaying
 message lists. Generated Rust, Swift and TypeScript clients default to the legacy contract:
 regenerating a client alone does not opt in. Enable the per-client option explicitly with
-Rust `.with_messages_paging(true)`, Swift `St3Client(..., messagesPaging: true)`, or
-TypeScript `new St3Client({ ..., messagesPaging: true })`. This choice applies to HTTP
+Rust `.with_messages_paging(true)`, Swift `FractalClient(..., messagesPaging: true)`, or
+TypeScript `new FractalClient({ ..., messagesPaging: true })`. This choice applies to HTTP
 and every WebSocket transport; the default (`false`) omits only the messages-paging token
 while preserving existing feature tokens. Clients without the token keep the old contract unchanged.
 
@@ -1717,7 +1904,7 @@ as DATA. Older PTY daemons ignore this extension.
 Raw clients cannot issue PTY lifecycle/CAS or ancestry-management commands through this capability.
 Bounded chunks and socket backpressure preserve every byte; slow consumers do not skip output.
 
-`st3-client::Client::raw_terminal_attachment` obtains the capability and
+`fractal-client::Client::raw_terminal_attachment` obtains the capability and
 `raw_terminal_stream` returns a Tokio `UnixStream`. A terminal renderer can run its own PTY
 parser, mode-aware paste, and geometry negotiation over it without learning about the fleet.
 Each reconnect obtains a fresh capability for the same explicitly chosen incarnation; the
@@ -2045,10 +2232,10 @@ Swift exposes `arrangementsList`, `arrangementsGet`, `arrangementEdit`, and
 All three arrangements stream helpers accept an optional `subject`; Rust takes
 `subject: Option<&str>` after `limit`, TypeScript takes `subject?: ArrangementId`
 after `limit`, and Swift takes `subject: String? = nil`.
-Rust operations reuse `st3_schema::arrangements::Operation`; TypeScript and Swift have
+Rust operations reuse `fractal_schema::arrangements::Operation`; TypeScript and Swift have
 typed operation unions, not arbitrary JSON bodies. Regenerate all clients with
-`cargo run -p st3-client-codegen`; verify freshness with
-`cargo run -p st3-client-codegen -- --check`.
+`cargo run -p fractal-client-codegen`; verify freshness with
+`cargo run -p fractal-client-codegen -- --check`.
 
 Fractal migration is client-owned: discover capability, pause legacy writers, fold old
 `custom.fractal.sidebar` HLC history once, and durably stage the snapshot, target ID,
@@ -2282,7 +2469,7 @@ must still use the existing incarnation-fenced attachment routes to attach.
 The real-daemon mixed-build regression is a **manual proof**, not a CI gate: run
 
 ```sh
-ST3_TERMINALS_COMPAT_BIN=/path/to/older/st3 cargo test -p st3 --test integration fleet::terminal_owner_filters_are_safe_across_mixed_builds -- --ignored --exact
+ST3_TERMINALS_COMPAT_BIN=/path/to/older/st3 cargo test -p fractal --test integration fleet::terminal_owner_filters_are_safe_across_mixed_builds -- --ignored --exact
 ```
 
 Choose a binary built before these terminal filters. The fake legacy-server refusal
@@ -2464,6 +2651,8 @@ as waiting records until upgrade; see [rolling upgrades](../replication.md#rolli
 
 `agent.retire` permanently retires the identity at its declaring host. It requires `{ "agent": "agent/example/worker", "reason": "Work finished" }`, a selected desired claim ID in `fence.runtime_desired_revision`, and a stable idempotency key. Optional `runtime_incarnation` fences a selected process. Rust provides `agent_retire`; Swift and TypeScript provide `agentRetire`. See [terminal retirement](../agent-retirement.md) for the coordinated registry rollout and locally known retirement rule. Fresh sends to a known retired agent return 409 `recipient-retired` with `applied: "none"` and a typed `details.refusal.variant: "Retired"`. Exact accepted retries return their receipt; a lost reply remains unconfirmed. `lifecycle-unavailable` concerns incomplete/conflicting local evidence, never an offline owner alone.
 
+`agent.retire.parameters.successor` optionally names an existing eligible agent. It is recorded in the signed retirement claim after the all-member registry gate. The successor's read and close claims carry `acting_for` and the retirement claim as evidence; `Agent.mail_custody` reports `{ successor, state: "pending" }` for OLD. Numeric unread counts and completion are not available in this increment.
+
 ### Exchange carrier observations
 
 `SyncPeer` may include `last_successful_exchange` and `last_failed_exchange`, each
@@ -2481,3 +2670,28 @@ them. Idle receipts outside the sync notice set do not notify client streams;
 repeated same-carrier failures likewise stay quiet when the graph is unchanged. Existing sync notice conditions
 remain the same. Older servers omit these optional fields; older clients ignore
 the additions. No API version, scope, operation or claim shape changes.
+
+## Schedule standby public read change set
+
+Compatibility **changed**: the optional standby declaration adds an optional
+`schedule_standby` local observation to CLI subject show/history. The exact legacy
+status route exposes it inside the existing open JSON `SubjectStatus.actual`
+object as `actual.schedule_standby`; it does not add a required generated-client
+resource or operation. Existing occurrence scheduled/reached claim bodies gain
+optional `standby` detail and `reason`. These additions keep the same claim kinds.
+
+Fields: `primary_host`, `standby_host`, `after_ms`, `eligibility`, `reason`,
+nullable `primary_heartbeat_age_ms`, `heartbeat_basis`, `observed_primary_view`,
+`run_twice_warning` and `cold_standby_limit`. A current local observation is not
+a converged eligibility assertion or exclusive lease. Historical reads label
+eligibility unknown and do not inject a current heartbeat age. History remains
+JSON lines of original claims/events with the optional observation field; an
+empty history still has no claims. Use subject show to read its current warnings.
+
+Jobs must be safe to run twice. The declaration guide, subject show (structured
+and text), history and release note expose the same cold-standby limitation:
+
+If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
+
+Hosted validation must run `cargo run -p st3-client-codegen -- --check`. Generated
+files remain generated; do not hand-edit clients for open JSON observation detail.

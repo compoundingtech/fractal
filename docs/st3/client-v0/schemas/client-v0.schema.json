@@ -14,9 +14,138 @@
     { "$ref": "#/$defs/ActionRequest" },
     { "$ref": "#/$defs/PairingBegin" },
     { "$ref": "#/$defs/PairingComplete" },
-    { "$ref": "#/$defs/PairingAdvertisement" }
+    { "$ref": "#/$defs/PairingAdvertisement" },
+    { "$ref": "#/$defs/ClientDiagnosticsBatch" }
   ],
   "$defs": {
+    "ScheduleOwner": {"type": "object", "additionalProperties": {}, "required": ["run_id", "generation_id", "step_id", "state"], "properties": {"run_id": {"type": ["string", "null"]}, "generation_id": {"type": ["string", "null"]}, "step_id": {"type": ["string", "null"]}, "state": {"anyOf": [{"enum": ["recorded", "not-recorded", "unknown"]}, {"type": "string"}]}}},
+    "ScheduleKnowledge": {"type": "object", "additionalProperties": {}, "required": ["origin_host_id", "basis", "last_exchange_at", "age_ms", "completeness"], "properties": {"origin_host_id": {"type": ["string", "null"]}, "basis": {"anyOf": [{"enum": ["local-read", "last-direct-exchange", "unknown"]}, {"type": "string"}]}, "last_exchange_at": {"type": ["string", "null"]}, "age_ms": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": 9007199254740991}, {"type": "null"}]}, "completeness": {"anyOf": [{"enum": ["unknown"]}, {"type": "string"}]}}},
+    "ScheduleUnheardHost": {"type": "object", "additionalProperties": {}, "required": ["host_id", "last_exchange_at", "age_ms", "reason"], "properties": {"host_id": {"type": "string"}, "last_exchange_at": {"type": ["string", "null"]}, "age_ms": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": 9007199254740991}, {"type": "null"}]}, "reason": {"anyOf": [{"enum": ["older-than-threshold", "never-recorded", "clock-unknown"]}, {"type": "string"}]}}},
+    "ScheduleCoverage": {"type": "object", "additionalProperties": {}, "required": ["scope", "unheard_after_ms", "unheard_hosts", "membership", "covered_host_count", "truncated", "omitted_configured_peer_count", "omitted_covered_host_count"], "properties": {"scope": {"const": "configured-peers-and-page-hosts"}, "unheard_after_ms": {"type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "Positive display threshold in milliseconds; default 300000, capped at the JSON exact integer ceiling; never host health."}, "unheard_hosts": {"type": "array", "items": {"$ref": "#/$defs/ScheduleUnheardHost"}, "maxItems": 200}, "membership": {"anyOf": [{"enum": ["unknown"]}, {"type": "string"}]}, "covered_host_count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "truncated": {"type": "boolean"}, "omitted_configured_peer_count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "omitted_covered_host_count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}}},
+    "ScheduleDeclaration": {"type": "object", "additionalProperties": {}, "required": ["id", "revision", "declaration_claim_id", "declaration_origin_host_id", "owner", "primary_host_id", "standby_state", "standby_node", "state", "declaration", "declaration_bytes", "read_problem", "next_declared_fire_at", "next_fire_state", "next_fire_basis", "knowledge"], "properties": {"id": {"type": "string"}, "revision": {"type": "string"}, "declaration_claim_id": {"type": "string"}, "declaration_origin_host_id": {"type": ["string", "null"]}, "owner": {"$ref": "#/$defs/ScheduleOwner"}, "primary_host_id": {"type": ["string", "null"]}, "standby_state": {"anyOf": [{"enum": ["declared", "not-declared", "unknown"]}, {"type": "string"}]}, "standby_node": {}, "state": {"anyOf": [{"enum": ["declared", "stopped", "unknown"]}, {"type": "string"}]}, "declaration": {}, "declaration_bytes": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "read_problem": {"type": ["string", "null"]}, "next_declared_fire_at": {"type": ["string", "null"]}, "next_fire_state": {"anyOf": [{"enum": ["future", "stopped", "past-one-shot", "unknown"]}, {"type": "string"}]}, "next_fire_basis": {"const": "declaration-only"}, "knowledge": {"$ref": "#/$defs/ScheduleKnowledge"}}},
+    "SchedulesPage": {"type": "object", "additionalProperties": {}, "required": ["kind", "collection", "as_of", "basis", "items", "page", "coverage"], "properties": {"kind": {"const": "page"}, "collection": {"const": "schedules"}, "as_of": {"$ref": "#/$defs/Timestamp"}, "basis": {"const": "local-replicated-declarations"}, "items": {"type": "array", "items": {"$ref": "#/$defs/ScheduleDeclaration"}, "maxItems": 200}, "page": {"$ref": "#/$defs/PageInfo"}, "coverage": {"$ref": "#/$defs/ScheduleCoverage"}}},
+    "ClientDiagnosticUuid": {
+      "type": "string", "minLength": 36, "maxLength": 36,
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "ClientDiagnosticMilliseconds": {
+      "type": "integer", "minimum": 0, "maximum": 9007199254740991,
+      "description": "Nonnegative JSON-safe integer milliseconds."
+    },
+    "ClientDiagnosticSeverity": {"enum": ["info", "warning", "error", "fatal"]},
+    "ClientDiagnosticCaptureSource": {"enum": ["js", "native-marker", "metrickit"]},
+    "ClientDiagnosticOccurrenceTimeBasis": {
+      "enum": ["exact", "metric-interval-end"],
+      "description": "MetricKit reports an interval end, not an exact diagnostic occurrence time."
+    },
+    "ClientDiagnosticLaunchIdBasis": {
+      "enum": ["process", "metric-interval"],
+      "description": "A MetricKit interval uses a synthetic launch UUID rather than attribution to the receiving process."
+    },
+    "ClientDiagnosticPlatform": {"const": "ios"},
+    "ClientDiagnosticBreadcrumb": {"enum": ["native-start", "js-start", "root-mounted", "foreground", "background", "previous-launch-unclean"]},
+    "ClientDiagnosticJsErrorName": {"enum": ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "UnknownError"]},
+    "ClientDiagnosticJsModule": {"enum": ["app", "react-native", "unknown"]},
+    "ClientDiagnosticNativeBinary": {"enum": ["app", "system", "unknown"]},
+    "ClientDiagnosticJsFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["module", "line", "column"],
+      "properties": {
+        "module": {"$ref": "#/$defs/ClientDiagnosticJsModule"},
+        "line": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "column": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+      }
+    },
+    "ClientDiagnosticNativeFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["binary", "offset"],
+      "properties": {
+        "binary": {"$ref": "#/$defs/ClientDiagnosticNativeBinary"},
+        "offset": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[0-9a-f]+$"}
+      }
+    },
+    "ClientDiagnosticPayload": {
+      "description": "Bounded privacy-safe diagnostics; no messages, arbitrary strings, symbol names or raw dumps.",
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "breadcrumb", "inferred"],
+          "properties": {
+            "kind": {"const": "launch"},
+            "breadcrumb": {"$ref": "#/$defs/ClientDiagnosticBreadcrumb"},
+            "inferred": {"type": "boolean"}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "name", "fatal", "frames"],
+          "properties": {
+            "kind": {"const": "js-error"},
+            "name": {"$ref": "#/$defs/ClientDiagnosticJsErrorName"},
+            "fatal": {"type": "boolean"},
+            "frames": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/ClientDiagnosticJsFrame"}}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "exception_type", "signal", "frames"],
+          "properties": {
+            "kind": {"const": "native-crash"},
+            "exception_type": {"type": ["integer", "null"], "minimum": 0, "maximum": 4294967295},
+            "signal": {"type": ["integer", "null"], "minimum": 0, "maximum": 4294967295},
+            "frames": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/ClientDiagnosticNativeFrame"}}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "duration_ms", "frames"],
+          "properties": {
+            "kind": {"const": "hang"},
+            "duration_ms": {"$ref": "#/$defs/ClientDiagnosticMilliseconds"},
+            "frames": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/ClientDiagnosticNativeFrame"}}
+          }
+        }
+      ]
+    },
+    "ClientDiagnosticEvent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "launch_id", "launch_id_basis", "sequence", "occurred_at_unix_ms", "occurrence_time_basis", "captured_at_unix_ms", "app_version", "native_build", "runtime_version", "update_id", "platform", "os_version", "severity", "capture_source", "payload"],
+      "properties": {
+        "event_id": {"$ref": "#/$defs/ClientDiagnosticUuid"},
+        "launch_id": {"$ref": "#/$defs/ClientDiagnosticUuid"},
+        "launch_id_basis": {"$ref": "#/$defs/ClientDiagnosticLaunchIdBasis"},
+        "sequence": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "occurred_at_unix_ms": {"$ref": "#/$defs/ClientDiagnosticMilliseconds"},
+        "occurrence_time_basis": {"$ref": "#/$defs/ClientDiagnosticOccurrenceTimeBasis"},
+        "captured_at_unix_ms": {"$ref": "#/$defs/ClientDiagnosticMilliseconds"},
+        "app_version": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "native_build": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "runtime_version": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(\\([A-Za-z0-9][A-Za-z0-9._-]*\\))?$(?![\\s\\S])"},
+        "update_id": {"oneOf": [{"const": "embedded"}, {"$ref": "#/$defs/ClientDiagnosticUuid"}]},
+        "platform": {"$ref": "#/$defs/ClientDiagnosticPlatform"},
+        "os_version": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "severity": {"$ref": "#/$defs/ClientDiagnosticSeverity"},
+        "capture_source": {"$ref": "#/$defs/ClientDiagnosticCaptureSource"},
+        "payload": {"$ref": "#/$defs/ClientDiagnosticPayload"}
+      }
+    },
+    "ClientDiagnosticsBatch": {
+      "description": "Version 1 diagnostics upload. The HTTP request body is limited to 128 KiB; admission validates this serialized-byte bound.",
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "events"],
+      "properties": {
+        "version": {"const": 1},
+        "events": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/ClientDiagnosticEvent"}}
+      }
+    },
+    "ClientDiagnosticsAck": {
+      "description": "Only durably ingested event IDs are acknowledged, including already-ingested duplicates.",
+      "type": "object", "additionalProperties": false,
+      "required": ["acknowledged_event_ids"],
+      "properties": {
+        "acknowledged_event_ids": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/ClientDiagnosticUuid"}}
+      }
+    },
     "AgentEndReason": {
       "type": "object",
       "additionalProperties": false,
@@ -70,7 +199,8 @@
         }}
       }
     },
-    "PromptRespondParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "episode", "answer"], "description": "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit).", "properties": {"target_id": {"$ref": "#/$defs/Id"}, "episode": {"type": "string"}, "answer": {"type": "string", "minLength": 1, "maxLength": 16384}}},
+    "DelegationProof": {"type": "object", "additionalProperties": false, "required": ["person", "policy", "message", "quote", "episode"], "properties": {"person": {"type": "string"}, "policy": {"type": "string"}, "message": {"type": "string"}, "quote": {"type": "string"}, "episode": {"type": "string"}}},
+    "PromptRespondParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "episode", "answer"], "description": "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). An authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof; when delegation is present, answer must be dismiss. Parameters never select the actor.", "properties": {"target_id": {"$ref": "#/$defs/Id"}, "episode": {"type": "string"}, "answer": {"type": "string", "minLength": 1, "maxLength": 16384}, "delegation": {"$ref": "#/$defs/DelegationProof"}}},
     "CustomReplyParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "registration", "revision", "episode", "fields"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "registration": {"type": "string"}, "revision": {"type": "string"}, "episode": {"type": "string"}, "fields": {"type": "object"}}},
     "ConversationSearchHit": {"type": "object", "additionalProperties": false, "required": ["conversation_id", "entry_id", "agent_id", "timestamp", "entry_type", "excerpt"], "properties": {"conversation_id": {"$ref": "#/$defs/Id"}, "entry_id": {"$ref": "#/$defs/Id"}, "agent_id": {"type": ["string", "null"]}, "timestamp": {"$ref": "#/$defs/Timestamp"}, "entry_type": {"type": "string"}, "excerpt": {"type": "string", "maxLength": 512}}},
     "ConversationSearch": {"type": "object", "additionalProperties": false, "required": ["kind", "items", "page", "indexed_at", "host_id", "incomplete_sources", "refreshing"], "properties": {"kind": {"const": "conversation-search"}, "items": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/ConversationSearchHit"}}, "page": {"$ref": "#/$defs/PageInfo"}, "indexed_at": {"$ref": "#/$defs/Timestamp"}, "host_id": {"$ref": "#/$defs/Id"}, "incomplete_sources": {"type": "array", "items": {"type": "string"}}, "refreshing": {"type": "boolean"}}},
@@ -90,6 +220,7 @@
     "ActorRef": {"type": "string", "pattern": "^(?:agent|daemon|person)/[^\\s]+$", "x-st-ref": ["agent", "daemon", "person"]},
     "ParticipantRef": {"type": "string", "pattern": "^(?:agent|person|step)/[^\\s]+$", "x-st-ref": ["agent", "person", "step"]},
     "SenderRef": {"type": "string", "pattern": "^(?:agent|assistant|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "person", "step"], "description": "Message sender, including an authorized external assistant principal. Not a recipient or actor."},
+    "TimelineRecipientRef": {"type": "string", "pattern": "^(?:agent|assistant|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "person", "step"], "description": "Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority."},
     "MissionState": {"anyOf": [{"enum": [
       "draft",
       "ready",
@@ -118,8 +249,15 @@
     "TimelineStatus": {"anyOf": [{"enum": ["queued", "running", "waiting", "completed", "failed", "cancelled"]}, {"type": "string"}], "description": "Run status reported in a timeline `status` entry."},
     "ErrorCode": {"anyOf": [{"enum": [
       "recipient-retired",
+      "identity-cycle",
+      "identity-occupied",
+      "identity-retired-source",
+      "identity-cross-kind",
+      "identity-unknown",
       "lifecycle-unavailable",
       "retirement-upgrade-required",
+      "invalid-custody-successor",
+      "custody-pending",
       "attention-migrated",
       "arrangement-exists",
       "arrangement-folder-exists",
@@ -155,6 +293,7 @@
       "runtime-list-ended",
       "remote-unavailable",
       "terminal-unavailable",
+      "inventory-unavailable",
       "terminal-ended",
       "timeline-history-incomplete",
       "projection-detail-too-large",
@@ -172,6 +311,8 @@
       "long-message-signature-unsupported",
       "response-budget-exceeded",
       "content-not-text",
+      "invalid-document-reference",
+      "document-not-synced",
       "internal"
     ]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads."},
     "UnknownResource": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "properties": {"kind": {"type": "string", "not": {"enum": [
@@ -279,7 +420,8 @@
         "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
         "has_more": { "type": "boolean" },
         "next_cursor": { "type": ["string", "null"] },
-        "cursor_expires_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] }
+        "cursor_expires_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "omitted_items": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "Envelope": {
@@ -295,6 +437,9 @@
             { "$ref": "#/$defs/DirectiveNotes" },
             { "$ref": "#/$defs/Capabilities" },
             { "$ref": "#/$defs/DocumentContent" },
+            { "$ref": "#/$defs/DocumentsPage" },
+            { "$ref": "#/$defs/SchedulesPage" },
+            { "$ref": "#/$defs/DocumentReferences" },
             { "$ref": "#/$defs/SubjectDefinition" },
             { "$ref": "#/$defs/PublicationDefinition" },
             { "$ref": "#/$defs/AgentWorkspace" },
@@ -306,6 +451,7 @@
             { "$ref": "#/$defs/ConversationSearch" },
             { "$ref": "#/$defs/EventPage" },
             { "$ref": "#/$defs/ActionResult" },
+            { "$ref": "#/$defs/ClientDiagnosticsAck" },
             { "$ref": "#/$defs/PairingChallenge" },
             { "$ref": "#/$defs/PairedSession" },
             { "$ref": "#/$defs/AssistantGrant" },
@@ -475,6 +621,7 @@
             "mission_run_id": { "$ref": "#/$defs/Id" },
             "step_run_id": { "$ref": "#/$defs/Id" },
             "blocked": { "$ref": "#/$defs/AttentionBlocked", "description": "The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask." },
+            "presentation": { "$ref": "#/$defs/AttentionPresentation", "description": "st's presentation of this row: its Now group and card, who Chat about this reaches, who raised it, and the step it holds. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Attention row). Absent on older daemons." },
             "title": { "type": "string" },
             "detail": { "type": "string" },
             "priority": { "enum": ["critical", "high", "normal", "low"] },
@@ -526,7 +673,61 @@
       "required": ["reference", "bytes"],
       "properties": {
         "reference": { "type": "string" },
-        "bytes": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } }
+        "bytes": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "size": { "type": "integer", "minimum": 0 },
+        "changed_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "latest": { "type": "boolean" },
+        "owner": { "type": "string" }
+      }
+    },
+    "DocumentItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "name", "version", "size", "changed_at_unix_ms", "latest"],
+      "properties": {
+        "reference": { "type": "string" },
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "size": { "type": "integer", "minimum": 0 },
+        "changed_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "latest": { "type": "boolean" },
+        "owner": { "type": "string" }
+      }
+    },
+    "DocumentsPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "has_more", "limit", "history"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/DocumentItem" } },
+        "has_more": { "type": "boolean" },
+        "limit": { "type": "integer", "minimum": 1 },
+        "history": { "type": "boolean" },
+        "next_cursor": { "type": ["string", "null"] }
+      }
+    },
+    "DocumentReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "name", "source"],
+      "properties": {
+        "reference": { "type": "string" },
+        "name": { "type": "string" },
+        "version": { "type": ["string", "null"] },
+        "source": { "enum": ["content", "body", "step"] },
+        "step": { "type": ["string", "null"] }
+      }
+    },
+    "DocumentReferences": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject", "references", "complete"],
+      "properties": {
+        "subject": { "type": "string" },
+        "references": { "type": "array", "items": { "$ref": "#/$defs/DocumentReference" } },
+        "complete": { "type": "boolean" }
       }
     },
     "Message": {
@@ -1381,6 +1582,44 @@
         }
       ]
     },
+    "AttentionPresentation": {
+      "type": "object",
+      "required": ["tier", "kind", "agent", "raised_by", "waiting"],
+      "properties": {
+        "tier": { "enum": ["stopped", "alert", "today", "later", null], "description": "The Now group, by its fixtures/clients/words.json tier id; null for a row that is not a Now card." },
+        "kind": { "enum": [
+          "review",
+          "feedback",
+          "request",
+          "update",
+          "launch",
+          "revision",
+          "prompt",
+          "login",
+          "fault",
+          null
+        ], "description": "The card; null for a row that is no card (an unread message stays in its conversation)." },
+        "agent": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff." },
+        "raised_by": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission." },
+        "waiting": { "oneOf": [{ "$ref": "#/$defs/AttentionWaiting" }, { "type": "null" }], "description": "The step it holds." }
+      }
+    },
+    "AttentionActor": {
+      "type": "object",
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id" },
+        "label": { "type": "string", "description": "The name a person reads." }
+      }
+    },
+    "AttentionWaiting": {
+      "type": "object",
+      "required": ["step", "path"],
+      "properties": {
+        "step": { "$ref": "#/$defs/StepRunId" },
+        "path": { "type": "string", "description": "The step's name within its mission." }
+      }
+    },
     "WorkLabel": {
       "type": "object",
       "required": ["id", "mission_id", "mission_run_id", "path", "state", "since"],
@@ -1475,6 +1714,7 @@
             "activity": { "type": ["string", "null"], "description": "What the seat is doing that is neither ordinary work nor a wait on a person, shown as its status and never as an alert: compacting while its harness compacts its conversation (Claude Code, Codex and omp report both edges). Absent otherwise and on older daemons; clients show unknown values as plain text." },
             "host_id": { "oneOf": [{ "$ref": "#/$defs/HostId" }, { "type": "null" }] },
             "last_activity_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+            "mail_custody": { "$ref": "#/$defs/AgentMailCustody", "description": "Pending mail held for the named successor; omitted without custody." },
             "silent_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
             "down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When a `down` seat began waiting for a session; null in every other state." },
             "fault": { "type": ["string", "null"], "description": "Current member reconcile failure; cleared by a successful pass." },
@@ -1504,6 +1744,7 @@
         }
       ]
     },
+    "AgentMailCustody": { "type": "object", "additionalProperties": false, "required": ["successor", "state"], "properties": { "successor": { "$ref": "#/$defs/AgentId" }, "state": { "const": "pending" } } },
     "AgentCheckout": { "type": "object", "additionalProperties": false, "required": ["repository", "base", "branch"], "properties": { "repository": { "type": "string" }, "base": { "type": "string" }, "branch": { "type": "string" } } },
     "AgentTodo": {
       "type": "object",
@@ -2300,7 +2541,7 @@
         { "if": { "properties": { "type": { "const": "truncation" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/TimelineTruncationBody" } } } }
       ]
     },
-    "TimelineMessageBody": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string"}, "reply_to": {"type": ["string", "null"]}, "from": {"$ref": "#/$defs/SenderRef"}, "to": {"$ref": "#/$defs/ParticipantRef"}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}}, "body_bytes": {"type": "integer", "minimum": 0}, "provenance": {"$ref": "#/$defs/MessageProvenance"}, "sender_class": {"type": "string", "enum": ["external-assistant"], "description": "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text."}, "assistant_grant_id": {"type": "string", "description": "The assistant grant that authorized the send, with sender_class."}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
+    "TimelineMessageBody": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string"}, "reply_to": {"type": ["string", "null"]}, "from": {"$ref": "#/$defs/SenderRef"}, "to": {"$ref": "#/$defs/TimelineRecipientRef"}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}}, "body_bytes": {"type": "integer", "minimum": 0}, "provenance": {"$ref": "#/$defs/MessageProvenance"}, "sender_class": {"type": "string", "enum": ["external-assistant"], "description": "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text."}, "assistant_grant_id": {"type": "string", "description": "The assistant grant that authorized the send, with sender_class."}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "MessageProvenance": {
       "type": "object", "additionalProperties": false, "required": ["verdict"],
       "description": "Who signed a message a person wrote, and whether the signature checks. Only messages whose sender is a person carry it; an agent's message does not.",
@@ -2488,7 +2729,7 @@
     "AgentRepository": {"type": "object", "additionalProperties": false, "required": ["path", "workspaces", "agent_ids"], "properties": {"path": {"type": "string"}, "workspaces": {"type": "array", "items": {"type": "string"}}, "agent_ids": {"type": "array", "items": {"type": "string"}}}},
     "HostRepositories": {"type": "object", "additionalProperties": false, "required": ["host_id", "repositories"], "properties": {"host_id": {"type": "string"}, "repositories": {"type": "array", "items": {"$ref": "#/$defs/AgentRepository"}}}},
     "AgentCreateParameters": {"type": "object", "additionalProperties": false, "required": ["name", "harness"], "properties": {"name": {"type": "string", "minLength": 1}, "harness": {"enum": ["claude", "codex", "pi", "omp", "opencode"]}, "host": {"type": "string", "minLength": 1}, "model": {"type": "string", "minLength": 1}, "effort": {"type": "string", "minLength": 1}, "workspace": {"type": "string", "minLength": 1}, "repo": {"type": "string", "minLength": 1}, "base": {"type": "string", "minLength": 1}, "branch": {"type": "string", "minLength": 1}, "remove_at_run_end": {"type": "boolean"}, "description": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}}},
-    "AgentRetireParameters": {"type": "object", "additionalProperties": false, "required": ["agent", "reason"], "properties": {"agent": {"$ref": "#/$defs/Id"}, "reason": {"type": "string", "minLength": 1}}},
+    "AgentRetireParameters": {"type": "object", "additionalProperties": false, "required": ["agent", "reason"], "properties": {"agent": {"$ref": "#/$defs/Id"}, "reason": {"type": "string", "minLength": 1}, "successor": {"$ref": "#/$defs/Id"}}},
     "MessageSendRefusal": {"oneOf": [
       {"type":"object", "required":["variant","recipient"], "properties":{"variant":{"const":"Retired"},"recipient":{"$ref":"#/$defs/Id"},"successor":{"$ref":"#/$defs/Id"},"transfer":{"type":"string"}}},
       {"type":"object", "required":["variant","recipient","reason"], "properties":{"variant":{"const":"LifecycleUnavailable"},"recipient":{"$ref":"#/$defs/Id"},"reason":{"enum":["unavailable","conflict"]}}}
@@ -3248,7 +3489,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "description": "Narrows the default limited grant. Must not be combined with full_control.",
-          "items": { "type": "string", "enum": ["read.projections", "read.glasses", "control.glasses", "terminal.read", "control.attention", "control.launches"] }
+          "items": { "type": "string", "enum": ["read.projections", "write.client-diagnostics", "read.glasses", "control.glasses", "terminal.read", "control.attention", "control.launches"] }
         }
       }
     },
@@ -3580,6 +3821,94 @@
         }
       ]
     },
+    "HarnessInventoryQuery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["owner_host_id", "session_id", "native_session_id", "runtime_incarnation", "collection"],
+      "properties": {
+        "owner_host_id": {"type": "string"},
+        "session_id": {"type": "string"},
+        "native_session_id": {"type": "string"},
+        "runtime_incarnation": {"type": "string"},
+        "collection": {"enum": ["files", "skills", "skill-commands", "slash-commands"]},
+        "directory": {"type": "string", "maxLength": 1024},
+        "prefix": {"type": "string", "maxLength": 160},
+        "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 200},
+        "cursor": {"type": ["string", "null"], "maxLength": 8192}
+      }
+    },
+    "HarnessInventoryItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "kind", "source"],
+      "properties": {
+        "name": {"type": "string"},
+        "kind": {"enum": ["file", "directory", "skill-command", "slash-command"]},
+        "source": {"enum": ["extension", "prompt", "skill", null]}
+      }
+    },
+    "HarnessInventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "agent_id", "owner_host_id", "session_id", "native_session_id", "runtime_incarnation", "collection", "status", "coverage", "full_inventory", "reason", "observed_at", "items", "page"],
+      "properties": {
+        "kind": {"const": "harness-inventory"},
+        "agent_id": {"type": "string"},
+        "owner_host_id": {"type": "string"},
+        "session_id": {"type": "string"},
+        "native_session_id": {"type": ["string", "null"]},
+        "runtime_incarnation": {"type": "string"},
+        "collection": {"enum": ["files", "skills", "skill-commands", "slash-commands"]},
+        "status": {"enum": ["supported", "unsupported", "unavailable"]},
+        "coverage": {"enum": ["none", "native-workspace", "enabled-skill-commands", "dynamic-commands"]},
+        "full_inventory": {"type": "boolean"},
+        "reason": {"type": ["string", "null"]},
+        "observed_at": {"type": ["string", "null"]},
+        "items": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/HarnessInventoryItem"}},
+        "page": {"$ref": "#/$defs/PageInfo"}
+      }
+    },
+    "HarnessInventoryQuery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["owner_host_id", "session_id", "native_session_id", "runtime_incarnation", "collection"],
+      "properties": {
+        "owner_host_id": {"type": "string"},
+        "session_id": {"type": "string"},
+        "native_session_id": {"type": "string"},
+        "runtime_incarnation": {"type": "string"},
+        "collection": {"enum": ["files", "skills", "skill-commands", "slash-commands"]},
+        "directory": {"type": "string", "maxLength": 1024},
+        "prefix": {"type": "string", "maxLength": 160},
+        "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 200},
+        "cursor": {"type": ["string", "null"], "maxLength": 8192}
+      }
+    },
+    "HarnessInventoryItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "kind", "source"],
+      "properties": {
+        "name": {"type": "string"},
+        "kind": {"enum": ["file", "directory", "skill-command", "slash-command"]},
+        "source": {"enum": ["extension", "prompt", "skill", null]}
+      }
+    },
+    "HarnessInventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "agent_id", "owner_host_id", "session_id", "native_session_id", "runtime_incarnation", "collection", "status", "coverage", "full_inventory", "reason", "observed_at", "items", "page"],
+      "properties": {
+        "kind": {"const": "harness-inventory"},
+        "agent_id": {"type": "string"},
+        "owner_host_id": {"type": "string"},
+        "session_id": {"type": "string"},
+        "native_session_id": {"type": ["string", "null"]},
+        "runtime_incarnation": {"type": "string"},
+        "collection": {"enum": ["files", "skills", "skill-commands", "slash-commands"]},
+        "status": {"enum": ["supported", "unsupported", "unavailable"]},
+        "coverage": {"enum": ["none", "native-workspace", "enabled-skill-commands", "dynamic-commands"]},
+        "full_inventory": {"type": "boolean"},
+        "reason": {"type": ["string", "null"]},
+        "observed_at": {"type": ["string", "null"]},
+        "items": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/HarnessInventoryItem"}},
+        "page": {"$ref": "#/$defs/PageInfo"}
+      }
+    },
     "CollectionFrame": {
       "oneOf": [
         {
@@ -3635,7 +3964,8 @@
             "replace": { "type": "boolean" },
             "items": { "type": "array", "items": { "$ref": "#/$defs/TimelineEntry" } },
             "has_more": { "type": "boolean" },
-            "header": { "$ref": "#/$defs/ConversationHeader", "description": "Present when conversation-blocks.v1 is negotiated and at least one header field is available" }
+            "header": { "$ref": "#/$defs/ConversationHeader", "description": "Present when conversation-blocks.v1 is negotiated and at least one header field is available" },
+            "older_cursor": { "type": "string", "description": "Replacement frames only, present whenever has_more is true: the timeline cursor (GET /v1/client/sessions/{id}/timeline?cursor=...) for the entries just before this frame's oldest entry." }
           }
         },
         {

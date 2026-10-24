@@ -19,13 +19,17 @@ FIELDS = {
 }
 VERSIONS = {
     'schema': ('crates/smallclaims/src/store.rs', r'pub const SCHEMA_VERSION:.*?user_version\s*=\s*(\d+)'),
-    'rules': ('crates/st3-store/src/store/checkpoint_rules.rs', r'pub const RULES_VERSION:\s*u32\s*=\s*(\d+)'),
+    'rules': ('crates/fractal-store/src/store/checkpoint_rules.rs', r'pub const RULES_VERSION:\s*u32\s*=\s*(\d+)'),
 }
 # Where a version constant lived before the file moved; a release range may start before the move.
 LEGACY_PATHS = {
-    'crates/st3-store/src/store/checkpoint_rules.rs': (
+    'crates/fractal-store/src/store/checkpoint_rules.rs': (
+        'crates/st3-store/src/store/checkpoint_rules.rs',
         'crates/st3-daemon/src/store/checkpoint_rules.rs',
         'crates/st3/src/store/checkpoint_rules.rs',
+    ),
+    'crates/fractal-storage-version/src/lib.rs': (
+        'crates/st-storage-version/src/lib.rs',
     ),
 }
 FRAGMENTS = 'release-notes/'
@@ -120,12 +124,11 @@ def version(repo, source, field):
     path, pattern = VERSIONS[field]
     path, content = version_source(repo, source, path)
     if field == 'schema' and re.search(
-        r'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;', content
+        r'pub use (?:fractal_storage_version|st_storage_version)::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;', content
     ):
         # Read the authoritative constant from the candidate tree. Historical releases
         # still keep their version in smallclaims' PRAGMA declaration.
-        path = 'crates/st-storage-version/src/lib.rs'
-        content = source_text(repo, source, path)
+        path, content = version_source(repo, source, 'crates/fractal-storage-version/src/lib.rs')
         pattern = r'pub const STORAGE_VERSION:\s*u32\s*=\s*(\d+)'
     match = re.search(pattern, content)
     if not match:
@@ -272,12 +275,15 @@ def render(repo, previous, source, tag, repository='compoundingtech/smalltalk', 
                              f'Method: {observation["method"]}. These are contextual observations, not a downtime guarantee.')
         lines.append('')
     lines.extend([f'## Changes since {previous}', ''])
+    report['change_links'] = {}
     for commit in report['coverage']:
         raw = git(repo, 'show', '-s', '--format=%s%n%b', commit)
         subject, _, body = raw.partition('\n')
         merge = re.match(r'Merge pull request #(\d+) from ', subject)
         title = body.strip().splitlines()[0] if merge and body.strip() else subject
         link = f'https://github.com/{repository}/pull/{merge.group(1)}' if merge else f'https://github.com/{repository}/commit/{commit}'
+        for path in report['coverage'][commit]:
+            report['change_links'].setdefault(path, link)
         lines.append(f'- [{title}]({link})')
     if not report['coverage']:
         lines.append('- No source changes.')

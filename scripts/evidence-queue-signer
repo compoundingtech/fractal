@@ -1,0 +1,511 @@
+#!/usr/bin/env python3
+"""Shadow merge-queue signer: sign host notes for the trees the merge queue tests, and record how they line up with its own runs.
+
+  evidence-queue-signer observe --repo DIR [--repository OWNER/NAME]
+  evidence-queue-signer sign --repo DIR [--repository OWNER/NAME] [--dry-run]
+  evidence-queue-signer report [--hours 24]
+
+Shadow by construction: a note signed at the host level never covers a merge_group run (.st/evidence-skip-policy.json), so nothing
+here skips, waits for or blocks a pull request or the queue. What it measures is whether a queue signer could: is the tree GitHub
+forms the tree predicted here, is the note there before the queue's gate looks, how long the run and its wait for a slot take, and
+does its result agree with the queue's own.
+
+observe (every minute, seconds): reads the merge queue (PR, PR head, base commit, group commit per entry) and fetches every group
+commit while its gh-readonly-queue branch still exists, so an entry that is dropped is measured too. Per entry it records the group
+tree and the tree `git merge-tree` gives for the PR head merged onto the entry's base. It reads the order the PRs will be queued in
+(optional: ~/.config/evidence-queue-signer/next-command, a JSON argv printing `<number> <head sha>` lines) and predicts, depth 1,
+the tree of the first listed PR not queued yet, merged onto the queue's tail (the last entry's group commit, or main). An entry that
+left the queue waits for the queue's checks on its group commit (the `evidence-gate-NAME` job is when the gate looked, the `NAME`
+job is its result); when they finished, or after three hours, its line goes to entries.jsonl.
+
+sign (every minute, one run at a time): takes one tree with no attempt yet, the prediction first (only a tree signed before
+enqueue can be ready before the gate looks), then the queue's entries in position order, builds its commit in a clone of its own
+(the group commit as fetched, or the prediction's merge of the same two parents), and runs st-test from origin/main with every local
+check on it, signing as the host and pushing the notes. Only our own authors' code runs here, the host's key within reach: a tree runs when its PR and every entry ahead of it
+are by a login in the pre-sign worker's authors file (~/.config/evidence-presign/authors); every entry is still observed and
+recorded. ~/.config/evidence-queue-signer/every-author, the host operator's decision, runs every entry. st-test runs a heavy check
+through the host's build slot; this adds no slot.
+The pre-sign worker's stop limits apply (scripts/evidence-presign-worker). It starts on operations' terms for this host (START below):
+IO pressure under 12% (three points under the 15% stop, so a run is not started only to be killed a minute later), at least 165 GiB
+free (a cold run writes about 19 GiB above the host's 134 GiB reserve) and 20 GiB of available memory, with no wait for ten calm
+minutes: the queue does not wait for a calm host, and a measurement that never starts measures nothing.
+A tree is never run twice, whatever the outcome: one stopped for load is not retried (for measurement, that is a result too).
+When the run ended, each note's time is read back from the notes pushed for the tree (their observed_at); when none can be read it
+is estimated from the run's start and st-test's per-check seconds, and the line says which (signed_at_source).
+~/.config/evidence-queue-signer/off stops both before they do anything.
+
+State: ~/.local/state/evidence-queue-signer/ (entries.json, the open records; entries.jsonl, one line per finished entry;
+attempts.jsonl, one line per run; logs/). `report` sums the lines of the window.
+"""
+import argparse
+import calendar
+import contextlib
+import fcntl
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.dont_write_bytecode = True
+CONFIG = Path(os.environ.get('EVIDENCE_QUEUE_CONFIG') or Path.home() / '.config/evidence-queue-signer')
+STATE = Path(os.environ.get('EVIDENCE_QUEUE_STATE') or Path.home() / '.local/state/evidence-queue-signer')
+BASE = 'main'
+START = {'start_io60': 12.0, 'min_free_gib': 165.0, 'start_mem_gib': 20.0}  # operations' start terms (stops: the worker's)
+SETTLE = 3 * 3600  # an entry that left the queue is written out once its checks finished, or after this long
+QUERY = '''query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: "main") {
+  entries(first: 50) { nodes { position state enqueuedAt pullRequest { number headRefOid author { login } }
+    headCommit { oid } baseCommit { oid } } } } } }'''
+
+
+def load_worker():
+    """The pre-sign worker beside this file (its load limits, its watched run): one set of host rules for both."""
+    path = Path(__file__).resolve().parent / 'evidence-presign-worker'
+    loader = importlib.machinery.SourceFileLoader('evidence_presign_worker', str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+W = load_worker()
+Failure = W.Failure
+stamp = W.stamp
+seconds_of = W.seconds_of
+read_json = W.read_json
+write_json = W.write_json
+append = W.append
+
+
+def git(repo, *args, check=True):
+    return W.git(repo, *args, check=check)
+
+
+def say(message):
+    print(f'evidence-queue-signer: {message}', file=sys.stderr, flush=True)
+
+
+@contextlib.contextmanager
+def state_lock():
+    """observe and sign both rewrite entries.json; each read-modify-write holds this."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / 'state.lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def run_lock(name):
+    """A per-command lock, or None when the previous tick of that command still runs."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    lock = open(STATE / f'{name}.lock', 'w')
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        return None
+    return lock
+
+
+def gh(*args):
+    done = subprocess.run([os.environ.get('EVIDENCE_QUEUE_GH', 'gh'), *args], capture_output=True, text=True, timeout=120)
+    if done.returncode != 0:
+        raise Failure(f'gh {" ".join(args[:2])}: {done.stderr.strip()[-300:]}')
+    return json.loads(done.stdout)
+
+
+def queue_entries(repository):
+    owner, name = repository.split('/')
+    data = gh('api', 'graphql', '-f', f'query={QUERY}', '-F', f'owner={owner}', '-F', f'name={name}')
+    nodes = (((data['data']['repository'] or {}).get('mergeQueue') or {}).get('entries') or {}).get('nodes') or []
+    return sorted([node for node in nodes if (node.get('headCommit') or {}).get('oid')], key=lambda node: node['position'])
+
+
+def next_list():
+    """The PRs in the order they will be queued, as (number, head) pairs: [] when no next-command is configured or it fails."""
+    path = CONFIG / 'next-command'
+    if not path.exists():
+        return []
+    argv = json.loads(path.read_text())
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        say(f'next-command: {error}')
+        return []
+    if done.returncode != 0:
+        say(f'next-command exit {done.returncode}: {done.stderr.strip()[-200:]}')
+        return []
+    pairs = []
+    for line in done.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0].lstrip('#').isdigit() and len(fields[1]) == 40:
+            pairs.append((int(fields[0].lstrip('#')), fields[1]))
+    return pairs
+
+
+def author_of(repository, number):
+    try:
+        return gh('api', f'repos/{repository}/pulls/{number}')['user']['login']
+    except (Failure, KeyError, TypeError):
+        return None
+
+
+def fetch(repo, repository):
+    W.clone(repo, repository)
+    git(repo, 'fetch', '-q', '--no-tags', '--prune', 'origin', '+refs/heads/gh-readonly-queue/*:refs/queue/*', check=False)
+
+
+def have(repo, oid):
+    return git(repo, 'cat-file', '-e', f'{oid}^{{commit}}', check=False).returncode == 0
+
+
+def fetch_oid(repo, oid, pr=None):
+    if have(repo, oid):
+        return True
+    if pr is not None:
+        git(repo, 'fetch', '-q', '--no-tags', 'origin', f'+refs/pull/{pr}/head:refs/queue-pr/{pr}', check=False)
+    if not have(repo, oid):
+        git(repo, 'fetch', '-q', '--no-tags', 'origin', oid, check=False)
+    return have(repo, oid)
+
+
+def tree_of(repo, oid):
+    return git(repo, 'rev-parse', f'{oid}^{{tree}}').stdout.strip()
+
+
+def merge_tree(repo, first, second):
+    """The tree of `second` merged onto `first` (git merge-tree, as the queue's MERGE method forms it), or None on a conflict."""
+    done = git(repo, 'merge-tree', '--write-tree', first, second, check=False)
+    return done.stdout.split()[0] if done.returncode == 0 and done.stdout.strip() else None
+
+
+def observe(args):
+    if (CONFIG / 'off').exists():
+        return 0
+    lock = run_lock('observe')
+    if lock is None:
+        return 0
+    repo = Path(args.repo).resolve()
+    fetch(repo, args.repository)
+    entries = queue_entries(args.repository)
+    upcoming = next_list()
+    main_tip = git(repo, 'rev-parse', f'origin/{BASE}').stdout.strip()
+    with state_lock():
+        state = read_json(STATE / 'entries.json', {'entries': {}, 'prediction': None})
+        records = state['entries']
+        seen_now = set()
+        for entry in entries:
+            group = entry['headCommit']['oid']
+            seen_now.add(group)
+            record = records.get(group)
+            if record is None:
+                pr = entry['pullRequest']
+                record = records[group] = {'pr': pr['number'], 'author': (pr.get('author') or {}).get('login'),
+                                           'pr_head': pr['headRefOid'], 'group_commit': group,
+                                           'base_commit': (entry.get('baseCommit') or {}).get('oid'),
+                                           'position_first_seen': entry['position'], 'enqueued_at': entry.get('enqueuedAt'),
+                                           'first_seen': stamp(),
+                                           'ahead': [(e['pullRequest'].get('author') or {}).get('login') for e in entries
+                                                     if e['position'] < entry['position']]}
+                prediction = state.get('prediction')
+                if prediction and prediction['pr'] == pr['number'] and prediction['pr_head'] == pr['headRefOid']:
+                    record['predicted'] = prediction
+                    state['prediction'] = None
+            if 'group_tree' not in record and fetch_oid(repo, group):
+                record['group_tree'] = tree_of(repo, group)
+                if record['base_commit'] and fetch_oid(repo, record['base_commit']) and fetch_oid(repo, record['pr_head'], record['pr']):
+                    record['merge_tree'] = merge_tree(repo, record['base_commit'], record['pr_head'])
+                    record['merge_tree_equal'] = record['merge_tree'] == record['group_tree']
+                if record.get('predicted'):
+                    record['predicted_equal'] = record['predicted'].get('tree') == record['group_tree']
+            record['last_state'] = entry.get('state')
+        # Entries that left the queue: merged when main now contains the group commit, otherwise dropped.
+        for group, record in records.items():
+            if group not in seen_now and 'left_at' not in record:
+                record['left_at'] = stamp()
+        # Depth 1: the first PR of the next list that is not in the queue, merged onto the tail.
+        queued = {record['pr'] for group, record in records.items() if group in seen_now}
+        tail = entries[-1]['headCommit']['oid'] if entries else main_tip
+        for number, head in upcoming:
+            if number in queued:
+                continue
+            current = state.get('prediction')
+            if current and current['pr'] == number and current['pr_head'] == head and current['on'] == tail:
+                break
+            if fetch_oid(repo, tail) and fetch_oid(repo, head, number):
+                tree = merge_tree(repo, tail, head)
+                state['prediction'] = {'pr': number, 'pr_head': head, 'on': tail, 'tree': tree, 'at': stamp(),
+                                       'conflict': tree is None, 'author': author_of(args.repository, number),
+                                       'ahead': [(e['pullRequest'].get('author') or {}).get('login') for e in entries]}
+                append(STATE / 'predictions.jsonl', state['prediction'])
+            break
+        else:
+            state['prediction'] = None
+        finish(repo, args.repository, state)
+        write_json(STATE / 'entries.json', state)
+    return 0
+
+
+def queue_checks(repository, group):
+    """The queue's own jobs on the group commit: {check: {gate_at, result, completed}} for every evidence-gate-NAME job."""
+    runs = gh('api', f'repos/{repository}/actions/runs?event=merge_group&head_sha={group}&per_page=20')['workflow_runs']
+    jobs = []
+    for run in runs:
+        jobs += gh('api', f'repos/{repository}/actions/runs/{run["id"]}/jobs?per_page=100&filter=latest')['jobs']
+    by_name = {job['name']: job for job in jobs}
+    checks = {}
+    for name, job in by_name.items():
+        if name.startswith('evidence-gate-'):
+            check = name[len('evidence-gate-'):]
+            result = by_name.get(check, {})
+            checks[check] = {'gate_at': job.get('started_at'), 'result': result.get('conclusion'),
+                             'completed': result.get('status') == 'completed'}
+    return checks, bool(runs) and all(run.get('status') == 'completed' for run in runs)
+
+
+def finish(repo, repository, state):
+    """Write out every entry that left the queue whose checks finished (or that waited SETTLE): one line, then it is dropped."""
+    attempts = read_lines(STATE / 'attempts.jsonl')
+    for group, record in list(state['entries'].items()):
+        if 'left_at' not in record:
+            continue
+        try:
+            checks, completed = queue_checks(repository, group)
+        except Failure as error:
+            say(f'#{record["pr"]}: {error}')
+            checks, completed = {}, False
+        if not completed and time.time() - seconds_of(record['left_at']) < SETTLE:
+            continue
+        # Merged when main now holds the group commit; otherwise it was dropped (removed, failed or rebuilt behind a drop).
+        record['landed'] = git(repo, 'merge-base', '--is-ancestor', group, f'origin/{BASE}', check=False).returncode == 0
+        mine = [a for a in attempts if a.get('tree') == record.get('group_tree')]
+        line = dict(record, queue=checks, signer=mine[-1] if mine else None)
+        line['compare'] = compare(checks, mine[-1] if mine else None)
+        append(STATE / 'entries.jsonl', line)
+        del state['entries'][group]
+
+
+def compare(checks, attempt):
+    """Per check: was the signer's note there before the gate looked, by how many minutes, and did the results agree."""
+    rows = {}
+    if not attempt or attempt.get('outcome') == 'deferred':
+        return rows
+    for name, result in attempt.get('checks', {}).items():
+        queue = checks.get(name) or {}
+        row = {'signer': result, 'queue': queue.get('result')}
+        signed_at = (attempt.get('signed_at') or {}).get(name)
+        if queue.get('gate_at') and signed_at and result == 'passed':
+            lead = (seconds_of(queue['gate_at']) - seconds_of(signed_at)) / 60
+            row.update(ready_before_gate=lead > 0, minutes=round(lead, 1))
+        if queue.get('result') and (result == 'passed' or result.startswith('FAILED') or result == 'timed out'):
+            row['agree'] = (result == 'passed') == (queue['result'] == 'success')
+        rows[name] = row
+    return rows
+
+
+def read_lines(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def ours(record, allowed):
+    """Only code of our own authors runs here, the host key within reach: the entry's author and every entry's ahead of it."""
+    return allowed is None or all(login in allowed for login in [record.get('author'), *record.get('ahead', [])])
+
+
+def choose(state, attempted, allowed):
+    """The next tree to sign: the prediction first, then the queue's entries in position order (None: allowed is everyone)."""
+    prediction = state.get('prediction')
+    if prediction and prediction.get('tree') and prediction['tree'] not in attempted and ours(prediction, allowed):
+        return {'kind': 'predicted', 'pr': prediction['pr'], 'tree': prediction['tree'],
+                'parents': [prediction['on'], prediction['pr_head']], 'since': prediction['at']}
+    open_entries = [r for r in state['entries'].values() if 'left_at' not in r and r.get('group_tree')]
+    for record in sorted(open_entries, key=lambda r: r['position_first_seen']):
+        if record['group_tree'] not in attempted and ours(record, allowed):
+            return {'kind': 'queue', 'pr': record['pr'], 'tree': record['group_tree'], 'commit': record['group_commit'],
+                    'since': record['first_seen']}
+    return None
+
+
+def build_commit(repo, pick, number):
+    """The commit to test: the group commit itself, or a merge commit of the prediction's two parents with the predicted tree."""
+    if pick['kind'] == 'queue':
+        return pick['commit'] if fetch_oid(repo, pick['commit']) else None
+    first, second = pick['parents']
+    if not (fetch_oid(repo, first) and fetch_oid(repo, second, number)):
+        return None
+    tree = merge_tree(repo, first, second)
+    if tree != pick['tree']:
+        return None
+    env = dict(os.environ, GIT_AUTHOR_NAME='queue signer', GIT_AUTHOR_EMAIL='queue-signer@localhost',
+               GIT_COMMITTER_NAME='queue signer', GIT_COMMITTER_EMAIL='queue-signer@localhost')
+    done = subprocess.run(['git', '-C', str(repo), 'commit-tree', tree, '-p', first, '-p', second, '-m', f'predicted merge of #{number}'],
+                          capture_output=True, text=True, env=env)
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def sign(args):
+    if (CONFIG / 'off').exists():
+        say(f'{CONFIG / "off"} exists: not running')
+        return 0
+    lock = run_lock('sign')
+    if lock is None:
+        return 0
+    rules = dict(W.limits(), **START)
+    start = CONFIG / 'start.json'  # an override agreed with operations
+    if start.exists():
+        given = json.loads(start.read_text())
+        if set(given) - set(START):
+            raise Failure(f'{start}: unknown start terms {", ".join(sorted(set(given) - set(START)))}')
+        rules.update({key: float(value) for key, value in given.items()})
+    repo = Path(args.repo).resolve()
+    W.clone(repo, args.repository)
+    attempted = {a.get('tree') for a in read_lines(STATE / 'attempts.jsonl')}
+    with state_lock():
+        state = read_json(STATE / 'entries.json', {'entries': {}, 'prediction': None})
+    # Every author's entries run only when the host's operator says so (~/.config/evidence-queue-signer/every-author).
+    allowed = None if (CONFIG / 'every-author').exists() else W.authors()
+    pick = choose(state, attempted, allowed)
+    if pick is None:
+        return 0
+    if args.dry_run:
+        print(json.dumps(pick, sort_keys=True))
+        return 0
+    def not_starting(reason, message):
+        say(message)
+        append(STATE / 'skips.jsonl', {'time': stamp(), 'pr': pick['pr'], 'tree': pick['tree'], 'kind': pick['kind'], 'reason': reason})
+        return 0
+    if W.free_gib(repo) < rules['min_free_gib']:
+        return not_starting('disk', f'{W.free_gib(repo):.0f} GiB free, under {rules["min_free_gib"]:.0f}: not starting')
+    if W.io60() >= rules['start_io60']:
+        return not_starting('busy', f'IO pressure {W.io60():.1f}% is over {rules["start_io60"]}%: not starting this tick')
+    if W.mem_gib() < rules['start_mem_gib']:
+        return not_starting('memory', f'{W.mem_gib():.1f} GiB available, under {rules["start_mem_gib"]:.0f}: not starting this tick')
+    commit = build_commit(repo, pick, pick['pr'])
+    if commit is None:
+        return not_starting('unavailable', f'#{pick["pr"]}: the commit for tree {pick["tree"][:12]} cannot be built here')
+    git(repo, 'checkout', '-q', '--detach', '--force', commit)
+    with tempfile.TemporaryDirectory(prefix='evidence-queue-') as scratch:
+        st_test = W.base_tools(repo, scratch)
+        checks = W.class_checks(st_test, repo, 'light') + W.class_checks(st_test, repo, 'heavy')
+        log = STATE / 'logs' / f'{time.strftime("%Y%m%dT%H%M%S")}-{pick["pr"]}-{pick["kind"]}.log'
+        log.parent.mkdir(parents=True, exist_ok=True)
+        started = time.time()
+        # Not the heavy class's kept target: st-test's own (with its lock) is shared with every other st-test run on the host.
+        rows, reason, seconds, peak = W.run(st_test, repo, checks, 'queue', rules, log)
+    line = {'time': stamp(), 'pr': pick['pr'], 'kind': pick['kind'], 'tree': pick['tree'], 'commit': commit,
+            'since': pick['since'], 'started_at': stamp(started), 'wait_s': round(started - seconds_of(pick['since'])),
+            'seconds': seconds, 'checks': {name: rows.get(name, 'no result') for name in checks},
+            'io60_peak': round(peak, 2), 'log': str(log)}
+    line['stage_seconds'] = stage_seconds(log)
+    line['signed_at'], line['signed_at_source'] = note_times(repo, pick['tree'], started), 'note'
+    if not line['signed_at']:
+        # No note read back: estimate it as the start plus the checks run up to it (st-test pushes each note when it is signed),
+        # which is early by the time st-test spends between checks.
+        elapsed, line['signed_at_source'] = started, 'estimate'
+        for name in checks:
+            elapsed += line['stage_seconds'].get(name, 0)
+            if line['checks'][name] == 'passed':
+                line['signed_at'][name] = stamp(elapsed)
+    if reason:
+        line.update(outcome='deferred', stopped=reason)
+    else:
+        results = set(line['checks'].values())
+        line['outcome'] = 'signed' if results == {'passed'} else 'signed_lane_edit' if results <= {'passed', 'not signed'} else 'failed'
+    append(STATE / 'attempts.jsonl', line)
+    say(f'#{pick["pr"]} {pick["kind"]} tree {pick["tree"][:12]}: {line["outcome"]} in {seconds}s')
+    return 0
+
+
+def note_times(repo, tree, since):
+    """When each check's note from this run was signed: its observed_at, read back from the notes pushed for the tree."""
+    git(repo, 'fetch', '-q', '--no-tags', 'origin', f'+refs/tags/evidence/{tree}/*:refs/queue-notes/{tree}/*', check=False)
+    times = {}
+    refs = git(repo, 'for-each-ref', '--format=%(refname)', f'refs/queue-notes/{tree}/', check=False).stdout.split()
+    for ref in refs:
+        try:
+            predicate = json.loads(git(repo, 'cat-file', '-p', f'{ref}:{tree}').stdout)['predicate']
+            at = predicate['observed_at']
+            if seconds_of(at) < since - 60:
+                continue  # an earlier run's note for the same tree
+            for name in predicate['observed']['checks']:
+                times[name] = min(times.get(name, at), at)
+        except (Failure, ValueError, KeyError, TypeError):
+            continue
+    return times
+
+
+def stage_seconds(log):
+    """st-test's own per-check seconds, from the summary rows after its last `st-test: tree` line."""
+    lines = Path(log).read_text(errors='replace').splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith('st-test: tree ')]
+    seconds = {}
+    for line in lines[starts[-1] + 1:] if starts else []:
+        match = W.ROW.match(line)
+        if not match:
+            break
+        seconds[match[1]] = int(match[3])
+    return seconds
+
+
+def report(args):
+    since = time.time() - args.hours * 3600
+    entries = [e for e in read_lines(STATE / 'entries.jsonl') if seconds_of(e['left_at']) >= since]
+    attempts = [a for a in read_lines(STATE / 'attempts.jsonl') if seconds_of(a['time']) >= since]
+    signed = [e for e in entries if e.get('signer')]
+    leads = [row['minutes'] for e in signed for row in e['compare'].values() if 'minutes' in row]
+    print(json.dumps({
+        'hours': args.hours,
+        'entries': len(entries), 'landed': sum(1 for e in entries if e.get('landed')),
+        'merge_tree_equal': sum(1 for e in entries if e.get('merge_tree_equal')),
+        'merge_tree_compared': sum(1 for e in entries if 'merge_tree_equal' in e),
+        'predicted': sum(1 for e in entries if e.get('predicted')),
+        'predicted_equal': sum(1 for e in entries if e.get('predicted_equal')),
+        'entries_signed': len(signed),
+        'checks_ready_before_gate': sum(1 for e in signed for row in e['compare'].values() if row.get('ready_before_gate')),
+        'checks_compared': len(leads),
+        'median_lead_minutes': statistics.median(leads) if leads else None,
+        'disagreements': sum(1 for e in signed for row in e['compare'].values() if row.get('agree') is False),
+        'runs': len(attempts), 'outcomes': {o: sum(1 for a in attempts if a['outcome'] == o) for o in sorted({a['outcome'] for a in attempts})},
+        'median_run_s': statistics.median([a['seconds'] for a in attempts]) if attempts else None,
+        'median_wait_s': statistics.median([a['wait_s'] for a in attempts]) if attempts else None,
+    }, indent=1, sort_keys=True))
+    return 0
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    commands = parser.add_subparsers(dest='command', required=True)
+    for name, text in (('observe', 'record the queue, the prediction and the queue\'s results'), ('sign', 'sign at most one tree')):
+        one = commands.add_parser(name, help=text)
+        one.add_argument('--repo', required=True, help='the clone this command owns (created on first use)')
+        one.add_argument('--repository', default='compoundingtech/fractal')
+        if name == 'sign':
+            one.add_argument('--dry-run', action='store_true', help='print the tree it would sign, run nothing')
+    summary = commands.add_parser('report', help='sum the finished entries and runs of the window')
+    summary.add_argument('--hours', type=float, default=24)
+    args = parser.parse_args(argv)
+
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+    import signal
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        return {'observe': observe, 'sign': sign, 'report': report}[args.command](args)
+    except KeyboardInterrupt:
+        if W.CHILD is not None:
+            W.stop(W.CHILD)
+        say('stopped')
+        return 143
+    except (Failure, subprocess.SubprocessError, OSError, ValueError, KeyError) as error:
+        say(f'{type(error).__name__}: {error}')
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""scripts/ci-evidence-slo on fake GitHub API data: the denominator, the producer split, produced-but-not-verified, and refusals."""
+import contextlib
+import datetime
+import importlib.machinery
+import importlib.util
+import io
+import json
+from pathlib import Path
+import sys
+import unittest
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('ci_evidence_slo', str(ROOT / 'scripts/ci-evidence-slo'))
+slo = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(slo)
+NOW = datetime.datetime(2026, 10, 18, 12, 0, tzinfo=datetime.timezone.utc)
+STEP = {'satisfied': 'evidence satisfied by existing note', 'degraded': 'evidence existing note is degraded', 'no_note': 'evidence no note',
+        'rejected': 'evidence note rejected', 'unavailable': 'evidence verifier unavailable'}
+
+
+def job(job_id, check, outcome, skipped=False, status='completed'):
+    steps = [{'name': 'Set up job', 'conclusion': 'success'}]
+    steps += [{'name': name, 'conclusion': 'success' if key == outcome else 'skipped'} for key, name in STEP.items()]
+    steps.append({'name': 'evidence skip taken', 'conclusion': 'success' if skipped else 'skipped'})
+    return {'id': job_id, 'name': f'evidence-gate-{check}', 'status': status, 'steps': steps}
+
+
+ECHOED = 'run: python3 gate || { echo "evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID"; }\n'
+
+
+def line(**fields):
+    # the log shows the step's own shell text (with an echoed fallback decision line) before the real line, which ends with the gate digest
+    return ECHOED + 'noise\nevidence-decision v1 ' + ' '.join(f'{k}={v}' for k, v in {**fields, 'gate_sha256': 'abc123'}.items()) + '\nmore noise'
+
+
+class FakeApi:
+    def __init__(self, runs, jobs, logs):
+        self.runs, self.jobs, self.logs, self.log_calls = runs, jobs, logs, []
+
+    def get(self, path, paginate_key=None):
+        if '/workflows/fleet.yml/runs' in path:
+            return self.runs
+        run_id = int(path.split('/runs/')[1].split('/')[0])
+        return self.jobs[run_id]
+
+    def log(self, job_id, repository):
+        self.log_calls.append(job_id)
+        return self.logs.get(job_id, '')
+
+
+def run(run_id, event='pull_request', status='completed'):
+    return {'id': run_id, 'event': event, 'status': status, 'conclusion': 'success'}
+
+
+class Slo(unittest.TestCase):
+    def report(self, runs, jobs, logs, *args):
+        api = FakeApi(runs, jobs, logs)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = slo.main(['--repository', 'org/repo', '--json', *args], api=api, now=NOW)
+        return code, (json.loads(out.getvalue()) if out.getvalue() else None), api
+
+    def test_counters_denominator_producers_and_produced_but_not_verified(self):
+        runs = [run(1), run(2), run(3, 'merge_group'), run(4, status='in_progress')]
+        jobs = {1: [job(11, 'linux-gate', 'satisfied', skipped=False), job(12, 'genie-freshness', 'no_note'), job(13, 'typescript-client', 'rejected')],
+                2: [job(21, 'linux-gate', 'satisfied', skipped=True), job(22, 'genie-freshness', 'degraded'),
+                    job(23, 'typescript-client', 'unavailable'), job(24, 'isolation-vm', 'satisfied', status='in_progress')],
+                3: [job(31, 'linux-gate', 'satisfied'), {'id': 32, 'name': 'linux-tests', 'status': 'completed', 'steps': []}],
+                4: [job(41, 'linux-gate', 'satisfied')]}
+        logs = {11: line(kind='wrapper', trust_level='host', signer='host/box'), 21: line(kind='observed', trust_level='fleet'),
+                31: line(kind='observed', trust_level='fleet'), 13: line(reason='untrusted_signer'), 22: line(reason='degraded')}
+        code, result, api = self.report(runs, jobs, logs)
+        self.assertEqual(code, 0)
+        self.assertEqual((result['runs_read'], result['totals']), (3, {'decisions': 7, 'satisfied': 3, 'produced_not_verified': 2}))
+        rows = {(r['check'], r['event']): r for r in result['checks']}
+        gate = rows[('linux-gate', 'pull_request')]
+        self.assertEqual((gate['decisions'], gate['satisfied'], gate['skipped'], gate['shadow']), (2, 2, 1, 1))
+        self.assertEqual(gate['satisfied_by_producer'], {'wrapper/host': 1, 'observed/fleet': 1})
+        self.assertEqual(rows[('linux-gate', 'merge_group')]['satisfied_by_producer'], {'observed/fleet': 1})
+        bad = rows[('typescript-client', 'pull_request')]
+        self.assertEqual((bad['produced_not_verified'], bad['rejected'], bad['unavailable']), (1, 1, 1))
+        self.assertEqual(bad['produced_not_verified_reasons'], {'untrusted_signer': 1})
+        self.assertEqual(rows[('genie-freshness', 'pull_request')]['produced_not_verified_reasons'], {'degraded': 1})
+        self.assertEqual(rows[('genie-freshness', 'pull_request')]['no_note'], 1)
+        self.assertEqual(result['target'], {'produced_not_verified': 0})
+        self.assertNotIn(24, api.log_calls)  # a job still running is not a decision and its log is not read
+
+    def test_a_gate_job_that_never_printed_its_outcome_is_not_a_decision(self):
+        code, result, _ = self.report([run(1)], {1: [job(11, 'linux-gate', None)]}, {})
+        self.assertEqual((result['totals']['decisions'], result['checks'][0]['gate_incomplete']), (0, 1))
+
+    def test_the_log_budget_bounds_downloads_and_the_rest_is_reported_unread(self):
+        jobs = {1: [job(10 + i, 'linux-gate', 'satisfied') for i in range(5)]}
+        code, result, api = self.report([run(1)], jobs, {}, '--max-logs', '2')
+        self.assertEqual((len(api.log_calls), result['logs_read']), (2, 2))
+        self.assertEqual(result['checks'][0]['satisfied_by_producer'], {'?/?': 2, 'unread': 3})  # logs without a real decision line do not invent a producer
+
+    def test_an_empty_interval_is_zero_decisions_not_an_error_and_bad_arguments_exit_two(self):
+        code, result, _ = self.report([], {}, {})
+        self.assertEqual((code, result['totals']['decisions'], result['checks']), (0, 0, []))
+        for bad in (['--hours', '0'], ['--since', 'yesterday'], ['--since', '2026-10-19T00:00:00Z', '--until', '2026-10-18T00:00:00Z'], ['--max-logs', '-1']):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(slo.main(['--repository', 'org/repo', *bad], api=FakeApi([], {}, {}), now=NOW), 2, bad)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(slo.main(['--repository', 'bad repo'], api=FakeApi([], {}, {}), now=NOW), 2)
+
+    def test_an_unreadable_api_exits_one_instead_of_reporting_zeros(self):
+        class Broken(FakeApi):
+            def get(self, path, paginate_key=None):
+                raise RuntimeError('rate limited')
+        with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(slo.main(['--repository', 'org/repo'], api=Broken([], {}, {}), now=NOW), 1)
+        self.assertEqual(out.getvalue(), '')
+        self.assertIn('could not read the runs', err.getvalue())
+
+    def test_the_text_report_names_the_target(self):
+        api = FakeApi([run(1)], {1: [job(11, 'linux-gate', 'satisfied')]}, {11: line(kind='observed', trust_level='fleet')})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(slo.main(['--repository', 'org/repo'], api=api, now=NOW), 0)
+        self.assertIn('produced-but-not-verified (target 0)', out.getvalue())
+        self.assertIn('observed/fleet', out.getvalue())
+
+
+if __name__ == '__main__':
+    unittest.main()

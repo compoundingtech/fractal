@@ -56,7 +56,7 @@ the checked-in contract:
 
 ```sh
 st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
-cargo nextest run -p st3 -E 'test(actor_contract)'
+cargo nextest run -p fractal -E 'test(actor_contract)'
 ```
 
 Use the binary built from the changed source. Resolve any rebase conflict in
@@ -128,8 +128,42 @@ source instead, which needs Zig 0.15.2 on `PATH`. On macOS, the vendored
 [`libghostty-vt-sys`](../vendor/libghostty-vt-sys/README.md) build script lets Zig 0.15.2 link against
 the macOS 26.5 and 27 SDKs.
 
-The script builds and installs `st3` and `st3-migrate`, and makes `st` a symlink to
+The script builds and installs `st3` and `fractal-migrate`, and makes `st` a symlink to
 the installed `st3`. `st` is never a separate build. On macOS, st3 lives in a fixed app bundle; see [macOS installation and signing](st3/macos-installation.md). A source install also needs [`pty`](https://github.com/compoundingtech/pty-rust) on `PATH`.
+
+## Shared TypeScript SDK
+
+`packages/fractal-sdk` owns the app-independent `@fractal/sdk` package. Its
+`@fractal/sdk/effect` entry point provides transport, follow state, decoding, and
+trace-context propagation without browser startup or UI dependencies.
+`St3Live(options)` works without an application platform layer; callers can supply
+an explicit socket in options for custom transports and tests.
+
+Browser behavior stays in `apps/fractal-web/src/data`: early collection socket
+adoption, traced browser fetch/WebSocket wrappers, and visibility/LRU admission
+policy. The app supplies those through `St3Platform`; the neutral SDK does not
+adopt a browser bootstrap socket or install browser visibility policy by default.
+`@fractal/sdk/admission` exposes the admission primitives used by that adapter.
+
+`St3.watch` accepts a typed `FollowDescriptor<TResource>`: `spec` selects an
+existing window collection and the descriptor's `decodeRow` decodes its rows.
+Optional `spec.descriptor` is a stable local decoder ID for independent decoder
+and admission identity; it is never sent on the wire. The watch shares the scoped
+follow lifecycle and multiplexed socket; it does not introduce another wire format.
+
+`St3Options.credential` resolves a bearer credential for each HTTP request and
+socket open. It is not an actor selector. The `client` option is only a reported
+client/build label, never authenticated identity or authority. An explicit
+credential bypasses browser bootstrap socket adoption; non-browser socket
+factories must honor the provided credential headers.
+
+The SDK is a root workspace member, not a nested app package. Its standalone
+Node suite and typecheck run with:
+
+```sh
+pnpm --filter @fractal/sdk test
+pnpm --filter @fractal/sdk typecheck
+```
 
 ## Fractal web diagnostics member
 
@@ -202,9 +236,9 @@ captured changes, composer, arrangements, roster and terminal attachment.
 
 ## Continuous integration
 
-Workspace CI runs on pull requests and merge groups. The five required checks are `linux-gate`,
-`isolation-vm`, `genie-freshness`, `typescript-client`, and `mail-redelivery-canaries`.
-A ready pull request lands through GitHub’s merge queue after review and all five required checks
+Workspace CI runs on pull requests and merge groups. The four required checks are `linux-gate`,
+`genie-freshness`, `typescript-client` and `fractal-web`; the VM tests and the mail redelivery canaries
+run once a day (`daily-long.yml`). A ready pull request lands through GitHub’s merge queue after review and all four required checks
 pass. Keep the approved head fixed; a new head requires review of its own changes before queueing.
 
 The queue checks the exact commit that lands. Main upkeep verifies those checks, runs `perf-cost`,
@@ -214,17 +248,17 @@ Namespace as overflow for ordinary PRs. The second test shard and supporting job
 macOS CI is currently disabled; its retained workflow is not a required check.
 See [CI operations](ci.md) for stage scope, routing, caches, and failure inspection.
 
-The standalone Rust client's generated `crates/st3-client/src/lib.rs` must be
-regenerated with `cargo run -p st3-client-codegen`, including after changes to
+The standalone Rust client's generated `crates/fractal-client/src/lib.rs` must be
+regenerated with `cargo run -p fractal-client-codegen`, including after changes to
 directory discovery. Commit the generator's exact output rather than hand-formatting
-it; `cargo run -p st3-client-codegen -- --check` checks freshness.
+it; `cargo run -p fractal-client-codegen -- --check` checks freshness.
 
 ## Shared UI models
 
 [Build your own client](clients/build-your-own.md) maps the Rust and TypeScript pieces
 and includes a small [example TUI](../examples/client-tui/) built and tested in CI.
 
-`crates/st3-ui-model` provides renderer-independent UI semantics without a ratatui dependency.
+`crates/fractal-ui-model` provides renderer-independent UI semantics without a ratatui dependency.
 Its broad name is intentional; initially it contains only the terminal UI's mission model (`Word`,
 `StepState`, `Mission`, `Step`) and mission derivation. The terminal UI consumes that same model.
 `missions::adapt` borrows typed mission and agent projections plus unresolved, actor-filtered
@@ -237,13 +271,21 @@ the actual execution seat without reconstructing identity from display labels.
 `Mission.step_metadata` retains each selected step's raw `blocked_reason` and `last_progress`,
 keyed by its step-run ID. These facts survive state changes independently of a step's waiting
 blocker or derived queue `note`, and are not normalized by display text policies.
-Shared widgets and other UI models are separate follow-up work, not part of this mission extraction.
+`crates/fractal-mission-ui` composes mission step rows and their progress meter without
+owning a shell or choosing a default renderer. Enable its optional `ratatui` feature
+and call `steps` with a borrowed mission, expansion keys, spinner, `Palette`,
+`Glyphs`, and the caller's shared conversation `Theme` for inline markdown.
+The returned shared `Doc<Intent>` contains styled lines and
+`Intent::ToggleStep` click targets using `step:{mission}:{name}` keys. The embedding
+application owns expansion state and the surrounding card. Token defaults reproduce
+the terminal UI; progress counts every described step, not only runnable steps.
+Header and agent-work composition remain outside this crate.
 
 ## Embedding native conversations
 
-`crates/st3-conversation-ui` provides the same native conversation presentation used by
+`crates/fractal-conversation-ui` provides the same native conversation presentation used by
 `st`’s terminal interface, without terminal acquisition, application tabs or daemon connections. Feed
-`st3-client` conversation frames into `Timeline::apply(Frame { replace, has_more, items })`,
+`fractal-client` conversation frames into `Timeline::apply(Frame { replace, has_more, items })`,
 adapt the timeline with caller-owned display names, and render it with `Cache::render`
 and caller-supplied `Theme` tokens. The returned document contains styled lines and typed
 `PaneIntent` targets. `State` retains scrolling, tool expansion, display-column selection
@@ -257,7 +299,7 @@ The shared crate and the `stui` library use workspace Ratatui 0.30. An embedding
 rendering dependency before passing buffers or lines across this boundary. Native conversations are not a terminal emulator: harness menus and arbitrary
 permission prompts still require access to the harness terminal.
 
-See the [conversation crate](../crates/st3-conversation-ui/README.md) for model-only and
+See the [conversation crate](../crates/fractal-conversation-ui/README.md) for model-only and
 Ratatui builds, and [build your own client](clients/build-your-own.md) for the client contract.
 
 ## Fractal web changelog
@@ -309,13 +351,13 @@ wording consistent when both describe the same change.
 
 | Path | Contents |
 | --- | --- |
-| `crates/st3` | Current daemon and CLI. |
-| `crates/stui` | Terminal UI library used by `st`. |
-| `crates/st-drivers`, `crates/st-runtime` | Harness drivers and shared runtime. |
-| `crates/st3-client`, `crates/st3-feed`, `crates/st3-schema`, `crates/st3-client-codegen` | Client API, feeds, schema, and code generation. |
-| `crates/st3-ui-model`, `crates/st3-conversation-ui` | Shared mission and conversation presentation. |
+| `crates/fractal` | Current daemon and CLI. |
+| `crates/fractal-tui` | Terminal UI library used by `st`. |
+| `crates/fractal-drivers`, `crates/fractal-runtime` | Harness drivers and shared runtime. |
+| `crates/fractal-client`, `crates/fractal-feed`, `crates/fractal-schema`, `crates/fractal-client-codegen` | Client API, feeds, schema, and code generation. |
+| `crates/fractal-ui-model`, `crates/fractal-conversation-ui` | Shared mission and conversation presentation. |
 | `clients`, `apps/ios` | TypeScript/Swift clients and the iOS app. |
-| `crates/st3-migrate` | Migration tooling. |
+| `crates/fractal-migrate` | Migration tooling. |
 | `src`, `tests` | Legacy st2 package and its integration tests. |
 | `components`, `evals`, `fixtures` | Provider components, evals, and proof fixtures. |
 | `examples/st3`, `docs` | Runnable declarations and documentation. |

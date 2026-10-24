@@ -10,7 +10,7 @@ import { IBMPlexMono_400Regular } from '@expo-google-fonts/ibm-plex-mono/400Regu
 import { IBMPlexMono_400Regular_Italic } from '@expo-google-fonts/ibm-plex-mono/400Regular_Italic';
 import { IBMPlexMono_600SemiBold } from '@expo-google-fonts/ibm-plex-mono/600SemiBold';
 import { IBMPlexMono_700Bold } from '@expo-google-fonts/ibm-plex-mono/700Bold';
-import { openAlerts } from '@smalltalk/st3-views';
+import { openAlerts } from '@fractal/views';
 import { FULL_SCREEN, navigationRef, ROOTS, type StackParams, type TabParams } from './navigation';
 import { StoreProvider, useStore } from './store';
 import { parseDevLink, tabLabel, tabNamed, type Tab } from './tabs';
@@ -24,11 +24,13 @@ import { LaunchScreen, MissionScreen, MissionsScreen, NewMissionScreen } from '.
 import { TerminalScreen } from './screens/Terminal';
 import { GlassesScreen, SpaceScreen } from './screens/Glasses';
 import { ResourceScreen } from './screens/Resource';
+import { DocumentScreen, DocumentsScreen } from './screens/Documents';
 import { SidebarScreen } from './screens/Sidebar';
 import { FabricProofScreen } from './screens/FabricProof';
 import { quality } from './qualityNative';
 import { qualityVisibility } from './qualityView';
 import { parseFabricProofLink, type FabricProofInput } from './fabricProof';
+import { DiagnosticsBoundary } from './DiagnosticsBoundary';
 
 // The chrome is native: one UITabBarController (react-native-screens' tabs, through
 // @react-navigation/bottom-tabs' native navigator) holding a UINavigationController per tab
@@ -76,6 +78,8 @@ function TabStack({ tab }: { tab: Tab }) {
     <Stack.Screen name="Agents" component={AgentsScreen} options={{ title: 'Agents' }} />
     <Stack.Screen name="Missions" component={MissionsScreen} options={{ title: 'Missions' }} />
     <Stack.Screen name="Resource" component={ResourceScreen} options={{ title: 'Resource' }} />
+    <Stack.Screen name="Documents" component={DocumentsScreen} options={{ title: 'Documents' }} />
+    <Stack.Screen name="Document" component={DocumentScreen} options={{ title: 'Document' }} />
     <Stack.Screen name="Space" component={SpaceScreen} options={{ title: 'Space' }} />
     <Stack.Screen name="Conversation" component={ConversationScreen} options={{ title: 'Conversation' }} />
     <Stack.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal', contentStyle: { backgroundColor: theme.crust } }} />
@@ -184,7 +188,7 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
 
 const qualityLayout = () => quality.commit();
 
-export default function App() {
+function AppContent() {
   const [fabricProof, setFabricProof] = useState<FabricProofInput | null>(null);
   useEffect(() => {
     if (!__DEV__) return;
@@ -209,4 +213,8 @@ export default function App() {
       <NavigationContainer ref={navigationRef} theme={navigationTheme}><Main /></NavigationContainer>
     </StoreProvider>}
   </SafeAreaProvider>;
+}
+
+export default function App() {
+  return <DiagnosticsBoundary><AppContent /></DiagnosticsBoundary>;
 }

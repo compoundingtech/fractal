@@ -22,13 +22,14 @@ __pycache__/
 .ding-bus-quoting-note.md
 
 # Assembled by the `pi-extension-types` check from pinned tarballs; never committed.
-crates/st-drivers/hooks/typecheck/node_modules/
+crates/fractal-drivers/hooks/typecheck/node_modules/
 
 # The root pnpm workspace's installation, including members' nested node_modules.
 /node_modules/
-clients/typescript/st3-client/node_modules/
-clients/typescript/st3-views/node_modules/
-clients/typescript/st3-scenarios/node_modules/
+clients/typescript/fractal-client/node_modules/
+clients/typescript/fractal-views/node_modules/
+clients/typescript/fractal-scenarios/node_modules/
+packages/fractal-sdk/node_modules/
 
 # Pinned megarepo members materialized by `mr apply`.
 /repos/

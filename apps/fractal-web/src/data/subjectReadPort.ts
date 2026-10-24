@@ -1,12 +1,12 @@
 import {
   ClientError,
-  St3Client,
+  FractalClient,
   type ClientOptions,
   type PageOptions,
   type EnvelopeOf,
   type Page,
-} from '@smalltalk/st3-client'
-import * as Native from '@smalltalk/st3-client/schema'
+} from '@fractal/client'
+import * as Native from '@fractal/client/schema'
 import { Context, Data, Effect, Fiber, Option, Queue, Schedule, Schema, Stream } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -72,7 +72,7 @@ export const subjectReaderFromAtom = <T>({
               new SubjectReadFailure({
                 ref,
                 reason: 'failed',
-                detail: 'The native resource reader closed before observation',
+                detail: 'The resource connection closed before any details arrived',
               }),
             )
           const state = first.value
@@ -88,8 +88,8 @@ export const subjectReaderFromAtom = <T>({
               reason: state._tag === 'Observed' ? (state.error?.reason ?? 'failed') : 'failed',
               detail:
                 state._tag === 'Observed'
-                  ? (state.error?.detail ?? 'The native observation is stale')
-                  : 'No native observation',
+                  ? (state.error?.detail ?? 'The last received details are out of date')
+                  : 'No details received',
             }),
           )
         }),
@@ -102,25 +102,25 @@ const retainedReader = <T>({
   read,
   registry,
 }: {
-  readonly read: SubjectReader<T>['read']
+  readonly read: (ref: string) => Effect.Effect<Extract<Feed<T>, { readonly _tag: 'Observed' }>, SubjectReadFailure>
   readonly registry: AtomRegistry.AtomRegistry
 }): SubjectReader<T> => {
-  const cache = new Map<string, T>()
+  const cache = new Map<string, Extract<Feed<T>, { readonly _tag: 'Observed' }>>()
   const changes = (ref: string) =>
     Stream.fromEffectSchedule(
       read(ref).pipe(
         Effect.match({
-          onSuccess: (value): Feed<T> => {
-            cache.set(ref, value)
-            return observed({ value })
+          onSuccess: (feed): Feed<T> => {
+            const dated = { ...feed, readAt: Date.now() }
+            cache.set(ref, dated)
+            return dated
           },
           onFailure: ({ reason, detail }): Feed<T> => {
             const value = cache.get(ref)
             return value === undefined
               ? unavailable({ reason, detail })
               : {
-                  _tag: 'Observed',
-                  value,
+                  ...value,
                   freshness: 'stale',
                   error: { reason, detail },
                 }
@@ -136,16 +136,16 @@ const retainedReader = <T>({
         changes(ref).pipe(Stream.runForEach((next) => Effect.sync(() => get.setSelf(next)))),
       )
       get.addFinalizer(() => Effect.runFork(Fiber.interrupt(fiber)))
-      return value === undefined ? waiting : observed({ value, freshness: 'stale' })
+      return value === undefined ? waiting : { ...value, freshness: 'stale' }
     }),
   )
   return subjectReaderFromAtom({ feed, registry })
 }
 
 /** Only the request transport is scoped; capability discovery remains the source client's cache. */
-class ScopedSubjectClient extends St3Client {
+class ScopedSubjectClient extends FractalClient {
   private readonly signal: AbortSignal
-  private readonly discovery: St3Client
+  private readonly discovery: FractalClient
   constructor({
     options,
     signal,
@@ -153,7 +153,7 @@ class ScopedSubjectClient extends St3Client {
   }: {
     readonly options: ClientOptions
     readonly signal: AbortSignal
-    readonly discovery: St3Client
+    readonly discovery: FractalClient
   }) {
     super({
       ...options,
@@ -232,7 +232,7 @@ const findLaunchChild = async ({
   signal,
 }: {
   readonly ref: string
-  readonly client: St3Client
+  readonly client: FractalClient
   readonly list: (args: {
     readonly parent: string
     readonly options: PageOptions
@@ -270,7 +270,7 @@ const findMissionRun = async ({
   signal,
 }: {
   readonly ref: string
-  readonly client: St3Client
+  readonly client: FractalClient
   readonly signal: AbortSignal
 }) => {
   for await (const missions of pages({
@@ -296,13 +296,13 @@ const findMissionRun = async ({
 /** Feed consumers must use this captured registry, shared with public reads and streams. */
 export const gatewaySubjectReads = ({
   options,
-  resource = unsupportedSubjectReader('This source has no native resource driver'),
-  discovery = new St3Client(options),
+  resource = unsupportedSubjectReader('Resource details are not supported by this connection'),
+  discovery = new FractalClient(options),
   registry = AtomRegistry.make(),
 }: {
   readonly options: ClientOptions
   readonly resource?: SubjectReader<Native.ResourceObservation>
-  readonly discovery?: St3Client
+  readonly discovery?: FractalClient
   readonly registry?: AtomRegistry.AtomRegistry
 }): SubjectReads => {
   const fromGetter = <T>({
@@ -311,10 +311,10 @@ export const gatewaySubjectReads = ({
   }: {
     readonly decode: (value: unknown) => T
     readonly getter: (args: {
-      readonly client: St3Client
+      readonly client: FractalClient
       readonly ref: string
       readonly signal: AbortSignal
-    }) => Promise<{ readonly value: unknown }>
+    }) => Promise<{ readonly value: unknown; readonly snapshot?: { readonly created_at: unknown } }>
   }) =>
     retainedReader({
       read: Effect.fn('SubjectReadPort.read')((ref: string) =>
@@ -331,12 +331,17 @@ export const gatewaySubjectReads = ({
               signal: signal,
             })
             signal.throwIfAborted()
-            return decode(response.value)
+            return {
+              _tag: 'Observed' as const,
+              value: decode(response.value),
+              freshness: 'live' as const,
+              ...(response.snapshot === undefined ? {} : { snapshotCreatedAt: Native.decodeUnknownSync(Native.Timestamp)(response.snapshot.created_at) }),
+            }
           },
           catch: (cause) =>
             new SubjectReadFailure({
               ref,
-              reason: cause instanceof ClientError && cause.status === 403 ? 'ungranted' : 'failed',
+              reason: cause instanceof ClientError && cause.status === 403 ? 'ungranted' : cause instanceof ClientError && cause.status === 501 ? 'unsupported' : 'failed',
               detail: cause instanceof Error ? cause.message : String(cause),
             }),
         }),

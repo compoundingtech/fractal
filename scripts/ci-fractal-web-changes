@@ -17,19 +17,20 @@ import tempfile
 PATTERNS = (
     "apps/fractal-web/**",
     "packages/fractal-ui/**",
+    "packages/fractal-sdk/**",
     # Export graph consumed by the app/SDK and Buck's client typecheck inputs.
-    "clients/typescript/st3-client/index.ts",
-    "clients/typescript/st3-client/Models.generated.ts",
-    "clients/typescript/st3-client/Client.generated.ts",
-    "clients/typescript/st3-client/Schema.generated.ts",
-    "clients/typescript/st3-client/errors.ts",
-    "clients/typescript/st3-client/package.json",
-    "clients/typescript/st3-client/tsconfig.json",
-    "clients/typescript/st3-client/tsconfig.schema.json",
-    "clients/typescript/st3-client/types.test.ts",
-    "clients/typescript/st3-client/BUCK*",
-    "clients/typescript/st3-views/**",
-    "clients/typescript/st3-scenarios/**",
+    "clients/typescript/fractal-client/index.ts",
+    "clients/typescript/fractal-client/Models.generated.ts",
+    "clients/typescript/fractal-client/Client.generated.ts",
+    "clients/typescript/fractal-client/Schema.generated.ts",
+    "clients/typescript/fractal-client/errors.ts",
+    "clients/typescript/fractal-client/package.json",
+    "clients/typescript/fractal-client/tsconfig.json",
+    "clients/typescript/fractal-client/tsconfig.schema.json",
+    "clients/typescript/fractal-client/types.test.ts",
+    "clients/typescript/fractal-client/BUCK*",
+    "clients/typescript/fractal-views/**",
+    "clients/typescript/fractal-scenarios/**",
     # The st3-scenarios recording import reads the client wire schema at runtime.
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     # Views tests and scenario lanes read committed client/scenario fixtures.
@@ -60,6 +61,13 @@ PATTERNS = (
     ".github/workflows/main-upkeep.yml*",
     ".github/workflows/cache-audit.ts",
     ".github/repo-settings.json*",
+    # Read by the lane although no web source names them: a workspace member's manifest (the frozen install reads every
+    # member), the client fixtures an SDK unit test opens (timeline-conformance.json), the pnpm source-input list the web
+    # shell hook publishes, and the public-repository lint the scenario privacy lane runs.
+    "apps/ios/package.json",
+    "docs/st3/client-v0/fixtures/**",
+    "pnpm-source-inputs.json*",
+    "scripts/check-public-repo",
 )
 # Keep workspace dependency coverage in sync with the guarded package graph in ci-fractal-web-test.
 # scripts/ci-fractal-web-kit-graph fails the kit lane when the built Storybook bundles a file outside these.
@@ -71,8 +79,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/coldOpen.fixtures.ts",
     # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
     "apps/fractal-web/.changelog/**",
-    "apps/fractal-web/packages/st3-sdk/src/**",
-    "clients/typescript/st3-views/**",
+    "packages/fractal-sdk/src/**",
+    "clients/typescript/fractal-views/**",
     # The rest of its module closure inside the app, named file by file so other app-only changes still skip kit plays.
     "apps/fractal-web/src/command-palette/fuzzy.ts",
     "apps/fractal-web/src/conversation/alerts/AgentAlerts.tsx",
@@ -88,7 +96,12 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/data/arrangements.ts",
     "apps/fractal-web/src/data/asking.ts",
     "apps/fractal-web/src/data/attention.ts",
+    "apps/fractal-web/src/data/contextOccupancy.ts",
     "apps/fractal-web/src/data/fixtureSource.ts",
+    "apps/fractal-web/src/data/nativeDeclarations.ts",
+    "apps/fractal-web/src/data/nativeDetails.ts",
+    "apps/fractal-web/src/data/nativeDetailsSource.ts",
+    "apps/fractal-web/src/data/observedClock.ts",
     "apps/fractal-web/src/data/projections.ts",
     "apps/fractal-web/src/data/react.tsx",
     "apps/fractal-web/src/data/source.ts",
@@ -130,6 +143,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/shell/sidebar/Toolbar.tsx",
     "apps/fractal-web/src/shell/threadHeaderSlot.tsx",
     "apps/fractal-web/src/state/persistence.ts",
+    # ConversationPane registers composer/tail commit regions even when no telemetry producer is installed.
+    "apps/fractal-web/src/telemetry/inputPaint.ts",
     "apps/fractal-web/src/telemetry/measurement/counters.ts",
     "apps/fractal-web/src/telemetry/measurement/developer.ts",
     "apps/fractal-web/src/telemetry/measurement/engine.ts",
@@ -161,6 +176,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/ui-compat/live-theme.stylex.ts",
     "apps/fractal-web/src/ui-compat/tokens.stylex.ts",
     "apps/fractal-web/src/web/AgentActions.tsx",
+    "apps/fractal-web/src/web/AgentDetailsPanel.tsx",
+    "apps/fractal-web/src/web/AlertsPopover.tsx",
     "apps/fractal-web/src/web/AttentionControls.tsx",
     "apps/fractal-web/src/web/capturedChanges.ts",
     "apps/fractal-web/src/web/ChangesInspector.tsx",
@@ -172,6 +189,7 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/ConversationStates.tsx",
     "apps/fractal-web/src/web/conversationTranscript.ts",
     "apps/fractal-web/src/web/DeclarationDialog.tsx",
+    "apps/fractal-web/src/web/detailsSupplement.ts",
     "apps/fractal-web/src/web/lastObserved.tsx",
     "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
     "apps/fractal-web/src/web/liveSidebarTree.ts",
@@ -182,14 +200,15 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/sidebarAttention.ts",
     "apps/fractal-web/src/web/SidebarEmptyState.tsx",
     "apps/fractal-web/src/web/sidebarRow.ts",
+    "apps/fractal-web/src/web/useNativeDetails.ts",
     "apps/fractal-web/src/web/workspaceView.ts",
     "apps/fractal-web/src/workbench-kit/brand-icons.tsx",
     "apps/fractal-web/src/workbench-kit/IconButton.tsx",
     "apps/fractal-web/src/workbench-kit/icons.tsx",
     "fixtures/clients/words.json",
     "apps/fractal-web/src/web/index.html",
-    "clients/typescript/st3-scenarios/**",
-    "clients/typescript/st3-client/**",
+    "clients/typescript/fractal-scenarios/**",
+    "clients/typescript/fractal-client/**",
     # The st3-scenarios recording import reads the client wire schema at runtime.
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "package.json*",
@@ -205,7 +224,7 @@ KIT_PATTERNS = (
     ".github/workflows/fleet.yml*",
     ".github/workflows/workspace-ci.ts",
     # The roster decode story replays captured daemon payloads through the SDK decode and the roster projection.
-    "apps/fractal-web/packages/st3-sdk/src/**",
+    "packages/fractal-sdk/src/**",
     "apps/fractal-web/src/data/attention.ts",
     "apps/fractal-web/src/data/projections.ts",
     "apps/fractal-web/src/data/source.ts",

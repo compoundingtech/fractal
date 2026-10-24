@@ -4,10 +4,10 @@
  * Cold mounting and switching agents follow through the real SDK and live source
  * (scripted gateway, real socket commands). Nothing here mocks the data hooks.
  */
-import type { Agent, CollectionCommand, CollectionFrame, CollectionSocket, Snapshot, TimelineEntry } from '@smalltalk/st3-client'
+import type { Agent, CollectionCommand, CollectionFrame, CollectionSocket, Snapshot, TimelineEntry } from '@fractal/client'
 import { webcrypto } from 'node:crypto'
 import { setTimeout as yieldIo } from 'node:timers/promises'
-import * as Native from '@smalltalk/st3-client/schema'
+import * as Native from '@fractal/client/schema'
 import { flushSync } from 'react-dom'
 import type { ComponentProps } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -456,6 +456,7 @@ describe('LiveAgentWorkspace retained panes', () => {
   const ux: UxTelemetry = {
     activeSpan: () => undefined,
     traceContext: () => undefined,
+    beginOpen: () => ({ phase: () => {}, contentCommitted: () => () => {}, cancel: () => {} }),
     shellCommitted: () => () => {},
     rosterCommitted: () => () => {},
     beginSwitch: () => {},

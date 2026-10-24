@@ -187,7 +187,7 @@ function HighlightProbe() {
 const meta = {
   title: 'Fractal UI/Sidebar tree',
   component: SidebarTree,
-  parameters: {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Identity-retained synthetic rows and calibrated negative controls isolate filter rendering and keystroke cost." },
     layout: 'fullscreen',
     docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only painted rows whose keyed DOM row changed, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke in the same page, the two alternating keystroke by keystroke and pooled over the phases before and after the controls; a busy-wait control making each filter keystroke wait 4x its paired reference keystroke must reject. This kit-only probe does not measure application agent-search latency.' } },
   },
@@ -302,6 +302,17 @@ async function playFilterProbes(canvasElement: HTMLElement, benchmark: boolean) 
     const filter = [...production.samples, ...restored.samples]
     const reference = [...production.reference, ...restored.reference]
     root.dataset.pooledRatio = String(p90(filter) / p90(reference))
+    // Publish completed measurements before the assertion. Storybook 10.6.1 drops
+    // reporter results when play throws; this synchronous event survives that failure.
+    const [theme, width] = root.dataset.testid!.slice('filter-probe-'.length).split('-')
+    window.dispatchEvent(new CustomEvent('kit-filter-benchmark', { detail: {
+      width: Number(width), theme,
+      filterP90Milliseconds: p90(filter),
+      referenceP90Milliseconds: p90(reference),
+      pooledRatio: Number(root.dataset.pooledRatio),
+      busyControlRatio: Number(root.dataset.busyRatio),
+      threshold: ratioBudget,
+    } }))
     await assertRatio(filter, reference)
   }
 }

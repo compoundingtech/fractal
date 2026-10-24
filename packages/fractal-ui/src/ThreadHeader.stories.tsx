@@ -2,6 +2,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
+import { ChromeControl } from './assistant-ui/composition/ChromeControl'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { colorVars as c, typeVars as t } from './assistant-ui/composition-tokens.stylex'
@@ -11,12 +12,13 @@ function ThreadHeaderStory({ scheme = 'dark', terminalDisabledReason, narrow = f
   return <main data-scheme={scheme} style={laneWidth === undefined ? undefined : { width: laneWidth }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
     {narrow
       ? <div data-testid="phone-frame" {...stylex.props(styles.phone)}>
-        <ThreadHeader narrow folder="workstation-a" title="Row projection with a long agent name" status="working" statusLabel="working" freshness="live" sidebarCollapsed onToggleSidebar={() => {}} sidebarSheet={{ open: false, id: 'agents-sheet' }} terminalAvailable panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
+        {/* The app's phone header carries the agent's actions and the conversation menu; its Terminal toggle lives in the workspace tab row, so a header told the terminal is available still renders none. */}
+        <ThreadHeader narrow folder="workstation-a" title="Row projection with a long agent name" status="working" statusLabel="working" freshness="live" sidebarCollapsed onToggleSidebar={() => {}} sidebarSheet={{ open: false, id: 'agents-sheet' }} nativeActions={<><ChromeControl icon="person" label="Actions for Row projection" /><ChromeControl icon="gear" label="Conversation menu" /></>} terminalAvailable panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
       </div>
       : <ThreadHeader folder="fractal" title="Row projection" panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} terminalDisabledReason={terminalDisabledReason} />}
   </main>
 }
-const meta = { title: 'Fractal UI/Thread header', component: ThreadHeaderStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ThreadHeaderStory>
+const meta = { title: 'Fractal UI/Thread header', component: ThreadHeaderStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact terminal-disabled reason and fixed short/long titles isolate accessible control names, tooltip focus and constrained-lane/phone overflow; the working label is a fixed geometry probe rather than a catalog agent state.' }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ThreadHeaderStory>
 export default meta
 type Story = StoryObj<typeof meta>
 /** The host knows why the terminal is unavailable: the toggle stays in place and in the tab order, disabled and described; focus shows the reason in the kit tooltip. */
@@ -62,26 +64,41 @@ export const ConstrainedLane: Story = { tags: ['critical'], args: { laneWidth: 3
   }
 } }
 export const ConstrainedLaneLight: Story = { ...ConstrainedLane, args: { ...ConstrainedLane.args, scheme: 'light' } }
-/**
- * A 390px phone: the header keeps the breadcrumb and status, drops the terminal toggle, and its two controls
- * (Expand sidebar, Agent details) are 44px touch targets that stay inside the header without overflowing it.
- */
-export const NarrowPhone: Story = { tags: ['critical'], args: { narrow: true }, play: async ({ canvasElement }) => {
+/** Every phone header control is a 44×44px target inside the 390px frame; none overlaps another or the breadcrumb, the breadcrumb keeps a readable share of the row, and the header never scrolls. */
+const assertPhoneHeaderFits = async (canvasElement: HTMLElement) => {
   const header = within(canvasElement).getByTestId('thread-header')
   const frame = within(canvasElement).getByTestId('phone-frame').getBoundingClientRect()
-  const buttons = within(header).getAllByRole('button')
-  await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', 'Agent details'])
-  for (const button of buttons) {
-    const rect = button.getBoundingClientRect()
-    await expect(rect.width).toBeGreaterThanOrEqual(44)
-    await expect(rect.height).toBeGreaterThanOrEqual(44)
-    await expect(rect.left).toBeGreaterThanOrEqual(frame.left)
-    await expect(rect.right).toBeLessThanOrEqual(frame.right)
+  await expect(frame.width).toBe(390)
+  const controls = within(header).getAllByRole('button').map(button => button.getBoundingClientRect())
+  for (const a of controls) {
+    await expect(a.width).toBeGreaterThanOrEqual(44)
+    await expect(a.height).toBeGreaterThanOrEqual(44)
+    await expect(a.left).toBeGreaterThanOrEqual(frame.left)
+    await expect(a.right).toBeLessThanOrEqual(frame.right)
+    for (const b of controls) if (a !== b) await expect(a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top).toBe(false)
   }
+  const breadcrumb = within(header).getByRole('navigation', { name: 'Breadcrumb' })
+  await expect(breadcrumb).toBeVisible()
+  const crumb = breadcrumb.getBoundingClientRect()
+  await expect(crumb.width).toBeGreaterThan(0)
+  for (const control of controls) await expect(crumb.left < control.right && crumb.right > control.left).toBe(false)
+  // Four controls leave the breadcrumb at least a quarter of the frame; a labelled Terminal in the header would squeeze it below that.
+  await expect(crumb.width).toBeGreaterThanOrEqual(frame.width / 4)
+  await expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth)
+  return header
+}
+const phoneHeaderNames = ['Expand sidebar', 'Actions for Row projection', 'Conversation menu', 'Agent details']
+/**
+ * A 390px phone: the header keeps the breadcrumb and status beside the agent's actions, the conversation menu and
+ * Agent details, all 44px touch targets inside the header without overflowing it. The terminal toggle is not here:
+ * the phone workspace puts its labelled Terminal at the end of the tab row.
+ */
+export const NarrowPhone: Story = { tags: ['critical'], args: { narrow: true }, play: async ({ canvasElement }) => {
+  const header = await assertPhoneHeaderFits(canvasElement)
+  await expect(within(header).getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(phoneHeaderNames)
   await expect(within(header).getByRole('button', { name: 'Expand sidebar' })).toHaveAttribute('aria-expanded', 'false')
   await expect(within(header).getByRole('button', { name: 'Agent details' })).toHaveAttribute('aria-haspopup', 'dialog')
-  await expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth)
-  await expect(within(header).getByRole('navigation', { name: 'Breadcrumb' })).toBeVisible()
+  for (const name of ['Terminal', 'Toggle terminal drawer']) await expect(within(header).queryByRole('button', { name })).toBeNull()
 } }
 export const NarrowPhoneLight: Story = { ...NarrowPhone, args: { narrow: true, scheme: 'light' } }
 const styles = stylex.create({

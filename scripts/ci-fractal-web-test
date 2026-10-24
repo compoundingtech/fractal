@@ -52,16 +52,20 @@ def check(name, outcome, expected):
 # Match the generated client export graph and web lane inputs, not their Rust generators.
 detector_contract = runpy.run_path(str(detector))
 web_inputs = (
-    "clients/typescript/st3-client/index.ts",
-    "clients/typescript/st3-client/Models.generated.ts",
-    "clients/typescript/st3-client/Client.generated.ts",
-    "clients/typescript/st3-client/Schema.generated.ts",
-    "clients/typescript/st3-client/errors.ts",
-    "clients/typescript/st3-client/package.json",
-    "clients/typescript/st3-client/tsconfig.json",
-    "clients/typescript/st3-client/tsconfig.schema.json",
-    "clients/typescript/st3-client/types.test.ts",
-    "clients/typescript/st3-client/BUCK",
+    "packages/fractal-sdk/src/effect/mod.ts",
+    "packages/fractal-sdk/package.json",
+    "packages/fractal-sdk/tsconfig.json",
+    "packages/fractal-sdk/vitest.config.ts",
+    "clients/typescript/fractal-client/index.ts",
+    "clients/typescript/fractal-client/Models.generated.ts",
+    "clients/typescript/fractal-client/Client.generated.ts",
+    "clients/typescript/fractal-client/Schema.generated.ts",
+    "clients/typescript/fractal-client/errors.ts",
+    "clients/typescript/fractal-client/package.json",
+    "clients/typescript/fractal-client/tsconfig.json",
+    "clients/typescript/fractal-client/tsconfig.schema.json",
+    "clients/typescript/fractal-client/types.test.ts",
+    "clients/typescript/fractal-client/BUCK",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "fixtures/clients/device-signing-v1.json",
     "fixtures/clients/transcripts/example.json",
@@ -72,15 +76,25 @@ web_inputs = (
     "flake.lock",
     "scripts/ci-web-shell",
     "scripts/ci-web-shell-test",
+    # Read by the lane without a web source naming them (the frozen install, an SDK fixture, the web shell hook, the
+    # scenario privacy lane): a change to only these must still run the lane.
+    "apps/ios/package.json",
+    "docs/st3/client-v0/fixtures/timeline-conformance.json",
+    "pnpm-source-inputs.json",
+    "pnpm-source-inputs.json.genie.ts",
+    "scripts/check-public-repo",
 )
 non_web_inputs = (
-    "crates/st3-client/src/lib.rs",
-    "crates/st3-client-codegen/src/main.rs",
-    "crates/st3-schema/x.rs",
+    "crates/fractal-client/src/lib.rs",
+    "crates/fractal-client-codegen/src/main.rs",
+    "crates/fractal-schema/x.rs",
     "docs/st3/client-v0/x.md",
     "nested/megarepo.kdl",
     "nested/megarepo.lock",
     "nested/flake.lock",
+    "apps/ios/Sources/App.swift",
+    "apps/ios/package.json.bak",
+    "scripts/check-public-repo-test",
 )
 unexpected = []
 for paths, expected in ((web_inputs, True), (non_web_inputs, False)):
@@ -116,10 +130,10 @@ def guard_workspace_dependencies(manifest, seen=None):
 
 
 guard_workspace_dependencies(json.loads((root / "packages/fractal-ui/package.json").read_text()))
-workspace_fixture = json.loads('{"devDependencies":{"@smalltalk/st3-scenarios":"workspace:*"}}')
+workspace_fixture = json.loads('{"devDependencies":{"@fractal/scenarios":"workspace:*"}}')
 guard_workspace_dependencies(workspace_fixture)
-assert detector_contract["kit_paths"](["clients/typescript/st3-scenarios/src/index.ts"])
-assert detector_contract["kit_paths"](["clients/typescript/st3-client/index.ts"])
+assert detector_contract["kit_paths"](["clients/typescript/fractal-scenarios/src/index.ts"])
+assert detector_contract["kit_paths"](["clients/typescript/fractal-client/index.ts"])
 assert detector_contract["kit_paths"](["docs/st3/client-v0/schemas/client-v0.schema.json"])
 packages["@fixture/uncovered"] = ("packages/uncovered-fixture", {})
 try:
@@ -137,22 +151,22 @@ with tempfile.TemporaryDirectory() as scratch:
     git(repo, "init", "--quiet", "--initial-branch=main")
     git(repo, "config", "user.email", "ci@example.invalid")
     git(repo, "config", "user.name", "ci")
-    base = commit(repo, "base", write=["src/main.rs", "clients/typescript/st3-client/index.ts", "docs/guide.md"])
-    rust = commit(repo, "rust", write=["src/main.rs", "crates/st3-daemon/src/lib.rs"])
+    base = commit(repo, "base", write=["src/main.rs", "clients/typescript/fractal-client/index.ts", "docs/guide.md"])
+    rust = commit(repo, "rust", write=["src/main.rs", "crates/fractal-daemon/src/lib.rs"])
     git(repo, "checkout", "--quiet", "-b", "web", base)
-    client = commit(repo, "client", write=["clients/typescript/st3-client/index.ts"])
+    client = commit(repo, "client", write=["clients/typescript/fractal-client/index.ts"])
     git(repo, "checkout", "--quiet", "-b", "schema", base)
-    schema = commit(repo, "schema", write=["crates/st3-schema/src/lib.rs"])
+    schema = commit(repo, "schema", write=["crates/fractal-schema/src/lib.rs"])
     git(repo, "checkout", "--quiet", "-b", "lock", base)
     lock = commit(repo, "lock", write=["pnpm-lock.yaml"])
     git(repo, "checkout", "--quiet", "-b", "rename-out", base)
-    renamed_out = commit(repo, "rename out", move=[("clients/typescript/st3-client/index.ts", "archive/index.ts")])
+    renamed_out = commit(repo, "rename out", move=[("clients/typescript/fractal-client/index.ts", "archive/index.ts")])
     git(repo, "checkout", "--quiet", "-b", "rename-in", base)
     renamed_in = commit(repo, "rename in", move=[("docs/guide.md", "apps/fractal-web/README.md")])
     git(repo, "checkout", "--quiet", "-b", "delete", base)
-    deleted = commit(repo, "delete", remove=["clients/typescript/st3-client/index.ts"])
+    deleted = commit(repo, "delete", remove=["clients/typescript/fractal-client/index.ts"])
     git(repo, "checkout", "--quiet", "-b", "nested", base)
-    nested = commit(repo, "nested lookalike", write=["crates/st3/package.json", "docs/BUCK.md"])
+    nested = commit(repo, "nested lookalike", write=["crates/fractal/package.json", "docs/BUCK.md"])
     git(repo, "checkout", "--quiet", "-b", "newline", base)
     newline = commit(repo, "newline path", write=["apps/fractal-web/component\nname.ts"])
     git(repo, "checkout", "--quiet", "-b", "app", base)
@@ -167,7 +181,7 @@ with tempfile.TemporaryDirectory() as scratch:
     git(repo, "checkout", "--quiet", "-b", "workflow", base)
     workflow_change = commit(repo, "workflow", write=[".github/workflows/workspace-ci.ts"])
     git(repo, "checkout", "--quiet", "-b", "workspace-dependency", base)
-    dependency_change = commit(repo, "workspace dependency", write=["clients/typescript/st3-scenarios/src/index.ts"])
+    dependency_change = commit(repo, "workspace dependency", write=["clients/typescript/fractal-scenarios/src/index.ts"])
     # main moved on with a web change; a Rust-only PR based on the older main stays Rust-only.
     git(repo, "checkout", "--quiet", "main")
     advanced = commit(repo, "main web", write=["pnpm-workspace.yaml"])
@@ -248,7 +262,7 @@ blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", jobs))
 changes, execution, gate_job = blocks["fractal-web-changes"], blocks["fractal-web-execution"], blocks["fractal-web"]
 for pattern in detector_contract["PATTERNS"]:
     assert f'"{pattern}"' in changes, f"generated detector omits {pattern}"
-for pattern in ("crates/st3-client*/**", "crates/st3-schema/**", "docs/st3/client-v0/**"):
+for pattern in ("crates/fractal-client*/**", "crates/fractal-schema/**", "docs/st3/client-v0/**"):
     assert f'"{pattern}"' not in changes, f"generated detector retains broad input {pattern}"
 for block in (changes, execution, gate_job):
     assert "runs-on: ubuntu-latest" in block
@@ -263,7 +277,7 @@ assert "KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' 
 assert "KIT_PLAY_MAX_SECONDS: ${{ github.event_name == 'pull_request' && '100' || '' }}" in execution, "the per-commit budget"
 assert "APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}" in execution, "PRs run the related app tests, merge groups all"
 assert "github.event.pull_request.draft == false" in changes and "(success())" in changes and "actions/checkout" not in changes, "ready PR detection runs on embedded source"
-assert "needs: [fractal-web-changes, genie-freshness]" in execution
+assert "needs: [fractal-web-changes, genie-freshness, evidence-gate-fractal-web]" in execution
 assert "needs.fractal-web-changes.outputs.relevant == 'true'" in execution
 assert "needs.genie-freshness.result == 'success'" in execution
 assert "bash scripts/ci-web-shell run bash scripts/ci-fractal-web" in execution, "the lanes run in the cached web shell"
@@ -271,6 +285,12 @@ assert "nix develop .#web -c" in (root / "scripts/ci-web-shell").read_text(), "a
 assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in execution
 assert execution.index("kernel.apparmor_restrict_unprivileged_userns=0") < execution.index("bash scripts/ci-web-shell run bash scripts/ci-fractal-web")
 assert workflow.count("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0") == 1, "only the Buck TypeScript execution job changes host namespace policy"
+# The strict Nix sandbox fails the installer on runners that forbid unprivileged user namespaces
+# (every daily lane failed at Install Nix on 10-20): only a job that lifts the restriction may keep it.
+for generated in sorted((root / ".github/workflows").glob("*.yml")):
+    for name, job in re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)", generated.read_text(), re.MULTILINE | re.DOTALL):
+        if "sandbox-fallback = false" in job:
+            assert "kernel.apparmor_restrict_unprivileged_userns=0" in job, f"{generated.name} {name}: strict Nix sandbox without enabling user namespaces"
 assert "actions/cache/restore@" in execution
 # Execution only restores: PR-scoped shell copies consume repository quota but
 # cannot warm merge groups. Protected-main upkeep remains the sole shell writer.
@@ -280,10 +300,13 @@ upkeep = (root / ".github/workflows/main-upkeep.yml").read_text()
 assert "name: Save the web shell closure" in upkeep
 assert "name: Save the pnpm store" in upkeep
 assert "bash scripts/ci-web-shell fill" in upkeep
-assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution]" in gate_job
+assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution, evidence-gate-fractal-web]" in gate_job
 assert "fractal-web" not in blocks["linux-gate"], "Rust-only gates never wait for web execution"
 settings = (root / ".github/repo-settings.json").read_text()
-assert '"fractal-web"' not in settings, "fractal-web becomes required only after PR and queue runs emit it"
+required = [check["context"] for ruleset in json.loads(settings)["rulesets"] if ruleset["name"] == "main"
+            for rule in ruleset["rules"] if rule["type"] == "required_status_checks"
+            for check in rule["parameters"]["required_status_checks"]]
+assert "fractal-web" in required, "fractal-web is a required check on main"
 print("passed: generated jobs are unfiltered, hosted, bounded and fail closed")
 
 client = blocks["typescript-client"]
@@ -293,7 +316,7 @@ assert "corepack enable" not in client, "Nix owns the client job's pnpm toolchai
 print("passed: client install and checks use the same Nix web toolchain")
 
 # The shared store renderer emits product views recursively; every workspace endpoint must exist.
-for package in ("st3-client", "st3-views"):
+for package in ("fractal-client", "fractal-views"):
     package_path = f"clients/typescript/{package}"
     source = (root / package_path / "BUCK").read_text()
     trees = {}
@@ -324,9 +347,10 @@ lanes = (root / "scripts/ci-fractal-web").read_text()
 assert lanes.index("lane \"Frozen install\" pnpm install --frozen-lockfile") < lanes.index("run_streams stream_scenarios"), "the install runs before the parallel streams"
 assert lanes.index("python3 scripts/ci-fractal-web-licenses --check") < lanes.index("buck2 build //:typecheck") < lanes.index("\nlane \"Toolchain and Buck root\"")
 print("passed: license coverage and manifest guards are wired into the generated CI lanes")
-assert 'lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.config.ts' in lanes
-assert 'lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.perf.config.ts' in lanes
-sdk = root / "apps/fractal-web/packages/st3-sdk"
+assert 'lane "SDK typecheck" pnpm --filter @fractal/sdk typecheck' in lanes
+assert 'lane "SDK unit tests" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.config.ts' in lanes
+assert 'lane "SDK frame CPU budgets" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.perf.config.ts' in lanes
+sdk = root / "packages/fractal-sdk"
 assert "'src/**/*.perf.test.ts'" in (sdk / "vitest.config.ts").read_text()
 assert "include: ['src/**/*.perf.test.ts']" in (sdk / "vitest.perf.config.ts").read_text()
 print("passed: deterministic SDK tests and isolated frame CPU budgets have separate lanes")
@@ -469,16 +493,18 @@ assert "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*" in ga
 assert "actions/upload-artifact@v4" in execution
 assert "actions/download-artifact@v4" in gate_job
 assert "kit-play-shards.mjs" in gate_job
-assert gate_job.count(f"if: {sharded} && needs.fractal-web-changes.outputs.relevant == 'true'") == 3, "pull requests skip the shard aggregation"
+assert gate_job.count(f"if: {sharded} && needs.fractal-web-changes.outputs.relevant == 'true'") == 1, "pull requests skip exact shard aggregation, not cost publication"
+assert "kit-play-cost.mjs" in gate_job
+assert "id: cost-receipts" in gate_job
 print("passed: merge-group shards preserve receipts and the semantic gate validates complete coverage")
 
 # The kit module graph check: every bundled repository file must be a declared kit input.
 graph_check = root / "scripts/ci-fractal-web-kit-graph"
 detector_kit_paths = runpy.run_path(str(detector))["kit_paths"]
 assert detector_kit_paths(["apps/fractal-web/src/changelog/seen.ts"]), "changelog files the kit renders select kit plays"
-roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "apps/fractal-web/packages/st3-sdk/src/effect/resourceDecode.ts"]
+roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "packages/fractal-sdk/src/effect/resourceDecode.ts"]
 assert detector_kit_paths(roster_story) == roster_story, "the roster decode story bundles the roster and the SDK decode, so they select kit plays"
-workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/st3-views/time.ts"]
+workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
 with tempfile.TemporaryDirectory() as scratch:
@@ -488,8 +514,9 @@ with tempfile.TemporaryDirectory() as scratch:
         return subprocess.run([str(graph_check), str(path)], capture_output=True, text=True)
     covered = graph("./src/Composer.stories.tsx", "./.storybook/preview.ts?v=1", "./../../node_modules/react/index.js",
                     "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx",
+                    "./../../apps/fractal-web/src/telemetry/inputPaint.ts",
                     "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
-    assert covered.returncode == 0 and "4 repository files, 0 outside" in covered.stdout, covered
+    assert covered.returncode == 0 and "5 repository files, 0 outside" in covered.stdout, covered
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):
