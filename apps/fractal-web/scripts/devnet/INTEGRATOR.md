@@ -238,7 +238,7 @@ dangling production pointer; operator recovery must reconcile that state.
 The helper uses `gate-slot` admission by default; `FRACTAL_BUILD_ADMISSION=fallback`
 explicitly reuses a caller's admission timeout and builds with `nice -n 19`.
 The deployment supplies Git, GNU coreutils, `flock`, Python and the private
-build entry point. Node comes from the candidate web shell inside the sandbox.
+build entry point. Node comes from the trusted launcher's web shell inside the sandbox.
 These scripts do not provision the private build code.
 
 During an operator-approved cache rollout, any `snapshot-failed` or `build-failed`
@@ -328,12 +328,13 @@ and availability surface; no agent credentials may be stored there.
 
 ### Known gaps
 
-Candidate flake evaluation occurs outside bubblewrap with pure evaluation and a
-clean bootstrap environment. Any build output defined by that flake is realized
-by the trusted Nix daemon; those builds use the Nix build sandbox. The candidate
-never receives a daemon socket, including when the deployment account is a
-trusted Nix user. This is a residual Nix evaluation/build trust boundary, not a
-claim that arbitrary candidate flake realization is performed by bubblewrap.
+Only trusted launcher flake evaluation and pinned tool realization occur outside
+bubblewrap, with pure evaluation and a clean bootstrap environment. Nix may still
+acquire inputs with the deployment account's permissions, which is why candidate
+flakes and candidate-selected tool pins must never enter this host-side path.
+The Nix daemon realizes trusted tool outputs using its build sandbox. The
+candidate never receives its socket, including when the deployment account is a
+trusted Nix user.
 
 The production server runtime and follower are not changed by this build boundary.
 The deployment still owns private overlay review, production credentials and
