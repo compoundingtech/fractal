@@ -142,9 +142,13 @@ For a repository's owner, read `ROOT/gh-ci/OWNER.token` and `OWNER.json` for
 metadata, branches/contents, PRs/reviews, checks/actions and open-PR GraphQL.
 Use `ROOT/github-ledger/OWNER.token` and `OWNER.json` for issue lists, issue
 comments/excerpts, issue watch preflight and Issue identity GraphQL. PR watch
-preflight and review excerpts use gh-ci. Remembered opaque node IDs are partitioned
-by their recorded `ItemIdentity.pull`, never guessed from their bytes, and each
-partition gets its own minimal identity query and app authorization.
+preflight and review excerpts use gh-ci. When either installation is selected,
+remembered opaque node IDs are partitioned by their recorded `ItemIdentity.pull`,
+never guessed from their bytes, and each partition gets its own minimal identity
+query and authorization. PAT-only batches retain the prior single mixed Issue/PR
+identity query and request count. Unconfigured local PAT observations also retain
+their existing repository-detail cache identity; installation and profile scopes
+remain qualified separately.
 
 Token files must be owner-owned regular mode0600 files, containing only the
 bare token with no whitespace or newline. Sidecars contain numeric

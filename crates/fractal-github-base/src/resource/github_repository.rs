@@ -655,6 +655,33 @@ const RESOLVED_PULLS: &str = "query($ids: [ID!]!) {
   }
 }";
 
+// A PAT can resolve both identity kinds in one page. Preserve that request count
+// when no installation is selected, including the unconfigured-source default.
+const RESOLVED_ITEMS: &str = "query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    id
+    ... on Issue {
+      number url state stateReason updatedAt
+      timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
+        createdAt actor { login }
+        closer {
+          ... on PullRequest { url }
+          ... on Commit { url }
+        }
+      } } }
+    }
+    ... on PullRequest {
+      number url state updatedAt merged mergedAt mergedBy { login } mergeCommit { oid url }
+      timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
+        createdAt closer {
+          ... on PullRequest { url }
+          ... on Commit { url }
+        }
+      } } }
+    }
+  }
+}";
+
 /// A check that a base branch requires before merging: its name, and the app that must report it
 /// when the rule names one.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1652,7 +1679,11 @@ async fn open_pull_requests(
 ) -> Result<RepositoryDetails> {
     let read_token = crate::github_http::read_auth(owner, "gh-ci", token);
     let issue_token = crate::github_http::read_auth(owner, "github-ledger", token);
-    let key = format!("{api_base} {locator} {} {}", read_token.cache_principal(), issue_token.cache_principal());
+    let key = if read_token.cache_principal() == "pat" && issue_token.cache_principal() == "pat" {
+        format!("{api_base} {locator}")
+    } else {
+        format!("{api_base} {locator} {} {}", read_token.cache_principal(), issue_token.cache_principal())
+    };
     let previous = {
         let mut checks = pull_request_checks()
             .lock()
@@ -1744,8 +1775,11 @@ async fn open_pull_requests(
             .skip(identities_read)
             .take(100)
             .collect::<Vec<_>>();
-        for pull in [false, true] {
-            let ids = ids.iter().filter(|(_, is_pull)| *is_pull == pull)
+        let partitions: &[Option<bool>] = if matches!(read_token, GithubAuth::Read { .. }) || matches!(issue_token, GithubAuth::Read { .. }) {
+            &[Some(false), Some(true)]
+        } else { &[None] };
+        for partition in partitions {
+            let ids = ids.iter().filter(|(_, is_pull)| partition.is_none_or(|pull| *is_pull == pull))
                 .map(|(id, _)| id).collect::<Vec<_>>();
             if ids.is_empty() { continue; }
             anyhow::ensure!(
@@ -1753,7 +1787,11 @@ async fn open_pull_requests(
                 "the GitHub pull request observation exceeded {PULL_REQUEST_CALL_LIMIT} GraphQL calls"
             );
             calls += 1;
-            let (auth, query) = if pull { (&read_token, RESOLVED_PULLS) } else { (&issue_token, RESOLVED_ISSUES) };
+            let (auth, query) = match partition {
+                Some(true) => (&read_token, RESOLVED_PULLS),
+                Some(false) => (&issue_token, RESOLVED_ISSUES),
+                None => (&read_token, RESOLVED_ITEMS),
+            };
             let resolved_data = github_graphql(client, api_base, auth, query, json!({"ids": ids})).await?;
             resolved.extend(resolved_data.get("nodes").and_then(Value::as_array).into_iter().flatten().cloned());
         }
@@ -2204,6 +2242,31 @@ mod tests {
                 {"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"},
             ]}}}}]},
         })
+    }
+
+    #[tokio::test]
+    async fn pat_only_mixed_opaque_identities_keep_one_query_and_legacy_cache_identity() {
+        use crate::github_http::app_read::tests::server;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = calls.clone();
+        let fixture = server(move |authorization, _, body| {
+            recorded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(authorization, "Bearer fixture-pat");
+            assert_eq!(body["query"], RESOLVED_ITEMS);
+            assert_eq!(body["variables"]["ids"], json!(["opaque-issue", "opaque-pull"]));
+            (reqwest::StatusCode::OK, json!({"data":{"nodes":[
+                {"id":"opaque-issue","state":"CLOSED"}, {"id":"opaque-pull","state":"MERGED"}
+            ]}}))
+        }).await;
+        let details = open_pull_requests(&reqwest::Client::new(), &fixture.base,
+            &GithubAuth::test("fixture-pat"), Duration::ZERO, "pat-fixture/repo",
+            ("pat-fixture", "repo"), true, true, &BTreeSet::new(), false,
+            &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        assert_eq!(details.identities_read, 2);
+        assert_eq!(details.resolved.len(), 2);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&format!("{} pat-fixture/repo", fixture.base)));
     }
 
     #[tokio::test]
