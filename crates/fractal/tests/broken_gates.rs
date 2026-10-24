@@ -33,6 +33,12 @@ impl Daemon {
         ] {
             executable(&bin.join(name), source);
         }
+        // These tests check what gates decide, not how passes are spaced: at the default 30
+        // passes a minute each round waited out seconds of spacing. The reconcile unit tests use
+        // the same fastest supported cap; start spacing is tested on its own.
+        let config = root.join("config/st3/config.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "[reconcile]\nmax_passes_per_minute = 600\n").unwrap();
         let log = File::create(root.join("daemon.log")).unwrap();
         let child = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
             .env_clear()

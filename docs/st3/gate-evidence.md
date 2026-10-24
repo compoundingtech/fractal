@@ -1361,7 +1361,9 @@ the record it used.
 
 `scripts/st-test` runs the whole per-PR suite: each required check that has a local command (today `typescript-client`, `genie-freshness`
 and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and means the same) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
-records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
+records the exit code and output digest. The checks that do not build (`typescript-client`, `genie-freshness`) run alongside
+`linux-gate`, one after another in a lane of their own, as CI runs them on runners of their own: their output is kept and printed after
+linux-gate's, never interleaved, and the summary lists every check as before (`ST_EVIDENCE_SERIAL=1` runs them one after another). The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a clean
@@ -1406,7 +1408,8 @@ the next `nix develop` from a tree that has the new `scripts/install-git-hooks`,
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not).
 The check that builds the Rust workspace (`linux-gate`) builds in one cargo target per pool tree kept between runs,
 `~/.cache/st-test/<hash>/target-N` (outside the tree, so the cleaning keeps it; `ST_EVIDENCE_TARGET=PATH` names one shared target for all
-trees instead; `off` builds in the tree itself; a `CARGO_TARGET_DIR` you set is left alone), so a run does not start cold: a tree's path
+trees instead, which one run at a time builds and tests in: its lock is exclusive for the whole run, because two runs on different
+trees sharing it once tested each other's binaries; `off` builds in the tree itself; a `CARGO_TARGET_DIR` you set is left alone), so a run does not start cold: a tree's path
 is the same every run, so the dependencies, build scripts and unchanged workspace crates are reused.
 Operations' terms: it is removed before a run once it passes 25 GB (the run holds the tree's lock, so nobody else uses it), it is never
 pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
@@ -1468,6 +1471,17 @@ archive` with CI's own filter, and the standalone production gateway, refused wh
 builds and runs the transport isolation VM driver with that archive and the sekrets VM driver with that gateway, with `TMPDIR` in the
 run's scratch. Its lane (`.st/required-lanes.json`) declares `.config/nextest.toml`, `.st`, `flake.lock`, `flake.nix`,
 `nix/sekrets-vm.nix`, `nix/transport-isolation-vm.nix` and `scripts`. A machine without a usable `/dev/kvm` fails it.
+
+**The web lane (`scripts/ci-local-web`).** `fractal-web`'s local command is `nix develop .#web -c bash scripts/ci-local-web`, which runs
+what CI's fractal-web-execution job runs (`scripts/ci-web-shell-test`, then `scripts/ci-fractal-web`) as ONE shard that covers every kit
+play and app test (`KIT_INPUTS=true`, `KIT_SHARD_COUNT=1`, `KIT_PLAY_SET=all`, a11y on, no per-play cap, `APP_TEST_SET=all`): more than a
+pull request's own run, and with no base to compare with. It runs in a home of its own on the account's disk, with a CI runner's umask,
+no seat or credential variables and none of the account's tool wrappers on `PATH`; the pnpm store is kept, and Buck's file watcher is the
+host's Watchman service, named by its socket. The note records `kit_shard_count=1`, `shard_results=0=success`, `kit_inputs=true`,
+`kit_play_set=all`, `app_test_set=all` and `event_name=pull_request`, so the wrapper kind's shard-count and input-order rules apply to it
+as to CI's aggregate note; its host and agent levels admit it for `pull_request` (`by_level`, `lane: true`). st-test asks the base's own
+`scripts/ci-fractal-web-changes` whether any web input changed since HEAD's merge base with the base: when none did, CI does not run the
+lane, so `--status` reads `not relevant` (covered) and a run skips it, neither a failure nor a note.
 
 **Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
 is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory,

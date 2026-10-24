@@ -1763,10 +1763,17 @@ fn seed_1_converges_on_a_real_disk() {
 }
 
 /// The deliberate bug must fail the first runs it happens in, not just some run. Seeds run four
-/// at a time, in order, until two ran into the bug.
-fn the_checks_catch(sabotage: Sabotage) {
+/// at a time, in order, until two ran into the bug. `first` are seeds known to run into it, tried
+/// before the others: if a change moves the bug to other seeds, the later ones still run, so that
+/// costs time, not coverage.
+fn the_checks_catch(sabotage: Sabotage, first: &[u64]) {
+    let order = first
+        .iter()
+        .copied()
+        .chain(SEEDS.iter().copied().filter(|seed| !first.contains(seed)))
+        .collect::<Vec<_>>();
     let mut happened = 0;
-    for seeds in SEEDS.chunks(4) {
+    for seeds in order.chunks(4) {
         let outcomes = std::thread::scope(|scope| {
             let runs = seeds
                 .iter()
@@ -1794,12 +1801,13 @@ fn the_checks_catch(sabotage: Sabotage) {
 
 #[test]
 fn the_checks_catch_a_trim_that_forgets_its_tombstones() {
-    the_checks_catch(Sabotage::ForgetTombstones);
+    the_checks_catch(Sabotage::ForgetTombstones, &[]);
 }
 
 #[test]
 fn the_checks_catch_a_partial_adoption() {
-    the_checks_catch(Sabotage::PartialAdoption);
+    // Seeds 1 and 13 run into it, so both fit in the first four instead of two rounds of four.
+    the_checks_catch(Sabotage::PartialAdoption, &[1, 13]);
 }
 
 /// A seed runs the same however fast it runs, so the seed a failure prints reproduces it.
