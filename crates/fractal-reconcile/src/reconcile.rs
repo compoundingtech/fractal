@@ -34501,14 +34501,14 @@ observer "repo" {
         ).with_resource_provider(Arc::new(RateLimitedResourceProvider {
             calls: calls.clone(), retry_at_unix_ms: reset,
         })).with_event_notify(events);
-        reconciler.reconcile_once().unwrap();
+        reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
         tokio::time::timeout(Duration::from_secs(2), changed.changed()).await.unwrap().unwrap();
         assert_eq!(
             reconciler.observer_deadlines.lock().unwrap_or_else(PoisonError::into_inner)[&key],
             reset,
         );
         assert!(reconciler.observer_intervals.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
-        reconciler.reconcile_once().unwrap();
+        reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -34819,7 +34819,9 @@ observer "repo" {
             let old = reconciler.observer_deadlines.lock().unwrap().get(&key).copied();
             let expected = calls.load(Ordering::SeqCst) + 1;
             let before = now_ms();
-            reconciler.reconcile_once().unwrap();
+            // This scheduler fixture has no live subscription; the full pass would
+            // correctly stop an unwatched standing observer before it can poll.
+            reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let deadline = reconciler.observer_deadlines.lock().unwrap().get(&key).copied();
