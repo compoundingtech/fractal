@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Legacy runtime-start repair can positively exclude protected user-manager, logind-session, and pre-operation processes without reading their environment",
+  "replay": {"status": "none", "detail": "No replay or ledger edits."},
+  "schema": {"status": "none", "detail": "No database or replicated claim schema changes."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Native repair evidence reports excluded processes with PID, comm, cgroup, and reason. These diagnostics alone do not change item IDs or filtered/unfiltered approval tokens; all physical closure predicates remain fenced."},
+  "downtime": {"status": "none", "detail": "Only the normal daemon rollout is required."},
+  "manual": {"status": "none", "detail": "Continue reviewing a fresh subject/class-filtered repair dry-run and applying its exact token. Unreadable processes without positive cgroup or conservative creation-time exclusion still refuse repair."},
+  "recovery": {"status": "none", "detail": "No process is signaled or attached, and no PTY row or native session is changed."}
+}

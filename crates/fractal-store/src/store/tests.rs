@@ -116,6 +116,107 @@ fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
 }
 
 #[test]
+fn legacy_runtime_repair_diagnostic_churn_preserves_approvals_and_receipts() {
+    for filtered in [false, true] {
+        let store = Store::open_memory("node").unwrap();
+        let absent = legacy_repair_fixture(&store);
+        let mut evidence = absent.clone();
+        evidence["excluded_processes"] = json!([{
+            "pid": 101, "comm": "sshd", "cgroup": "/system.slice/ssh.service",
+            "reason": "unreadable environment; unrelated system service",
+        }]);
+        let mut fresh = evidence.clone();
+        fresh["excluded_processes"][0]["pid"] = json!(202);
+        fresh["excluded_processes"][0]["comm"] = json!("sshd-session");
+        let subjects = if filtered { vec!["agent/example-legacy".to_owned()] } else { vec![] };
+        let classes = if filtered { vec!["revoked-legacy-runtime-start".to_owned()] } else { vec![] };
+        let plan_for = |captures: &[Value]| {
+            store.operational_repair_plan_with_legacy_starts_and_filter(
+                captures, &subjects, &classes,
+            ).unwrap()
+        };
+        let baseline = plan_for(std::slice::from_ref(&absent));
+        let plan = plan_for(std::slice::from_ref(&evidence));
+        assert_eq!(plan.token, baseline.token);
+        assert_eq!(plan.items[0].id, baseline.items[0].id);
+        assert_eq!(plan.items[0].details["native_evidence"], evidence);
+        for captures in [
+            vec![fresh.clone()],
+            vec![evidence.clone(), fresh.clone(), absent.clone()],
+            vec![fresh.clone(), evidence.clone()],
+        ] {
+            let recaptured = plan_for(&captures);
+            assert_eq!(recaptured.items.len(), 1);
+            assert_eq!(recaptured.items[0].id, plan.items[0].id);
+            assert_eq!(recaptured.token, plan.token);
+            assert_eq!(recaptured.items[0].details["native_evidence"], captures[0]);
+        }
+
+        // Only the top-level exclusions are diagnostic. Every other physical
+        // field, including similarly named nested fields, remains fenced.
+        for changed in [
+            {
+                let mut changed = fresh.clone();
+                changed["native_fixture"]["capture"] = json!("changed");
+                changed
+            },
+            {
+                let mut changed = fresh.clone();
+                changed["native_fixture"]["excluded_processes"] = json!([303]);
+                changed
+            },
+        ] {
+            assert_ne!(plan_for(std::slice::from_ref(&changed)).token, plan.token);
+            for captures in [vec![changed.clone()], vec![fresh.clone(), changed]] {
+                assert_eq!(store.apply_operational_repair_with_legacy_starts(
+                    &plan.token, &captures,
+                ).unwrap_err().code, "stale-repair-plan");
+            }
+        }
+
+        let result = store.apply_operational_repair_with_legacy_starts(
+            &plan.token, &[fresh.clone(), evidence],
+        ).unwrap();
+        assert_eq!(result.applied, 1);
+        let connection = store.readers.get();
+        let operation = connection.query_row(
+            "SELECT * FROM local_runtime_starts WHERE id='legacy-op'", [], runtime_starts::read,
+        ).unwrap();
+        assert_eq!(operation.result.unwrap()["closure_proof"]["witness"]["native_evidence"], fresh);
+        let receipt: String = connection.query_row(
+            "SELECT body FROM claims WHERE id=?1 AND kind='repair.applied'",
+            [result.receipt_claim_id.unwrap()], |row| row.get(0),
+        ).unwrap();
+        let receipt: Value = serde_json::from_str(&receipt).unwrap();
+        let closures: Value = serde_json::from_str(
+            receipt["fields"]["reason"].as_str().unwrap()
+                .split_once("; legacy runtime start closures: ").unwrap().1,
+        ).unwrap();
+        assert_eq!(closures[0]["native_evidence"], fresh);
+    }
+}
+
+#[test]
+fn legacy_runtime_repair_without_diagnostics_preserves_existing_hashes() {
+    let store = Store::open_memory("node").unwrap();
+    let evidence = legacy_repair_fixture(&store);
+    let plan = store.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap();
+    let item = &plan.items[0];
+    assert_eq!(item.id, format!("repair-item/{}", canonical_hash(&(
+        "st3.operational-repair-item.v0", &item.class, &item.subject,
+        &item.affected_subjects, &item.reason, &item.details,
+    )).unwrap()));
+    assert_eq!(plan.token, format!("orpv0:{}", canonical_hash(&(
+        "st3.operational-repair.v0", &plan.items,
+    )).unwrap()));
+    let filter = OperationalRepairFilter::new(&[item.subject.clone()], &[item.class.clone()]);
+    let expected = format!("orpv0:{}:{}", canonical_hash(&(
+        "st3.operational-repair-filter.v0", &filter, &plan.items,
+    )).unwrap(), hex::encode(serde_json::to_vec(&filter).unwrap()));
+    assert_eq!(filter_repair_plan(plan, &filter).unwrap().token, expected);
+}
+
+#[test]
 fn legacy_runtime_repair_rejects_ineligible_local_rows_and_evidence() {
     for (column, value) in [
         ("revoked_by", Value::Null),
