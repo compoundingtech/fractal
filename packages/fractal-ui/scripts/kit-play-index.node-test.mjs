@@ -112,6 +112,7 @@ test('the per-commit set rejects a listed story that is not critical, so a renam
 
 const benchmarkId = 'fractal-ui-sidebar-tree--filter-keystroke-to-paint'
 const functionalId = 'fractal-ui-sidebar-tree--filter-behavior'
+const freezeId = 'fractal-narrow-layout--sidebar-drag-unmount-cleanup'
 const aliasIds = [
   'fractal-ui-transcript--no-green-all-states-light',
   'fractal-ui-composer--footer-width-budget-light',
@@ -125,6 +126,7 @@ test('the strict case set measures the filter once, keeps functional corners, an
     ['fractal-ui-transcript--no-green-all-states-light', []],
     ['fractal-ui-composer--footer-width-budget-light', []],
     ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
+    [freezeId, [['dark', 1100], ['light', 1100]]],
   ])
   const omittedBenchmarkCases = [
     { id: 'fractal-ui-sidebar-tree--filter-keystroke-to-paint', scheme: 'dark', width: 440 },
@@ -147,8 +149,13 @@ test('the strict case set measures the filter once, keeps functional corners, an
   assert.deepEqual(commit.ids, [functionalId])
   assert.deepEqual(commit.omittedStories, aliasIds)
 })
+test('the intermediate-width resize regression runs at its declared real viewport in both gate sets', () => {
+  const expected = [{ id: freezeId, scheme: 'dark', width: 1100 }, { id: freezeId, scheme: 'light', width: 1100 }]
+  assert.deepEqual(fullCases([freezeId]), expected)
+  assert.deepEqual(commitSetCases([freezeId], { mergeOnlyIds: [], bothWidthsIds: [] }).cases, expected)
+})
 test('strict case policy rejects unknown stories and aliases without a kept same-source base', () => {
-  const ids = [benchmarkId, ...aliasIds, ...baseIds]
+  const ids = [benchmarkId, functionalId, freezeId, ...aliasIds, ...baseIds]
   const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
   assert.doesNotThrow(() => validateCaseOverrides(entries))
   assert.throws(() => validateCaseOverrides(entries, new Map([['kit--unknown', []]])), /not a known story/)
@@ -222,7 +229,7 @@ test('the gate receipt declares the intended benchmark corner and alias omission
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
     await mkdir(build)
-    const ids = [benchmarkId, functionalId, ...aliasIds, ...baseIds]
+    const ids = [benchmarkId, functionalId, freezeId, ...aliasIds, ...baseIds]
     await writeFile(join(build, 'index.json'), JSON.stringify({ entries: Object.fromEntries(ids.map(id => [id, { ...story, id }])) }))
     const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
       env: { ...process.env, KIT_PLAY_SET: 'all', PLAYWRIGHT_MODULE: 'must-not-import-browser-for-case-contract' },
@@ -234,8 +241,8 @@ test('the gate receipt declares the intended benchmark corner and alias omission
     })
     assert.equal(code, 1)
     const receipt = JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8'))
-    assert.equal(receipt.expectedCases, 13)
-    assert.equal(receipt.omitted.cases, 11)
+    assert.equal(receipt.expectedCases, 15)
+    assert.equal(receipt.omitted.cases, 13)
     assert.deepEqual(receipt.omitted.stories, aliasIds.toSorted())
     assert.deepEqual(receipt.caseOverrides[benchmarkId], [['dark', 1440]])
     assert.match(receipt.fatalError, /must-not-import-browser-for-case-contract/)

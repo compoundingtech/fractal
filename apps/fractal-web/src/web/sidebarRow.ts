@@ -7,6 +7,7 @@ import type { AgentSubagent } from '../data/source.ts'
 import type { Attention, Mission } from '@fractal/client/schema'
 import * as Option from 'effect/Option'
 import { isWaitingForAnswer } from '../data/attention.ts'
+import { contextOccupancy } from '../data/contextOccupancy.ts'
 
 const missionSlug = (id: string): string => id.split('/').at(-1) ?? id
 
@@ -96,10 +97,12 @@ export const sidebarSubagentRow = ({ parent, child, stale }: {
 })
 
 /** Presentation of one actual roster observation. A stale roster retains its last-observed status. */
-export const sidebarRow = ({ agent, stale, needsMe, missions, attention, missionInfo, missionUnavailable = false }: {
+export const sidebarRow = ({ agent, stale, needsMe, missions, attention, missionInfo, missionUnavailable = false, now = Date.now() }: {
   readonly agent: Agent; readonly stale: boolean; readonly needsMe?: boolean
   readonly missions?: readonly Mission[]; readonly attention?: readonly Attention[]
   readonly missionInfo?: SidebarMissionInfo; readonly missionUnavailable?: boolean
+  /** Only fences out future-dated occupancy; rows stay off the ticking clock, which reaches time leaves. */
+  readonly now?: number
 }): SidebarAgentRowData => {
   const status: SidebarAgentStatus = agent.state === 'retired' ? 'retired'
     : agent.state === 'suspended' ? 'suspended'
@@ -118,6 +121,7 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
     statusLabel: stale ? 'Last verified · ' + statusLabel : statusLabel,
     freshness: stale ? 'stale' : 'live', description: agent.description, harness: agent.harness,
     terminal: agent.terminal || undefined, mission: agent.mission, lastActivityAt, statusSince,
+    context: contextOccupancy({ usage: agent.usage, now, observedAfter: agent.contextObservedAfter }),
     missionContext: missionUnavailable && (agent.currentWork?.[0]?.missionId ?? agent.mission) !== undefined
       ? { _tag: 'Unavailable' } : sidebarMissionContext({ agent, missions, attention }),
     missionInfo,

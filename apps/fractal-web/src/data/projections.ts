@@ -330,6 +330,7 @@ export const createProjections = (): {
   let previousFleet: Fleet | undefined
   let previousViews: MissionView[] = []
   let previousSubjects: SubjectSummary[] = []
+  const lifecycles = new Map<string, { readonly incarnationId: string | undefined; readonly contextObservedAfter: number | undefined; readonly contextAt: number | undefined }>()
   return {
     fleetFromAgents: (rows) => {
       if (rows === previousRows && previousFleet !== undefined) return previousFleet
@@ -341,15 +342,17 @@ export const createProjections = (): {
           agents.set(row, candidate)
         }
         const previous = previousAgents.get(row.id)
-        // Cumulative usage can retain old occupancy across incarnations. Even a cached native
-        // DTO must inherit the transition fence; only strictly newer evidence restores context.
+        // UsageSummary spans incarnations; an unchanged occupancy timestamp cannot prove a
+        // new incarnation's context. A strictly newer reading restores the reported claim.
+        // The lifecycle is per ref, not per fleet: a ref that leaves a bounded roster window and
+        // returns (even as the same or a cloned DTO) keeps its incarnation and fence.
         const context = candidate.usage._tag === 'Known' ? candidate.usage.value.context : undefined
-        const previousContext = previous?.usage._tag === 'Known' ? previous.usage.value.context : undefined
-        const contextObservedAfter = previous !== undefined && previous.incarnationId !== candidate.incarnationId
-          ? Math.max(previous.contextObservedAfter ?? 0, DateTime.toEpochMillis(row.updated_at),
-            previousContext === undefined ? 0 : DateTime.toEpochMillis(previousContext.observed_at_unix_ms),
-            context === undefined ? 0 : DateTime.toEpochMillis(context.observed_at_unix_ms))
-          : previous?.contextObservedAfter
+        const contextAt = context === undefined ? undefined : DateTime.toEpochMillis(context.observed_at_unix_ms)
+        const prior = lifecycles.get(row.id)
+        const contextObservedAfter = prior !== undefined && prior.incarnationId !== candidate.incarnationId
+          ? Math.max(prior.contextObservedAfter ?? 0, DateTime.toEpochMillis(row.updated_at), prior.contextAt ?? 0, contextAt ?? 0)
+          : prior?.contextObservedAfter
+        lifecycles.set(row.id, { incarnationId: candidate.incarnationId, contextObservedAfter, contextAt: contextAt ?? prior?.contextAt })
         if (contextObservedAfter !== undefined) candidate = { ...candidate, contextObservedAfter }
         const agent = previous !== undefined && sameAgent(previous, candidate) ? previous : candidate
         return agent

@@ -19,9 +19,14 @@ import * as rowProjection from './sidebarRow.ts'
 import * as treeProjection from './liveSidebarTree.ts'
 import * as folderComponents from '../shell/AgentFolders.tsx'
 import type { ConnectionState } from '@fractal/sdk/effect'
+import { within } from 'storybook/test'
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
 
-vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
+// Vitest hoists the factory above static imports; load the shared mock inside it.
+vi.mock('@stylexjs/stylex', async () => ({
+  ...await import('../testStylex.ts'),
+  props: (...styles: unknown[]) => ({ 'data-style-contract': JSON.stringify(Object.assign({}, ...styles.filter(style => typeof style === 'object' && style !== null))) }),
+}))
 
 const gateway = 'gateway.example.invalid'
 const agent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example-primary', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))
@@ -75,9 +80,24 @@ const mount = async (width: number) => {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
 }
-const sidebar = () => host.querySelector('aside[aria-label="Agents"], [role="dialog"][aria-label="Agents"]')!
+const sidebar = () => host.querySelector<HTMLElement>('aside[aria-label="Agents"]') ?? host.querySelector<HTMLElement>('[role="dialog"][aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const band = () => host.querySelector('[data-connection-state]')
+
+it('connects the responsive drawer toggle to its dialog while retaining narrow agent details', async () => {
+  registry.set(agents, observed({ value: [agent] }))
+  await mount(800)
+  const toggle = within(host).getByRole('button', { name: 'Expand sidebar' })
+  expect(toggle.getAttribute('aria-haspopup')).toBe('dialog')
+  expect(toggle.getAttribute('aria-expanded')).toBe('false')
+  expect(toggle.hasAttribute('aria-controls')).toBe(false)
+  expect(within(host).getByRole('button', { name: 'Agent details' })).not.toBeNull()
+  await act(async () => toggle.click())
+  const dialog = within(host).getByRole('dialog', { name: 'Agents' })
+  expect(dialog.id).toBe(toggle.getAttribute('aria-controls'))
+  expect(toggle.getAttribute('aria-expanded')).toBe('true')
+  expect(within(dialog).getByRole('navigation', { name: 'Agent roster' })).not.toBeNull()
+})
 
 it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).flatMap(scheme =>
   (['missions', 'attention'] as const).map(family => ({ width, scheme, family })))))
@@ -426,6 +446,16 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
     expect(host.textContent).not.toContain(gateway)
   })
 
+  it('shows the offline band outside the sidebar when the network goes offline despite a live observation', async () => {
+    const network = Atom.make({ _tag: 'Offline' } as const)
+    source = { ...source, network }
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(width)
+    expect(band()?.getAttribute('data-connection-state')).toBe('offline')
+    expect(sidebar().contains(band())).toBe(false)
+    expect(sidebar().querySelector('footer [role="status"]')).toBeNull()
+  })
+
   it('removes the waiting notice and skeleton as soon as roster rows are published', async () => {
     await mount(width)
     expect(sidebar().querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents…')
@@ -529,6 +559,40 @@ describe('workspace overlays', () => {
     const menu = document.querySelector('[role="menu"]')
     expect(menu).not.toBeNull()
     expect(host.querySelector('[data-testid="live-agent-workspace"]')!.contains(menu)).toBe(true)
+  })
+})
+
+describe('responsive agent navigation', () => {
+  it.each([440, 700])('starts closed below 900px and opens a minimum-width modal at %ipx', async width => {
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(width)
+    expect(within(host).queryByRole('complementary', { name: 'Agents' })).toBeNull()
+    expect(host.querySelector('[data-resizer="live-agent-sidebar"]')).toBeNull()
+    const opener = within(host).getByRole('button', { name: 'Expand sidebar' })
+    await act(async () => opener.click())
+    const dialog = within(host).getByRole('dialog', { name: 'Agents' })
+    const workspace = within(host).getByTestId('thread-header')
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(workspace.closest('[inert], [aria-hidden="true"]')).not.toBeNull()
+    expect(dialog.closest('[inert], [aria-hidden="true"]')).toBeNull()
+    expect(sidebar().getAttribute('data-sidebar-presentation')).toBe('drawer')
+    expect(JSON.parse(dialog.getAttribute('data-style-contract')!).width).toBe('min(320px, calc(100vw - 40px))')
+    await act(async () => within(host).getByRole('button', { name: 'Close agents' }).click())
+    expect(within(host).queryByRole('complementary', { name: 'Agents' })).toBeNull()
+    expect(workspace.closest('[inert], [aria-hidden="true"]')).toBeNull()
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', ctrlKey: true, bubbles: true })) })
+    const reopened = within(host).getByRole('dialog', { name: 'Agents' })
+    expect(reopened.getAttribute('aria-modal')).toBe('true')
+    expect(workspace.closest('[inert], [aria-hidden="true"]')).not.toBeNull()
+  })
+
+  it.each([900, 1440])('keeps a minimum-width dock and resize floor at %ipx', async width => {
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(width)
+    expect(sidebar().getAttribute('data-sidebar-presentation')).toBe('dock')
+    expect(Number.parseFloat(sidebar().style.width)).toBeGreaterThanOrEqual(240)
+    expect(within(host).getByRole('separator', { name: 'Agent sidebar width' }).getAttribute('aria-valuemin')).toBe('240')
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
   })
 })
 
