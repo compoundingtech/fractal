@@ -860,15 +860,18 @@ class StTest(unittest.TestCase):
         # The whole (here one-check) suite, on pool tree 0; nothing builds, so warmth does not apply; nothing ran alongside.
         self.assertEqual((record['full'], record['checks'], record['pool_tree'], record['warm'], record['parallel'], record['exit'], record['stages']),
                          (True, ['demo'], 0, None, False, 0, []))
-        row, = record['rows']
+        # One row per check, after the setup row (the time before any check: fetch, the clean tree, the members).
+        setup, row = record['rows']
+        self.assertEqual((setup['name'], setup['result'], type(setup['seconds'])), ('setup', 'done', int))
         self.assertEqual((sorted(row), row['name'], row['result'], type(row['seconds'])), (['name', 'result', 'seconds'], 'demo', 'passed', int))
-        self.assertLessEqual(row['seconds'], record['total_s'])
+        self.assertLessEqual(row['seconds'] + setup['seconds'], record['total_s'])
         self.commit('c.txt', 'three')
         code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', 'exit 3'])
         self.assertEqual(code, 1, out + err)
         first, second = self.runs()
         self.assertEqual(first, record, 'appended, never rewritten')
-        self.assertEqual((second['full'], second['exit'], second['rows'][0]['result']), (False, 1, 'FAILED (3)'))
+        by_name = {row['name']: row for row in second['rows']}
+        self.assertEqual((second['full'], second['exit'], by_name['demo']['result']), (False, 1, 'FAILED (3)'))
         self.run_st_test('--status')
         self.assertEqual(len(self.runs()), 2, 'a status question runs nothing and records nothing')
 
