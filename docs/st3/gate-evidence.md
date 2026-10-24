@@ -1144,7 +1144,10 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
   job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red is hidden only when a member that a skip skips
   (the jobs whose `if` reads `needs.evidence-gate-linux-gate.outputs.skip`: `linux-test-build`, `linux-tests` and its shards,
   `linux-clippy`, `linux-fleet-compat`) failed or was cancelled; a red from a member that always runs (`upgrade-impact`) would show
-  under enforce too, and is reported as `visible_red`, which does not block.
+  under enforce too, and is reported as `visible_red`, which does not block. A check with no job of its own (the per-crate
+  `rust-tests`) is judged by the jobs its skip skips, those whose `if` reads `needs.evidence-gate-rust-tests.outputs.skip`
+  (`linux-test-build`, `linux-tests` and its shards; not the `linux-gate` verdict, which reads it in a step only): its real result
+  is `failure` when one of them failed or was cancelled, and that red is hidden. While no job skips on it, it is not ready.
 
 A check can also carry preconditions on its own policy entry at origin/main, whatever its decision lines say. `linux-gate` has one:
 its clippy stage ratchets against a base, so it is not ready until the policy requires `clippy_base_sha` of both its `host` and `agent`

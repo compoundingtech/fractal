@@ -356,7 +356,8 @@ class FlipReady(unittest.TestCase):
     def test_an_aggregates_members_are_the_jobs_that_read_its_skip_output_and_one_with_none_is_unreadable(self):
         policy = json.loads((ROOT / flip.POLICY).read_text())['checks']
         members = flip.skipped_members((ROOT / flip.WORKFLOW).read_text(), policy)
-        self.assertEqual(sorted(members), ['fractal-web', 'linux-gate'])  # the checks whose wrapper command is an aggregate
+        # the checks whose wrapper command is an aggregate, and rust-tests, which has no job of its own
+        self.assertEqual(sorted(members), ['fractal-web', 'linux-gate', 'rust-tests'])
         self.assertEqual(members['fractal-web'], ('fractal-web-execution',))
         self.assertEqual(members['linux-gate'], ('linux-clippy', 'linux-fleet-compat', 'linux-test-build', 'linux-tests',
                                                  'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4'))
@@ -364,6 +365,39 @@ class FlipReady(unittest.TestCase):
             self.assertNotIn(always, members['fractal-web'] + members['linux-gate'])
         with self.assertRaises(ValueError):
             flip.skipped_members('jobs:\n  linux-gate:\n    steps: []\n', policy)
+
+    def test_a_check_without_a_job_of_its_own_is_judged_by_the_jobs_whose_if_reads_its_skip(self):
+        policy = json.loads((ROOT / flip.POLICY).read_text())['checks']
+        members = flip.skipped_members((ROOT / flip.WORKFLOW).read_text(), policy)
+        # linux-gate's test jobs skip on rust-tests; the linux-gate verdict reads it in a step only, so it is not a member.
+        self.assertEqual(members['rust-tests'], ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3',
+                                                'linux-tests-shard-4'))
+        for check in ('typescript-client', 'genie-freshness'):  # a check with its own job is judged by that job
+            self.assertNotIn(check, members)
+        self.assertEqual(flip.skipped_members('jobs:\n  linux-gate:\n    if: always()\n', {'rust-tests': {}}), {'rust-tests': ()})
+        self.assertEqual([flip.derived_result(c) for c in ([], ['skipped'], ['success', 'skipped'], ['success', 'cancelled'], ['failure'])],
+                         [None, None, 'success', 'failure', 'failure'])
+        # While no job skips on it, a red under its skip could not be seen: not ready.
+        ready = {'ready': True, 'why_not': []}
+        self.assertEqual(flip.preconditions(ready, 'rust-tests', {}, ())['why_not'], [f'no job of {flip.WORKFLOW} skips on its skip output'])
+        self.assertEqual(flip.preconditions(ready, 'rust-tests', {}, members['rust-tests']), ready)
+
+    def test_a_red_in_a_job_the_per_crate_skip_would_skip_is_a_hidden_red_and_any_other_red_is_not_its(self):
+        tests = {'linux-test-build': 'success', 'linux-tests': 'success', 'linux-tests-shard-2': 'success'}
+        for i in range(40):
+            self.gh.run(1000 + i, at(25 if i == 0 else 23 - i * 0.5), [decision(check='rust-tests')], check='rust-tests', members=tests)
+        self.gh.run(6100, at(5), [decision(check='rust-tests')], check='rust-tests', members={**tests, 'linux-tests': 'failure'})
+        self.gh.run(6101, at(5), [decision(check='rust-tests')], check='rust-tests', members={**tests, 'linux-tests-shard-2': 'cancelled'})
+        # clippy and the verdict are not skipped by rust-tests: their red is linux-gate's, not a red the per-crate skip hides
+        self.gh.run(6102, at(4), [decision(check='rust-tests')], check='rust-tests',
+                    members={**tests, 'linux-clippy': 'failure', 'linux-gate': 'failure'})
+        self.gh.run(6103, at(4), [decision(check='rust-tests', decision='skip')], check='rust-tests',
+                    members={name: 'skipped' for name in tests})  # an enforced skip is evidence neither way
+        self.gh.run(6104, at(4), [decision(check='rust-tests', outcome='no_note')], check='rust-tests',
+                    members={**tests, 'linux-tests': 'failure'})  # a red the gate did not cover is not hidden
+        entry = self.check_of('rust-tests')
+        self.assertEqual((entry['hidden_red'], entry['visible_red']), ([6100, 6101], []))
+        self.assertIn('2 runs with a hidden red', entry['why_not'])
 
     def test_a_matrix_members_jobs_are_named_with_their_index_and_still_count(self):
         # The API names fractal-web-execution's matrix jobs "fractal-web-execution (0)", "(1)", ... (run 39866986203).
