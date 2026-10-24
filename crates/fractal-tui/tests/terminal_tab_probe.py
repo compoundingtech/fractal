@@ -700,14 +700,15 @@ def main():
     if args.check:
         expected = json.loads((HERE / "fixtures/terminal-tab-current.json").read_text())
         if args.part is not None:
-            # A part's cases are one contiguous run of the recorded ones: the matrix starts them, the
-            # controls end them, and the agent guards come between.
-            assert rows, f"part {args.part} produced no cases"
-            starts = [index for index, old in enumerate(expected) if old["case"] == rows[0]["case"]]
-            assert len(starts) == 1, f"part {args.part} starts at {rows[0]['case']}, found {len(starts)} times"
-            start = starts[0]
-            assert args.part != "matrix" or start == 0, f"the matrix starts at case {start}"
-            assert args.part != "controls" or start + len(rows) == len(expected), "the controls end the cases"
+            # The parts are contiguous runs of the recorded cases, in this order, and together they are
+            # all of them: fixtures/terminal-tab-parts.json names each part's length.
+            parts = json.loads((HERE / "fixtures/terminal-tab-parts.json").read_text())
+            order = ["matrix", "agent-guards", "controls"]
+            assert list(parts) == order, f"parts file names {list(parts)}"
+            assert sum(parts.values()) == len(expected), (
+                f"the parts cover {sum(parts.values())} of {len(expected)} recorded cases: update terminal-tab-parts.json")
+            start = sum(parts[name] for name in order[:order.index(args.part)])
+            assert len(rows) == parts[args.part], f"part {args.part} has {len(rows)} cases, recorded {parts[args.part]}"
             expected = expected[start:start + len(rows)]
         assert len(rows) == len(expected), f"row count {len(rows)} != {len(expected)}"
         for row, old in zip(rows, expected):
