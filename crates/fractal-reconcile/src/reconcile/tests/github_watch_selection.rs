@@ -317,7 +317,7 @@ fn a_clean_watch_stage_retains_fault_but_a_failed_safety_pass_retries() {
 async fn repository_aliases_share_one_request_and_fan_out_without_rewriting_watches() {
     struct Capture {
         requests: Arc<tokio::sync::Mutex<Vec<ObservationRequest>>>,
-        facts: Value,
+        facts: Arc<tokio::sync::Mutex<Value>>,
     }
     impl ResourceProvider for Capture {
         fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
@@ -326,7 +326,7 @@ async fn repository_aliases_share_one_request_and_fan_out_without_rewriting_watc
             Box::pin(async move {
                 self.requests.lock().await.push(request);
                 Ok(crate::resource::ProviderObservation {
-                    facts: self.facts.clone(),
+                    facts: self.facts.lock().await.clone(),
                     cursor: Some("shared-alias-cursor".into()),
                     next_check_unix_ms: now_ms() + 300_000,
                 })
@@ -357,17 +357,20 @@ async fn repository_aliases_share_one_request_and_fan_out_without_rewriting_watc
     });
     let at = chrono::Utc::now().to_rfc3339();
     let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let observed = Arc::new(tokio::sync::Mutex::new(json!({
+        "repository_id": 1310762902, "pull_requests": [
+            watched_pull(12, json!({"recent_comments": [{
+                "kind": "comment", "id": 912, "author": "fern", "at": at,
+                "url": "https://github.com/acme/orchid/pull/12#issuecomment-912"
+            }]}))
+        ]
+    })));
     let reconciler = Reconciler::new(
         fixture.store.clone(), Arc::new(FakeRuntime::default()), "node".into(),
         Arc::new(Notify::new()),
     ).with_resource_provider(Arc::new(Capture {
         requests: requests.clone(),
-        facts: json!({"repository_id": 1310762902, "pull_requests": [
-            watched_pull(12, json!({"recent_comments": [{
-                "kind": "comment", "id": 912, "author": "fern", "at": at,
-                "url": "https://github.com/acme/orchid/pull/12#issuecomment-912"
-            }]}))
-        ]}),
+        facts: observed.clone(),
     }));
     for source in [&fixture, &other] {
         let revision = fixture.store.selected_desired_revision(&source.observer).unwrap().unwrap();
@@ -394,6 +397,20 @@ async fn repository_aliases_share_one_request_and_fan_out_without_rewriting_watc
             declarations[index], "deduplication must not migrate declarations or watch deadlines");
     }
     // The surviving old-name watch must keep the canonical resource's item history.
+    // A second rename must follow through the now-intermediate alias even when
+    // neither the intermediate nor current name has a remaining direct watcher.
+    let latest_thread = crate::github_watch::ThreadRef::parse("acme/rose#12").unwrap();
+    fixture.store.ensure_watch_observer(&latest_thread).unwrap();
+    let latest = WatchFixture {
+        store: fixture.store.clone(),
+        observer: latest_thread.observer(),
+        resource: latest_thread.resource(),
+    };
+    latest.observe(observed.lock().await.clone());
+    observed.lock().await["pull_requests"][0]["head"] = json!("b".repeat(40));
+    latest.observe(observed.lock().await.clone());
+    other.observe(json!({"repository_id": 1310762902, "moved_to": latest.resource}));
+    assert_eq!(fixture.wakes(planner).len(), 2, "the terminal resource delivered the head change");
     fixture.store.end_watch(&renamed, "unwatched", None).unwrap();
     reconciler.reconcile_github_watches(&fixture.store.github_watch_declarations().unwrap()).unwrap();
     assert!(!fixture.running(&other.observer));
@@ -409,8 +426,8 @@ async fn repository_aliases_share_one_request_and_fan_out_without_rewriting_watc
     }).await.expect("the remaining old alias continues observing");
     let captured = requests.lock().await;
     assert_eq!(captured.len(), 2);
-    assert_eq!(captured[1].locator, "acme/orchid");
-    assert_eq!(fixture.wakes(planner).len(), 1, "old alias must not redeliver known comments");
+    assert_eq!(captured[1].locator, "acme/rose");
+    assert_eq!(fixture.wakes(planner).len(), 2, "old alias must not redeliver known head transitions");
 }
 
 #[test]
