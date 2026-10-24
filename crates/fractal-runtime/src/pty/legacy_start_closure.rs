@@ -480,6 +480,14 @@ mod tests {
     fn native_proc_scan_finds_owned_child_exact_label() {
         let variable = "FRACTAL_START_OPERATION";
         let operation = "fractal-runtime-legacy-proof-native-test";
+        if let Err(expected) = require_complete_procfs() {
+            let error = operation_processes(unsafe { libc::geteuid() }, operation).unwrap_err();
+            let refusal = error.downcast_ref::<ProcfsHidesProcesses>().unwrap();
+            assert_eq!(refusal.detail, expected.detail);
+            assert_eq!(refusal.mount_options, expected.mount_options);
+            eprintln!("native_proc_scan_finds_owned_child_exact_label: typed refusal instead of partial enumeration: {refusal:?}");
+            return;
+        }
         let mut child = Command::new("sleep").arg("60").env(variable, operation).spawn().unwrap();
         // Limit enumeration to this test's child. Sandboxed CI can expose
         // unrelated same-UID processes whose environ is deliberately unreadable.
@@ -790,17 +798,17 @@ mod tests {
     fn unreadable_environment_requires_positive_exit_evidence() {
         let proc = tempfile::tempdir().unwrap();
         std::fs::write(proc.path().join("stat"), "123 (producer) S 1 2 3").unwrap();
-        let error = owner_process_has_operation(proc.path(), "op", 123).unwrap_err();
+        let error = owner_process_has_operation_in_complete_procfs(proc.path(), "op", 123).unwrap_err();
         let refusal = error.downcast_ref::<LegacyStartProofUnavailable>().unwrap();
         assert_eq!(refusal.stage, "proc-environ");
         assert_eq!(refusal.pid, 123);
         assert_eq!(refusal.errno, Some(libc::ENOENT));
         std::fs::write(proc.path().join("stat"), "123 (producer) Z 1 2 3").unwrap();
-        assert!(!owner_process_has_operation(proc.path(), "op", 123).unwrap());
+        assert!(!owner_process_has_operation_in_complete_procfs(proc.path(), "op", 123).unwrap());
         std::fs::write(proc.path().join("stat"), "unreadable evidence").unwrap();
-        assert!(owner_process_has_operation(proc.path(), "op", 123).is_err());
+        assert!(owner_process_has_operation_in_complete_procfs(proc.path(), "op", 123).is_err());
         std::fs::remove_file(proc.path().join("stat")).unwrap();
-        assert!(!owner_process_has_operation(proc.path(), "op", 123).unwrap());
+        assert!(!owner_process_has_operation_in_complete_procfs(proc.path(), "op", 123).unwrap());
     }
 
     #[cfg(target_os = "linux")]
