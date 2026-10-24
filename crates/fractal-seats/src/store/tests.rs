@@ -1195,10 +1195,15 @@ fn runtime_status_reuses_subject_generations_across_actor_only_claims() {
     assert_eq!(original.subjects.len(), 32);
     for n in 0..32 {
         store.append_claim(&ClaimInput {
-            subject: format!("observer/unrelated-{n}"),
-            kind: "harness.observed".into(),
+            subject: format!("message/unrelated-{n}"),
+            kind: "message.sent".into(),
             actor: Some(format!("agent/reuse-{n}")),
-            fields: BTreeMap::from([("state".into(), json!("idle"))]),
+            fields: BTreeMap::from([
+                ("from".into(), json!(format!("agent/reuse-{n}"))),
+                ("to".into(), json!("agent/recipient")),
+                ("content".into(), json!("unrelated activity")),
+                ("status".into(), json!("sent")),
+            ]),
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
     }
