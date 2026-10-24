@@ -520,6 +520,104 @@
               "true",
               "false"
             ]
+          },
+          "trust_levels": [
+            "fleet",
+            "host",
+            "agent",
+            "queue"
+          ],
+          "by_level": {
+            "host": {
+              "command": [
+                "nix",
+                "develop",
+                ".#web",
+                "-c",
+                "bash",
+                "scripts/ci-local-web"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt",
+                "kit_shard_count",
+                "shard_results",
+                "kit_inputs",
+                "kit_play_set",
+                "app_test_set",
+                "event_name"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            },
+            "agent": {
+              "command": [
+                "nix",
+                "develop",
+                ".#web",
+                "-c",
+                "bash",
+                "scripts/ci-local-web"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt",
+                "kit_shard_count",
+                "shard_results",
+                "kit_inputs",
+                "kit_play_set",
+                "app_test_set",
+                "event_name"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            },
+            "queue": {
+              "command": [
+                "nix",
+                "develop",
+                ".#web",
+                "-c",
+                "bash",
+                "scripts/ci-local-web"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt",
+                "kit_shard_count",
+                "shard_results",
+                "kit_inputs",
+                "kit_play_set",
+                "app_test_set",
+                "event_name"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "merge_group"
+              ],
+              "lane": true
+            }
           }
         }
       }

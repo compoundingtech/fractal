@@ -275,12 +275,15 @@ def render(repo, previous, source, tag, repository='compoundingtech/smalltalk', 
                              f'Method: {observation["method"]}. These are contextual observations, not a downtime guarantee.')
         lines.append('')
     lines.extend([f'## Changes since {previous}', ''])
+    report['change_links'] = {}
     for commit in report['coverage']:
         raw = git(repo, 'show', '-s', '--format=%s%n%b', commit)
         subject, _, body = raw.partition('\n')
         merge = re.match(r'Merge pull request #(\d+) from ', subject)
         title = body.strip().splitlines()[0] if merge and body.strip() else subject
         link = f'https://github.com/{repository}/pull/{merge.group(1)}' if merge else f'https://github.com/{repository}/commit/{commit}'
+        for path in report['coverage'][commit]:
+            report['change_links'].setdefault(path, link)
         lines.append(f'- [{title}]({link})')
     if not report['coverage']:
         lines.append('- No source changes.')
