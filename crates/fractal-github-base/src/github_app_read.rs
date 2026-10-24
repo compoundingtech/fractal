@@ -230,8 +230,12 @@ pub(crate) mod tests {
             } else { (StatusCode::OK, json!({"ok": true})) }
         }).await;
         let client = reqwest::Client::new();
-        let response = crate::github_http::send_read(client.get(format!("{}/repos/{owner}/repo/contents/a", server.base)), &auth).await.unwrap();
+        let response = crate::github_http::spend_as("fixture/app-rotation-accounting".into(),
+            crate::github_http::send_read(client.get(format!("{}/repos/{owner}/repo/contents/a", server.base)), &auth)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let report = crate::resource::github_usage_report();
+        let usage = report.spenders.iter().find(|usage| usage.spender == "fixture/app-rotation-accounting").unwrap();
+        assert_eq!((usage.sent, usage.refused), (2, 1));
         assert_eq!(calls.lock().iter().map(|(auth, _)| auth.as_str()).collect::<Vec<_>>(),
             ["Bearer fixture-old", "Bearer fixture-rotated"]);
         let response = crate::github_http::send(client.post(format!("{}/repos/{owner}/repo/issues", server.base)).json(&json!({"title":"fixture"})), &auth).await.unwrap();
@@ -254,8 +258,12 @@ pub(crate) mod tests {
             (StatusCode::UNAUTHORIZED, json!({}))
         }).await;
         let client = reqwest::Client::new();
-        let response = crate::github_http::send_read(client.get(format!("{}/repos/{owner}/repo/issues", server.base)), &auth).await.unwrap();
+        let response = crate::github_http::spend_as("fixture/app-rejection-accounting".into(),
+            crate::github_http::send_read(client.get(format!("{}/repos/{owner}/repo/issues", server.base)), &auth)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let report = crate::resource::github_usage_report();
+        let usage = report.spenders.iter().find(|usage| usage.spender == "fixture/app-rejection-accounting").unwrap();
+        assert_eq!((usage.sent, usage.refused), (3, 3), "initial app401, reloaded app401 and PAT401 each count exactly once");
         assert_eq!(count(owner, "github-ledger", "401"), 1);
         assert!(auth.used_fallback());
         assert_eq!(calls.lock().len(), 3);
@@ -292,5 +300,32 @@ pub(crate) mod tests {
             (StatusCode::OK, json!({}))
         }).await;
         crate::github_http::send(client.get(format!("{}/repos/unconfigured/repo/issues", server.base)), &pat).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod response_accounting_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn app_401_reload_401_and_successful_pat_final_each_count_once() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = "pat-success-accounting-fixture";
+        tests::install(root.path(), owner, "gh-ci", "fixture-rejected",
+            chrono::Utc::now() + chrono::Duration::minutes(60));
+        let auth = select(Some(root.path()), owner, "gh-ci", &GithubAuth::test("fixture-pat"));
+        let fixture = tests::server(|authorization, _, _| {
+            let status = if authorization == "Bearer fixture-pat" {
+                reqwest::StatusCode::OK
+            } else { reqwest::StatusCode::UNAUTHORIZED };
+            (status, serde_json::json!({}))
+        }).await;
+        let response = crate::github_http::spend_as("fixture/app-pat-success-accounting".into(),
+            crate::github_http::send_read(reqwest::Client::new().get(
+                format!("{}/repos/{owner}/repo/pulls", fixture.base)), &auth)).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let report = crate::resource::github_usage_report();
+        let usage = report.spenders.iter().find(|usage| usage.spender == "fixture/app-pat-success-accounting").unwrap();
+        assert_eq!((usage.sent, usage.refused), (3, 2));
     }
 }

@@ -490,7 +490,7 @@ async fn send_once(
             github_spender(), resource.into(), config.github.observer_requests_per_hour.map(|cap| cap as usize),
         ).await?;
     }
-    match auth {
+    let response = match auth {
         GithubAuth::Read { .. } => bail!("installation credentials require the read-only send boundary"),
         GithubAuth::Authorized { config, profile } => {
             send_authorized_with(
@@ -510,7 +510,9 @@ async fn send_once(
             }
             Ok(response)
         }
-    }
+    }?;
+    crate::resource::record_github_response(response.status(), response.headers());
+    Ok(response)
 }
 
 async fn send_authorized_with<F>(

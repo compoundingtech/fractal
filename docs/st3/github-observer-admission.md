@@ -189,3 +189,8 @@ rotation, expiry, invalid/unreadable/missing sources and reason counts,401 reloa
 and fallback, separately authorized mixed identity pages, PAT-only writes and
 legacy-status merging. They are written but not run in this slice; no build,
 test, lint, formatter, credential inspection or live migration was performed.
+
+Response accounting runs once at the one-send transport boundary, including each
+initial installation401, reload401 and final PAT response; resource wrappers do
+not recount the final response. Artifact URL invalidation clears every stable
+principal-qualified cache entry for that exact URL, retaining unrelated URLs.

@@ -706,7 +706,7 @@ pub fn github_usage_report() -> GithubUsageReport {
         .report(now)
 }
 
-fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+pub(crate) fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -729,7 +729,12 @@ fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header
 
 /// Drop `url`'s cached answer: for a URL read once, whose answer would never be revalidated.
 async fn github_forget(url: &str) {
-    github_cache().lock().await.remove(url);
+    // Cache keys qualify the URL with a non-secret authorization principal.
+    // Forget every scope: an immutable artifact URL must not survive invalidation
+    // merely because it was fetched with another installation or the PAT.
+    github_cache().lock().await.retain(|key, _| {
+        key.strip_suffix(url).is_none_or(|prefix| !prefix.ends_with(' '))
+    });
 }
 
 /// A URL is fetched at most once per cache interval on this host. A stale entry is revalidated
@@ -766,7 +771,6 @@ async fn github_json(
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
     let response = crate::github_http::send_read(request, token).await?;
-    record_github_response(response.status(), response.headers());
     let response = github_response(response).await?;
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
         let payload = cached
@@ -898,7 +902,6 @@ async fn github_graphql(
         .header("Accept", "application/vnd.github+json")
         .json(&json!({"query": query, "variables": variables}));
     let response = crate::github_http::send_read(request, token).await?;
-    record_github_response(response.status(), response.headers());
     let response = github_response(response).await?;
     let headers = response.headers().clone();
     let body = response.json::<Value>().await?;
@@ -1212,6 +1215,42 @@ async fn observe_github_pull_request_at(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn forgetting_artifact_url_invalidates_every_principal_without_double_counting_responses() {
+        use crate::github_http::app_read::{select, tests::{install, server}};
+        let root = tempfile::tempdir().unwrap();
+        let owner = "invalidation-fixture";
+        install(root.path(), owner, "gh-ci", "fixture-ci",
+            chrono::Utc::now() + chrono::Duration::minutes(60));
+        let pat = GithubAuth::test("fixture-pat");
+        let app = select(Some(root.path()), owner, "gh-ci", &pat);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = calls.clone();
+        let fixture = server(move |auth, _, _| {
+            recorded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (reqwest::StatusCode::OK, json!({"authorization_fixture": auth}))
+        }).await;
+        let url = format!("{}/repos/{owner}/repo/actions/artifacts/1", fixture.base);
+        let unrelated = format!("{}/repos/{owner}/repo/actions/artifacts/2", fixture.base);
+        let client = github_client();
+        let cache_for = Duration::from_secs(3600);
+        spend_as("fixture/principal-invalidation-accounting".into(), async {
+            let ci = github_json(&client, url.clone(), &app, cache_for).await.unwrap();
+            let personal = github_json(&client, url.clone(), &pat, cache_for).await.unwrap();
+            assert_ne!(ci.value, personal.value);
+            github_json(&client, unrelated.clone(), &app, cache_for).await.unwrap();
+            github_forget(&url).await;
+            github_json(&client, url.clone(), &app, cache_for).await.unwrap();
+            github_json(&client, url.clone(), &pat, cache_for).await.unwrap();
+            github_json(&client, unrelated.clone(), &app, cache_for).await.unwrap();
+        }).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 5,
+            "both invalidated principals refetch; the unrelated URL stays cached");
+        let report = github_usage_report();
+        let usage = report.spenders.iter().find(|usage| usage.spender == "fixture/principal-invalidation-accounting").unwrap();
+        assert_eq!(usage.sent, 5, "resource wrappers must not recount transport responses");
+    }
 
     #[tokio::test]
     async fn credentials_recover_after_a_missing_token_and_rotate() {
