@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep native stui terminals on the daemon's ordered shared geometry to avoid stale or duplicated rows during resize",
+  "replay": { "status": "none", "detail": "No stored event replay changes. Native terminal attachment now applies the initial effective geometry before feeding the screen replay." },
+  "schema": { "status": "none", "detail": "No database schema or replicated claim change." },
+  "rules": { "status": "none", "detail": "Pane resize requests no longer resize the local emulators ahead of queued output. Only daemon GEOMETRY frames change effective dimensions, preserving DATA ordering and constraints from other attached clients." },
+  "compatibility": { "status": "none", "detail": "Uses existing PTY GEOMETRY frames and SessionConnection effective dimension accessors; no wire protocol change." },
+  "downtime": { "status": "none", "detail": "No daemon restart is required for this client-only change; reopen stui to use the updated viewer." },
+  "manual": { "status": "none", "detail": "No migration or manual action is required." },
+  "recovery": { "status": "none", "detail": "No persistent state is changed." }
+}
