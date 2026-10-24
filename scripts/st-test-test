@@ -10,7 +10,9 @@ import json
 import time
 import os
 from pathlib import Path
+import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -29,7 +31,8 @@ loader.exec_module(st_test)
 LOCAL = dict(st_test.LOCAL)  # the real commands, before a test replaces them
 
 DATE = '2026-10-14T12:00:00Z'
-GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI')}, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
+# Without the caller's state home or runs file: a run records its times under the test's own home, never the developer's.
+GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI', 'XDG_STATE_HOME', 'ST_TEST_RUNS')}, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
                GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t',
                GIT_COMMITTER_EMAIL='t@example.invalid', GIT_AUTHOR_DATE=DATE, GIT_COMMITTER_DATE=DATE)
 POLICY = {'version': 1, 'checks': {'demo': {'trust_levels': ['host'], 'kinds': {'wrapper': {
@@ -834,6 +837,121 @@ class StTest(unittest.TestCase):
             done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], names, args)
+
+    def runs(self, path=None):
+        path = path or self.home / '.local/state/st-test/runs.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_every_run_appends_one_json_line_with_its_times_and_a_named_check_is_not_a_full_run(self):
+        self.commit('b.txt', 'two')
+        code, out, err = self.run_st_test()
+        self.assertEqual(code, 0, out + err)
+        record, = self.runs()
+        self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'checks',
+                                                 'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages']))
+        for field in ('started', 'ended'):
+            self.assertRegex(record[field], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+        self.assertLessEqual(record['started'], record['ended'])
+        self.assertIsInstance(record['total_s'], int)
+        self.assertEqual((record['v'], record['host'], record['tree'], record['commit'], record['base'], record['behind']),
+                         (1, socket.gethostname().split('.')[0], git(self.work, 'rev-parse', 'HEAD^{tree}'), git(self.work, 'rev-parse', 'HEAD'),
+                          git(self.work, 'rev-parse', 'origin/main'), 0))
+        # The whole (here one-check) suite, on pool tree 0; nothing builds, so warmth does not apply; nothing ran alongside.
+        self.assertEqual((record['full'], record['checks'], record['pool_tree'], record['warm'], record['parallel'], record['exit'], record['stages']),
+                         (True, ['demo'], 0, None, False, 0, []))
+        row, = record['rows']
+        self.assertEqual((sorted(row), row['name'], row['result'], type(row['seconds'])), (['name', 'result', 'seconds'], 'demo', 'passed', int))
+        self.assertLessEqual(row['seconds'], record['total_s'])
+        self.commit('c.txt', 'three')
+        code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', 'exit 3'])
+        self.assertEqual(code, 1, out + err)
+        first, second = self.runs()
+        self.assertEqual(first, record, 'appended, never rewritten')
+        self.assertEqual((second['full'], second['exit'], second['rows'][0]['result']), (False, 1, 'FAILED (3)'))
+        self.run_st_test('--status')
+        self.assertEqual(len(self.runs()), 2, 'a status question runs nothing and records nothing')
+
+    def test_the_runs_file_follows_xdg_state_home_and_st_test_runs_and_off_records_nothing(self):
+        self.commit('b.txt', 'two')
+        state = Path(self.tmp.name) / 'state'
+        self.assertEqual(self.run_st_test(extra_env={'XDG_STATE_HOME': str(state)})[0], 0)
+        self.assertEqual(len(self.runs(state / 'st-test/runs.jsonl')), 1)
+        chosen = Path(self.tmp.name) / 'elsewhere/runs.jsonl'
+        self.assertEqual(self.run_st_test(extra_env={'ST_TEST_RUNS': str(chosen), 'XDG_STATE_HOME': str(state)})[0], 0)
+        self.assertEqual(len(self.runs(chosen)), 1)
+        self.assertEqual(len(self.runs(state / 'st-test/runs.jsonl')), 1)
+        code, out, err = self.run_st_test(extra_env={'ST_TEST_RUNS': 'off', 'XDG_STATE_HOME': str(state)})
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual((len(self.runs(chosen)), len(self.runs(state / 'st-test/runs.jsonl')), self.runs()), (1, 1, []))
+        self.assertNotIn('record', err)
+
+    def test_a_runs_file_that_cannot_be_written_is_one_line_on_stderr_and_never_changes_the_exit_code(self):
+        self.commit('b.txt', 'two')
+        blocked = Path(self.tmp.name) / 'a-file'
+        blocked.write_text('not a directory\n')
+        for command, expected in ((['sh', '-c', 'echo ran'], 0), (['sh', '-c', 'exit 3'], 1)):
+            self.commit('c.txt', str(expected))
+            code, out, err = self.run_st_test('--check', 'demo', command=command, extra_env={'ST_TEST_RUNS': str(blocked / 'runs.jsonl')})
+            self.assertEqual(code, expected, out + err)
+            self.assertEqual(err.count("st-test: could not record this run's times: "), 1, err)
+
+    def test_scripts_ci_local_s_stage_table_is_read_from_its_output_and_lines_that_are_not_rows_are_not(self):
+        log = Path(self.tmp.name) / 'gate.log'
+        log.write_text('\n'.join([
+            'ci-local: running tests',
+            'ci-local:   stage                      start                 end                   seconds',
+            'ci-local:   setup                      2026-10-23T10:00:00Z  2026-10-23T10:01:10Z      70s',
+            'ci-local:   tests                      2026-10-23T10:01:10Z  2026-10-23T10:09:30Z     500s  exit 0   queue: 2 waits, 31s',
+            'ci-local:   clippy                     2026-10-23T10:09:30Z  2026-10-23T10:11:00Z      90s  exit 101 queue: 0 waits, 0s\r',
+            'test result: ok. 2026-10-23T10:00:00Z  2026-10-23T10:01:10Z 70s',
+        ]) + '\n')
+        self.assertEqual(st_test.ci_local_stages(log), [
+            {'name': 'setup', 'start': '2026-10-23T10:00:00Z', 'end': '2026-10-23T10:01:10Z', 'seconds': 70, 'exit': None, 'queue_waits': None, 'queue_s': None},
+            {'name': 'tests', 'start': '2026-10-23T10:01:10Z', 'end': '2026-10-23T10:09:30Z', 'seconds': 500, 'exit': 0, 'queue_waits': 2, 'queue_s': 31},
+            {'name': 'clippy', 'start': '2026-10-23T10:09:30Z', 'end': '2026-10-23T10:11:00Z', 'seconds': 90, 'exit': 101, 'queue_waits': 0, 'queue_s': 0}])
+        # The printf the table comes from, as #3718 writes it, reads back the same.
+        row = subprocess.run(['printf', 'ci-local:   %-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss\n', 'fleet-compat', '2026-10-23T10:11:00Z',
+                              '2026-10-23T10:12:00Z', '60', '1', '3', '12'], capture_output=True, text=True).stdout
+        log.write_text('noise\n' + row)
+        self.assertEqual(st_test.ci_local_stages(log), [{'name': 'fleet-compat', 'start': '2026-10-23T10:11:00Z', 'end': '2026-10-23T10:12:00Z',
+                                                         'seconds': 60, 'exit': 1, 'queue_waits': 3, 'queue_s': 12}])
+        self.assertEqual(st_test.ci_local_stages(Path(self.tmp.name) / 'missing.log'), [])
+
+    def test_a_check_that_runs_ci_local_still_prints_as_it_goes_and_its_stages_and_warmth_are_recorded(self):
+        self.commit('b.txt', 'two')
+        table = ('echo gate output; echo "ci-local:   setup                      2026-10-23T10:00:00Z  2026-10-23T10:01:10Z      70s"; '
+                 'echo "ci-local:   tests                      2026-10-23T10:01:10Z  2026-10-23T10:09:30Z     500s  exit 0   queue: 2 waits, 31s" >&2')
+        command = ['sh', '-c', table, 'scripts/ci-local']  # its LOCAL command runs scripts/ci-local, as linux-gate's does
+        env = {'ST_EVIDENCE_GOVERN': 'off'}
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+            code, out, err = self.run_st_test(command=command, extra_env=env)
+            self.assertEqual(code, 0, out + err)
+            self.assertLess(out.index('gate output'), out.index('st-test: tree'))  # streamed to the terminal, before the summary
+            self.assertIn('queue: 2 waits, 31s', out)  # stderr too, as one stream
+            record, = self.runs()
+            self.assertEqual([(stage['name'], stage['seconds'], stage['exit']) for stage in record['stages']], [('setup', 70, None), ('tests', 500, 0)])
+            self.assertIs(record['warm'], False, 'a fresh target')
+            (self.pool() / 'target-0/debug').mkdir(parents=True)
+            self.commit('c.txt', 'three')
+            self.assertEqual(self.run_st_test(command=command, extra_env=env)[0], 0)
+            self.assertIs(self.runs()[-1]['warm'], True, 'the kept target held a build')
+        self.commit('d.txt', 'four')
+        code, out, err = self.run_st_test(command=['sh', '-c', 'echo no table'], extra_env=env)  # a check that is not scripts/ci-local's
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.runs()[-1]['stages'], [])
+
+    def test_a_streamed_check_keeps_the_time_limit_and_is_not_held_by_what_it_left_behind(self):
+        self.commit('b.txt', 'two')
+        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '1', command=['sh', '-c', 'echo before; sleep 30', 'scripts/ci-local'])
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'demo +timed out')
+        self.assertEqual(self.runs()[-1]['exit'], 1)
+        log = Path(self.tmp.name) / 'left.log'
+        started = time.monotonic()
+        with mock.patch.object(st_test, 'STREAM_GRACE', 0.5), contextlib.redirect_stdout(io.StringIO()) as seen:
+            self.assertEqual(st_test.streamed(['sh', '-c', '(sleep 5) & echo done; exit 7'], log, 60), 7)
+        self.assertLess(time.monotonic() - started, 4, 'a process left holding the pipe does not hold the run')
+        self.assertEqual((seen.getvalue(), log.read_text()), ('done\n', 'done\n'))
 
 
 

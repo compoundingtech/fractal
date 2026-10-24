@@ -1423,6 +1423,23 @@ killed it (2026-10-23, on a build host: a canaries stage killed at 2400 s having
 records and signs does not. A host without a user systemd bus runs the check as before and says so on stderr; `ST_EVIDENCE_GOVERN=off` does the
 same.
 
+**How long a run takes, and the objective.** A full warm run of the per-PR suite (`scripts/st-test` with no `--check` and no `--crate`,
+every default check including the per-crate `rust-tests` signing, on a pool tree whose kept target already holds a build) takes 12 minutes
+(720 s) or less on a dev box. It is in breach when the p90 of those runs is over 12 minutes, or when any one of them takes over 15 minutes
+(900 s). So that this is measured rather than remembered, every run that reaches its summary appends one JSON line to
+`~/.local/state/st-test/runs.jsonl` (under `$XDG_STATE_HOME` when that is set; `ST_TEST_RUNS=PATH` names another file, `ST_TEST_RUNS=off`
+records nothing; it is read before the seat scrub, like the other `ST_TEST_*` settings, so the checks never see it). One write with
+`O_APPEND`, so concurrent runs never interleave; a file that cannot be written is one line on stderr and never changes the exit code. A
+record (`"v": 1`) has `started` and `ended` (UTC, from before the base fetch to the summary), `total_s` (monotonic seconds), `host`, `tree`,
+`commit`, `base`, `behind`, `full` (no `--check` and no `--crate`), `checks`, `pool_tree`, `warm` (the build target was not empty before the
+run; `null` when no check builds), `parallel` (the light checks ran alongside the build lane), `rows` (every summary row's name, result and
+seconds), `exit`, and `stages`: `linux-gate`'s stages (name, start, end, seconds, exit, queue waits and queue seconds) from the table
+`scripts/ci-local` prints at its end, read from its output, which st-test copies to the terminal as it comes and keeps (`[]` when there is
+no table). `scripts/st-test-report [FILE...] [--hours 24 | --since ISO] [--slo-s 720] [--max-s 900] [--markdown]` reads those files and
+prints, over the full warm runs in the window that ran and signed every check (exit 0), the count,
+the nearest-rank p50 and p90, the maximum, the share within the objective, whether it is breached and why, the same per host, and the five
+slowest stages or checks; the runs left out are counted by reason (`not_full`, `cold`, `partial`: exit 4, a tree that edits a lane runs nothing for that check, and `failed`). It writes nothing.
+
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
 one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing
 a hook it did not write and leaving a configured `core.hooksPath` alone. **The hook and the runner are not the pushed branch's:** the stub takes
