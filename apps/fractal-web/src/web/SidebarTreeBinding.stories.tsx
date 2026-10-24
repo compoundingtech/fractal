@@ -11,6 +11,7 @@ import { AgentFolders } from '../shell/AgentFolders.tsx'
 import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
 import { sidebarRow } from './sidebarRow.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
+import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
 
 const now = Date.UTC(2026, 9, 8, 12)
 const usage = decodeUnknownSync(UsageSummary)({ aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 100, output_tokens: 200, cached_tokens: 300, total_tokens: 600, context: { used_percent: 18, observed_at_unix_ms: now } })
@@ -40,6 +41,7 @@ const TreeBindingSurface = ({ scheme, variant = 'default' }: { readonly scheme: 
     ? longFolders.map((folder, index) => ({ _tag: 'Folder', id: `long-${index}`, label: folder.label, collapsed: collapsedFolders.has(`long-${index}`), children: folder.agents.map(agent => ({ _tag: 'Agent', id: agent.ref, subject: agent.ref, label: agent.name })) }))
     : [...rows.slice(0, 100), { _tag: 'Folder', id: 'deep', label: 'Deep work', collapsed, children: rows.slice(100) }]
   return <main data-tree-binding-story style={{ width: 1440, height: 700, display: 'flex' }} {...stylex.props(liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
+    <ThemePortal>
     <ResponsiveAgentSidebar viewport={1440} width={width} maxWidth={440} collapsed={false} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => undefined} onWidthChange={setWidth} onWidthCommit={setWidth} onWidthReset={() => setWidth(256)}>
       <nav aria-label="Agent roster" style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         <AgentFolders tree={tree} selectedId={selected} canDrop={() => ({ refused: 'Read-only fixture' })} onMove={() => undefined} onCreateFolder={() => undefined} onRenameFolder={() => undefined} onDeleteFolder={() => undefined} onToggleCollapsed={change => {
@@ -52,6 +54,7 @@ const TreeBindingSurface = ({ scheme, variant = 'default' }: { readonly scheme: 
       </nav>
     </ResponsiveAgentSidebar>
     <section aria-label="Selected thread"><Aria.Button onPress={() => setSelected(deepRef)}>Open deep thread</Aria.Button><p>{selected}</p></section>
+    </ThemePortal>
   </main>
 }
 const meta = {
@@ -72,6 +75,7 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await userEvent.hover(first.querySelector<HTMLElement>('[data-row-column="title"]')!)
   const context = await waitFor(() => { const element = document.querySelector('[data-testid="agent-hover-card"] [data-context-observation]'); expect(element).not.toBeNull(); return element! })
   await expect(context).toHaveTextContent(`Reported main-session context: 18%; as of ${new Date(now).toISOString()}`)
+  await expect(context.closest('[data-milestone-row]')).toBeNull()
   await userEvent.unhover(first.querySelector<HTMLElement>('[data-row-column="title"]')!)
   await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
   // Resizing the production frame 256 → 320 by keyboard widens the row it hosts.
@@ -102,8 +106,8 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   try { await waitFor(() => expect(assertRevealed).toThrow('Active deep row was not revealed')) } finally { tree.scrollTop = scroll }
   await waitFor(assertRevealed)
 }
-export const Dark: Story = { play }
-export const Light: Story = { args: { scheme: 'light' }, play }
+export const Dark: Story = { tags: ['critical'], play }
+export const Light: Story = { tags: ['critical'], args: { scheme: 'light' }, play }
 
 /**
  * The production binding with long names in many folders: the roster scrolls vertically and never sideways, every
