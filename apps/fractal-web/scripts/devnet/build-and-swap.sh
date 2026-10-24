@@ -38,6 +38,7 @@ cleanup_warning() {
 }
 finish() {
   local rc=$?
+  local rollback_failed=0 selected=0 current_target='' recorded_sha=''
   trap - EXIT
   set +e
   # Command wrappers may need getcwd even with absolute arguments. Leave the
@@ -53,14 +54,40 @@ finish() {
         if ! ln -s "$previous" "$P/.current-rollback-$$" ||
             ! mv -Tf "$P/.current-rollback-$$" "$P/current"; then
           cleanup_warning 'unsafe rollback failure: current may reference a failed build'
+          rollback_failed=1
+          reason=rollback-failed
           rc=1
         fi
       elif ! rm -f "$P/current"; then
         cleanup_warning 'unsafe rollback failure: cannot remove failed current pointer'
+        rollback_failed=1
+        reason=rollback-failed
         rc=1
       fi
     fi
-    [[ -z $build ]] || rm -rf -- "$build" || cleanup_warning 'cannot remove failed build directory'
+    if [[ -n $build ]]; then
+      # Pointer rollback and artifact deletion are separate decisions. Failed
+      # activation must never delete an artifact still named by either pointer.
+      if [[ -e $P/current || -L $P/current ]]; then
+        if ! current_target=$(readlink -f -- "$P/current"); then
+          selected=1
+          cleanup_warning 'cannot resolve current; preserving failed build'
+        elif [[ $current_target == "$build" ]]; then selected=1; fi
+      fi
+      if [[ -e $P/current-sha || -L $P/current-sha ]]; then
+        if ! IFS= read -r recorded_sha < "$P/current-sha" ||
+            [[ ! $recorded_sha =~ ^[0-9a-f]{40}$ || $recorded_sha == "${build##*/}" ]]; then
+          selected=1
+        fi
+      fi
+      if ((rollback_failed || selected)); then
+        cleanup_warning 'unsafe activation state: preserving failed build because rollback or selection is inconsistent'
+        ((rollback_failed)) || reason=rollback-inconsistent
+        rc=1
+      else
+        rm -rf -- "$build" || cleanup_warning 'cannot remove failed build directory'
+      fi
+    fi
   fi
   rm -f "$P/admitted-$$" "$P/overlay-manifest-$$" || cleanup_warning 'cannot remove temporary admission/overlay files'
   if [[ -n $snapshot ]]; then

@@ -204,6 +204,12 @@ warnings available before the JSONL append appear in `cleanupWarnings`. A failed
 log append is necessarily stderr-only. Failed-build rollback failure or inability
 to enter any stable cwd remains an error because cleanup cannot establish safe
 state. Artifact/current-pointer validation remains a hard build failure.
+Failed-build cleanup deletes the new artifact only after verifying that neither
+`current` nor `current-sha` selects it and rollback did not fail. Failed rollback,
+an unresolved pointer or a still-selected revision preserves the artifact, emits
+an unsafe-state warning, records `rollback-failed`/`rollback-inconsistent`, and
+exits nonzero. Retaining a failed-but-selected directory is safer than creating a
+dangling production pointer; operator recovery must reconcile that state.
 
 The helper uses `gate-slot` admission by default; `FRACTAL_BUILD_ADMISSION=fallback`
 explicitly reuses a caller's admission timeout and builds with `nice -n 19`.

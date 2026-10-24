@@ -86,6 +86,20 @@ if os.environ.get("SNAPSHOT_CLEANUP_FAIL_LOCK") == "1" and sys.argv[-1].endswith
 os.execv({shutil.which('rm')!r}, ["rm", *sys.argv[1:]])
 ''')
             rm.chmod(0o755)
+            mv = binary / 'mv'
+            mv.write_text(f'''#!{sys.executable}
+import os, pathlib, sys
+if os.environ.get("SNAPSHOT_FAIL_ROLLBACK") == "1":
+    src, dst = pathlib.Path(sys.argv[-2]), pathlib.Path(sys.argv[-1])
+    if src.name.startswith(".current-rollback-"):
+        raise SystemExit("injected rollback rename failure")
+    if src.name.startswith(".current-") and dst.name == "current":
+        # Activation succeeds, then the shell's current-sha write fails.
+        pid = src.name.removeprefix(".current-")
+        (dst.parent / (".current-sha-" + pid)).mkdir()
+os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
+''')
+            mv.chmod(0o755)
             release = fixture / 'release'
             os.mkfifo(release)
             base_env = {
@@ -167,6 +181,23 @@ os.execv({shutil.which('rm')!r}, ["rm", *sys.argv[1:]])
                 self.assertEqual(receipt['dependencyKey'], second_key)
                 self.assertTrue((fixture / 'relative-build-root/shared/builds.jsonl').is_file())
                 self.assertEqual(list((fixture / 'relative-snapshot-root/shared').iterdir()), [])
+                failed_sha = 'd' * 40
+                failed_env = {**relative_env, 'SNAPSHOT_LEASE_SHA': failed_sha,
+                              'SNAPSHOT_FAIL_ROLLBACK': '1'}
+                failed = subprocess.run(['bash', str(HELPER), str(source), failed_sha, 'shared'],
+                                        cwd=fixture, env=failed_env, capture_output=True,
+                                        text=True, timeout=15)
+                self.assertNotEqual(failed.returncode, 0)
+                production = fixture / 'relative-build-root/shared'
+                preserved = production / 'builds' / failed_sha
+                self.assertEqual((production / 'current').resolve(strict=True), preserved)
+                self.assertTrue(preserved.is_dir(), 'failed rollback deleted the selected artifact')
+                self.assertEqual((production / 'current-sha').read_text().strip(), relative_sha)
+                failure_log = json.loads((production / 'builds.jsonl').read_text().splitlines()[-1])
+                self.assertEqual(failure_log['outcome'], 'failed')
+                self.assertEqual(failure_log['reason'], 'rollback-failed')
+                self.assertTrue(any('preserving failed build' in warning
+                                    for warning in failure_log['cleanupWarnings']))
             finally:
                 if first.poll() is None:
                     os.killpg(first.pid, signal.SIGTERM)
