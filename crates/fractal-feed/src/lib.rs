@@ -55,6 +55,25 @@ const RETRY_DELAYS: [Duration; 5] = [
 /// How long a fresh request may take to prove st is answering after its stream dropped.
 const PROBE_WAIT: Duration = Duration::from_secs(3);
 
+/// `default`, or `STUI_FEED_TIMER_CAP_MS` when that is shorter: a cap on the quiet check, the
+/// ping, the pong wait and the retry delays above. Only the end-to-end tests set it, so they need
+/// not wait 20 s to see a silent link dropped.
+fn timer(default: Duration) -> Duration {
+    static CAP: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    let cap = *CAP.get_or_init(|| {
+        std::env::var("STUI_FEED_TIMER_CAP_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .map(Duration::from_millis)
+    });
+    cap.map_or(default, |cap| cap.min(default))
+}
+
+/// The wait before the attempt after `failures` failed ones.
+fn retry_delay(failures: usize) -> Duration {
+    timer(RETRY_DELAYS[failures.min(RETRY_DELAYS.len() - 1)])
+}
+
 /// The prefix of generation-scoped terminal subscription IDs.
 const TERMINAL: &str = "terminal";
 /// The subscription ID of the open conversation.
@@ -367,7 +386,7 @@ pub async fn run_members_with_sidebar(
             return;
         }
         // Wait before trying again, still honouring an unfollow meanwhile.
-        let delay = RETRY_DELAYS[failures.min(RETRY_DELAYS.len() - 1)];
+        let delay = retry_delay(failures);
         // Device gateways have no peer-online channel. Keep their retry ceiling short,
         // with jitter so clients returning together do not all reconnect at once.
         let jitter = Duration::from_millis((uuid::Uuid::now_v7().as_u128() % 500) as u64);
@@ -503,7 +522,7 @@ async fn connected(
     // so one slow answer from a busy daemon never rereads every window.
     let heard = stream.heard();
     let mut pinged: Option<Instant> = None;
-    let mut probe = tokio::time::interval(QUIET_CHECK);
+    let mut probe = tokio::time::interval(timer(QUIET_CHECK));
     probe.tick().await;
     // Glasses are followed only where st grants them in the shape this stui reads (splits of
     // tab groups, version 1); elsewhere stui keeps them on the device. A member still on the
@@ -602,7 +621,7 @@ async fn connected(
         tokio::select! {
             _ = probe.tick() => {
                 let quiet = heard.quiet_for();
-                if quiet < QUIET_BEFORE_PING {
+                if quiet < timer(QUIET_BEFORE_PING) {
                     pinged = None;
                     *failures = 0;
                 } else {
@@ -613,7 +632,7 @@ async fn connected(
                             }
                             pinged = Some(Instant::now());
                         }
-                        Some(at) if at.elapsed() >= PONG_WAIT => {
+                        Some(at) if at.elapsed() >= timer(PONG_WAIT) => {
                             return Ended::Dropped(if remote {
                                 "the member stopped answering".into()
                             } else {
@@ -713,7 +732,7 @@ async fn connected(
                         // Anything else may clear: the agent starts, its host comes back, its
                         // history arrives. Ask again after a backoff.
                         if !permanent {
-                            current.retry_at = Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
+                            current.retry_at = Some(Instant::now() + retry_delay(current.failures));
                             current.failures += 1;
                         }
                         if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent }).is_err() {
@@ -957,7 +976,7 @@ impl WindowRetries {
     /// its first failure since it last loaded, the one worth telling the person about.
     fn failed(&mut self, window: Window, now: Instant) -> bool {
         let failures = self.failures.entry(window).or_default();
-        let wait = RETRY_DELAYS[(*failures).min(RETRY_DELAYS.len() - 1)];
+        let wait = retry_delay(*failures);
         self.at.insert(window, now + wait + jitter(wait));
         *failures += 1;
         *failures == 1
@@ -1068,7 +1087,7 @@ fn terminal_failed(
             | ErrorCode::RuntimeAuthorityIndeterminate,
         ) => {
             current.retry_at =
-                Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
+                Some(Instant::now() + retry_delay(current.failures));
             current.failures += 1;
             TerminalUpdate::Reconnecting(plain)
         }
@@ -1116,7 +1135,7 @@ async fn follow(
         Err(Refusal::Unavailable(reason)) => {
             clear_following(client, stream, current).await?;
             current.retry_at =
-                Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
+                Some(Instant::now() + retry_delay(current.failures));
             current.failures += 1;
             let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Reconnecting(reason) });
             return Ok(());
