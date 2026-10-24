@@ -231,14 +231,24 @@ pub async fn operational_repair_plan(
 
 pub async fn apply_operational_repair(
     State(state): State<AppState>,
+    bound: Option<Extension<BoundAgent>>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
+    if bound.is_none() && request.actor.is_some() {
+        return Err(ApiError::bad(St3Error::new(
+            "foreign-agent-actor",
+            "repair caller attribution requires an authenticated harness binding",
+        )));
+    }
+    let bound_actor = bound.map(|bound| bound.0.0);
     let effect_state = state.clone();
     let result = blocking_action(move || {
         let (subjects, classes) = Store::operational_repair_token_filters(&request.token)?;
         let (_guards, evidence) = legacy_start_repair_evidence(&effect_state, &subjects, &classes)
             .map_err(|error| St3Error::new("legacy-start-proof-unavailable", format!("{error:#}")))?;
-        effect_state.store.apply_operational_repair_with_legacy_starts(&request.token, &evidence)
+        effect_state.store.apply_operational_repair_with_legacy_starts(
+            &request.token, &evidence, bound_actor.as_deref(),
+        )
     }).await?;
     if result.applied != 0 {
         signal_changed(&state);

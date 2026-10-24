@@ -2181,7 +2181,7 @@ enum RepairCommand {
     Apply {
         token: String,
         /// Caller identity. Agent seats must explicitly name their literal seat identity.
-        /// The repair API is token-only; this is checked locally, not recorded in the receipt.
+        /// The daemon verifies the authenticated harness binding and records the caller.
         #[arg(long = "as")]
         actor: Option<String>,
     },
@@ -5456,8 +5456,8 @@ fn guard_mutating_cli_actor(
     let Some(own) = own.filter(|own| own.starts_with("agent/")) else {
         return Ok(());
     };
-    // Repair's token-only API has no actor field. Bind the explicit CLI actor before
-    // any request, rather than mistaking possession of a token for a seat identity.
+    // Bind explicit repair actors locally as well as at the daemon's authenticated
+    // harness boundary; possession of a repair token is not a caller identity.
     let repair_actor = match command {
         Command::Repair { command: RepairCommand::Apply { actor, .. } } => {
             Some(actor.as_deref().ok_or_else(|| anyhow::anyhow!(
@@ -10561,12 +10561,12 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                         println!("  evidence\t{}", serde_json::to_string(&item.details)?);
                     }
                 }
-                println!("Apply this exact plan with: st repair apply {}", plan.token);
+                println!("Apply this exact plan with: st repair apply --as \"$ST_AGENT\" {}", plan.token);
             }
         }
-        RepairCommand::Apply { token, actor: _ } => {
+        RepairCommand::Apply { token, actor } => {
             let result: OperationalRepairResult = client
-                .post("/v1/repair/apply", &OperationalRepairApplyRequest { token })
+                .post("/v1/repair/apply", &OperationalRepairApplyRequest { token, actor })
                 .await?;
             if json_output {
                 print_value(&result, true)?;
