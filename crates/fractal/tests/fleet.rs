@@ -263,10 +263,13 @@ impl Node {
     pub(super) async fn start(&mut self) {
         let pty = self.root.join("bin/pty");
         let log = |name: &str| fs::File::create(self.root.join(name)).unwrap();
+        // No browser UI: its default address (127.0.0.1:7410) is a fixed port, and a host that already
+        // listens there (a developer's web server) made the previous release exit at once with
+        // "Address already in use". Both releases accept `--web-listen off`.
         let up: Vec<&str> = if self.binary == Path::new(st3()) {
-            vec!["up", "--pty-binary", pty.to_str().unwrap()]
+            vec!["up", "--pty-binary", pty.to_str().unwrap(), "--web-listen", "off"]
         } else {
-            vec!["up"]
+            vec!["up", "--web-listen", "off"]
         };
         let daemon = self
             .command(&up)
