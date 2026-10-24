@@ -58,6 +58,8 @@ mod membership_query_tests;
 mod repair_operation_tests;
 #[cfg(test)]
 mod schema_install_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod contents;
 pub mod prepared_seal;
 #[cfg(test)]
 mod prepared_seal_tests;
@@ -765,6 +767,10 @@ pub const SCHEMA: &str = core_schema!("", "");
 /// Contains BEGIN IMMEDIATE and COMMIT; cannot run inside an open transaction.
 pub const FRESH_SCHEMA: &str = core_schema!("BEGIN IMMEDIATE;", "COMMIT;");
 
+/// [`FRESH_SCHEMA`] with its transaction left open, so a fresh open commits the schema
+/// version with the first tables.
+const FRESH_SCHEMA_UNCOMMITTED: &str = core_schema!("BEGIN IMMEDIATE;", "");
+
 /// The store's schema version, set once the graph's and the runtime's tables exist.
 pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
 
@@ -891,12 +897,37 @@ impl Store {
     /// Open the store at `path`, creating it when it does not exist, with `runtime`'s tables
     /// and projections beside the graph's.
     pub fn open(path: &Path, origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
-        let origin = origin.into();
+        Self::open_with(path, origin.into(), runtime, true, |_| {})
+    }
+
+    /// [`Self::open`] with the initialization of a fresh database committed the way it was
+    /// before deferred durability (`defer_fresh_durability` false), and `prepare` run on the
+    /// writer connection before anything is read or written, so a test can observe or stop
+    /// its commits.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_for_initialization_test(
+        path: &Path,
+        origin: impl Into<String>,
+        runtime: Arc<dyn Runtime>,
+        defer_fresh_durability: bool,
+        prepare: impl FnOnce(&Connection),
+    ) -> Result<Self> {
+        Self::open_with(path, origin.into(), runtime, defer_fresh_durability, prepare)
+    }
+
+    fn open_with(
+        path: &Path,
+        origin: String,
+        runtime: Arc<dyn Runtime>,
+        defer_fresh_durability: bool,
+        prepare: impl FnOnce(&Connection),
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let mut connection = Connection::open(path)
             .with_context(|| format!("open st database {}", path.display()))?;
+        prepare(&connection);
         let path = crate::sqlite::opened_database_path(&connection, path)?;
         let has_meta: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
@@ -924,7 +955,7 @@ impl Store {
         // page cache. The default (~2 MiB per connection) churns against the
         // large durable claim store during otherwise quiet replication.
         connection.pragma_update(None, "cache_size", -(crate::sqlite::WRITE_CACHE_KIB as i64))?;
-        Self::create_schema(&connection, &*runtime)?;
+        let fresh = Self::create_schema_with(&connection, &*runtime, defer_fresh_durability)?;
         separate_staged_blobs(&mut connection)?;
         {
             let transaction = connection.transaction()?;
@@ -932,6 +963,12 @@ impl Store {
             transaction.commit()?;
         }
         runtime.finish_open_projections(&mut connection)?;
+        if fresh && defer_fresh_durability {
+            // Back to the member's setting before `from_connection` commits its first meta rows,
+            // which a fresh store always writes: that commit fsyncs the WAL, and with it every
+            // frame the initialization wrote, before open returns.
+            connection.pragma_update(None, "synchronous", "FULL")?;
+        }
         let readers = ReadPool::new(&path, false)?;
         Self::from_connection(
             connection,
@@ -975,6 +1012,20 @@ impl Store {
     /// Check and migrate the schema, then create the graph's tables, the runtime's, and the
     /// triggers that keep digests current.
     fn create_schema(connection: &Connection, runtime: &dyn Runtime) -> Result<()> {
+        Self::create_schema_with(connection, runtime, false).map(|_| ())
+    }
+
+    /// [`Self::create_schema`], returning whether the database began empty. With
+    /// `defer_fresh_durability`, a fresh database's initialization commits at
+    /// synchronous=NORMAL after the core schema: in WAL mode that is corruption-safe and
+    /// skips the fsync on each of its many small commits. The caller sets FULL again
+    /// before its next commit, and that commit's WAL fsync makes the initialization
+    /// durable. An existing database is opened exactly as before.
+    fn create_schema_with(
+        connection: &Connection,
+        runtime: &dyn Runtime,
+        defer_fresh_durability: bool,
+    ) -> Result<bool> {
         // Only an empty database can batch DDL without changing upgrade progress or locking
         // ordinary reopens. Determine this before any migration or schema hook creates objects.
         let fresh: bool = connection.query_row(
@@ -989,7 +1040,19 @@ impl Store {
         }
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f86346fb38f owner=smallclaims::store TODO=trace-statement-and-value-representation */ if fresh { FRESH_SCHEMA } else { SCHEMA })?;
+        if fresh {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8680754156af owner=smallclaims::store TODO=trace-statement-and-value-representation */ FRESH_SCHEMA_UNCOMMITTED)?;
+            // The version commits with the first tables. A first open stopped after this
+            // reopens as a current store, which the existing-store path below completes; a
+            // store with tables at version 0 is refused as an old one.
+            connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc1e68820d94d owner=smallclaims::store TODO=trace-statement-and-value-representation */ "COMMIT")?;
+        } else {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hab2af578d954 owner=smallclaims::store TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        }
+        if fresh && defer_fresh_durability {
+            connection.pragma_update(None, "synchronous", "NORMAL")?;
+        }
         repair_ledger::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
@@ -1031,7 +1094,7 @@ impl Store {
         })?;
         projection_digest::initialize(connection, runtime.digest_tables())?;
         checkpoint_capture_epoch::initialize(connection)?;
-        Ok(())
+        Ok(fresh)
     }
 
     /// Wrap an opened, initialized writer connection and its read pool.

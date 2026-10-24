@@ -12,7 +12,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/8cb2135bd4a852b99ca3f677c0815d0268766ff5";
+      "github:overengineeringstudio/effect-utils/1e294f81aeec43c2e1f25ba25bb731c1c8336beb";
   };
 
   outputs =
@@ -767,7 +767,7 @@
           ${st3}/bin/st3 --help > st3.help
           ${st3}/bin/st --help > st.help
           cmp st3.help st.help
-          grep -F "Usage: st [" st.help
+          grep -F "Usage: fractal [" st.help
           test -s ${st3}/share/bash-completion/completions/st.bash
           test -s ${st3}/share/zsh/site-functions/_st
           test -s ${st3}/share/fish/vendor_completions.d/st.fish
@@ -1079,19 +1079,23 @@
         checks.st3-deploy-policy-absent = mkDeployPolicyCheck "absent" null;
         checks.st3-deploy-policy-packaged = mkDeployPolicyCheck "packaged" deployPolicyFixture;
         checks.st3-deploy-policy-unreadable = mkDeployPolicyCheck "unreadable" unreadableDeployPolicy;
-        checks.st3-runtime-inputs =
+        # Keep derivation-path assertions lazy until the check's builder is evaluated:
+        # flake discovery must not force package inputs (including the installation hash guard).
+        checks.st3-runtime-inputs = pkgs.runCommand "st3-runtime-inputs" { } (
           assert import ./nix/st3-runtime-input-tests.nix {
             inherit self system;
             baseline = messagingCompat;
             inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
           };
-          pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
+          ''touch $out''
+        );
         checks.st3-help = st3Help;
-        checks.st3-check-input-isolation =
+        checks.st3-check-input-isolation = pkgs.runCommand "st3-check-input-isolation" { } (
           assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
           # Native check inputs must not contribute to the installed package identity.
           assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
-          pkgs.runCommand "st3-check-input-isolation" { } ''touch $out'';
+          ''touch $out''
+        );
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;

@@ -13,6 +13,9 @@ A crate's key is `source_inputs` (the git tree of exactly the declared paths, sc
      dependency changes that dependency's build for every crate;
   3. the crate's own `extra` paths from the same file: what its tests read outside the closure.
 
+The same file lists under `no_tests` the crates that have no test to run (reviewed): the verifier refuses a note whose run ran no test
+unless the crate is listed there. The list is not part of any key.
+
 A crate the file does not list has the extra `.`, whose key is the whole tree: it is run on every change (it fails closed), so an
 unreviewed crate or a new one is never reused by accident. The file is read from --inputs-from (the accepted base, for a verifier) or else
 from the tree being keyed. Nothing here runs cargo.
@@ -161,6 +164,9 @@ def read_inputs(repo, treeish):
         raise Failure(f'{INPUTS_PATH}: {error}')
     if not isinstance(inputs, dict) or not isinstance(inputs.get('global', []), list) or not isinstance(inputs.get('crates', {}), dict):
         raise Failure(f'{INPUTS_PATH}: expected {{"global": [...], "crates": {{name: {{"extra": [...]}}}}}}')
+    no_tests = inputs.get('no_tests', [])
+    if not isinstance(no_tests, list) or not all(isinstance(name, str) for name in no_tests):
+        raise Failure(f'{INPUTS_PATH}: no_tests must be an array of crate names')
     return inputs
 
 

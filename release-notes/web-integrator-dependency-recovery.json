@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Retry incomplete web follower dependency preparation across unchanged main ticks and capture failed integrator install output.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of application data." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Developer-only scripts. The follower stores successful input hashes and a pending-install marker beside its existing JSONL log." },
+  "downtime": { "status": "none", "detail": "No running service is activated by this change." },
+  "manual": { "status": "none", "detail": "No released-product manual step. Deployment owners preserve follower state files alongside its log." },
+  "recovery": { "status": "none", "detail": "No persistent application state changes. Failed dependency preparation remains pending until a later tick succeeds." }
+}

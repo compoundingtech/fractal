@@ -196,6 +196,8 @@ export interface ConversationPage {
 export interface Grants {
   readonly actions: 'granted' | 'ungranted'
   readonly messageSend: 'granted' | 'ungranted'
+  /** Image upload for message attachments (`control.messages`); sending them still needs `messageSend`. */
+  readonly attachmentUpload: 'granted' | 'ungranted'
   readonly terminalInput: 'granted' | 'ungranted'
 }
 
@@ -270,6 +272,7 @@ export interface AttachmentPort {
   readonly upload: (request: {
     readonly bytes: Blob | ArrayBuffer | Uint8Array
     readonly mediaType: BlobUpload['media_type']
+    readonly signal?: AbortSignal
   }) => Promise<ConversationPortResult<BlobUpload>>
   readonly chunk: (request: {
     readonly sha256: string

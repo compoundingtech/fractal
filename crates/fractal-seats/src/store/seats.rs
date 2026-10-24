@@ -1870,8 +1870,8 @@ impl SeatsStore for Store {
         ) -> Result<(ResourceObservationOutcome, bool), St3Error> {
         let fence = resource_preparation::Fence::new(self);
         for pass in 0..2 {
-            let prepared = fence.prepare_with_actuals(self, |connection, serial| {
-                resource_preparation::inputs_with_actuals(
+            let prepared = fence.prepare_with_actuals(self, |connection, _| {
+                resource_preparation::read_inputs(
                     connection,
                     resource_preparation::Observation {
                         observer,
@@ -1880,10 +1880,6 @@ impl SeatsStore for Store {
                         resource,
                         facts: &canonical_json_value(facts),
                         subscriptions,
-                    },
-                    &mut |subject| match serial {
-                        Some(serial) => self.smalltalk.observer_actuals.read(connection, subject, serial),
-                        None => latest_actual(connection, subject),
                     },
                 )
             });

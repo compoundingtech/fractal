@@ -486,11 +486,11 @@ export const evidenceStageJob = (name: string) =>
   (evidenceStageNames as readonly string[]).includes(name) ? { environment: evidenceEnvironment } : {}
 
 /**
- * Jobs that are not `scripts/ci-linux` stages but are required checks too (genie-freshness,
+ * Jobs that are not `scripts/ci-linux` stages but are required checks too (genie-freshness, ci-script-tests,
  * typescript-client). They sign from the outcomes of their own steps; a step that did
  * not run (for example because the job was covered by a trusted note) makes no note.
  */
-export const evidenceStepNames = ['genie-freshness', 'typescript-client'] as const
+export const evidenceStepNames = ['genie-freshness', 'ci-script-tests', 'typescript-client'] as const
 /**
  * A lane that is skipped whenever its paths are untouched (fractal-web), so a run that did not execute it makes no note
  * for it. Each shard signs its own note (scripts/ci-evidence-signing STEP_INPUTS), and the evidence note job signs one
