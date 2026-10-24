@@ -936,6 +936,16 @@ class PerCrate(StTest):
         self.assertEqual(code, 1, out + err)
         self.assertIn('not a workspace crate of this tree: nope', out)
 
+    def test_the_filterset_input_stays_within_what_the_signer_takes_and_still_pins_the_crate_list(self):
+        small = st_test.filterset_input(['base', 'top'])
+        self.assertEqual(small, 'package(=base) or package(=top)')
+        crates = [f'fractal-crate-number-{n}' for n in range(52)]
+        big = st_test.filterset_input(crates)
+        self.assertLessEqual(len(big), 500)
+        self.assertRegex(big, r'^52 packages sha256:[0-9a-f]{64}$')
+        self.assertNotEqual(big, st_test.filterset_input(crates[:-1] + ['other']))
+        self.assertEqual(big, st_test.filterset_input(list(crates)))
+
     def test_status_names_the_crates_to_run(self):
         code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
         self.assertEqual(code, 3, out + err)

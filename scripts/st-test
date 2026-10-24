@@ -79,6 +79,8 @@ RUST_TESTS_COMMAND = ['python3', 'scripts/ci-rust-test-result']
 RUN_TESTS = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']
 # nextest: 0 every test passed, 100 some test failed (the report is complete either way), 4 the selection matched no test.
 RUN_COMPLETED = frozenset({0, 4, 100})
+# The signer refuses an input longer than 500 characters (scripts/evidence-sign); a full run's filterset is longer than that.
+FILTERSET_LIMIT = 400
 # Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
 # (a builds.slice scope, the kept target below), which nobody has to ask for.
 BUILDS = frozenset({'linux-gate', 'fractal-web', RUST_TESTS})
@@ -557,6 +559,15 @@ def uncovered_crates(verifier, directory, tree, base, repository, lane_base, key
     return missing, have
 
 
+def filterset_input(selected):
+    """The expression scripts/ci-linux builds from CI_TEST_PACKAGES, as the record's `filterset` input: the whole expression while the signer
+    takes it (an input is at most 500 characters), else the count and the sha256 of the expression, which still pins the exact crate list."""
+    expression = ' or '.join(f'package(={crate})' for crate in selected)
+    if len(expression) <= FILTERSET_LIMIT:
+        return expression
+    return f'{len(selected)} packages sha256:{hashlib.sha256(expression.encode()).hexdigest()}'
+
+
 def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes, target):
     """The `rust-tests` check: one nextest run of the crates that have no passing note for their key, on the workspace build CI makes,
     then one signature per crate over that crate's part of the run. Returns the summary rows."""
@@ -585,8 +596,8 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     if code not in RUN_COMPLETED or not junit.exists():
         return [('rust-tests', 'timed out' if code == 124 else 'NOT SIGNED', ran_seconds,
                  f'the run did not complete (exit {code}{"" if junit.exists() else ", no report"}): no crate was signed')], True
-    # Exactly the expression scripts/ci-linux builds from CI_TEST_PACKAGES: the record says which crates the run was filtered to.
-    filterset = ' or '.join(f'package(={crate})' for crate in selected)
+    # The expression scripts/ci-linux builds from CI_TEST_PACKAGES: the record says which crates the run was filtered to.
+    filterset = filterset_input(selected)
     run_sha = hashlib.sha256(json.dumps([RUN_TESTS, selected]).encode()).hexdigest()
     rows, failed, signed_count = [], False, 0
     for crate in selected:
