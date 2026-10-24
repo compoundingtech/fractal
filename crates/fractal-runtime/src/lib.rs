@@ -40,4 +40,5 @@ pub use process::{
 pub use pty::{
     Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, PtyObservation, PtyRuntime,
     PtySpawnTimeout, PtySpawnTimeoutPhase, TerminalSize,
+    RebootWitnessManifest, RebootWitnessProof, RebootWitnessScan, REBOOT_WITNESS_MAX_PREBOOT_AGE_MS,
 };

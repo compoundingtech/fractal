@@ -309,15 +309,24 @@ pub(super) fn operational_repair_check(
     }
 }
 
+mod reboot_witness;
+pub use reboot_witness::capture_reboot_witness;
+
+#[derive(Default)]
+struct LegacyRepairGuards {
+    native: Vec<fractal_runtime::LegacyStartClosureProof>,
+    reboot: Vec<fractal_runtime::RebootWitnessProof>,
+}
+
 /// Physical evidence comes only from this owner daemon, never the repair request.
 /// Keep each native spawn-lock guard alive through the normal writer transaction.
 fn legacy_start_repair_evidence(
     state: &AppState,
     subjects: &[String],
     classes: &[String],
-) -> anyhow::Result<(Vec<fractal_runtime::LegacyStartClosureProof>, Vec<Value>)> {
+) -> anyhow::Result<(LegacyRepairGuards, Vec<Value>)> {
     let runtime = daemon_pty(state)?;
-    let mut guards = Vec::new();
+    let mut guards = LegacyRepairGuards::default();
     let mut evidence = Vec::new();
     if !classes.is_empty() && !classes.iter().any(|class| class == "revoked-legacy-runtime-start") {
         return Ok((guards, evidence));
@@ -332,11 +341,22 @@ fn legacy_start_repair_evidence(
             continue;
         }
         let Some(runtime_id) = member["runtime_id"].as_str() else { continue; };
+        if let Some(manifest) = state.store.reboot_witness_for(&operation.subject, &operation.id)? {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from)
+                .ok_or_else(|| anyhow::anyhow!("owner home unavailable"))?;
+            let proof = runtime.prove_reboot_witness(
+                runtime_id, &operation.id, &state.node, &manifest.manifest,
+                &manifest.observation_id, &manifest.digest, &home, &state.state_dir,
+            )?;
+            evidence.push(proof.evidence.clone());
+            guards.reboot.push(proof);
+            continue;
+        }
         if let Some(proof) = runtime.legacy_start_closure(runtime_id, &operation.id)? {
             let mut value = serde_json::to_value(&proof.evidence)?;
             value["legacy"] = Value::from(true);
             evidence.push(value);
-            guards.push(proof);
+            guards.native.push(proof);
         }
     }
     Ok((guards, evidence))

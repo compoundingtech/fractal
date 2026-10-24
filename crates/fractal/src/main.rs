@@ -2176,6 +2176,36 @@ enum RepairCommand {
     },
     /// Apply exactly the plan identified by a dry-run token.
     Apply { token: String },
+    /// Capture owner-local reboot evidence for a revoked legacy start; never repairs it.
+    RebootWitness {
+        #[command(subcommand)]
+        command: RebootWitnessCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RebootWitnessCommand {
+    /// Scan relaunch stores under the spawn fence before the authorized reboot.
+    Capture {
+        #[arg(long)]
+        subject: String,
+        /// Transport-bound agent capturing this observation.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: String,
+    },
+}
+
+#[cfg(test)]
+mod reboot_witness_cli_tests {
+    use super::*;
+    #[test]
+    fn reboot_witness_cli_requires_explicit_agent_and_subject() {
+        let args = ["st", "repair", "reboot-witness", "capture", "--subject", "agent/owner/seat", "--as", "agent/owner"];
+        assert!(Cli::try_parse_from(args).is_ok());
+        assert!(Cli::try_parse_from(&args[..6]).is_err());
+        let mut person = args; person[7] = "person/owner";
+        assert!(Cli::try_parse_from(person).is_err());
+    }
 }
 
 #[derive(Subcommand)]
@@ -10534,6 +10564,20 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                     }
                 }
                 println!("Apply this exact plan with: st repair apply {}", plan.token);
+            }
+        }
+        RepairCommand::RebootWitness { command: RebootWitnessCommand::Capture { subject, actor } } => {
+            let record: Value = client.post("/v1/repair/reboot-witness/capture",
+                &json!({"subject":subject,"actor":actor})).await?;
+            if json_output {
+                print_value(&record, true)?;
+            } else {
+                println!("reboot-witness\t{}\tdigest={}\tboot={}\tcaptured_at_unix_ms={}",
+                    record["observation_id"].as_str().unwrap_or_default(),
+                    record["digest"].as_str().unwrap_or_default(),
+                    record["manifest"]["boot_id"].as_str().unwrap_or_default(),
+                    record["manifest"]["captured_at_unix_ms"]);
+                println!("This observation does not authorize a reboot or repair. A later boot must begin within 10 minutes of capture; then inspect a fresh repair dry-run.");
             }
         }
         RepairCommand::Apply { token } => {

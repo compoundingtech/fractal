@@ -708,6 +708,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/doctor", get(operations::doctor))
         .route("/v1/repair", get(operations::operational_repair_plan))
         .route("/v1/repair/apply", post(operations::apply_operational_repair))
+        .route("/v1/repair/reboot-witness/capture", post(operations::capture_reboot_witness))
         .route("/v1/backup", get(operations::backup_export))
         .route("/v1/replication/status", get(replication::replication_status))
         .route("/v1/replication/records", get(replication::replication_records))
