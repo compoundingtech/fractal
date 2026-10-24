@@ -2453,7 +2453,31 @@ fn every_cli_command_has_a_valid_help_surface() {
 
     let command = Cli::command();
     command.clone().debug_assert();
-    visit(&command, &["st".into()]);
+    visit(&command, &["fractal".into()]);
+}
+
+#[test]
+fn cli_branding_is_fractal_even_through_legacy_aliases() {
+    for program in ["fractal", "st", "st3"] {
+        let help = Cli::try_parse_from([program, "setup", "--help"]).err().unwrap().to_string();
+        assert!(help.contains("Usage: fractal setup"), "{help}");
+        assert!(help.contains("start fractal"), "{help}");
+        assert!(!help.contains("start st"), "{help}");
+        let version = Cli::try_parse_from([program, "--version"]).err().unwrap().to_string();
+        assert!(version.starts_with("fractal "), "{version}");
+    }
+}
+
+#[test]
+fn web_is_visible_in_root_help_and_parses_as_a_public_command() {
+    let help = cli_help::root_help(false);
+    assert!(help.lines().any(|line| line.starts_with("  web ")), "{help}");
+    let command = Cli::command();
+    assert!(!command.find_subcommand("web").unwrap().is_hide_set());
+    assert!(matches!(
+        Cli::try_parse_from(["fractal", "web", "--state-dir", "/tmp/example"]).unwrap().command,
+        Command::Web { state_dir: Some(_) }
+    ));
 }
 
 #[test]
@@ -2478,7 +2502,7 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
 
     let mut help = command.clone();
     let help = help.render_long_help().to_string();
-    assert!(help.contains("Usage: st ["), "{help}");
+    assert!(help.contains("Usage: fractal ["), "{help}");
     assert!(
         command
             .find_subcommand("claude-channel")
