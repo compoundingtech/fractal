@@ -505,8 +505,8 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness')
 # The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
-HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'linux-gate', 'fractal-web'})
-HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web'})
+HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests'})
+HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests'})
 
 
 def policy_text(**overrides):
@@ -1346,7 +1346,8 @@ class CommittedPolicy(unittest.TestCase):
     def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
         modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
-        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'fractal-web': 'off'})
+        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'fractal-web': 'off',
+                                 'rust-tests': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
             if mode != 'off':
