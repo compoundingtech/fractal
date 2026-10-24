@@ -178,34 +178,6 @@ const deferredStoryModes: Readonly<Record<string, number>> = {
   './Transcript.stories.tsx#NoGreenAllStates': 2936,
   './Transcript.stories.tsx#NoGreenAllStatesLight': 2936,
   './Transcript.stories.tsx#MixedContent': 2936,
-  './Composer.stories.tsx#Geometry': 2937,
-  './Composer.stories.tsx#Idle': 2937,
-  './Composer.stories.tsx#IdleLight': 2937,
-  './Composer.stories.tsx#TypingMultiLine': 2937,
-  './Composer.stories.tsx#Running': 2937,
-  './Composer.stories.tsx#QueuedTwice': 2937,
-  './Composer.stories.tsx#FailedSendRestored': 2937,
-  './Composer.stories.tsx#OfflineDraft': 2937,
-  './Composer.stories.tsx#ImageAttached': 2937,
-  './Composer.stories.tsx#AllStates': 2937,
-  './Composer.stories.tsx#AllStatesLight': 2937,
-  './Composer.stories.tsx#TargetTooltips': 2937,
-  './Composer.stories.tsx#TargetTooltipsLight': 2937,
-  './Composer.stories.tsx#MentionPopup': 2937,
-  './Composer.stories.tsx#MentionPopupLight': 2937,
-  './Composer.stories.tsx#SlashCommands': 2937,
-  './Composer.stories.tsx#ImeComposition': 2937,
-  './Composer.stories.tsx#ShiftEnterNewline': 2937,
-  './Composer.stories.tsx#DurableDraft': 2937,
-  './Composer.stories.tsx#EffortSupported': 2937,
-  './Composer.stories.tsx#EffortUnsupported': 2937,
-  './Composer.stories.tsx#EffortUnknown': 2937,
-  './Composer.stories.tsx#EffortAllStates': 2937,
-  './Composer.stories.tsx#FooterWidthBudget': 2937,
-  './Composer.stories.tsx#FooterWidthBudgetLight': 2937,
-  './Composer.stories.tsx#LayoutShapes': 2937,
-  './Composer.stories.tsx#KitLabelResize': 2937,
-  './Composer.stories.tsx#PlainTextAdapter': 2937,
   './Workbench.stories.tsx#Dark': 2936,
   './Workbench.stories.tsx#Light': 2936,
   './Workbench.stories.tsx#OnePane': 2936,
@@ -563,7 +535,7 @@ test('app mode debt matches its reviewed shrink-only pin', () => {
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(381)
+  expect(exemptions).toHaveLength(409)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 
