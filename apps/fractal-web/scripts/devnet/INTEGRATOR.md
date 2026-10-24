@@ -15,8 +15,8 @@ Its generated-metadata cache includes `pnpm-source-inputs.json`.
 
 ## Integrator inputs
 
-All variables below are required. Paths identify deployment-owned resources;
-the scripts do not create a production deployment or provision credentials.
+Variables below are required unless marked conditional. Paths identify
+deployment-owned resources; scripts do not provision deployments or credentials.
 
 | Environment variable | Value |
 | --- | --- |
@@ -29,6 +29,8 @@ the scripts do not create a production deployment or provision credentials.
 | `FRACTAL_INTEGRATOR_VENDOR` | Deployment-owned web vendor directory |
 | `FRACTAL_INTEGRATOR_BUILD_SCRIPT` | Existing build-and-swap shell script; receives clone, revision and build name |
 | `FRACTAL_INTEGRATOR_PRIORITY_JSON` | Ordered JSON array of required PR numbers; `[]` explicitly selects none |
+| `FRACTAL_INTEGRATOR_TRUST_MODE` | Required: `authors` or `collaborator-permission`; no default |
+| `FRACTAL_INTEGRATOR_TRUSTED_AUTHORS` | Conditional: explicit JSON array of trusted GitHub logins, required in `authors` mode; no built-in authors |
 
 Run `python3 apps/fractal-web/scripts/devnet/integrator.py` for the five-minute
 loop, or append `--once` for one tick. `--dry-run` additionally requires
@@ -41,6 +43,35 @@ Existing state names remain unchanged: `live-r3.jsonl`, `live-r3-drop.json`,
 when adopting the script to reuse the existing member key. The production build
 helper and generated launchers remain deployment-owned inputs, not replacements
 for the separate launcher scripts.
+
+## Trust boundary
+
+Only same-repository PR heads are eligible: `isCrossRepository` must be false
+and the head owner must match the canonical `compoundingtech/fractal` owner.
+Fork heads are never eligible. Deployment owners must choose a trust mode:
+`FRACTAL_INTEGRATOR_TRUST_MODE=authors` requires author membership in
+`FRACTAL_INTEGRATOR_TRUSTED_AUTHORS`; `[]` explicitly trusts no authors.
+`FRACTAL_INTEGRATOR_TRUST_MODE=collaborator-permission` instead requires GitHub
+repository `write`, `maintain` or `admin` permission, queried once per author per
+tick. API failures and read-only permissions are untrusted. This mode does not
+require an author allowlist. Missing or unknown trust modes fail before a tick.
+Rejected PRs log `fork-head` or `untrusted-author`, including required PRs.
+After fetching, a moved head logs `head-moved`; merges use only the exact selected
+and verified SHA. Recorded semantic stacks cannot restore rejected or moved heads.
+
+## Publication recovery and retention
+
+Cached successful artifacts under `<prod-root>/builds/<sha>` remain publishable
+after an activation failure: the integrator reselects the artifact and retries
+publication without rebuilding. An unchanged candidate is not considered served
+until the published edge reports that exact revision. Reduced-stack cache entries
+record the SHA that actually built successfully, including the ejected PR result.
+After confirmed activation, the integrator keeps the current build and one previous
+rollback build and deletes older build directories. `integrator-activation.json`
+under the production root preserves the confirmed current/previous pair across
+unchanged ticks and restarts. Failed activation does not prune builds.
+The deployment-owned build helper must leave build cleanup to the integrator;
+it must not prune artifacts before publication or remove the rollback target.
 
 ## Tick observability
 
@@ -81,3 +112,9 @@ integrator and its external build helper. The follower needs Git, Nix, Python
 and GNU coreutils. Production state, credentials, private overlays and machine
 configuration stay outside this repository. Deployment owners review and activate
 new script revisions explicitly; committing these scripts does not restart a service.
+
+## Known gaps
+
+Candidate genie, install and build commands still inherit the agent environment.
+A separate follow-up PR allowlists the environment passed to candidate commands;
+the trust policy here does not provide environment isolation.
