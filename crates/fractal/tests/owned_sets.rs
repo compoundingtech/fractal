@@ -1547,3 +1547,105 @@ async fn adoption_diff_reads_existing_unmanaged_definition_and_invalid_actors_ar
             .is_err()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn suspended_authored_selection_refuses_start_and_resumes_the_recorded_session() {
+    use fractal_daemon::reconcile::{Reconciler, RuntimeControl};
+    use fractal_daemon::suspension;
+
+    let root = tempfile::tempdir().unwrap();
+    let anchor = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", anchor.clone(), &anchor).await;
+    let subject = "agent/garden/orchard";
+    let native = "suspended-native";
+    let transcript = root.path().join(format!("2026-10-24_{native}.jsonl"));
+    std::fs::write(&transcript, format!("{{\"type\":\"session\",\"id\":\"{native}\"}}\n")).unwrap();
+    let source = format!(
+        "version 2\nagent \"garden/orchard\" {{ host \"amber\"; workspace {:?}; harness \"omp\" {{ args \"--resume\" {:?}; }} }}",
+        root.path().display().to_string(), transcript.display().to_string(),
+    );
+    let intent = fractal_daemon::parse_intent(&source, "amber").unwrap();
+    d.store.apply_internal(&intent, "suspended-authored-fixture").unwrap();
+    let token = d.store.selected_desired_token(subject).unwrap().unwrap();
+    // Reproduce a historical suspension: current suspend preflight prevents creating a new one
+    // with an authored selector, but old durable suspensions still have to be resumable.
+    let suspend = d.store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "runtime.action.requested".into(),
+        actor: Some("person/operator".into()),
+        fields: serde_json::from_value(json!({"action":"suspend","incarnation_id":"original"})).unwrap(),
+        evidence: vec![token.clone()], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    for (key, phase) in [
+        (suspension::suspend_snapshot_key(&suspend.id), "snapshotting"),
+        (suspension::suspend_completed_key(&suspend.id), "suspended"),
+    ] {
+        d.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.action.succeeded".into(),
+            actor: Some("person/operator".into()),
+            fields: serde_json::from_value(json!({"action":"suspend","operation_status":phase,
+                "harness":"omp","native_session_id":native})).unwrap(),
+            evidence: vec![suspend.id.clone()], expected_subject: None, idempotency_key: Some(key),
+        }).unwrap();
+    }
+    assert_eq!(suspension::current(&d.store, subject).unwrap().unwrap().phase, "suspended");
+    let refused: fractal_daemon::model::ClaimRecord = d.client.post("/v1/agents/resume", &json!({
+        "subject":subject,"actor":"person/operator","idempotency_key":"historical-refused-resume",
+    })).await.unwrap();
+    d.store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "runtime.action.failed".into(),
+        actor: Some("person/operator".into()),
+        fields: serde_json::from_value(json!({"action":"resume","code":"authored-session-selection",
+            "reason":"historical blanket authored selector refusal"})).unwrap(),
+        evidence: vec![refused.id.clone()], expected_subject: None,
+        idempotency_key: Some(suspension::resume_failed_key(&refused.id)),
+    }).unwrap();
+    let held = suspension::current(&d.store, subject).unwrap().unwrap();
+    assert_eq!(held.phase, "suspended");
+    assert_eq!(held.code.as_deref(), Some("authored-session-selection"));
+    let socket = d.client.socket_path().unwrap().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+            .env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
+            .args(["--endpoint"]).arg(socket)
+            .args(["agents", "start", "garden/orchard", "--as", "person/operator"])
+            .output().unwrap()
+    }).await.unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("start-suspended"), "{error}");
+    assert!(error.contains("st agents resume"), "{error}");
+    assert_eq!(d.store.selected_desired_token(subject).unwrap().unwrap(), token);
+
+    let runtime = Arc::new(RolloutRuntime::default());
+    let reconciler = Reconciler::new(d.store.clone(), runtime.clone(), "amber".into(), Arc::new(Notify::new()));
+    d.client.post::<_, Value>("/v1/agents/resume", &json!({
+        "subject":subject,"actor":"person/operator","idempotency_key":"resume-authored",
+    })).await.unwrap();
+    for _ in 0..4 { reconciler.reconcile_once().unwrap(); }
+    let launch = runtime.starts.lock().unwrap().last().unwrap().clone();
+    assert_eq!(launch.environment[suspension::RESUME_ENV], native);
+    // Exercise the same argv check used by the driver, including the pinned-path branch.
+    // The native_resume unit fixture separately runs the resulting argv through a stub harness.
+    let argv = vec!["omp".into(), "--resume".into(), transcript.display().to_string()];
+    let selected = fractal_daemon::native_resume::pi_family_argv(
+        "omp", argv.clone(), &root.path().join("sessions"), native, Some(&transcript),
+    ).unwrap();
+    assert_eq!(selected, argv);
+    let observation = runtime.snapshot_ptys().unwrap().pop().unwrap();
+    append(&d.store, subject, "harness.session-file", json!({
+        "harness":"omp","session_id":native,"incarnation_id":observation.incarnation_id,
+        "path":transcript,"status":"active",
+    }));
+    for _ in 0..3 { reconciler.reconcile_once().unwrap(); }
+    let resumed = suspension::current(&d.store, subject).unwrap().unwrap();
+    assert_eq!(resumed.phase, "resumed");
+    assert_eq!(resumed.native_session_id.as_deref(), Some(native));
+
+    std::fs::write(&transcript, "{\"type\":\"session\",\"id\":\"other-native\"}\n").unwrap();
+    assert_eq!(
+        fractal_daemon::native_resume::pi_family_argv(
+            "omp", argv, &root.path().join("sessions"), native, Some(&transcript),
+        ).unwrap_err().code,
+        "authored-session-mismatch",
+    );
+}

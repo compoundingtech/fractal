@@ -300,6 +300,18 @@ pub(super) async fn run_agents(
             let client = cli_client(endpoint);
             let (subject, tokens, existing, mission) =
                 agent_start_declaration(&client, &args).await?;
+            if existing.is_some() && !args.print_kdl
+                && let ClientResource::Agent(agent) = generated_client(endpoint, None)?.agents_get(&subject).await?.value
+                && let Some(suspension) = agent.suspension
+                && matches!(suspension.phase.as_str(),
+                    "quiescing" | "snapshotting" | "suspended" | "fencing-source" | "transferring" | "restoring" | "verifying")
+            {
+                return Err(fractal_daemon::St3Error::new(
+                    "start-suspended",
+                    format!("`{subject}` is {}; use `st agents resume {subject}` to resume its recorded native session",
+                        suspension.phase),
+                ).into());
+            }
             anyhow::ensure!(!args.source_offline || existing.is_some(),
                 "--source-offline needs an existing seat with a pending placement handoff");
             let response = if let Some(mission) = mission {

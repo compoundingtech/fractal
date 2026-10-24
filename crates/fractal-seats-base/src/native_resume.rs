@@ -620,8 +620,8 @@ fn check_authored_transcript(transcript: &str, id: &str) -> Result<PathBuf, Refu
 /// pinned imported transcript (`resume_path`) by its own path once its header names the session.
 ///
 /// A seat may declare its own `--resume TRANSCRIPT` when that transcript is the recorded
-/// session: the selector is replaced by st's single selector for the staged inventory entry. A
-/// pinned imported transcript still refuses any authored selector.
+/// session: the selector is replaced by st's single selector for the staged inventory entry or
+/// pinned transcript. A pinned transcript and an authored selector must both name that session.
 pub fn pi_family_argv(
     driver: &str,
     mut argv: Vec<String>,
@@ -635,11 +635,9 @@ pub fn pi_family_argv(
     if driver == "omp"
         && let Some(path) = resume_path
     {
-        if let Some((_, transcript)) = authored {
-            return Err(Refusal::new(
-                "authored-session-selection",
-                format!("the seat declares its own session selection ({transcript}), so st cannot resume"),
-            ));
+        if let Some((range, transcript)) = authored {
+            check_authored_transcript(transcript, id)?;
+            argv.drain(range);
         }
         if pi_family_header_id(path).as_deref() != Some(id) {
             return Err(Refusal::new(
@@ -1285,6 +1283,34 @@ sed -n '1s/.*"id":"\([^"]*\)".*/\1/p' "$file"
         assert_eq!(
             pi_family_argv("omp", seat.launch(&["--", "--resume", "other"]), &seat.sessions, &seat.id, None).unwrap(),
             argv(&["omp", "--resume", &staged.to_string_lossy(), "--", "--resume", "other"])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_resume_accepts_matching_authored_selection_with_a_pinned_transcript() {
+        let seat = AuthoredSeat::new();
+        let transcript = seat.transcript.to_str().unwrap();
+        let resumed = pi_family_argv(
+            "omp",
+            seat.launch(&["--resume", transcript, "--model", "m"]),
+            &seat.sessions,
+            &seat.id,
+            Some(&seat.transcript),
+        ).unwrap();
+        assert_eq!(resumed, argv(&["omp", "--resume", transcript, "--model", "m"]));
+        let output = stub_omp(seat.root.path(), &seat.sessions, &resumed);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), seat.id);
+
+        // A selector for another native session must never replace the suspended binding.
+        fs::write(&seat.transcript, "{\"type\":\"session\",\"id\":\"another-session\"}\n").unwrap();
+        assert_eq!(
+            pi_family_argv(
+                "omp", seat.launch(&["--resume", transcript]), &seat.sessions,
+                &seat.id, Some(&seat.transcript),
+            ).unwrap_err().code,
+            "authored-session-mismatch",
         );
     }
 
