@@ -18,6 +18,8 @@ base, never the change under test). The trust level of a signer is the part of i
 principal before the first slash, and is never read from the record itself.
 """
 import argparse
+import concurrent.futures
+import copy
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -27,6 +29,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 
 sys.dont_write_bytecode = True
@@ -481,7 +484,19 @@ def with_note_for(repo, commits, tree):
     return [commit for commit, answer in zip(commits, answers) if not answer.endswith(' missing')]
 
 
+_LOADED = {}
+
+
 def load(repo, commit, tree=None):
+    """The record's statement (a copy), read once per process: a record is content-addressed, so what it says does not change, and a
+    per-crate check (`--members`) looks at every record of the tree once for each of its crates, 52 times each, which was most of its time."""
+    key = (repo, commit, tree)
+    if key not in _LOADED:
+        _LOADED[key] = read_statement(repo, commit, tree)
+    return copy.deepcopy(_LOADED[key])
+
+
+def read_statement(repo, commit, tree=None):
     """The record's statement. With `tree` the record must be for that tree; without it, the tree is the one
     the record names (used when a record is found by its input key, not by the tree)."""
     entries = [e for e in git(repo, 'ls-tree', '-r', '-z', commit).split(b'\0') if e]
@@ -893,23 +908,33 @@ def verify_members(repo, tree, check, keys, command, kinds, bind, max_age, runne
     combined key (the sha1 of the sorted crate=key lines) for the gate's sampling seed."""
     members = member_keys(repo, tree, policy_base)
     no_tests = zero_test_crates(repo, policy_base)
-    lane_cache = []
+    lane_cache, lane_lock = [], threading.Lock()
 
     def memoized_level_lane():
-        if not lane_cache:
-            lane_cache.append(level_lane() if level_lane else None)
-        return lane_cache[0]
+        with lane_lock:
+            if not lane_cache:
+                lane_cache.append(level_lane() if level_lane else None)
+            return lane_cache[0]
 
-    found, missing = {}, {}
-    for crate, key in sorted(members.items()):
+    def check_one(item):
+        crate, key = item
         if key is None:
-            missing[crate] = 'no_key'
-            continue
+            return crate, None, 'no_key'
         try:
-            found[crate] = verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, None, rules, lane,
-                                    memoized_level_lane if level_lane else None, run_inputs, (crate, key, crate not in no_tests))
+            return crate, verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, None, rules, lane,
+                                   memoized_level_lane if level_lane else None, run_inputs, (crate, key, crate not in no_tests)), None
         except Failure as failure:
-            missing[crate] = failure.reason
+            return crate, None, failure.reason
+
+    # Each member's check is a handful of git and ssh-keygen runs (the signature of every candidate record): independent, so side by side, 8 at
+    # a time; the answers are read back in crate order, so the result is the one a serial loop gives.
+    found, missing = {}, {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, max(1, len(members)))) as pool:
+        for crate, note, reason in pool.map(check_one, sorted(members.items())):
+            if reason is not None:
+                missing[crate] = reason
+            else:
+                found[crate] = note
     if missing:
         failure = Failure('crate_uncovered', f'{len(missing)} of {len(members)} crates have no satisfying note for their key: '
                       + ', '.join(f'{crate} ({reason})' for crate, reason in list(missing.items())[:12]) + (' ...' if len(missing) > 12 else ''),

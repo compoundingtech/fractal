@@ -1145,10 +1145,11 @@ class PerCrate(StTest):
 
     def test_a_push_that_fails_is_a_failed_row_not_a_silent_success(self):
         git(self.work, 'remote', 'set-url', '--push', 'origin', '/nonexistent/origin.git')
-        code, out, err = self.run_crates('--push', 'origin')
+        with mock.patch.object(st_test.time, 'sleep'):
+            code, out, err = self.run_crates('--push', 'origin')
         self.assertEqual(code, 1, out + err)
         self.assertIn('rust-tests:push', out)
-        self.assertIn('push of 8 refs failed', out)
+        self.assertIn('push of 8 of 8 refs failed after 3 tries', out)
 
     def members(self, *extra):
         verifier = ROOT / 'scripts/evidence-verify'
@@ -1323,6 +1324,60 @@ class PerCrate(StTest):
         code, out, err = self.run_seed('main', '--crate', 'base')
         self.assertEqual(code, 0, out + err)
         self.assertEqual(self.ran(), ['base'])
+
+    def hook(self, body):
+        path = Path(self.tmp.name) / 'origin.git/hooks/pre-receive'
+        path.write_text('#!/bin/bash\n' + body)
+        path.chmod(0o755)
+
+    def push_refs(self, count):
+        head = git(self.work, 'rev-parse', 'HEAD')
+        refs = [f'refs/notes/pushtest/r{n}' for n in range(count)]
+        for ref in refs:
+            git(self.work, 'update-ref', ref, head)
+        return refs
+
+    def remote_refs(self):
+        return subprocess.run(['git', '-C', str(Path(self.tmp.name) / 'origin.git'), 'for-each-ref', '--format=%(refname)', 'refs/notes/pushtest/'],
+                              capture_output=True, text=True).stdout.split()
+
+    def test_records_are_pushed_in_chunks_and_a_ref_that_fails_once_is_retried_on_its_own(self):
+        calls = Path(self.tmp.name) / 'pushes'
+        refs = self.push_refs(85)
+        self.hook(f'echo x >> {calls}\nif [ ! -e {calls}.rejected ]; then touch {calls}.rejected; echo "transient" >&2; exit 1; fi\nexit 0\n')
+        with mock.patch.object(st_test.time, 'sleep'), contextlib.chdir(self.work):
+            self.assertIsNone(st_test.push_records(self.work, 'origin', refs))
+        self.assertEqual(sorted(self.remote_refs()), sorted(refs))
+        self.assertEqual(len(calls.read_text().split()), 4, 'three chunks of at most 40, and the one that failed once again')
+
+    def test_a_ref_the_remote_keeps_rejecting_is_named_with_its_reason_after_the_tries(self):
+        refs = self.push_refs(3)
+        self.hook('echo "no such thing" >&2\nexit 1\n')
+        with mock.patch.object(st_test.time, 'sleep') as slept, contextlib.chdir(self.work):
+            error = st_test.push_records(self.work, 'origin', refs)
+        self.assertIn('push of 3 of 3 refs failed after 3 tries', error)
+        self.assertIn('refs/notes/pushtest/r0', error)
+        self.assertEqual(slept.call_count, 2)
+        self.assertEqual(self.remote_refs(), [])
+
+    def test_coverage_is_asked_of_the_verifier_once_for_all_the_crates(self):
+        self.run_crates()
+        with mock.patch.object(st_test, 'covered', side_effect=AssertionError('asked crate by crate')):
+            code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('2 of 2 crates covered', out)
+        self.commit('crates/top/src/lib.rs', '// changed\n')
+        with mock.patch.object(st_test, 'covered', side_effect=AssertionError('asked crate by crate')):
+            code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
+        self.assertEqual(code, 3, out + err)
+        self.assertIn('to run: top', out)
+
+    def test_the_table_shows_the_setup_time_and_where_the_rust_tests_time_went(self):
+        code, out, err = self.run_crates()
+        self.assertEqual(code, 0, out + err)
+        rows = {line.split()[0]: line for line in out.splitlines() if line.startswith('  ')}
+        self.assertIn('setup', rows)
+        self.assertRegex(rows['rust-tests'], r'\[keys \d+s, verify \d+s, tests \d+s, sign \d+s, push \d+s\]')
 
     def test_status_names_the_crates_to_run(self):
         code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
