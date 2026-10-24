@@ -502,10 +502,10 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
-ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness')
+ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
 # The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
-HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests'})
+HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests'})
 HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests'})
 
 
@@ -1346,7 +1346,7 @@ class CommittedPolicy(unittest.TestCase):
     def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
         modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
-        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'fractal-web': 'off',
+        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'ci-script-tests': 'shadow', 'fractal-web': 'off',
                                  'rust-tests': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
@@ -1355,7 +1355,9 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_declared_inputs_are_exactly_the_reviewed_list_and_all_exist(self):
         # Written out here: changing what a check depends on is a reviewed change to the policy AND to this list.
-        declared = {'linux-gate': sorted([
+        declared = {'ci-script-tests': sorted([
+            # The self-tests that run in a sparse copy of exactly these (scripts/ci-script-tests): a read outside them fails the check.
+            '.config/daily-only.filterset', '.gitattributes', '.github', '.gitignore', '.st', 'apps/fractal-web/.gitignore', 'apps/fractal-web/src/changelog/seen.ts', 'crates/fractal/tests/daemon_load.rs', 'crates/fractal/tests/messaging_faults.rs', 'docs/st3/gate-evidence.md', 'flake.lock', 'flake.nix', 'megarepo.lock', 'nix', 'package.json', 'packages/fractal-ui/.gitignore', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts', 'src/main.rs']), 'linux-gate': sorted([
             '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components', 'crates',
             'docs/st2', 'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
             'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/fractal-daemon/src/attach_image.rs
@@ -1381,7 +1383,7 @@ class CommittedPolicy(unittest.TestCase):
             # lint the scenario privacy lane runs.
             'apps/ios/package.json', 'docs/st3/client-v0/fixtures', 'pnpm-source-inputs.json', 'pnpm-source-inputs.json.genie.ts',
             'scripts/check-public-repo'])}
-        for check in ('linux-gate', 'typescript-client', 'genie-freshness', 'fractal-web'):
+        for check in ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web'):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['inputs']) if rules['inputs'] else None, declared.get(check), check)
             for path in rules['inputs'] or ():
@@ -1508,7 +1510,7 @@ class CommittedPolicy(unittest.TestCase):
         self.assertEqual(sorted(with_queue), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
 
     def test_every_required_check_has_a_valid_entry_that_accepts_only_the_fleet_signer(self):
-        for check in ('linux-gate', 'typescript-client', 'genie-freshness'):
+        for check in ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests'):
             rules = self.rules(check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)
             self.assertIsNone(rules['max_age_s'], check)  # no age limit by default
@@ -1537,6 +1539,7 @@ class CommittedPolicy(unittest.TestCase):
         self.assertIn('linux-gate', jobs)
         # The separate checks have their own notes; the aggregate does not record them (ci-evidence-signing SEPARATE_CHECKS).
         self.assertNotIn('genie-freshness', jobs)
+        self.assertNotIn('ci-script-tests', jobs)
         self.assertNotIn('typescript-client', jobs)
         common = ['attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256']
         self.assertEqual(gate['required_inputs'], common)
@@ -1548,6 +1551,7 @@ class CommittedPolicy(unittest.TestCase):
     def test_the_step_outcome_notes_of_the_other_two_checks_have_their_own_exact_rules(self):
         expected = {
             'genie-freshness': ['bash', 'scripts/ci-genie-freshness'],
+            'ci-script-tests': ['bash', 'scripts/ci-script-tests'],
             'typescript-client': ['bash', 'scripts/ci-typescript-client'],
         }
         required = ['attempt', 'flake_lock_sha256', 'job', 'step_outcomes', 'steps', 'system', 'toolchain_sha256', 'wrapper_sha256']
@@ -1558,7 +1562,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(wrapper['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
 
     def test_every_required_check_lists_observed_and_wrapper_and_only_the_fleet_signer(self):
-        for check in ('linux-gate', 'typescript-client', 'genie-freshness'):
+        for check in ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests'):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['kinds']), ['observed', 'wrapper'], check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)  # the wrapper signs as fleet/ci

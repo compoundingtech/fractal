@@ -69,6 +69,7 @@ LOCAL = {
     'typescript-client': ['nix', 'develop', '.#web', '-c', 'bash', '-c',
                           'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client'],
     'genie-freshness': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-genie-freshness'],
+    'ci-script-tests': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-script-tests'],
     # The stages a linux-gate skip covers (the tests, clippy and fleet compatibility), in one run, as their CI jobs run them but
     # with a home of their own (scripts/ci-local). The VM tests and the mail redelivery canaries run daily (daily-long.yml).
     'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat'],
