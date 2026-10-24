@@ -1,4 +1,5 @@
 use super::runtime::Plain;
+use super::contents::{differences, each_in_parallel, scratch_root, stored};
 use super::{FRESH_SCHEMA, SCHEMA, Store};
 use rusqlite::Connection;
 use std::sync::{
@@ -372,78 +373,6 @@ fn fresh_auxiliary_schema_families_share_durable_commits() {
     );
 }
 
-/// What a store holds: its catalog, a few header settings, and every row of every table. An
-/// integer within a day of now in Unix ms is when its row was written, so it reads as `now`.
-fn stored(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-    let shown = |value: rusqlite::types::Value| match value {
-        rusqlite::types::Value::Integer(at) if (at - now).abs() < 86_400_000 => "now".to_owned(),
-        value => format!("{value:?}"),
-    };
-    let connection = Connection::open(path).unwrap();
-    let catalog = connection
-        .prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
-        .unwrap()
-        .query_map([], |row| {
-            Ok(format!(
-                "{}|{}|{}|{}",
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?.unwrap_or_default()
-            ))
-        })
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let mut rows = Vec::new();
-    for pragma in ["auto_vacuum", "user_version", "journal_mode"] {
-        let value: String = connection
-            .query_row(/* sqlite-large-value: allow-for-now lv-hdac47c2007af owner=smallclaims::store::schema_install_tests TODO=trace-statement-and-value-representation */ &format!("SELECT CAST({pragma} AS TEXT) FROM pragma_{pragma}"), [], |row| row.get(0))
-            .unwrap();
-        rows.push(format!("pragma {pragma}={value}"));
-    }
-    let tables = connection
-        .prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    for table in tables {
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h93737219aa55 owner=smallclaims::store::schema_install_tests TODO=trace-statement-and-value-representation */ &format!("SELECT * FROM \"{table}\"")).unwrap();
-        let columns = statement.column_count();
-        let mut table_rows = statement
-            .query_map([], |row| {
-                (0..columns)
-                    .map(|index| row.get::<_, rusqlite::types::Value>(index).map(shown))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .unwrap()
-            .map(|row| format!("{table}: {}", row.unwrap().join(", ")))
-            .collect::<Vec<_>>();
-        table_rows.sort();
-        rows.extend(table_rows);
-    }
-    (catalog, rows)
-}
-
-/// The entries only one of two stores holds; empty when they hold the same.
-fn differences(left: &(Vec<String>, Vec<String>), right: &(Vec<String>, Vec<String>)) -> Vec<String> {
-    let mut only = Vec::new();
-    for (side, mine, theirs) in [("left", left, right), ("right", right, left)] {
-        for entry in mine.0.iter().chain(mine.1.iter()) {
-            if !theirs.0.contains(entry) && !theirs.1.contains(entry) {
-                only.push(format!("only {side}: {entry}"));
-            }
-        }
-    }
-    only
-}
-
 fn writer_synchronous(store: &Store) -> u32 {
     store
         .connection
@@ -454,7 +383,7 @@ fn writer_synchronous(store: &Store) -> u32 {
 
 #[test]
 fn a_fresh_open_with_deferred_durability_stores_what_committing_each_step_stores() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir_in(scratch_root()).unwrap();
     let deferred = directory.path().join("deferred.sqlite");
     let each = directory.path().join("each.sqlite");
     let store = Store::open(&deferred, "node", Arc::new(Plain)).unwrap();
@@ -503,13 +432,15 @@ fn fresh_commits(path: &std::path::Path, defer: bool) -> usize {
 fn a_fresh_open_cut_after_any_commit_reopens_as_committing_each_step_did() {
     // Deferring durability skips fsyncs, not commits: the same commits happen in the same order,
     // so any prefix a crash leaves is one the old sequence could leave too, and reopens alike.
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir_in(scratch_root()).unwrap();
     let commits = fresh_commits(&directory.path().join("deferred.sqlite"), true);
     assert_eq!(commits, fresh_commits(&directory.path().join("each.sqlite"), false));
     assert!(commits > 2, "a fresh open commits more than once: {commits}");
-    for kept in 0..commits {
-        let deferred = cut_and_reopen(directory.path(), true, kept);
-        let each = cut_and_reopen(directory.path(), false, kept);
+    each_in_parallel(commits, |kept| {
+        // Each cut's stores go once it is checked, so the scratch holds a few at a time.
+        let cut = tempfile::tempdir_in(directory.path()).unwrap();
+        let deferred = cut_and_reopen(cut.path(), true, kept);
+        let each = cut_and_reopen(cut.path(), false, kept);
         match (&deferred, &each) {
             (Ok(deferred), Ok(each)) => {
                 let difference = differences(deferred, each);
@@ -519,5 +450,23 @@ fn a_fresh_open_cut_after_any_commit_reopens_as_committing_each_step_did() {
             _ => panic!("cut after {kept} of {commits}: deferred {:?} but each step {:?}",
                 deferred.as_ref().map(|_| "reopens"), each.as_ref().map(|_| "reopens")),
         }
-    }
+    });
+}
+
+#[test]
+fn a_fresh_open_cut_after_any_commit_reopens_to_the_store_a_whole_open_makes() {
+    // The schema version commits with the first tables, so no cut leaves tables at version 0,
+    // which a reopen refuses as an old store (#3777); the reopen completes the store instead.
+    // The test above shows that committing each step reopens alike.
+    let directory = tempfile::tempdir_in(scratch_root()).unwrap();
+    let whole = directory.path().join("whole.sqlite");
+    let commits = fresh_commits(&whole, true);
+    let expected = stored(&whole);
+    each_in_parallel(commits, |kept| {
+        let cut = tempfile::tempdir_in(directory.path()).unwrap();
+        let reopened = cut_and_reopen(cut.path(), true, kept)
+            .unwrap_or_else(|error| panic!("cut after {kept} of {commits}: {error}"));
+        let difference = differences(&reopened, &expected);
+        assert!(difference.is_empty(), "cut after {kept} of {commits}: {difference:#?}");
+    });
 }

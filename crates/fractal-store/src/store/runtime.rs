@@ -1087,6 +1087,48 @@ mod schema_install_tests {
         }
         panic!("the crash point was not reached");
     }
+
+    #[test]
+    fn a_fresh_open_cut_after_any_commit_reopens_to_the_store_a_whole_open_makes() {
+        // The runtime's tables commit after the graph's first tables and their schema version,
+        // so a cut first open reopens as a current store and the existing-store path finishes it
+        // (#3777). Without the version it would be refused as an old store at version 0.
+        use smallclaims::store::contents::{differences, each_in_parallel, scratch_root, stored};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir_in(scratch_root()).unwrap();
+        let whole = directory.path().join("whole.sqlite");
+        let commits = Arc::new(AtomicUsize::new(0));
+        let counted = commits.clone();
+        drop(
+            crate::store::GraphStore::open_for_initialization_test(&whole, "node", Arc::new(SmalltalkRuntime::default()), true, move |connection| {
+                connection.commit_hook(Some(move || {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    false
+                }));
+            })
+            .unwrap(),
+        );
+        let commits = commits.load(Ordering::Relaxed);
+        drop(Store::open(&whole, "node").unwrap());
+        let expected = stored(&whole);
+        each_in_parallel(commits, |kept| {
+            // Each cut's store goes once it is checked, so the scratch holds a few at a time.
+            let cut = tempfile::tempdir_in(directory.path()).unwrap();
+            let path = cut.path().join("cut.sqlite");
+            let seen = Arc::new(AtomicUsize::new(0));
+            // Every commit after the first `kept` rolls back, as if the process stopped there.
+            let opened = crate::store::GraphStore::open_for_initialization_test(&path, "node", Arc::new(SmalltalkRuntime::default()), true, move |connection| {
+                connection.commit_hook(Some(move || seen.fetch_add(1, Ordering::Relaxed) >= kept));
+            });
+            assert!(opened.is_err(), "the open cut after {kept} of {commits} commits still succeeded");
+            drop(opened);
+            let reopened = Store::open(&path, "node")
+                .unwrap_or_else(|error| panic!("cut after {kept} of {commits}: {error:#}"));
+            drop(reopened);
+            let difference = differences(&stored(&path), &expected);
+            assert!(difference.is_empty(), "cut after {kept} of {commits}: {difference:#?}");
+        });
+    }
 }
 
 #[cfg(test)]

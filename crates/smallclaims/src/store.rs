@@ -58,6 +58,8 @@ mod membership_query_tests;
 mod repair_operation_tests;
 #[cfg(test)]
 mod schema_install_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod contents;
 pub mod prepared_seal;
 #[cfg(test)]
 mod prepared_seal_tests;
@@ -765,6 +767,10 @@ pub const SCHEMA: &str = core_schema!("", "");
 /// Contains BEGIN IMMEDIATE and COMMIT; cannot run inside an open transaction.
 pub const FRESH_SCHEMA: &str = core_schema!("BEGIN IMMEDIATE;", "COMMIT;");
 
+/// [`FRESH_SCHEMA`] with its transaction left open, so a fresh open commits the schema
+/// version with the first tables.
+const FRESH_SCHEMA_UNCOMMITTED: &str = core_schema!("BEGIN IMMEDIATE;", "");
+
 /// The store's schema version, set once the graph's and the runtime's tables exist.
 pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
 
@@ -1034,7 +1040,16 @@ impl Store {
         }
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f86346fb38f owner=smallclaims::store TODO=trace-statement-and-value-representation */ if fresh { FRESH_SCHEMA } else { SCHEMA })?;
+        if fresh {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8680754156af owner=smallclaims::store TODO=trace-statement-and-value-representation */ FRESH_SCHEMA_UNCOMMITTED)?;
+            // The version commits with the first tables. A first open stopped after this
+            // reopens as a current store, which the existing-store path below completes; a
+            // store with tables at version 0 is refused as an old one.
+            connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc1e68820d94d owner=smallclaims::store TODO=trace-statement-and-value-representation */ "COMMIT")?;
+        } else {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hab2af578d954 owner=smallclaims::store TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        }
         if fresh && defer_fresh_durability {
             connection.pragma_update(None, "synchronous", "NORMAL")?;
         }
