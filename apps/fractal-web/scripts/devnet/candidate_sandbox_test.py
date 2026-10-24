@@ -152,6 +152,7 @@ class IsolationTest(unittest.TestCase):
             (secret / 'sentinel').write_text(sentinel)
             worktree = root / 'candidate'
             worktree.mkdir()
+            (worktree / 'pnpm-source-inputs.json').write_text('{"sourceInputPaths": []}')
             (worktree / 'flake.nix').write_text(
                 '{ inputs.secret = { url = "path:' + str(secret) + '"; flake = false; };'
                 ' outputs = { self, secret }: { devShells.x86_64-linux.web = '
