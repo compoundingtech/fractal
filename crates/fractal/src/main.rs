@@ -4572,6 +4572,15 @@ fn cli_main() -> ExitCode {
         None => {}
     }
     fractal::dispatch(arguments.as_mut_slice());
+    // Preserve the browser launcher's early boundary: its arbitrary OS-string state
+    // path must not be reinterpreted by the inventory/instance raw-argument scanners.
+    if arguments.get(1).is_some_and(|argument| argument == "web") {
+        return match Cli::try_parse_from(&arguments) {
+            Ok(Cli { command: Command::Web { state_dir }, .. }) => fractal::web(state_dir),
+            Ok(_) => unreachable!("the selected subcommand is web"),
+            Err(error) => exit_usage_error(error),
+        };
+    }
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());
