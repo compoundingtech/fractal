@@ -1034,6 +1034,37 @@ class PerCrate(StTest):
                               capture_output=True, text=True, env=GIT_ENV)
         return done.returncode, json.loads(done.stdout)
 
+    def gate(self, event='merge_group'):
+        """scripts/ci-evidence-gate for rust-tests as a CI job runs it: a depth-1 clone of the feature head, the base's own verifier
+        and scripts/rust-test-keys, the notes on the remote."""
+        tmp = Path(self.tmp.name)
+        git(self.work, 'push', '-q', '--force', 'origin', 'feature')
+        clone = tmp / 'gate-clone'
+        shutil.rmtree(clone, ignore_errors=True)
+        subprocess.run(['git', 'clone', '-q', '--depth=1', '--branch', 'feature', f'file://{tmp / "origin.git"}', str(clone)],
+                       check=True, capture_output=True, env=GIT_ENV)
+        (tmp / 'gate-output').write_text('')
+        (tmp / 'gate-summary').write_text('')
+        env = dict(GIT_ENV, CHECK='rust-tests', REPOSITORY='org/repo', HEAD_REPOSITORY='org/repo', EVENT_NAME=event, PR_NUMBER='',
+                   BASE_SHA=git(self.work, 'rev-parse', 'origin/main').strip(), HEAD_SHA=git(self.work, 'rev-parse', 'feature').strip(),
+                   RUN_ID='42', RUN_ATTEMPT='1', GITHUB_OUTPUT=str(tmp / 'gate-output'), GITHUB_STEP_SUMMARY=str(tmp / 'gate-summary'))
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-evidence-gate')], cwd=clone, env=env, capture_output=True, text=True)
+        lines = [line for line in done.stdout.splitlines() if line.startswith('evidence-decision v1 ')]
+        self.assertEqual(len(lines), 1, done.stdout + done.stderr)
+        return dict(part.split('=', 1) for part in lines[0].split(' ')[2:])
+
+    def test_the_gate_asks_whether_every_member_has_a_note_for_its_own_key(self):
+        fields = self.gate()
+        self.assertEqual((fields['outcome'], fields['reason'], fields['members'], fields['missing']), ('rejected', 'crate_uncovered', '2', '2'), fields)
+        self.assertEqual(self.run_crates('--push', 'origin')[0], 0)
+        fields = self.gate()
+        # Satisfied, in shadow: the committed rust-tests entry does not enforce, so the decision is still run.
+        self.assertEqual((fields['outcome'], fields['members'], fields['missing'], fields['decision']), ('satisfied', '2', '-', 'run'), fields)
+        self.assertIn(fields['members_fetch'], ('ok', 'none'))
+        self.commit('crates/top/src/lib.rs', '// changed\n')
+        fields = self.gate()
+        self.assertEqual((fields['outcome'], fields['reason'], fields['missing']), ('rejected', 'crate_uncovered', '1'), fields)
+
     def test_the_verifier_is_satisfied_only_when_every_member_has_a_note_for_its_own_key(self):
         code, result = self.members()
         self.assertEqual((code, result['reason']), (1, 'crate_uncovered'), result)
