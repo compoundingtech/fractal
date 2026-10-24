@@ -3216,7 +3216,9 @@ async fn repair_actor_apply_request(
     let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap())
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    let value = if status.is_success() { envelope["value"].clone() } else { envelope };
+    (status, value)
 }
 
 #[tokio::test]
