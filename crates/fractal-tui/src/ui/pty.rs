@@ -6,6 +6,11 @@
 use super::theme;
 #[path = "pty_graphics.rs"]
 mod graphics;
+#[path = "pty_connection.rs"]
+mod connection;
+#[cfg(test)]
+#[path = "pty_geometry_tests.rs"]
+mod geometry_tests;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line as GridLine, Point, Side};
@@ -19,7 +24,7 @@ use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
 };
-use pty_client::connection::{SessionConnection, SessionEvent};
+use pty_client::connection::SessionEvent;
 use pty_terminal::{
     Key as ProtocolKey, KeyAction, Mods, MouseAction, MouseButton as ProtocolButton, TerminalActor,
 };
@@ -667,7 +672,7 @@ fn start(
     let name = name.to_owned();
     std::thread::Builder::new()
         .name(format!("pty {name}"))
-        .spawn(move || run(stream, &name, size, &shared, &inputs))
+        .spawn(move || run(stream, size, &shared, &inputs))
         .ok();
     input
 }
@@ -701,7 +706,6 @@ fn dropped(screen: &mut Screen, reason: String) {
 /// send it what is typed, until stui lets go or the session ends.
 fn run(
     stream: UnixStream,
-    name: &str,
     size: Size,
     screen: &Mutex<Screen>,
     inputs: &mpsc::Receiver<Input>,
@@ -712,12 +716,12 @@ fn run(
         return;
     }
     let mut control = stream.try_clone();
-    let mut connection = match SessionConnection::attach_over(
+    let mut requested = size;
+    let mut connection = match connection::Connection::attach_over(
         stream,
-        name,
         size.rows,
         size.columns,
-        Some(ATTACH_TIMEOUT),
+        ATTACH_TIMEOUT,
     ) {
         Ok(connection) => connection,
         Err(error) => {
@@ -748,6 +752,7 @@ fn run(
                 Ok(Input::Bytes(bytes)) => connection.write(&bytes),
                 Ok(Input::Resize(size)) => {
                     connection.resize(size.rows, size.columns);
+                    requested = size;
                     // Only ordered GEOMETRY may resize the emulators: queued DATA still
                     // belongs to the previous size, and another client may constrain this one.
                 }
@@ -773,8 +778,8 @@ fn run(
                     protocol.set_cell_size(cell);
                     if let Ok(control) = &mut control {
                         let _ = control.write_all(&pty_core::protocol::encode_resize_with_cell(
-                            protocol.rows(),
-                            protocol.cols(),
+                            requested.rows,
+                            requested.columns,
                             cell.width as u16,
                             cell.height as u16,
                         ));
