@@ -26,4 +26,4 @@ parallel_tests \
   st-test-test ci-local-test evidence-prepush-test evidence-presign-worker-test evidence-queue-signer-test \
   evidence-wrap-test ci-evidence-signing-test evidence-publish-test ci-evidence-shadow-test nix-check-facts-test \
   ci-evidence-gate-test evidence-flip-ready-test ci-evidence-presign-notice-test evidence-sign-hardening-test ci-daily-long-report-test \
-  ci-nextest-flaky-test nix-typescript-client-test nix-evidence-job-test ci-nextest-test ci-sparse-tree-test
+  ci-nextest-flaky-test nix-typescript-client-test nix-evidence-job-test ci-nextest-test ci-local-web-test ci-sparse-tree-test

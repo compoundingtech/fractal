@@ -1147,7 +1147,15 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(entry.get('require', 'off'), 'off')
         self.assertEqual(entry['trust_levels'], ['fleet'])
         self.assertEqual(sorted(entry['kinds']), ['wrapper'])  # the always-emitted fractal-web job passes without running the lane
-        self.assertFalse({'trust_levels', 'by_level'} & set(entry['kinds']['wrapper']))
+        # Host and agent levels admit only the local one-shard whole-check note (scripts/ci-local-web), for pull requests, bound to its
+        # lane; CI's own notes stay fleet-signed, and a single CI shard's note still never satisfies the check (below).
+        wrapper = entry['kinds']['wrapper']
+        self.assertEqual(wrapper['trust_levels'], ['fleet', 'host', 'agent', 'queue'])
+        self.assertEqual(sorted(wrapper['by_level']), ['agent', 'host', 'queue'])
+        for name, level in wrapper['by_level'].items():
+            self.assertEqual(level['command'], ['nix', 'develop', '.#web', '-c', 'bash', 'scripts/ci-local-web'])
+            # host and agent cover pull requests only; the (inert) queue level covers the merge queue only, like the other host checks'.
+            self.assertEqual((level['events'], level['lane']), (['merge_group' if name == 'queue' else 'pull_request'], True), name)
         self.assertRegex((ROOT / '.github/workflows/fleet.yml').read_text(), re.compile(r'^  evidence-gate-fractal-web:', re.M))
         shard_inputs = {'job': 'fractal-web', 'steps': 'run', 'step_outcomes': 'run=success'}
         for shard in ({'kit_shard': '1', 'kit_shard_count': '2', 'kit_play_set': 'all', 'app_test_set': 'all'},
