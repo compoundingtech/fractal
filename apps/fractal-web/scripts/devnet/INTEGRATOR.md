@@ -106,10 +106,12 @@ The private digest conservatively hashes **every source file** beneath
 `apps/fractal-web/private` and `apps/fractal-web/vendor`, not a filename allowlist.
 Arbitrary lifecycle scripts can read non-manifest files, so a minimal static
 install closure is not reliable. Even unrelated private source changes invalidate
-the cache. Directory exclusions are exactly `node_modules`, `.git`, `dist`,
-`build`, `.next`, `.turbo`, `.cache`, `coverage`, `out`: these generated directories
-must not be install inputs. Source install/postinstall scripts and local-package
-sources must live outside excluded outputs.
+the cache. Directory exclusions are only `node_modules` (installed output, which
+must not recursively key itself) and `.git` (VCS bookkeeping, not package source).
+Build/dist/cache outputs are included: no evidence establishes a safe exclusion.
+If the build writes such paths inside an overlay, that change invalidates the next
+key. Adding a future output exclusion requires proving/asserting that no generation
+inventory entry can capture dependencies beneath the excluded path.
 Package manifests in these trees recursively add all source files of their
 `file:`, `link:` and `workspace:` dependencies, including packages outside the
 overlay but inside the source clone. Workspace names must resolve to exactly one

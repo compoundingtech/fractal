@@ -148,14 +148,18 @@ class DependencyCacheTest(unittest.TestCase):
         for path in paths:
             with self.subTest(path=path.relative_to(self.source)):
                 path.write_text('changed source\n')
+                refreshed = f'reinstalled after {path.relative_to(self.source)}\n'
+                self.dependency.write_text(refreshed)
                 current = self.populate()
                 self.assertNotEqual(current, previous)
                 self.assertEqual(dependency_cache.public_install_key(self.source), public)
+                installed = self.cache / current / 'node_modules/package/index.js'
+                self.assertEqual(installed.read_text(), refreshed)
                 previous = current
         generated = private / 'build/generated.js'
         generated.parent.mkdir()
-        generated.write_text('not an install input')
-        self.assertEqual(dependency_cache.install_key(self.source), previous)
+        generated.write_text('build paths are included unless proven safe to exclude')
+        self.assertNotEqual(dependency_cache.install_key(self.source), previous)
 
     def test_private_local_input_escape_and_missing_workspace_fail_closed(self):
         private = self.source / 'apps/fractal-web/private'

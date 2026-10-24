@@ -36,12 +36,11 @@ def public_install_key(source):
     return inputs.hexdigest()
 
 
-OVERLAY_OUTPUTS = frozenset(('node_modules', '.git', 'dist', 'build', '.next',
-                             '.turbo', '.cache', 'coverage', 'out'))
+OVERLAY_OUTPUTS = frozenset(('node_modules', '.git'))
 
 
 def _input_tree(root):
-    """Deterministic source inventory; generated outputs cannot be install inputs."""
+    """Deterministic source inventory, excluding installed dependencies and VCS."""
     for directory, dirs, files in os.walk(root):
         dirs[:] = sorted(name for name in dirs if name not in OVERLAY_OUTPUTS)
         for name in sorted(dirs + files):
