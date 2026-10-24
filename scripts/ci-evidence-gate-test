@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +39,9 @@ REPOSITORY = 'org/repo'
 CHECKS = ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web')
 # The checks with an entry in the skip policy: every gated one (fractal-web's entry is shadow, see its own tests).
 POLICY_CHECKS = CHECKS
+# Every evidence gate job: the checks above and rust-tests, whose note covers one crate and whose gate asks whether every workspace
+# member has one (evidence-verify --members; its end-to-end test is scripts/st-test-test's PerCrate).
+GATED = CHECKS + ('rust-tests',)
 WEEK = 7 * 24 * 3600
 # The wrapper notes' exact strings, as the note jobs record them (nix-evidence, #2795 / #2803), written out
 # here independently of the policy file so a typo in either cannot make the test agree with itself.
@@ -195,6 +199,45 @@ class Decide(unittest.TestCase):
         for head, expected in (('org/repo', 'false'), ('', 'true'), ('org/repo-fork', 'true'), ('org/other', 'true')):
             self.assertEqual(gate.context_from({'REPOSITORY': 'org/repo', 'HEAD_REPOSITORY': head})['fork'], expected)
         self.assertEqual(gate.context_from({'HEAD_REPOSITORY': 'org/repo'})['fork'], 'true')
+
+
+class ManifestPrefetch(unittest.TestCase):
+    """A per-crate check reads every Cargo.toml without fetching: the gate fetches the ones a blob-less clone lacks in one request."""
+
+    def test_the_manifests_a_partial_clone_lacks_arrive_in_one_fetch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', GIT_AUTHOR_NAME='t',
+                       GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
+            git = lambda cwd, *args: subprocess.run(['git', '-C', str(cwd), *args], check=True, capture_output=True, env=env).stdout.decode()
+            upstream = root / 'upstream'
+            (upstream / 'crates/one').mkdir(parents=True)
+            (upstream / '.st').mkdir()
+            (upstream / 'Cargo.toml').write_text('[workspace]\nmembers = ["crates/one"]\n')
+            (upstream / 'crates/one/Cargo.toml').write_text('[package]\nname = "one"\n')
+            (upstream / 'crates/one/lib.rs').write_text('// not a manifest\n')
+            (upstream / '.st/rust-test-inputs.json').write_text('{}\n')
+            git(root, 'init', '-q', '-b', 'main', str(upstream))
+            git(upstream, 'add', '.')
+            git(upstream, 'commit', '-q', '-m', 'one')
+            git(upstream, 'config', 'uploadpack.allowFilter', 'true')
+            git(upstream, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
+            clone = root / 'clone'
+            git(root, 'clone', '-q', '--filter=blob:none', '--no-checkout', f'file://{upstream}', str(clone))
+            base = git(clone, 'rev-parse', 'HEAD').strip()
+            lacks = lambda path: subprocess.run(['git', '-C', str(clone), 'cat-file', '-e', f'HEAD:{path}'], capture_output=True,
+                                                env=dict(env, GIT_NO_LAZY_FETCH='1')).returncode != 0
+            self.assertTrue(lacks('Cargo.toml') and lacks('crates/one/Cargo.toml') and lacks('.st/rust-test-inputs.json'))
+            here = os.getcwd()
+            os.chdir(clone)
+            try:
+                with mock.patch.dict(os.environ, env):
+                    self.assertEqual(gate.prefetch_manifests('HEAD', base), 'ok')
+                    self.assertEqual(gate.prefetch_manifests('HEAD', base), 'none')  # nothing left to fetch
+            finally:
+                os.chdir(here)
+            self.assertFalse(lacks('Cargo.toml') or lacks('crates/one/Cargo.toml') or lacks('.st/rust-test-inputs.json'))
+            self.assertTrue(lacks('crates/one/lib.rs'), 'only the manifests and the inputs file, never the whole tree')
 
 
 class ProtectedPaths(unittest.TestCase):
@@ -878,7 +921,7 @@ class EndToEnd(unittest.TestCase):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
         enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
-        # rust-tests (per crate, scripts/st-test) has a policy entry and no gate job of its own until the gate step lands.
+        # rust-tests (per crate, scripts/st-test) has a policy entry and a gate job of its own, in shadow (enforce false).
         self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS + ('rust-tests',)))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
         for check, entry in policy['checks'].items():
@@ -1377,7 +1420,10 @@ class EndToEnd(unittest.TestCase):
             'check', 'decision', 'outcome', 'reason', 'record', 'signer', 'trust_level', 'kind', 'tier',
             'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'match', 'source_inputs', 'tree', 'tree_of', 'pr_head', 'merge_tree',
             'head_tree', 'behind', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'log', 'log_head', 'log_age_s', 'log_missing',
-            'log_fetch', 'head', 'base', 'event', 'pr', 'repo', 'run', 'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
+            'log_fetch', 'members', 'missing', 'manifests_fetch', 'members_fetch', 'head', 'base', 'event', 'pr', 'repo', 'run', 'attempt',
+            'fork', 'verifier_sha256', 'gate_sha256'])
+        # The per-crate fields are '-' for a check that is not per crate.
+        self.assertEqual([fields[k] for k in ('members', 'missing', 'manifests_fetch', 'members_fetch')], ['-'] * 4)
         self.assertEqual((fields['pr'], fields['repo'], fields['run'], fields['attempt'], fields['fork']),
                          ('123', REPOSITORY, '42', '1', 'false'))
         self.assertEqual((fields['max_age_s'], fields['tree'], fields['base']), ('-', tree, base))
@@ -1669,7 +1715,7 @@ class WorkflowStructure(unittest.TestCase):
 
     def test_every_gate_job_passes_the_pull_request_payload_the_head_tree_choice_checks(self):
         blocks = self.blocks()
-        for check in CHECKS:
+        for check in GATED:
             with self.subTest(check):
                 block = blocks[f'evidence-gate-{check}']
                 for name, expression in (('PR_HEAD_SHA', 'github.event.pull_request.head.sha'), ('PR_USER', 'github.event.pull_request.user.login'),
@@ -1789,13 +1835,13 @@ class WorkflowStructure(unittest.TestCase):
                 self.assertEqual(referenced, expected, name)
         self.assertGreaterEqual(signed, 8)  # the six stage jobs and the two step-outcome jobs
         aggregate = self.needs_of(blocks['evidence-note-linux-gate'])
-        for check in CHECKS:
+        for check in GATED:
             self.assertIn(f'evidence-gate-{check}', aggregate)
 
     def test_the_gate_jobs_can_write_nothing_and_start_nothing(self):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
         jobs = re.findall(r'^  (evidence-gate-[a-z-]+):\n((?:    .*\n|\n)+)', text, re.M)
-        self.assertEqual(len(jobs), len(CHECKS))
+        self.assertEqual(len(jobs), len(GATED))
         for name, body in jobs:
             self.assertIn('    permissions:\n      contents: read\n', body, name)
             self.assertNotRegex(body, r'write|workflow_dispatch|gh (run|workflow|api)|secrets\.|git push', name)
@@ -1847,8 +1893,8 @@ class WorkflowStructure(unittest.TestCase):
         jobs = re.findall(r'^  evidence-gate-[a-z-]+:\n((?:    .*\n|\n)+)', text, re.M)
         bases = [m for body in jobs for m in re.findall(r'^          BASE_SHA: (.*)$', body, re.M)]
         heads = [m for body in jobs for m in re.findall(r'^          HEAD_REPOSITORY: (.*)$', body, re.M)]
-        self.assertEqual(len(bases), len(CHECKS))
-        self.assertEqual(len(heads), len(CHECKS))
+        self.assertEqual(len(bases), len(GATED))
+        self.assertEqual(len(heads), len(GATED))
         for base in bases:  # the push fallback is the commit the push replaced, and only on push
             self.assertIn("(github.event_name == 'push' && github.event.before)", base)
             self.assertNotIn('workflow_dispatch', base)
@@ -1885,7 +1931,7 @@ class WorkflowStructure(unittest.TestCase):
             self.assertNotIn(lane, recorded)
         # Every real gate job is awaited; a skip taken by a gate of a linux-gate member stops the note.
         self.assertEqual(sorted(n for n in names if n.startswith('evidence-gate-')),
-                         sorted(f'evidence-gate-{c}' for c in CHECKS))
+                         sorted(f'evidence-gate-{c}' for c in GATED))
 
     def test_the_fractal_web_wrapper_rule_is_the_whole_check_note_the_evidence_note_job_signs(self):
         """The rule's command and inputs, read back from the note job's needs and its fractal-web signing step, so adding a

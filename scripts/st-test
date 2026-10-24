@@ -110,7 +110,8 @@ TARGET_MAX_GB = 25.0  # operations' terms for a kept target on a shared host (as
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
 POOL_WAIT_SECONDS = 5
-POOL_SETTINGS = {}  # ST_TEST_TREES and ST_TEST_POOL as the caller set them: read before the seat scrub drops every ST_* name
+POOL_SETTINGS = {}  # the ST_TEST_* settings (pool, signing jobs, member limit) as the caller set them: read before the seat scrub drops every ST_* name
+SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT')
 
 
 class Failure(Exception):
@@ -401,20 +402,54 @@ def members_command(directory):
             'apply', '--worktree-mode', 'commit', '--git-protocol', 'https']
 
 
+# The member step fetches every member repository: minutes when they are cold, and it once sat 30 minutes behind a `git fetch` that was blocked
+# writing to its parent (bun's `mr apply` did not read it) while the network was fine. A limit turns that into a refusal that says so.
+MEMBERS_LIMIT = 1200
+
+
+def members_limit():
+    try:
+        return max(1, int(POOL_SETTINGS.get('ST_TEST_MEMBERS_LIMIT', MEMBERS_LIMIT)))
+    except ValueError:
+        return MEMBERS_LIMIT
+
+
 def materialize_members(directory):
     """Fill repos/ from the tree's megarepo.lock, as CI does before every lane that reads it; a tree without one needs nothing.
 
-    Returns None, or why the members could not be materialized (then no check runs and nothing is signed)."""
+    Returns None, or why the members could not be materialized (then no check runs and nothing is signed). The command's output goes to a
+    file, not a pipe this process would have to read, and a run past the limit is killed with everything it started."""
     if not (directory / 'megarepo.lock').is_file():
         return None
     try:
         command = members_command(directory)
     except (OSError, ValueError, KeyError, TypeError) as error:
         return f'cannot read the effect-utils pin from flake.lock: {error}'
-    done = subprocess.run(command, cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    if done.returncode != 0:
-        sys.stderr.write(done.stdout.decode(errors='replace')[-4000:])
-        return f'materializing the megarepo members failed ({done.returncode})'
+    limit = members_limit()
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(command, cwd=directory, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            code = process.wait(timeout=limit)
+        except subprocess.TimeoutExpired:
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(process.pid, sig)
+                except ProcessLookupError:
+                    break
+                try:
+                    process.wait(timeout=10)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            output.seek(0, os.SEEK_END)
+            output.seek(max(0, output.tell() - 4000))
+            sys.stderr.write(output.read().decode(errors='replace'))
+            return f'materializing the megarepo members timed out after {limit}s (ST_TEST_MEMBERS_LIMIT)'
+        if code != 0:
+            output.seek(0, os.SEEK_END)
+            output.seek(max(0, output.tell() - 4000))
+            sys.stderr.write(output.read().decode(errors='replace'))
+            return f'materializing the megarepo members failed ({code})'
     return None
 
 
@@ -566,6 +601,16 @@ def uncovered_crates(verifier, directory, tree, base, repository, lane_base, key
     return missing, have
 
 
+def listed_no_tests(base):
+    """The crates the accepted base lists under no_tests in .st/rust-test-inputs.json (reviewed: they have no test to run); empty when unreadable."""
+    done = git('show', f'{base}:{RUST_TEST_INPUTS}', check=False)
+    try:
+        listed = json.loads(done.stdout.decode()).get('no_tests', []) if done.returncode == 0 else []
+    except (ValueError, AttributeError, UnicodeDecodeError):
+        return []
+    return [name for name in listed if isinstance(name, str)] if isinstance(listed, list) else []
+
+
 def push_records(directory, remote, refs):
     """One push of every record's refs (the same refs evidence-wrap --push sends for one record, many at once). Returns an error text or None."""
     token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
@@ -584,7 +629,7 @@ def push_records(directory, remote, refs):
 def sign_jobs():
     """How many crate signatures run at once (ST_TEST_SIGN_JOBS; default 8)."""
     try:
-        return max(1, int(os.environ.get('ST_TEST_SIGN_JOBS', '8')))
+        return max(1, int(POOL_SETTINGS.get('ST_TEST_SIGN_JOBS', '8')))
     except ValueError:
         return 8
 
@@ -701,6 +746,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
             rows.append(('rust-tests:push', 'FAILED', 0, pushed))
             failed = True
     detail = f'{signed_count} of {len(selected)} crates run and signed ({have} of {len(keys)} already had a passing note); one nextest run on the workspace build'
+    empty = [crate for crate in empty if crate not in listed_no_tests(args.base)]
     if empty:
         # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).
         detail += f'; {len(empty)} ran no test (list under no_tests if they have none): {", ".join(empty[:8])}' + (' ...' if len(empty) > 8 else '')
@@ -710,7 +756,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
 
 def main(argv):
     POOL_SETTINGS.clear()
-    POOL_SETTINGS.update({name: os.environ[name] for name in ('ST_TEST_TREES', 'ST_TEST_POOL') if name in os.environ})
+    POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
     scrub_git_environment()
     scrub_seat_environment()
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])

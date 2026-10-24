@@ -359,6 +359,31 @@ class StTest(unittest.TestCase):
         self.assertIn('materializing the megarepo members failed (7)', out)
         self.assertIn('no network', err)
 
+    def test_a_member_step_past_its_limit_is_killed_with_what_it_started_and_runs_no_check(self):
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        marker = Path(self.tmp.name) / 'grandchild-alive'
+        script = f'(sleep 30; touch {marker}) & echo started >&2; sleep 30'
+        with mock.patch.object(st_test, 'members_command', lambda directory: ['sh', '-c', script]):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '2'})
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.statements(), [])
+        self.assertIn('NOT RUN', out)
+        self.assertIn('materializing the megarepo members timed out after 2s', out)
+        self.assertIn('started', err)
+        time.sleep(1)
+        self.assertFalse(marker.exists(), 'the process group was killed, not only its leader')
+
+    def test_a_member_step_with_a_lot_of_output_does_not_block_on_it(self):
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        with mock.patch.object(st_test, 'members_command', lambda directory: ['sh', '-c', 'head -c 5000000 /dev/zero | tr "\\0" x; exit 0']):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '60'})
+        self.assertEqual(code, 0, out[-300:] + err[-300:])
+
+    def test_the_members_limit_comes_from_the_environment_and_a_bad_value_is_the_default(self):
+        for value, expected in (('30', 30), ('0', 1), ('x', st_test.MEMBERS_LIMIT), ('', st_test.MEMBERS_LIMIT)):
+            with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_MEMBERS_LIMIT': value}):
+                self.assertEqual(st_test.members_limit(), expected, value)
+
     def test_a_tree_without_a_megarepo_lock_materializes_nothing(self):
         self.commit('b.txt', 'two')
         with mock.patch.object(st_test, 'members_command', side_effect=AssertionError('called')):
@@ -957,10 +982,9 @@ class PerCrate(StTest):
 
     def test_signing_jobs_come_from_the_environment_and_a_bad_value_is_the_default(self):
         for value, expected in (('3', 3), ('0', 1), ('-2', 1), ('x', 8), ('', 8)):
-            with mock.patch.dict(os.environ, {'ST_TEST_SIGN_JOBS': value}):
+            with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_SIGN_JOBS': value}):
                 self.assertEqual(st_test.sign_jobs(), expected, value)
-        with mock.patch.dict(os.environ):
-            os.environ.pop('ST_TEST_SIGN_JOBS', None)
+        with mock.patch.dict(st_test.POOL_SETTINGS, clear=True):
             self.assertEqual(st_test.sign_jobs(), 8)
 
     def test_the_shared_toolchain_digest_is_none_when_it_cannot_be_named_so_each_wrap_reports_for_itself(self):
@@ -968,11 +992,10 @@ class PerCrate(StTest):
 
     def test_every_crate_is_signed_when_the_signatures_run_side_by_side(self):
         for jobs in ('1', '8'):
-            with mock.patch.dict(os.environ, {'ST_TEST_SIGN_JOBS': jobs}):
-                git(self.work, 'checkout', '-q', '-B', f'jobs{jobs}', 'main')
-                code, out, err = self.run_crates()
-                self.assertEqual(code, 0, out + err)
-                self.assertEqual(self.crate_records(), [('base', 0), ('top', 0)], jobs)
+            git(self.work, 'checkout', '-q', '-B', f'jobs{jobs}', 'main')
+            code, out, err = self.run_crates(ST_TEST_SIGN_JOBS=jobs)
+            self.assertEqual(code, 0, out + err)
+            self.assertEqual(self.crate_records(), [('base', 0), ('top', 0)], jobs)
             git(self.work, 'checkout', '-q', 'feature')
             for ref in git(self.work, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence', 'refs/tags/evidence', 'refs/notes/evidence-input').split():
                 git(self.work, 'update-ref', '-d', ref)
@@ -1011,6 +1034,37 @@ class PerCrate(StTest):
                               capture_output=True, text=True, env=GIT_ENV)
         return done.returncode, json.loads(done.stdout)
 
+    def gate(self, event='merge_group'):
+        """scripts/ci-evidence-gate for rust-tests as a CI job runs it: a depth-1 clone of the feature head, the base's own verifier
+        and scripts/rust-test-keys, the notes on the remote."""
+        tmp = Path(self.tmp.name)
+        git(self.work, 'push', '-q', '--force', 'origin', 'feature')
+        clone = tmp / 'gate-clone'
+        shutil.rmtree(clone, ignore_errors=True)
+        subprocess.run(['git', 'clone', '-q', '--depth=1', '--branch', 'feature', f'file://{tmp / "origin.git"}', str(clone)],
+                       check=True, capture_output=True, env=GIT_ENV)
+        (tmp / 'gate-output').write_text('')
+        (tmp / 'gate-summary').write_text('')
+        env = dict(GIT_ENV, CHECK='rust-tests', REPOSITORY='org/repo', HEAD_REPOSITORY='org/repo', EVENT_NAME=event, PR_NUMBER='',
+                   BASE_SHA=git(self.work, 'rev-parse', 'origin/main').strip(), HEAD_SHA=git(self.work, 'rev-parse', 'feature').strip(),
+                   RUN_ID='42', RUN_ATTEMPT='1', GITHUB_OUTPUT=str(tmp / 'gate-output'), GITHUB_STEP_SUMMARY=str(tmp / 'gate-summary'))
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-evidence-gate')], cwd=clone, env=env, capture_output=True, text=True)
+        lines = [line for line in done.stdout.splitlines() if line.startswith('evidence-decision v1 ')]
+        self.assertEqual(len(lines), 1, done.stdout + done.stderr)
+        return dict(part.split('=', 1) for part in lines[0].split(' ')[2:])
+
+    def test_the_gate_asks_whether_every_member_has_a_note_for_its_own_key(self):
+        fields = self.gate()
+        self.assertEqual((fields['outcome'], fields['reason'], fields['members'], fields['missing']), ('rejected', 'crate_uncovered', '2', '2'), fields)
+        self.assertEqual(self.run_crates('--push', 'origin')[0], 0)
+        fields = self.gate()
+        # Satisfied, in shadow: the committed rust-tests entry does not enforce, so the decision is still run.
+        self.assertEqual((fields['outcome'], fields['members'], fields['missing'], fields['decision']), ('satisfied', '2', '-', 'run'), fields)
+        self.assertIn(fields['members_fetch'], ('ok', 'none'))
+        self.commit('crates/top/src/lib.rs', '// changed\n')
+        fields = self.gate()
+        self.assertEqual((fields['outcome'], fields['reason'], fields['missing']), ('rejected', 'crate_uncovered', '1'), fields)
+
     def test_the_verifier_is_satisfied_only_when_every_member_has_a_note_for_its_own_key(self):
         code, result = self.members()
         self.assertEqual((code, result['reason']), (1, 'crate_uncovered'), result)
@@ -1033,6 +1087,18 @@ class PerCrate(StTest):
         git(self.work, 'commit', '-qam', message)
         git(self.work, 'push', '-q', 'origin', 'main')
         git(self.work, 'checkout', '-q', 'feature')
+
+    def test_the_ran_no_test_note_names_only_the_crates_the_base_does_not_list(self):
+        inputs = json.loads((self.work / '.st/rust-test-inputs.json').read_text())
+        self.on_main('list base as having no test', lambda: (self.work / '.st/rust-test-inputs.json').write_text(json.dumps(dict(inputs, no_tests=['base']))))
+        git(self.work, 'fetch', '-q', 'origin')
+        git(self.work, 'merge', '-q', '--ff-only', 'origin/main')
+        code, out, err = self.run_crates(FAKE_EMPTY='base')
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('ran no test', out, 'base is listed: nothing to review')
+        with contextlib.chdir(self.work):
+            self.assertEqual(st_test.listed_no_tests('origin/main'), ['base'])
+            self.assertEqual(st_test.listed_no_tests('origin/nope'), [])
 
     def test_a_note_that_ran_no_test_covers_a_crate_only_when_the_base_lists_it_as_having_none(self):
         code, out, err = self.run_crates(FAKE_EMPTY='base')

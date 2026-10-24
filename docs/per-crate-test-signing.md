@@ -161,6 +161,22 @@ Measured with the committed extras over the last 57 first-parent merges of main 
 crates; 29 merges change at most 5, 5 change 6 to 20, 14 change 21 to 49, and 9 change 50 or more (global paths: a manifest, the lock, the
 stage scripts). So about half the merges re-run a handful of crates and one in six re-runs everything.
 
+## 8a. As built in step 3 (the gate job, shadow)
+
+- `evidence-gate-rust-tests` is one of the evidence gate jobs (`evidenceGateChecks` in `.github/workflows/fleet.yml.genie.ts`), and the
+  aggregate note job waits for it as for the others. With the policy entry in shadow (`enforce` false) it decides nothing: it reports a
+  decision line on every run, and no job skips on it yet.
+- `scripts/ci-evidence-gate`, for a check in `MEMBER_CHECKS` (`rust-tests`):
+  - copies the base's `scripts/rust-test-keys` beside the base's verifier;
+  - fetches the tree's `Cargo.toml` blobs and the base's `.st/rust-test-inputs.json` that the clone lacks, in ONE fetch by object id. A
+    head tree's clone has trees but no blobs, and the verifier reads them without fetching;
+  - fetches every member's note refs in ONE fetch built from `--members --project`;
+  - asks `--members`.
+  A base whose verifier lacks `--members`, or that has no `scripts/rust-test-keys`, makes the outcome `unavailable`, and the check runs.
+- The decision line adds `members` (workspace members), `missing` (how many have no satisfying note), `manifests_fetch` and `members_fetch`.
+- Next, on Factory's sign-off: the enforce step. linux-gate's test jobs skip on `evidence-gate-rust-tests` (pull_request only, sampled 1 in 5),
+  with the aggregate counting them as covered; then `rust-tests` joins `scripts/st-test`'s default.
+
 ## 9. Signing time (measured 2026-10-24)
 
 The first full run on main's tree signed 52 crates in 671 s (07:52:51Z to 08:04:02Z), as long as the tests (nextest 941.6 s): each
@@ -170,3 +186,7 @@ repository when it is missing) and the rest `ST_TEST_SIGN_JOBS` (default 8) at a
 Each record's content and signature are as before. Fifty-two signatures from a saved report took 74.7 s on this host, before the push.
 The four workspace crates that ran no test in that run (demo-resolver-wasm, fractal-build-stamp, fractal-github-issue-component,
 fractal-github-pr-component) are listed under `no_tests` in `.st/rust-test-inputs.json`.
+A full run once sat 30 minutes in the megarepo member step (`mr apply`, whose `git fetch --tags --prune` was blocked writing to its parent while
+the network was fine). The step now has a limit (`ST_TEST_MEMBERS_LIMIT`, default 1200 s), writes its output to a file, and is killed with
+everything it started when the limit passes; the run then reports "NOT RUN" with the reason. The `ST_TEST_*` settings are read before the seat
+environment scrub, which would otherwise remove them.
