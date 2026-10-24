@@ -624,7 +624,7 @@ const OPEN_PULL_REQUESTS: &str = "query($owner: String!, $name: String!, $after:
 
 // GitHub can reject the combined query even when each 100-item read succeeds separately.
 // Keep closure/transfer lookups out of the expensive PR review and check-rollup query.
-const RESOLVED_ITEMS: &str = "query($ids: [ID!]!) {
+const RESOLVED_ISSUES: &str = "query($ids: [ID!]!) {
   nodes(ids: $ids) {
     id
     ... on Issue {
@@ -637,6 +637,12 @@ const RESOLVED_ITEMS: &str = "query($ids: [ID!]!) {
         }
       } } }
     }
+  }
+}";
+
+const RESOLVED_PULLS: &str = "query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    id
     ... on PullRequest {
       number url state updatedAt merged mergedAt mergedBy { login } mergeCommit { oid url }
       timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
@@ -1419,7 +1425,7 @@ pub async fn observe_at(
                     .as_ref()
                     .is_some_and(|after| *id <= after)
             }))
-            .cloned()
+            .map(|id| (id.clone(), cursor.identities[id].pull))
             .collect::<Vec<_>>();
         let details = open_pull_requests(
             &client,
@@ -1440,7 +1446,7 @@ pub async fn observe_at(
         )
         .await?;
         if details.identities_read > 0 {
-            cursor.detail_after = identities.get(details.identities_read - 1).cloned();
+            cursor.detail_after = identities.get(details.identities_read - 1).map(|(id, _)| id.clone());
         }
         for node in details.resolved.iter() {
             let Some(id) = node.get("id").and_then(Value::as_str) else {
@@ -1591,6 +1597,38 @@ pub async fn observe_at(
     })
 }
 
+/// Neither installation has statuses:read. An app-only rollup is not complete.
+fn merge_legacy_statuses(node: &mut Value, combined: &Value) -> Result<()> {
+    let statuses = combined.get("statuses").and_then(Value::as_array)
+        .context("the GitHub combined status response has no statuses")?;
+    anyhow::ensure!(combined.get("total_count").and_then(Value::as_u64).unwrap_or(statuses.len() as u64) <= statuses.len() as u64,
+        "the GitHub combined status response is truncated");
+    let commit = node.pointer_mut("/commits/nodes/0/commit")
+        .context("the GitHub pull request has no head commit for legacy statuses")?;
+    if commit.get("statusCheckRollup").is_none_or(Value::is_null) {
+        commit["statusCheckRollup"] = json!({"state": null, "contexts": {"nodes": []}});
+    }
+    let rollup = &mut commit["statusCheckRollup"];
+    let contexts = rollup.pointer_mut("/contexts/nodes").and_then(Value::as_array_mut)
+        .context("the GitHub check rollup has no contexts")?;
+    contexts.retain(|context| context["__typename"] != "StatusContext");
+    contexts.extend(statuses.iter().map(|status| json!({
+        "__typename": "StatusContext", "context": status["context"],
+        "state": status["state"].as_str().map(str::to_ascii_uppercase),
+    })));
+    if statuses.is_empty() { return Ok(()); }
+    let state = combined.get("state").and_then(Value::as_str);
+    anyhow::ensure!(matches!(state, Some("success" | "pending" | "failure" | "error")),
+        "the GitHub combined status response has no valid state");
+    let checks = rollup.get("state").and_then(Value::as_str);
+    rollup["state"] = json!(if matches!(state, Some("failure" | "error")) || matches!(checks, Some("FAILURE" | "ERROR")) {
+        "FAILURE"
+    } else if state == Some("pending") || matches!(checks, Some("PENDING" | "EXPECTED")) {
+        "PENDING"
+    } else { "SUCCESS" });
+    Ok(())
+}
+
 /// The repository's open pull requests as GraphQL last answered on this host. GraphQL has no
 /// conditional request, so it is asked again only when `changed` says the REST reads saw an open
 /// pull request change, while a pull request is settling, or once the last answer is old, and
@@ -1610,9 +1648,11 @@ async fn open_pull_requests(
     changed: bool,
     listed: &BTreeSet<u64>,
     emit_pulls: bool,
-    identities: &[String],
+    identities: &[(String, bool)],
 ) -> Result<RepositoryDetails> {
-    let key = format!("{api_base} {locator}");
+    let read_token = crate::github_http::read_auth(owner, "gh-ci", token);
+    let issue_token = crate::github_http::read_auth(owner, "github-ledger", token);
+    let key = format!("{api_base} {locator} {} {}", read_token.cache_principal(), issue_token.cache_principal());
     let previous = {
         let mut checks = pull_request_checks()
             .lock()
@@ -1671,7 +1711,7 @@ async fn open_pull_requests(
             match github_graphql(
                 client,
                 api_base,
-                token,
+                &read_token,
                 OPEN_PULL_REQUESTS,
                 json!({"owner": owner, "name": repository, "after": after, "first": page_size}),
             )
@@ -1704,23 +1744,18 @@ async fn open_pull_requests(
             .skip(identities_read)
             .take(100)
             .collect::<Vec<_>>();
-        if !ids.is_empty() {
+        for pull in [false, true] {
+            let ids = ids.iter().filter(|(_, is_pull)| *is_pull == pull)
+                .map(|(id, _)| id).collect::<Vec<_>>();
+            if ids.is_empty() { continue; }
             anyhow::ensure!(
                 calls < PULL_REQUEST_CALL_LIMIT,
                 "the GitHub pull request observation exceeded {PULL_REQUEST_CALL_LIMIT} GraphQL calls"
             );
             calls += 1;
-            let resolved_data =
-                github_graphql(client, api_base, token, RESOLVED_ITEMS, json!({"ids": ids}))
-                    .await?;
-            resolved.extend(
-                resolved_data
-                    .get("nodes")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .cloned(),
-            );
+            let (auth, query) = if pull { (&read_token, RESOLVED_PULLS) } else { (&issue_token, RESOLVED_ISSUES) };
+            let resolved_data = github_graphql(client, api_base, auth, query, json!({"ids": ids})).await?;
+            resolved.extend(resolved_data.get("nodes").and_then(Value::as_array).into_iter().flatten().cloned());
         }
         identities_read = identities.len().min(identities_read + 100).min(1000);
         if !emit_pulls {
@@ -1753,6 +1788,17 @@ async fn open_pull_requests(
             .min(PULL_REQUEST_PAGE_SIZE)
             .min(failed_size_ceiling - 1);
     }
+    if matches!(read_token, GithubAuth::Read { .. }) {
+        let mut statuses = BTreeMap::new();
+        for node in &mut nodes {
+            let Some(head) = node.get("headRefOid").and_then(Value::as_str).map(str::to_owned) else { continue; };
+            if !statuses.contains_key(&head) {
+                let payload = github_json(client, format!("{api_base}/repos/{owner}/{repository}/commits/{head}/status?per_page=100"), &read_token, cache_for).await?;
+                statuses.insert(head.clone(), payload.value);
+            }
+            merge_legacy_statuses(node, &statuses[&head])?;
+        }
+    }
     let mut required = BTreeMap::<String, Option<Vec<RequiredCheck>>>::new();
     for node in &nodes {
         if let Some(base) = node.get("baseRefName").and_then(Value::as_str)
@@ -1784,7 +1830,7 @@ async fn open_pull_requests(
     open.sort_by_key(|facts| facts.get("number").and_then(Value::as_u64));
     let open = Arc::new(open);
     let resolved = Arc::new(resolved);
-    pull_request_checks()
+    if !read_token.used_fallback() && !issue_token.used_fallback() { pull_request_checks()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(
@@ -1797,7 +1843,7 @@ async fn open_pull_requests(
                 resolved: resolved.clone(),
                 emit_pulls,
             },
-        );
+        ); }
     Ok(RepositoryDetails {
         open,
         resolved,
@@ -2160,6 +2206,74 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn installation_pages_split_opaque_identities_and_merge_pat_legacy_status_once_per_head() {
+        use crate::github_http::app_read::{select, tests::{install, server}};
+        use reqwest::StatusCode;
+        let root = tempfile::tempdir().unwrap();
+        let owner = "mixed-fixture";
+        let expires = chrono::Utc::now() + chrono::Duration::minutes(60);
+        install(root.path(), owner, "gh-ci", "fixture-ci", expires);
+        install(root.path(), owner, "github-ledger", "fixture-ledger", expires);
+        let auth = select(Some(root.path()), owner, "gh-ci", &GithubAuth::test("fixture-pat"));
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let mut first = open_pull(1, "same-head", "SUCCESS");
+        let mut second = open_pull(2, "same-head", "SUCCESS");
+        for node in [&mut first, &mut second] {
+            node.pointer_mut("/commits/nodes/0/commit/statusCheckRollup/contexts/nodes")
+                .unwrap().as_array_mut().unwrap().retain(|context| context["__typename"] == "CheckRun");
+        }
+        let fixture = server(move |authorization, path, body| {
+            recorded.lock().push((authorization.to_owned(), path.to_owned(), body.clone()));
+            if path.contains("/commits/") {
+                assert_eq!(authorization, "Bearer fixture-pat");
+                return (StatusCode::OK, json!({"state":"failure", "total_count":1,
+                    "statuses":[{"context":"legacy/build","state":"failure"}]}));
+            }
+            let query = body["query"].as_str().unwrap();
+            if body["variables"].get("owner").is_some() {
+                assert_eq!(authorization, "Bearer fixture-ci");
+                (StatusCode::OK, json!({"data":{"repository":{"pullRequests":{
+                    "pageInfo":{"hasNextPage":false}, "nodes":[first, second]}}}}))
+            } else if body["variables"]["ids"] == json!(["opaque-issue"]) {
+                assert_eq!(authorization, "Bearer fixture-ledger");
+                assert_eq!(query, RESOLVED_ISSUES);
+                (StatusCode::OK, json!({"data":{"nodes":[{"id":"opaque-issue","state":"CLOSED"}]}}))
+            } else {
+                assert_eq!(authorization, "Bearer fixture-ci");
+                assert_eq!(query, RESOLVED_PULLS);
+                assert_eq!(body["variables"]["ids"], json!(["opaque-pull"]));
+                (StatusCode::OK, json!({"data":{"nodes":[{"id":"opaque-pull","state":"MERGED"}]}}))
+            }
+        }).await;
+        let details = open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
+            Duration::ZERO, "mixed-fixture/repo", (owner, "repo"), true, true,
+            &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        assert_eq!(details.identities_read, 2);
+        assert_eq!(details.resolved.len(), 2);
+        assert_eq!(details.open.len(), 2);
+        for pull in details.open.iter() {
+            assert_eq!(pull["checks_state"], "failure");
+            assert!(pull["checks"].as_array().unwrap().iter().any(|check| check["name"] == "legacy/build" && check["conclusion"] == "failure"));
+            assert!(pull["checks"].as_array().unwrap().iter().any(|check| check["name"] == "lint"));
+        }
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 4, "one PR query, two separately authorized identity queries, one PAT status read");
+        assert_eq!(requests.iter().filter(|(_, path, _)| path.contains("/status")).count(), 1);
+    }
+
+    #[test]
+    fn legacy_status_merge_preserves_checks_and_refuses_truncation() {
+        let mut pull = open_pull(1, "head", "SUCCESS");
+        merge_legacy_statuses(&mut pull, &json!({"state":"pending","total_count":0,"statuses":[]})).unwrap();
+        assert_eq!(pull.pointer("/commits/nodes/0/commit/statusCheckRollup/state").unwrap(), "SUCCESS");
+        merge_legacy_statuses(&mut pull, &json!({"state":"pending","total_count":1,
+            "statuses":[{"context":"legacy","state":"pending"}]})).unwrap();
+        assert_eq!(pull.pointer("/commits/nodes/0/commit/statusCheckRollup/state").unwrap(), "PENDING");
+        assert!(merge_legacy_statuses(&mut pull, &json!({"state":"success","total_count":2,"statuses":[]})).is_err());
+    }
+
     fn pull_page(nodes: Value, after: Option<&str>, resolved: Value) -> Value {
         json!({"data": {
             "repository": {"pullRequests": {
@@ -2171,10 +2285,11 @@ mod tests {
     }
 
     async fn read_pull_pages(base: &str, identities: &[String]) -> Result<RepositoryDetails> {
+        let identities = identities.iter().map(|id| (id.clone(), false)).collect::<Vec<_>>();
         open_pull_requests(
             &reqwest::Client::new(), base, &GithubAuth::test("fixture-auth"),
             Duration::ZERO, "github/acme/garden", ("acme", "garden"),
-            true, true, &BTreeSet::new(), true, identities,
+            true, true, &BTreeSet::new(), true, &identities,
         )
         .await
     }

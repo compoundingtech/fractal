@@ -1743,3 +1743,18 @@ mod tests {
         );
     }
 }
+
+/// Transition-only installation read fallback, never a mutation credential change.
+pub fn github_auth_fallback(owner: &str, app: &str, reason: &str) {
+    if !metrics_enabled() { return; }
+    static COUNTER: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::LazyLock::new(|| opentelemetry::global::meter("st3")
+            .u64_counter("st.github.auth.fallback")
+            .with_description("Installation reads using the transition PAT")
+            .build());
+    COUNTER.add(1, &[
+        KeyValue::new("github.owner", owner.to_owned()),
+        KeyValue::new("github.app", app.to_owned()),
+        KeyValue::new("github.auth.fallback.reason", reason.to_owned()),
+    ]);
+}

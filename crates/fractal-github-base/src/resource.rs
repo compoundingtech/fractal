@@ -740,13 +740,15 @@ async fn github_json(
     token: &GithubAuth,
     cache_for: Duration,
 ) -> Result<GithubPayload> {
+    let selected = crate::github_http::read_auth_for_url(&url, token);
+    let token = &selected;
     let entry = {
         let mut cache = github_cache().lock().await;
         if cache.len() > 4_096 {
             cache.clear();
         }
         cache
-            .entry(url.clone())
+            .entry(format!("{} {url}", token.cache_principal()))
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
             .clone()
     };
@@ -763,7 +765,7 @@ async fn github_json(
     if let Some(etag) = cached.as_ref().and_then(|payload| payload.etag.as_deref()) {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
-    let response = crate::github_http::send(request, token).await?;
+    let response = crate::github_http::send_read(request, token).await?;
     record_github_response(response.status(), response.headers());
     let response = github_response(response).await?;
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
@@ -785,7 +787,11 @@ async fn github_json(
         next,
         checked_at: Instant::now(),
     };
-    *cached = Some(payload.clone());
+    if token.used_fallback() {
+        *cached = None;
+    } else {
+        *cached = Some(payload.clone());
+    }
     Ok(payload)
 }
 
@@ -891,7 +897,7 @@ async fn github_graphql(
         .post(format!("{api_base}/graphql"))
         .header("Accept", "application/vnd.github+json")
         .json(&json!({"query": query, "variables": variables}));
-    let response = crate::github_http::send(request, token).await?;
+    let response = crate::github_http::send_read(request, token).await?;
     record_github_response(response.status(), response.headers());
     let response = github_response(response).await?;
     let headers = response.headers().clone();

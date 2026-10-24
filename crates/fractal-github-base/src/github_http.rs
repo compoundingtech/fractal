@@ -18,6 +18,9 @@ pub use crate::config::open_token_file;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
+#[path = "github_app_read.rs"]
+pub mod app_read;
+
 pub const GITHUB_AUTH_REMEDY: &str = "GitHub observers have no token; run `gh auth login` as the daemon account or export GH_TOKEN/GITHUB_TOKEN in that account's login-shell startup files. Check the daemon PATH with `st doctor`. No anonymous request was sent; failed or rejected credentials are checked again after a 30-second refresh backoff. HTTP requests are never retried.";
 
 tokio::task_local! {
@@ -48,6 +51,11 @@ pub enum GithubAuth {
         config: Arc<crate::config::Config>,
         profile: String,
     },
+    /// A selected read batch; all mutations unwrap to the original PAT route.
+    Read {
+        source: app_read::ReadSource,
+        pat: Box<GithubAuth>,
+    },
 }
 
 impl GithubAuth {
@@ -55,6 +63,7 @@ impl GithubAuth {
         match self {
             Self::Local { token, .. } => !token.trim().is_empty(),
             Self::Authorized { profile, .. } => !profile.trim().is_empty(),
+            Self::Read { source, .. } => !source.token.is_empty(),
         }
     }
 
@@ -70,6 +79,7 @@ impl GithubAuth {
     pub fn local_token(&self) -> &Arc<String> {
         match self {
             Self::Local { token, .. } => token,
+            Self::Read { source, .. } => &source.token,
             Self::Authorized { .. } => panic!("profile auth has no local token"),
         }
     }
@@ -279,17 +289,21 @@ fn token_cache() -> &'static Arc<TokenCache> {
 static SOURCE: OnceLock<Arc<crate::config::Config>> = OnceLock::new();
 
 pub fn configure(config: &crate::config::Config) -> Result<()> {
+    let mut config = config.clone();
+    if let Some(root) = std::env::var_os("ST3_GITHUB_APP_TOKEN_ROOT") {
+        config.github.app_token_root = Some(root.into());
+    }
     config.github.validate()?;
     if let Some(known) = SOURCE.get() {
         anyhow::ensure!(
-            known.as_ref() == config,
+            known.as_ref() == &config,
             "GitHub source was already configured for this process"
         );
         return Ok(());
     }
     crate::github_admission::configure(config.state_dir.join("github-admission.json"), config.github.observer_requests_per_hour.map(|cap| cap as usize));
     SOURCE
-        .set(Arc::new(config.clone()))
+        .set(Arc::new(config))
         .map_err(|_| anyhow::anyhow!("GitHub source was already configured"))
 }
 
@@ -392,9 +406,77 @@ fn request_resource(path: &str) -> &'static str {
     }
 }
 
+/// Select from the supplied root only. Token files are reopened for each read batch.
+pub fn read_auth(owner: &str, app: &str, pat: &GithubAuth) -> GithubAuth {
+    let root = match pat {
+        GithubAuth::Read { source, .. } => Some(source.root.as_path()),
+        _ => SOURCE.get().and_then(|config| config.github.app_token_root.as_deref()),
+    };
+    app_read::select(root, owner, app, pat.pat())
+}
+
+impl GithubAuth {
+    pub fn pat(&self) -> &Self {
+        match self { Self::Read { pat, .. } => pat.pat(), _ => self }
+    }
+
+    pub fn cache_principal(&self) -> &str {
+        match self { Self::Read { source, .. } => &source.principal, Self::Authorized { profile, .. } => profile, _ => "pat" }
+    }
+
+    pub fn used_fallback(&self) -> bool {
+        matches!(self, Self::Read { source, .. } if source.used_fallback.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+pub fn read_auth_for_url(url: &str, auth: &GithubAuth) -> GithubAuth {
+    let Ok(url) = reqwest::Url::parse(url) else { return auth.pat().clone(); };
+    let Some((owner, app, statuses)) = app_read::route(&url) else { return auth.pat().clone(); };
+    if statuses {
+        if matches!(auth, GithubAuth::Read { .. }) || SOURCE.get().is_some_and(|config| config.github.app_token_root.is_some()) {
+            app_read::fallback(owner, app, "statuses");
+        }
+        return auth.pat().clone();
+    }
+    if let GithubAuth::Read { source, .. } = auth
+        && source.owner == owner && source.app == app {
+        return auth.clone();
+    }
+    read_auth(owner, app, auth)
+}
+
+/// Only callers that constructed an idempotent GraphQL query use this entrypoint.
+pub async fn send_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> Result<reqwest::Response> {
+    let read = request.try_clone().and_then(|request| request.build().ok()).is_some_and(|request| {
+        request.method() == reqwest::Method::GET ||
+            (request.method() == reqwest::Method::POST && request.url().path().ends_with("/graphql") &&
+             request.body().and_then(reqwest::Body::as_bytes)
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+                .and_then(|body| body.get("query").and_then(serde_json::Value::as_str).map(str::to_owned))
+                .is_some_and(|query| query.trim_start().starts_with("query") || query.trim_start().starts_with('{')))
+    });
+    if !read { return send_once(request, auth.pat()).await; }
+    match auth {
+        GithubAuth::Read { source, pat } => app_read::send(request, source, pat).await,
+        _ => send_once(request, auth).await,
+    }
+}
+
 /// Send exactly once, including mutations. A 401 invalidates only the credential used here;
 /// another poll can acquire again after backoff. Never retry the original HTTP request.
 pub async fn send(
+    request: reqwest::RequestBuilder,
+    auth: &GithubAuth,
+) -> Result<reqwest::Response> {
+    let copy = request.try_clone().and_then(|copy| copy.build().ok());
+    if let Some(copy) = copy.filter(|copy| copy.method() == reqwest::Method::GET) {
+        let selected = read_auth_for_url(copy.url().as_str(), auth);
+        return send_read(request, &selected).await;
+    }
+    send_once(request, auth.pat()).await
+}
+
+async fn send_once(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
 ) -> Result<reqwest::Response> {
@@ -409,6 +491,7 @@ pub async fn send(
         ).await?;
     }
     match auth {
+        GithubAuth::Read { .. } => bail!("installation credentials require the read-only send boundary"),
         GithubAuth::Authorized { config, profile } => {
             send_authorized_with(
                 config.clone(),

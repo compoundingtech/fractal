@@ -126,3 +126,66 @@ Pagination still continues at one second without advancing quiet backoff, and
 provider rate-limit errors retain their retry deadlines. This changes standing
 watch freshness to three minutes while active and up to ten minutes while quiet;
 it does not change direct merge/check gates or claim measured live savings.
+
+## Operator-supplied installation read source
+
+The optional daemon `[github].app_token_root = "/absolute/operator/supplied/path"`
+or explicit `ST3_GITHUB_APP_TOKEN_ROOT` environment input selects installation
+tokens for reads. The environment input overrides the config field. Relative
+roots are rejected. st3 never computes a platform root: Agent Policy's host facts
+are Linux `$XDG_RUNTIME_DIR/github-app-token` and macOS
+`$(getconf DARWIN_USER_TEMP_DIR)github-app-token`; the operator supplies the
+already-resolved absolute result. The external minter rollout depends on
+dotfiles#7401 and is not performed by this code change.
+
+For a repository's owner, read `ROOT/gh-ci/OWNER.token` and `OWNER.json` for
+metadata, branches/contents, PRs/reviews, checks/actions and open-PR GraphQL.
+Use `ROOT/github-ledger/OWNER.token` and `OWNER.json` for issue lists, issue
+comments/excerpts, issue watch preflight and Issue identity GraphQL. PR watch
+preflight and review excerpts use gh-ci. Remembered opaque node IDs are partitioned
+by their recorded `ItemIdentity.pull`, never guessed from their bytes, and each
+partition gets its own minimal identity query and app authorization.
+
+Token files must be owner-owned regular mode0600 files, containing only the
+bare token with no whitespace or newline. Sidecars contain numeric
+`installation_id`, RFC3339 `expires_at`, a `permissions` object and
+`repository_selection` (`all` or `selected`). The minter owns atomic publication
+and refresh when less than15minutes remain from a60-minute lifetime. st3 reopens
+the supplied files per read batch, not once per daemon lifetime. A401 permits
+one bounded reload/read replay, then a transition PAT read if still rejected.
+No network retry is made for a failed transport or for a mutation.
+
+The existing Local/Authorized PAT transport remains the explicit route for
+every REST or GraphQL mutation; app availability never gates writes. Unconfigured
+roots keep existing PAT behavior. Read-only transition fallback increments the
+OTel COUNTER `st.github.auth.fallback`, labeled `github.owner`, `github.app` and
+`github.auth.fallback.reason`, and emits a warning. Reasons are `missing`
+(unconfigured/absent root or one missing file), `no-installation` (both owner
+files absent under an existing supplied root), `expired`, `unreadable`
+(including invalid sidecars/token format/permissions), and `401`. Operators must
+use this explicit absence convention when publishing an owner's installation.
+These count source-selection fallback events, not GitHub charges; conditional
+cache hits can still encounter a missing source. Remove transition fallback only
+after one week with zero unintentional fallback across the enrolled owners.
+
+**Legacy status qualification:** neither app has statuses:read. An app GraphQL
+`statusCheckRollup` returns check runs without legacy `StatusContext` data, so
+repository PR detail reads retain a PAT-only combined commit-status GET, once
+per distinct head SHA in a read, through the existing ETag cache. Its source
+exception is observable as fallback reason `statuses`. Legacy status contexts
+are merged with app check runs before deriving check facts and required-check
+outcomes. Truncated status responses fail visibly rather than asserting missing
+contexts passed. This intentional status exception must be excluded from the
+one-week unintentional-fallback gate until installation permissions are separately
+approved and qualified. No statuses permission is assumed or added here.
+
+REST cache keys include the stable installation principal, permissions and
+repository-selection scope, not token bytes; rotation preserves cache identity.
+PAT and app bodies/ETags are separate. A401 PAT fallback drops the app's ETag
+and does not populate the app cache with a PAT representation.
+
+Local fixture tests cover supplied-root reads, endpoint selection, no-root PAT,
+rotation, expiry, invalid/unreadable/missing sources and reason counts,401 reload
+and fallback, separately authorized mixed identity pages, PAT-only writes and
+legacy-status merging. They are written but not run in this slice; no build,
+test, lint, formatter, credential inspection or live migration was performed.
