@@ -180,6 +180,29 @@ fn cli_command() -> clap::Command {
     cli_command_with_bindings(Cli::command(), &bindings)
 }
 
+/// The local browser launcher uses its own state directory, not CLI transport,
+/// instance activation, output encoding, or daemon-retry options.
+fn reject_web_global_flags(
+    command: &mut clap::Command,
+    matches: &clap::ArgMatches,
+) -> std::result::Result<(), clap::Error> {
+    if matches.subcommand_name() != Some("web") {
+        return Ok(());
+    }
+    let rejected = command.get_arguments().find(|argument| {
+        argument.is_global_set()
+            && matches.value_source(argument.get_id().as_str())
+                == Some(clap::parser::ValueSource::CommandLine)
+    }).map(ToString::to_string);
+    if let Some(argument) = rejected {
+        return Err(command.error(
+            clap::error::ErrorKind::ArgumentConflict,
+            format!("{argument} cannot be used with `web`; select the local daemon with --state-dir DIR"),
+        ));
+    }
+    Ok(())
+}
+
 fn cli_command_with_bindings(
     command: clap::Command,
     bindings: &[Option<(&'static str, Option<&'static str>)>],
@@ -230,6 +253,7 @@ enum Command {
     ///
     /// The daemon's local web session defaults to port 7410. FRACTAL_WEB_URL overrides
     /// the daemon rendezvous URL. This command does not start a server.
+    /// Global CLI flags are not supported here; select the local daemon with --state-dir DIR.
     Web {
         /// Read the web rendezvous URL from this daemon state directory.
         // The original launcher accepted any OS string, including an empty path.
@@ -4554,6 +4578,21 @@ fn cli_main() -> ExitCode {
         fractal_daemon::recorder::run(program);
     }
     let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    // Parse the local launcher before any raw scanner can mistake its state path
+    // for an unrelated option. Inspect clap's value sources, never raw tokens.
+    if arguments.get(1).is_some_and(|argument| argument == "web") {
+        let mut command = cli_command();
+        let matches = command.try_get_matches_from_mut(&arguments)
+            .unwrap_or_else(|error| exit_usage_error(error));
+        reject_web_global_flags(&mut command, &matches)
+            .unwrap_or_else(|error| exit_usage_error(error));
+        let cli = Cli::from_arg_matches(&matches)
+            .unwrap_or_else(|error| exit_usage_error(error));
+        let Command::Web { state_dir } = cli.command else {
+            unreachable!("the selected subcommand is web");
+        };
+        return fractal::web(state_dir);
+    }
     match checkpoint_space_gate_capabilities_request(&arguments) {
         Some(true) => {
             println!(
@@ -4572,15 +4611,6 @@ fn cli_main() -> ExitCode {
         None => {}
     }
     fractal::dispatch(arguments.as_mut_slice());
-    // Preserve the browser launcher's early boundary: its arbitrary OS-string state
-    // path must not be reinterpreted by the inventory/instance raw-argument scanners.
-    if arguments.get(1).is_some_and(|argument| argument == "web") {
-        return match Cli::try_parse_from(&arguments) {
-            Ok(Cli { command: Command::Web { state_dir }, .. }) => fractal::web(state_dir),
-            Ok(_) => unreachable!("the selected subcommand is web"),
-            Err(error) => exit_usage_error(error),
-        };
-    }
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());
@@ -4656,9 +4686,8 @@ fn cli_main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let json_version = arguments.iter().any(|arg| arg == "--json");
-    let matches = match cli_command()
-        .override_help(cli_help::root_help(false))
-        .try_get_matches_from(arguments)
+    let mut command = cli_command().override_help(cli_help::root_help(false));
+    let matches = match command.try_get_matches_from_mut(arguments)
     {
         Ok(matches) => matches,
         Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion && json_version => {
@@ -4670,6 +4699,8 @@ fn cli_main() -> ExitCode {
         }
         Err(error) => exit_usage_error(error),
     };
+    reject_web_global_flags(&mut command, &matches)
+        .unwrap_or_else(|error| exit_usage_error(error));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
     if let Command::ActorContract { effective } = &cli.command {
         return match actor_contract::print(*effective) {

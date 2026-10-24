@@ -59,3 +59,56 @@ fn web_early_parser_uses_the_public_clap_help_and_usage_statuses() {
         );
     }
 }
+
+#[test]
+fn web_refuses_instance_selection_instead_of_opening_the_default_installation() {
+    for arguments in [
+        vec!["web", "--instance", "demo"],
+        vec!["web", "--instance=demo"],
+        vec!["--instance", "demo", "web"],
+    ] {
+        let output = web(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}: {output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("--instance"), "{arguments:?}: {output:?}");
+        assert!(error.contains("cannot be used with `web`"), "{arguments:?}: {output:?}");
+    }
+}
+
+#[test]
+fn web_refuses_every_other_explicit_global_instead_of_silently_dropping_it() {
+    for flags in [
+        vec!["--endpoint", "/unused.sock"],
+        vec!["--endpoint=/unused.sock"],
+        vec!["--catalog", "/unused/catalog"],
+        vec!["--catalog=/unused/catalog"],
+        vec!["--json"],
+        vec!["--daemon-wait", "17"],
+        vec!["--daemon-wait=17"],
+        vec!["--read-contract-inventory-json"],
+        vec!["--checkpoint-space-gate-capabilities"],
+    ] {
+        let mut arguments = vec!["web"];
+        arguments.extend(flags);
+        let output = web(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}: {output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("cannot be used with `web`"), "{arguments:?}: {output:?}");
+        assert!(error.contains("--state-dir DIR"), "{arguments:?}: {output:?}");
+    }
+}
+
+#[test]
+fn web_accepts_global_flag_text_as_a_state_path_value_not_as_a_flag() {
+    for directory in [
+        "--endpoint", "--instance", "--catalog", "--json", "--daemon-wait",
+        "--read-contract-inventory-json", "--checkpoint-space-gate-capabilities",
+    ] {
+        let output = web(&["web", "--state-dir", directory]);
+        assert!(output.status.success(), "{directory}: {output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{URL}\n"));
+        assert!(output.stderr.is_empty(), "{directory}: {output:?}");
+    }
+}

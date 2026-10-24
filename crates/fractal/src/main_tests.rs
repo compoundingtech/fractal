@@ -2561,7 +2561,7 @@ fn web_rejects_missing_values_repeats_positionals_and_unknown_flags_with_usage_s
 }
 
 #[test]
-fn web_uses_clap_option_delimiters_equals_values_and_global_options() {
+fn web_uses_clap_option_delimiters_and_equals_values() {
     for arguments in [
         vec!["fractal", "web", "--state-dir=relative"],
         vec!["fractal", "web", "--state-dir", "relative", "--"],
@@ -2575,9 +2575,19 @@ fn web_uses_clap_option_delimiters_equals_values_and_global_options() {
         Cli::try_parse_from(["fractal", "web", "--"]).unwrap().command,
         Command::Web { state_dir: None }
     ));
-    let cli = Cli::try_parse_from(["fractal", "web", "--json"]).unwrap();
-    assert!(cli.json);
-    assert!(matches!(cli.command, Command::Web { state_dir: None }));
+}
+
+#[test]
+fn web_global_rejection_covers_the_complete_inherited_inventory() {
+    let command = Cli::command();
+    let globals = command.get_arguments()
+        .filter(|argument| argument.is_global_set())
+        .map(|argument| argument.get_id().as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(globals, std::collections::BTreeSet::from([
+        "read_contract_inventory_json", "checkpoint_space_gate_capabilities",
+        "endpoint", "instance", "catalog", "json", "daemon_wait",
+    ]), "review each new global and add its real-binary web rejection case");
 }
 
 #[test]
