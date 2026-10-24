@@ -34,7 +34,7 @@ impl Fixture {
         let member = key();
         let issuer = node("host-b", Some(&root), Some(&root));
         admit(&issuer, "host-b", &root, "anchor", None);
-        admit(&issuer, "host-a", &member, "host-b", None);
+        admit(&issuer, "host-a", &member, "invite", None);
         let local = node("host-a", Some(&member), Some(&root));
         sync(&issuer, &local);
         let now = now_ms();
