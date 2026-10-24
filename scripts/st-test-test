@@ -26,6 +26,7 @@ loader = importlib.machinery.SourceFileLoader('st_test', str(ROOT / 'scripts/st-
 spec = importlib.util.spec_from_loader(loader.name, loader)
 st_test = importlib.util.module_from_spec(spec)
 loader.exec_module(st_test)
+LOCAL = dict(st_test.LOCAL)  # the real commands, before a test replaces them
 
 DATE = '2026-10-14T12:00:00Z'
 GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI')}, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
@@ -723,7 +724,7 @@ class StTest(unittest.TestCase):
     def test_the_real_table_lists_only_checks_with_a_command_and_prints_them(self):
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list'], capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'linux-gate'])
+        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'linux-gate', 'fractal-web'])
 
     def test_a_check_that_builds_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
@@ -763,10 +764,47 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo', extra_env=env)[0], 0)
         self.assertFalse(calls.exists())  # a check that builds nothing is not wrapped
 
+    def test_fractal_web_is_not_relevant_when_no_web_input_changed_by_the_base_s_own_rules(self):
+        (self.work / 'scripts').mkdir(exist_ok=True)
+        shutil.copy(ROOT / 'scripts/ci-fractal-web-changes', self.work / 'scripts/ci-fractal-web-changes')
+        git(self.work, 'checkout', '-q', 'main')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'the base decides web relevance')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        git(self.work, 'merge', '-q', 'main')
+        self.commit('crates.txt', 'a change no web lane reads')
+        st_test.LOCAL['fractal-web'] = ['sh', '-c', 'echo web']
+        code, out, err = self.run_st_test('--check', 'fractal-web', '--status')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'fractal-web +not relevant +no web input changed since [0-9a-f]{12}: CI does not run the lane')
+        code, out, err = self.run_st_test('--check', 'fractal-web')
+        self.assertEqual(code, 0, out + err)  # nothing to run or sign: not a failure
+        self.assertRegex(out, r'fractal-web +not relevant +0s ')
+        self.assertEqual(self.statements(), [])
+        (self.work / 'apps/fractal-web').mkdir(parents=True)
+        self.commit('apps/fractal-web/page.ts', 'export const page = 1\n')
+        code, out, err = self.run_st_test('--check', 'fractal-web', '--status')
+        self.assertEqual(code, 3, out + err)  # a web change: the lane runs, and nothing covers it yet
+        self.assertRegex(out, r'fractal-web +not covered ')
+
+    def test_the_web_inputs_a_local_run_records_pass_the_committed_policy_s_value_rules(self):
+        loader = importlib.machinery.SourceFileLoader('evidence_verify_for_web', str(ROOT / 'scripts/evidence-verify'))
+        verify = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(verify)
+        rules = verify.policy_rules((ROOT / '.st/evidence-skip-policy.json').read_text(), 'fractal-web', 'org/repo')
+        wrapper = rules['kinds']['wrapper']
+        for detected in ('true', 'false'):  # covers a run whatever its own change detection said about the kit
+            verify.value_checks(wrapper, st_test.WEB_INPUTS, {'kit_inputs': detected}, None)
+        host = wrapper['by_level']['host']
+        self.assertEqual(list(host['command']), LOCAL['fractal-web'])
+        standard = {'flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system', 'attempt'}  # evidence-wrap's own
+        self.assertEqual(set(host['required_inputs']), standard | set(st_test.WEB_INPUTS))
+
     def test_every_check_of_the_per_pr_suite_runs_by_default_and_all_means_the_same(self):
         # No subset for signing: with no flag st-test runs the whole per-PR suite; --all is an accepted alias; --check selects.
         # The VM tests and the mail redelivery canaries run daily, not here.
-        suite = ['typescript-client', 'genie-freshness', 'linux-gate']
+        suite = ['typescript-client', 'genie-freshness', 'linux-gate', 'fractal-web']
         for args, names in (([], suite), (['--all'], suite), (['--check', 'linux-gate'], ['linux-gate'])):
             done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)
