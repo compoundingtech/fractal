@@ -1534,8 +1534,8 @@ mod tests {
             requests
         });
         let auth = GithubAuth::test("fixture-conditional-auth");
-        let first = github_array(&github_client(), format!("{base}/items"), &auth, Duration::ZERO).await.unwrap();
-        let second = github_array(&github_client(), format!("{base}/items"), &auth, Duration::ZERO).await.unwrap();
+        let first = github_listing(&github_client(), format!("{base}/items"), &auth, Duration::ZERO, 2, false).await.unwrap().values;
+        let second = github_listing(&github_client(), format!("{base}/items"), &auth, Duration::ZERO, 2, false).await.unwrap().values;
         assert_eq!(first, vec![json!({"id": 1}), json!({"id": 2})]);
         assert_eq!(second, first);
         let requests = server.await.unwrap();
