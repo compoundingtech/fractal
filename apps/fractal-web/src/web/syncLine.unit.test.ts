@@ -30,7 +30,7 @@ describe('portable sync presentation', () => {
   expect(syncLine({status:{_tag:'Failed',cause:{_tag:'Server',code:'reported-code',message:'Actual reported detail'}},label:'conversation',now:6000,observedAt:5000})).toMatchObject({text:"Couldn't load conversation: the request did not complete",tone:'error'})
  })
  it.each([
-  [{_tag:'Connecting',since:0}, 'Connecting · 2m'],
+  [{_tag:'Connecting',attempt:0,since:0}, 'Connecting · 2m'],
   [{_tag:'Requested',since:0}, 'Loading conversation is taking longer than expected · 2m'],
   [{_tag:'Progress',stage:'queued',elapsedMs:120000,stageSince:120000,reportedAt:120000}, 'Waiting to load conversation · 2m'],
   [{_tag:'Progress',stage:'resolving',elapsedMs:120000,stageSince:120000,reportedAt:120000}, 'Finding conversation · 2m'],
@@ -44,7 +44,7 @@ describe('portable sync presentation', () => {
   expect(syncLine({status,label:'conversation',now:120000,observedAt:status._tag === 'Progress' ? 120000 : 0,socket:status._tag === 'Connecting'})?.text).toBe(text)
  })
  it.each([[120001,'2m 1s'],[120000,'2m'],[119999,'2m'],[1,'1s'],[0,'0s'],[-1,'0s']] as const)('rounds the reconnect countdown up at %i ms', (remaining, text) => {
-  expect(syncLine({status:{_tag:'Stale',reason:{_tag:'Reconnecting',nextAt:120000+remaining,attempt:2}},label:'connection',now:120000,observedAt:0,socket:true})?.text).toBe(`Reconnecting in ${text} · attempt 2`)
+  expect(syncLine({status:{_tag:'Stale',reason:{_tag:'Reconnecting',nextAt:120000+remaining,attempt:2,issue:'Connection closed.'}},label:'connection',now:120000,observedAt:0,socket:true})?.text).toBe(`Reconnecting in ${text} · attempt 2`)
  })
  it('keeps short waits and mixed units consistent with the canonical formatter', () => {
   for (const [now, text] of [[59999,'59s'],[60000,'1m'],[65000,'1m 5s'],[3600000,'1h'],[86400000,'1d']] as const) {
