@@ -8,7 +8,7 @@ import sys
 TRUSTED_CWD = Path(__file__).resolve().parent
 POLICY = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
           '-c', 'core.attributesFile=/dev/null', '-c', 'protocol.ext.allow=never']
-DRIVERS = r'^(filter\..*\.(clean|smudge|process)|merge\..*\.driver|diff\..*\.command|include.*\.path)$'
+DRIVERS = r'^(filter\..*\.(clean|smudge|process)|merge\..*\.driver|diff\..*\.(command|textconv)|include.*\.path)$'
 
 
 def run(args):

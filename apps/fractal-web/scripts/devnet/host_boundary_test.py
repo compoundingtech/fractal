@@ -60,11 +60,14 @@ class HostBoundaryTest(unittest.TestCase):
                                          '-C', str(repo), *args], cwd=repo, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(marker.exists())
-            subprocess.run(['git', '-C', str(repo), 'config', 'filter.fixture.clean', str(attack)], check=True)
-            result = subprocess.run([sys.executable, '-I', str(SCRIPTS / 'host-git.py'),
-                                     '-C', str(repo), 'add', '.'], capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertFalse(marker.exists())
+            for key in ('filter.fixture.clean', 'diff.fixture.textconv'):
+                with self.subTest(key=key):
+                    subprocess.run(['git', '-C', str(repo), 'config', key, str(attack)], check=True)
+                    result = subprocess.run([sys.executable, '-I', str(SCRIPTS / 'host-git.py'),
+                                             '-C', str(repo), 'add', '.'], capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(marker.exists())
+                    subprocess.run(['git', '-C', str(repo), 'config', '--unset', key], check=True)
 
 
 if __name__ == '__main__':
