@@ -2,6 +2,7 @@
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
   scripts/st-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
+  scripts/st-test --seed [REF] [--base origin/main] [--push REMOTE]
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
 
@@ -59,6 +60,7 @@ import sys
 import tempfile
 import threading
 import time
+import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
 
@@ -70,6 +72,7 @@ LOCAL = {
     'typescript-client': ['nix', 'develop', '.#web', '-c', 'bash', '-c',
                           'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client'],
     'genie-freshness': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-genie-freshness'],
+    'ci-script-tests': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-script-tests'],
     # The stages a linux-gate skip covers (the tests, clippy and fleet compatibility), in one run, as their CI jobs run them but
     # with a home of their own (scripts/ci-local). The VM tests and the mail redelivery canaries run daily (daily-long.yml).
     'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat'],
@@ -90,10 +93,11 @@ FILTERSET_LIMIT = 400
 # Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
 # (a builds.slice scope, the kept target below), which nobody has to ask for.
 BUILDS = frozenset({'linux-gate', 'fractal-web', RUST_TESTS})
-# Named with --check only, temporarily: --all and the default run linux-gate, whose tests stage rust-tests splits per crate, so running
-# both would test twice. It joins the default when the gate accepts per-crate notes and linux-gate stops running the tests stage
+# rust-tests runs by default, after linux-gate, and signs the crates that have no note from linux-gate's own nextest run (its JUnit report:
+# the same workspace build and selection), so the tests are not run twice. When the gate skips linux-gate's tests stage on the per-crate
+# notes, linux-gate's local command shrinks to clippy and fleet-compat and rust-tests runs the crates without a note itself
 # (docs/per-crate-test-signing.md, step 5).
-OPT_IN = frozenset({RUST_TESTS})
+OPT_IN = frozenset()
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate'})  # rust-tests is not: a test's result does not depend on the base
 # What the fractal-web note records about the run, as CI's aggregate note does (scripts/ci-evidence-signing): one shard, every kit
@@ -191,13 +195,16 @@ def text(done):
     return done.stdout.decode().strip()
 
 
+TARGET = []  # [commit] when --seed names the tree to sign instead of HEAD
+
+
 def target_commit(base):
-    """The commit that is signed: HEAD, the commit being pushed.
+    """The commit that is signed: HEAD, the commit being pushed (with --seed, the commit it names).
 
     A pull request check is reported on the head commit, and the CI gate looks up the note for the head's own tree (see
     docs/st3/gate-evidence.md, "Which tree a pull request run asks about"), so the tree an agent built and signed is the
     tree that counts, whether or not main has moved since. The merge queue still tests the integrated tree."""
-    return text(git('rev-parse', 'HEAD'))
+    return TARGET[0] if TARGET else text(git('rev-parse', 'HEAD'))
 
 
 def branch_point(commit, base):
@@ -337,7 +344,7 @@ def lane_edits(verifier_path, directory, base, check, tree):
 
 def behind(base):
     """How many commits of the base this branch lacks (0 when it holds the base's tip)."""
-    done = git('rev-list', '--count', f'HEAD..{base}', check=False)
+    done = git('rev-list', '--count', f'{target_commit(base)}..{base}', check=False)
     return int(text(done)) if done.returncode == 0 and text(done).isdigit() else None
 
 
@@ -790,9 +797,20 @@ def filterset_input(selected):
     return f'{len(selected)} packages sha256:{hashlib.sha256(expression.encode()).hexdigest()}'
 
 
-def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes, target):
+def usable_report(path):
+    """Whether `path` is a nextest JUnit report that was written whole (nextest writes it when the run ends)."""
+    try:
+        return path is not None and path.exists() and ET.parse(path).getroot().tag == 'testsuites'
+    except (OSError, ET.ParseError):
+        return False
+
+
+def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes, target, report=None):
     """The `rust-tests` check: one nextest run of the crates that have no passing note for their key, on the workspace build CI makes,
-    then one signature per crate over that crate's part of the run. Returns the summary rows."""
+    then one signature per crate over that crate's part of the run. Returns the summary rows.
+
+    With `report` (the JUnit file of linux-gate's own run in this invocation: the same workspace build, the whole selection) nothing is run again:
+    the crates without a note are signed from it, and the records say so (filterset `workspace`, the command of linux-gate's run)."""
     keys, error = crate_keys(args.base, directory, tree, scratch)
     if not error:
         keys, error = only_crates(keys, args.crate)
@@ -804,23 +822,29 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     if not missing:
         return [('rust-tests', 'covered', 0, f'all {len(keys)} crates already have a passing note for their key')], False
     selected = [crate for crate, _ in missing]
-    junit = Path(scratch) / 'nextest-junit.xml'
-    environment = dict(os.environ, CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit))
-    if target:
-        environment['CARGO_TARGET_DIR'] = str(target)
-    started = time.monotonic()
-    try:
-        done = subprocess.run(governed(RUN_TESTS, 'rust-tests'), cwd=directory, timeout=args.time_limit, env=environment)
-        code = done.returncode
-    except subprocess.TimeoutExpired:
-        code = 124
-    ran_seconds = round(time.monotonic() - started)
-    if code not in RUN_COMPLETED or not junit.exists():
-        return [('rust-tests', 'timed out' if code == 124 else 'NOT SIGNED', ran_seconds,
-                 f'the run did not complete (exit {code}{"" if junit.exists() else ", no report"}): no crate was signed')], True
-    # The expression scripts/ci-linux builds from CI_TEST_PACKAGES: the record says which crates the run was filtered to.
-    filterset = filterset_input(selected)
-    run_sha = hashlib.sha256(json.dumps([RUN_TESTS, selected]).encode()).hexdigest()
+    if usable_report(report):
+        junit, ran_seconds = report, 0
+        filterset = 'workspace'
+        run_sha = hashlib.sha256(json.dumps([LOCAL['linux-gate']]).encode()).hexdigest()
+    else:
+        junit = Path(scratch) / 'nextest-junit.xml'
+        environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
+        environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit))
+        if target:
+            environment['CARGO_TARGET_DIR'] = str(target)
+        started = time.monotonic()
+        try:
+            done = subprocess.run(governed(RUN_TESTS, 'rust-tests'), cwd=directory, timeout=args.time_limit, env=environment)
+            code = done.returncode
+        except subprocess.TimeoutExpired:
+            code = 124
+        ran_seconds = round(time.monotonic() - started)
+        if code not in RUN_COMPLETED or not junit.exists():
+            return [('rust-tests', 'timed out' if code == 124 else 'NOT SIGNED', ran_seconds,
+                     f'the run did not complete (exit {code}{"" if junit.exists() else ", no report"}): no crate was signed')], True
+        # The expression scripts/ci-linux builds from CI_TEST_PACKAGES: the record says which crates the run was filtered to.
+        filterset = filterset_input(selected)
+        run_sha = hashlib.sha256(json.dumps([RUN_TESTS, selected]).encode()).hexdigest()
     rows, failed, signed_count, empty = [], False, 0, []
     # The dev shell's digest is the same for every crate: name it once (a nix evaluation of seconds) rather than once per signature.
     toolchain = args.toolchain_sha256 or shared_toolchain(tools['evidence-wrap'])
@@ -881,7 +905,9 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         if pushed:
             rows.append(('rust-tests:push', 'FAILED', 0, pushed))
             failed = True
-    detail = f'{signed_count} of {len(selected)} crates run and signed ({have} of {len(keys)} already had a passing note); one nextest run on the workspace build'
+    detail = (f'{signed_count} of {len(selected)} crates signed from linux-gate\'s own nextest run ({have} of {len(keys)} already had a passing note)'
+              if junit == report else
+              f'{signed_count} of {len(selected)} crates run and signed ({have} of {len(keys)} already had a passing note); one nextest run on the workspace build')
     empty = [crate for crate in empty if crate not in listed_no_tests(args.base)]
     if empty:
         # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).
@@ -905,6 +931,9 @@ def main(argv):
     parser.add_argument('--attempt', default='1')
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
+    parser.add_argument('--seed', nargs='?', const='', metavar='REF', help='sign the per-crate rust-tests notes of REF (default: the base) instead of HEAD, '
+                        'for the crates that lack one, and push them (to origin unless --push says otherwise): what a merge-queue signer runs after a merge that moved '
+                        'a crate key or the lane, from any checkout, whatever HEAD is')
     parser.add_argument('--all', action='store_true', help='accepted, and the same as no flag: every check runs')
     parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree (a lane edit, '
                         'and with no --check a policy check that has no local command, count as covered: CI runs them); exit 0 if all are, 3 if not')
@@ -915,6 +944,16 @@ def main(argv):
     unknown = [name for name in args.check if name not in LOCAL]
     if unknown:
         raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join(LOCAL)}')
+    TARGET.clear()
+    if args.seed is not None:
+        if args.check and args.check != [RUST_TESTS]:
+            raise Failure('--seed signs rust-tests only; it takes no other --check')
+        resolved = git('rev-parse', '--verify', '-q', (args.seed or args.base) + '^{commit}', check=False)
+        if resolved.returncode != 0:
+            raise Failure(f'--seed {(args.seed or args.base)!r} is not a commit (fetch it first)')
+        TARGET.append(text(resolved))
+        args.check = [RUST_TESTS]
+        args.push = args.push or 'origin'
     checks = args.check or [name for name in LOCAL if name not in OPT_IN]
     if args.list:
         for name in checks:
@@ -1007,6 +1046,7 @@ def main(argv):
                         members_state.append(materialize_members(directory))
                     return members_state[0]
 
+            gate_report = Path(scratch) / 'linux-gate-nextest-junit.xml'
             def run_one(name, output=None):
                 """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
                 edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in lanes else []
@@ -1018,7 +1058,7 @@ def main(argv):
                         return (name, 'NOT RUN', 0, problem), True, False
                     # One run, one row for the run and one for each crate that did not sign (a list: the collector below takes either).
                     new_rows, bad = run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes,
-                                                   target)
+                                                   target, report=gate_report)
                     return new_rows, bad, False
                 unchanged = web_unchanged(args.base) if name == WEB else None
                 if unchanged:
@@ -1047,6 +1087,9 @@ def main(argv):
                 environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                 if target and name in BUILDS:
                     environment['CARGO_TARGET_DIR'] = str(target)
+                if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
+                    # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
+                    environment['CI_TEST_JUNIT'] = str(gate_report)
                 if name in BASE_BOUND:
                     # clippy's ratchet compares with the base, as CI compares with the event's base: the base as just fetched,
                     # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.

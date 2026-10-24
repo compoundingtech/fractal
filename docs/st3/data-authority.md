@@ -7,6 +7,13 @@ have their own logical authority digests; local physical fields and caches are o
 
 The claim log and immutable blobs are the durable graph authority.
 
+The `local_completion_health_v1_*` tables are member-local, rebuildable projections
+of retained claims and their ordering/repair metadata. Their candidate rows, pending
+work and hydration progress are not shared logical rows. They add no registry
+subjects, claim fields or wire types, and do not change `STORAGE_VERSION` or
+`LOCAL_STORAGE_SCHEMA`, so registry and local-storage schema digests are unchanged.
+They remain outside `SHARED_TABLES` and the shared projection digest inventory.
+
 `local_push_registrations` is member-local secret authority, not a shared projection or a
 rebuildable cache. Its token and registration metadata come from an authenticated phone;
 pairing claims constrain ownership and lifetime but cannot reconstruct the token. Rows
@@ -224,6 +231,10 @@ order from the same admitted claims.
 | `local_client_message_fold_batches` | Local cache | Temporary batch-prefix counters for resumable selector folds. They compute legacy canonical wire positions through bounded indexed claim scans, contain no message bodies, and are cleared in bounded chunks after each subject. Never replicated or included in projection digests. |
 | `local_client_message_publications` | Local cache | Body-free publication-cut timestamps used to retain retired headers for the full cursor lifetime after their replacement becomes published. Unreferenced cohorts are pruned in bounded chunks while the latest is retained. Never replicated or included in projection digests. |
 | `local_client_message_selectors_v1` | Local cache | Rebuildable body-free message page selectors: canonical order key, parties and eligibility with local cut intervals, plus a pending queue of changed subjects. Backfilled from claims and projections in bounded resumable chunks, never replicated, and excluded from projection digests. See [schema](schema.md#local-message-selectors). |
+| `local_completion_health_v1_backfill` | Local cache | Resumable hydration phase and canonical-claim scan cursor for completion health; local progress is not a shared logical outcome. |
+| `local_completion_health_v1_claims` | Local cache | Rebuildable membership of retained observer/subscription actual-state claims; authoritative identities remain in the claim log. |
+| `local_completion_health_v1_fields` | Local cache | Rebuildable canonical-order candidates for state, revision and reason, including field-clearing markers; no cursor payload or new replicated authority. |
+| `local_completion_health_v1_pending` | Local cache | Changed-claim work queued until completion-health maintenance; never replicated or included in shared projection digests. |
 | `local_coordination_backfill` | Local cache | Writer-maintained count and held metadata, bounded historical cursor/ceiling/progress. No new conversation payload; excluded from shared projection digests. |
 | `local_custom_dirty` | Local | Custom projection subjects requiring maintenance in the current transaction. |
 | `local_directive_note_dirty` | Local | Person directive-note subjects whose published read needs refresh. |

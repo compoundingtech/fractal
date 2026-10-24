@@ -230,3 +230,42 @@ async fn consumed_replay_does_not_authorize_a_changed_epoch_or_replaced_peer() {
     assert!(authority::replay_proof_inputs(&fixture.state, &successor, &successor_peer)
         .unwrap().failure.is_some());
 }
+
+fn request_restart(fixture: &NativeReplay, incarnation: &str) -> String {
+    fixture.state.store.append_claim(&ClaimInput {
+        subject: fixture.fence.subject.clone(), kind: "runtime.action.requested".into(),
+        actor: Some("agent/example/watchdog".into()),
+        fields: serde_json::from_value(json!({"action":"restart","incarnation_id":incarnation})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap().id
+}
+
+#[tokio::test]
+async fn a_drop_during_the_incarnations_own_requested_restart_raises_no_channel_fault() {
+    let fixture = NativeReplay::new("eval.restart-drop");
+    let incarnation = fixture.fence.incarnation.clone();
+    request_restart(&fixture, &incarnation);
+    authority::loss_if_current(&fixture.state, &fixture.fence, &fixture.peer).unwrap();
+    assert!(
+        authority::replay_proof_inputs(&fixture.state, &fixture.fence, &fixture.peer).unwrap().failure.is_none(),
+        "the planned stop of a restart is not a lost channel"
+    );
+}
+
+#[tokio::test]
+async fn a_drop_after_a_restart_of_another_incarnation_or_a_finished_one_still_raises_the_fault() {
+    let other = NativeReplay::new("eval.restart-other");
+    request_restart(&other, "4242:2026-10-12T00:00:00.000Z");
+    assert!(!other.loss().is_empty());
+    let finished = NativeReplay::new("eval.restart-finished");
+    let incarnation = finished.fence.incarnation.clone();
+    let request = request_restart(&finished, &incarnation);
+    finished.state.store.append_claim(&ClaimInput {
+        subject: finished.fence.subject.clone(), kind: "runtime.action.succeeded".into(),
+        actor: Some("agent/example/watchdog".into()),
+        fields: serde_json::from_value(json!({"action":"restart","incarnation_id":incarnation})).unwrap(),
+        evidence: vec![request.clone()], expected_subject: None,
+        idempotency_key: Some(format!("agent-restart-completed:{request}")),
+    }).unwrap();
+    assert!(!finished.loss().is_empty());
+}
