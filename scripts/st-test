@@ -35,12 +35,18 @@ It runs `nix develop` and `pnpm install` from the tree under test, on this machi
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
 
+Every run that gets as far as its summary appends one JSON line (version 1: start, end and total seconds, host, tree, the checks, every
+summary row and, when scripts/ci-local printed its stage table, linux-gate's stages) to ${XDG_STATE_HOME:-~/.local/state}/st-test/runs.jsonl,
+or to the path in ST_TEST_RUNS (`off` records nothing); scripts/st-test-report reads it against the per-PR suite's time objective
+(docs/st3/gate-evidence.md). Recording never changes the result: a file that cannot be written is one line on stderr.
+
 Exit 0 when every selected check passed and was signed; 1 when a check failed, timed out or could not be signed; 2 when it
 could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered; 4 when nothing failed but a check
 was not signed because the tree edits that check's lane (evidence-wrap would refuse it; CI runs it).
 """
 import argparse
 import base64
+import codecs
 import concurrent.futures
 import fcntl
 import hashlib
@@ -50,8 +56,10 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -112,8 +120,8 @@ TARGET_MAX_GB = 25.0  # operations' terms for a kept target on a shared host (as
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
 POOL_WAIT_SECONDS = 5
-POOL_SETTINGS = {}  # the ST_TEST_* settings (pool, signing jobs, member limit) as the caller set them: read before the seat scrub drops every ST_* name
-SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT')
+POOL_SETTINGS = {}  # the ST_TEST_* settings (pool, signing jobs, member limit, runs file) as the caller set them: read before the seat scrub drops every ST_* name
+SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT', 'ST_TEST_RUNS')
 
 
 class Failure(Exception):
@@ -777,6 +785,117 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     return rows, failed
 
 
+# scripts/ci-local's closing stage table (one line per stage it ran: name, start, end, seconds, and for a stage its exit code and the build
+# queue it waited in), as `printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss'` prints it after the `ci-local:` prefix; setup has no exit.
+CI_LOCAL = 'scripts/ci-local'
+STAGE_LINE = re.compile(r'ci-local:\s+(\S+)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d+)s'
+                        r'(?:\s+exit\s+(\S+)(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?)?\s*')
+# How long a check's output is still copied after the check itself exited: a process it left behind may hold the pipe open.
+STREAM_GRACE = 5
+
+
+def ci_local_stages(path):
+    """The stage rows of scripts/ci-local's table in `path` (a check's whole output), in order; [] when it printed none (before #3718) or the
+    file cannot be read. A stage's exit and queue fields are None when the line has none (setup) or they are not numbers."""
+    def number(value):
+        return int(value) if value is not None and re.fullmatch(r'-?\d+', value) else None
+    stages = []
+    try:
+        with open(path, errors='replace') as lines:
+            for line in lines:
+                match = STAGE_LINE.fullmatch(line.rstrip('\r\n').split('\r')[-1])
+                if match:
+                    name, start, end, seconds, code, waits, queued = match.groups()
+                    stages.append({'name': name, 'start': start, 'end': end, 'seconds': int(seconds), 'exit': number(code),
+                                   'queue_waits': number(waits), 'queue_s': number(queued)})
+    except OSError:
+        return []
+    return stages
+
+
+def streamed(argv, log, timeout, **options):
+    """`argv`'s exit code (124 past `timeout`), with its output (stdout and stderr, as one) copied as it comes both to this terminal, unchanged,
+    and to the file `log`, so the summary can read what it printed. subprocess.run's own semantics otherwise: past the timeout the process
+    itself is killed (not its group: what it started is left as before) and waited for, and any error here (TERM's exit included) kills it
+    too. Once it exited, what it left behind holding the pipe gets STREAM_GRACE seconds, then the pipe is closed."""
+    sys.stdout.flush()
+    raw = getattr(sys.stdout, 'buffer', None)
+    decode = codecs.getincrementaldecoder('utf-8')(errors='replace').decode
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options) as process, open(log, 'wb') as kept:
+        try:
+            pipe, ended = process.stdout.fileno(), None
+            while time.monotonic() < deadline and (ended is None or time.monotonic() - ended < STREAM_GRACE):
+                if ended is None and process.poll() is not None:
+                    ended = time.monotonic()
+                if not select.select([pipe], [], [], 0.2)[0]:
+                    continue
+                chunk = os.read(pipe, 65536)
+                if not chunk:
+                    break
+                kept.write(chunk)
+                if raw:
+                    raw.write(chunk)
+                    raw.flush()
+                else:
+                    sys.stdout.write(decode(chunk))
+                    sys.stdout.flush()
+            try:
+                return process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                return 124
+        except BaseException:
+            process.kill()
+            raise
+
+
+def target_warm(target):
+    """Whether the cargo target a build check uses already held something before this run (after a trim, which empties it): a warm run. A
+    tree's own target (ST_EVIDENCE_TARGET=off) is never warm, because the tree is cleaned before every run."""
+    target = target or (Path(os.environ['CARGO_TARGET_DIR']) if os.environ.get('CARGO_TARGET_DIR') else None)
+    try:
+        return target is not None and any(target.iterdir())
+    except OSError:
+        return False
+
+
+def runs_path():
+    """Where each run's times are appended (ST_TEST_RUNS, read before the seat scrub like the other ST_TEST_* settings), or None for `off`."""
+    value = POOL_SETTINGS.get('ST_TEST_RUNS', '')
+    if value == 'off':
+        return None
+    if value:
+        return Path(value)
+    state = os.environ.get('XDG_STATE_HOME', '')
+    return Path(state if os.path.isabs(state) else Path.home() / '.local/state') / 'st-test/runs.jsonl'
+
+
+def record_run(record):
+    """Append `record` as one JSON line: one write with O_APPEND, so concurrent runs never interleave. Fail-soft: a file that cannot be
+    written is one line on stderr, never a different exit code."""
+    path = runs_path()
+    if path is None:
+        return
+    line = (json.dumps(record, separators=(',', ':')) + '\n').encode()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            written = os.write(fd, line)
+        finally:
+            os.close(fd)
+        if written != len(line):
+            raise OSError(f'short write to {path} ({written} of {len(line)} bytes)')
+    except OSError as error:
+        print(f'st-test: could not record this run\'s times: {error}', file=sys.stderr)
+
+
+def utc(seconds):
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(seconds))
+
+
 def main(argv):
     POOL_SETTINGS.clear()
     POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
@@ -820,6 +939,8 @@ def main(argv):
             print(f'{name}: {" ".join(LOCAL[name])}')
         return 0
 
+    # A run's times count from here (the base fetch, the pool tree, the members and the notes fetch are part of what a run costs).
+    started_wall, started = time.time(), time.monotonic()
     remote, _, branch = args.base.partition('/')
     if branch:
         git('fetch', '-q', remote, branch)  # the base moves; the lag and the policy are read at its current tip
@@ -877,7 +998,7 @@ def main(argv):
             path.chmod(0o700)
             tools[name] = str(path)
         directory = Path(scratch) / 'tree'
-        pool_trees, tree_lock, tree_target = pool_size(), None, None
+        pool_trees, tree_lock, tree_target, n = pool_size(), None, None, None
         try:
             if pool_trees:
                 commit, root = target_commit(args.base), pool_root()
@@ -894,8 +1015,10 @@ def main(argv):
             rows, failed, unsigned = [], False, False
             lanes = lane_names(args.base)
             target, target_lock = shared_target(tree_target) if any(name in BUILDS for name in checks) else (None, None)
+            warm = target_warm(target) if any(name in BUILDS for name in checks) else None  # before anything builds in it
             unmaterialized = materialize_members(directory)
             gate_report = Path(scratch) / 'linux-gate-nextest-junit.xml'
+            stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
             def run_one(name, output=None):
                 """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
                 if unmaterialized:
@@ -933,13 +1056,21 @@ def main(argv):
                 if name == WEB:
                     wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
                 started = time.monotonic()
-                try:
-                    command = wrap + ['--'] + LOCAL[name]
-                    done = subprocess.run(governed(command, name) if name in BUILDS else command, cwd=directory, timeout=args.time_limit,
-                                          env=environment, stdout=output, stderr=subprocess.STDOUT if output else None)
-                    code = done.returncode
-                except subprocess.TimeoutExpired:
-                    code = 124
+                command = wrap + ['--'] + LOCAL[name]
+                command = governed(command, name) if name in BUILDS else command
+                if output is None and CI_LOCAL in LOCAL[name]:
+                    # scripts/ci-local ends with a table of its stages' times: its output still reaches this terminal as it comes, and is kept
+                    # so the run's record can carry the stages.
+                    log = Path(scratch) / f'{name}-output.log'
+                    code = streamed(command, log, args.time_limit, cwd=directory, env=environment)
+                    stages[:] = ci_local_stages(log)
+                else:
+                    try:
+                        done = subprocess.run(command, cwd=directory, timeout=args.time_limit, env=environment, stdout=output,
+                                              stderr=subprocess.STDOUT if output else None)
+                        code = done.returncode
+                    except subprocess.TimeoutExpired:
+                        code = 124
                 seconds = round(time.monotonic() - started)
                 ok = code == 0
                 is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
@@ -952,7 +1083,8 @@ def main(argv):
             builds = [name for name in checks if name in BUILDS]
             light = [name for name in checks if name not in BUILDS]
             results = {}
-            if builds and light and os.environ.get('ST_EVIDENCE_SERIAL') != '1':
+            parallel = bool(builds and light and os.environ.get('ST_EVIDENCE_SERIAL') != '1')
+            if parallel:
                 logs = {name: Path(scratch) / f'{name}.log' for name in light}
 
                 def light_lane():
@@ -988,7 +1120,14 @@ def main(argv):
                 line = nudge_log()
                 if line:
                     print(f'  {line}')
-            return 1 if failed else (4 if unsigned else 0)
+            code = 1 if failed else (4 if unsigned else 0)
+            # One line per run for the time objective (scripts/st-test-report): only a run of the whole suite (no --check, no --crate) counts.
+            record_run({'v': 1, 'started': utc(started_wall), 'ended': utc(time.time()), 'total_s': round(time.monotonic() - started),
+                        'host': socket.gethostname().split('.')[0], 'tree': tree, 'commit': commit, 'base': base_commit, 'behind': lag,
+                        'full': not args.check and not args.crate, 'checks': checks, 'pool_tree': n, 'warm': warm,
+                        'parallel': parallel, 'rows': [{'name': name, 'result': result, 'seconds': seconds} for name, result, seconds, _ in rows],
+                        'exit': code, 'stages': stages})
+            return code
         finally:
             if not pool_trees and directory.exists():
                 git('worktree', 'remove', '--force', str(directory), check=False)
