@@ -260,3 +260,29 @@ Real representation/conversion decisions require separate storage/contract revie
 and the required human decision before implementation. Native cost controls,
 large-cell fixtures, long-reader/WAL checks and crash/reopen tests remain future
 qualification work. This source guard supplies none of those results.
+
+## Completion-health candidate review
+
+`fractal_store::store::completion_state` owns the new health-v1 namespace and its
+inventory exceptions. Schema site `lv-ha8a94220e780` retains claim identifiers,
+subjects, canonical sort keys and three selected JSON fields inline. Field count
+is bounded; encoded identifier/key/reason sizes are not. No cursor, resource facts
+or signed envelope is copied into this namespace. The producer maintainer retains
+`chunk-or-reference-variable-columns`: qualify physical references for variable
+keys/values, including predecessor selection and deletion, without imposing new
+logical input limits.
+
+The module's remaining inventoried sinks create body-free queues, process changed
+claim identities, read one changed authoritative body and insert/delete its narrow
+candidates. `lv-hb0cb6dfa9cec` and `lv-h73e9590d9234` are the prepared query and bind
+for that single-body read; `lv-hde7c87402fcd` binds indexed field-winner reads.
+They remain transitional exceptions, not byte-size guarantees. Inline narrow
+candidates preserve existing canonical ordering and avoid copying historical
+cursor payloads on completion reads; eventual physical breakup must preserve
+explicit clearing markers versus JSON null and indexed repaired predecessors.
+Queue/reclamation and dynamic-source TODOs remain with this same producer.
+
+`fractal_store::store::completion_state_tests` owns the associated fixture-only
+exceptions: invented time/origin/position mutations, repair membership, deletion,
+savepoints and preparation closures. These exercise invalidation and rollback;
+they are not new production value producers or permission to relax wire limits.

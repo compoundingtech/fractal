@@ -177,7 +177,9 @@ impl Fence {
             let started = std::time::Instant::now();
             #[cfg(any(test, feature = "test-support"))]
             let work = smallclaims::sqlite::work::SqliteWorkScope::start();
-            if connection.is_autocommit() {
+            // An external/raw writer can leave durable projection work without passing through
+            // our commit hook. Reject preparation until canonical completion drains that work.
+            if connection.is_autocommit() && completion_state::current(&connection).unwrap_or(false) {
                 prepared.cut = NativeCut::read(&connection);
                 actual_serial = store.smalltalk.observer_actuals.seed(
                     &connection, || connection.reverify_observer_coverage(),

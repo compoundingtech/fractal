@@ -496,6 +496,7 @@ impl Runtime for SmalltalkRuntime {
         // without running APPEND (or can do so after its last claim projector).
         // The native connection signal makes the no-work boundary SQL-free.
         resources::flush_preparation(transaction)?;
+        completion_state::flush(transaction)?;
         let budget = client_messages::finalize_commit(transaction)?;
         #[cfg(any(test, feature = "test-support"))]
         {

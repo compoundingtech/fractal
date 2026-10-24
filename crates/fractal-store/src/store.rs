@@ -65,6 +65,7 @@ pub mod usage_fold_tests;
 pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
+pub mod completion_state;
 #[cfg(test)]
 pub mod resource_preparation_fence_tests;
 pub mod message_versions;
