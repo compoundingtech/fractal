@@ -609,7 +609,8 @@ export const PlainImageAttachments: Story = { tags: ['critical'],
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.getByRole('button', { name: 'Attach image' })).toBeVisible()
-    fireEvent.paste(textbox(canvasElement), { clipboardData: pngFiles('first.png', 'second.png') })
+    await userEvent.click(textbox(canvasElement))
+    await userEvent.paste(pngFiles('first.png', 'second.png'))
     await waitFor(() => expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible())
     // Over the limit: the excess is named, Send and Attach are withheld instead of a later refusal.
     await expect(canvas.getByRole('alert')).toHaveTextContent('A message can carry at most 1 image. Remove 1 to send.')
