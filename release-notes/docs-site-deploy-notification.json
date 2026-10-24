@@ -6,6 +6,6 @@
   "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
   "compatibility": {"status": "none", "detail": "No CLI, API or runtime behavior changes. Pushes to main affecting docs/site send a fractal-docs-changed repository dispatch to the website repository."},
   "downtime": {"status": "none", "detail": "No service interruption or additional runtime work."},
-  "manual": {"status": "required", "detail": "Configure FRACTAL_SITE_DISPATCH_TOKEN in this repository with Contents: write on compoundingtech/private, and enable its Deploy sites receiver workflow. Documentation notifications fail with a clear error if the dispatch token is absent."},
+  "manual": {"status": "changed", "detail": "Configure FRACTAL_SITE_DISPATCH_TOKEN in this repository with Contents: write on compoundingtech/private, and enable its Deploy sites receiver workflow. Documentation notifications fail with a clear error if the dispatch token is absent."},
   "recovery": {"status": "none", "detail": "No persistent state changes. A missed notification can be recovered by manually dispatching the website deployment workflow."}
 }
