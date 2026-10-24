@@ -128,12 +128,14 @@ const bareCondition = (condition: unknown) => {
 }
 const gateSkip = (gate: string) => `needs.evidence-gate-${gate}.outputs.skip == 'true'`
 const gateRecord = (gate: string) => `\${{ needs.evidence-gate-${gate}.outputs.record }}`
-const jobSkips: Record<string, { gates: string[]; skip: string }> = Object.fromEntries(
-  ['linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat'].map((id) => [
-    id,
-    { gates: ['linux-gate'], skip: gateSkip('linux-gate') },
-  ]),
-)
+// The test jobs also skip when every workspace crate has a note for its own key (rust-tests, per crate: docs/per-crate-test-signing.md);
+// clippy and fleet compatibility are not per crate, so only linux-gate's own note covers them. While the rust-tests policy entry is
+// shadow (enforce false) its gate never says skip, so this changes nothing until that entry is flipped on its own trigger.
+const testJobs = ['linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4']
+const jobSkips: Record<string, { gates: string[]; skip: string }> = Object.fromEntries([
+  ...testJobs.map((id) => [id, { gates: ['linux-gate', 'rust-tests'], skip: `${gateSkip('linux-gate')} || ${gateSkip('rust-tests')}` }]),
+  ...['linux-clippy', 'linux-fleet-compat'].map((id) => [id, { gates: ['linux-gate'], skip: gateSkip('linux-gate') }]),
+])
 // The aggregate's RESULTS are positional. Exactly the stages skipped at job level may report `skipped` under an
 // evidence skip (derived here from the same list that skips them); every other stage, `upgrade-impact` among them,
 // must succeed. Positions after the base stages are the merge-only shards.
@@ -580,11 +582,11 @@ position=0
 for result in $RESULTS; do
   position=$((position + 1))
   [ "$result" = success ] && continue
-  # A stage the evidence gate skipped reports \`skipped\`: accepted only when this gate decided to skip, only
-  # in the positions of stages skipped at job level, only when that stage's own skip rule says skip, and never
-  # for a failure or a cancellation.
+  # A stage an evidence gate skipped reports \`skipped\`: accepted only in the positions of stages skipped at job level,
+  # only when that stage's own skip rule says skip (linux-gate's gate, or for the test stages the per-crate rust-tests
+  # gate as well), and never for a failure or a cancellation.
   flag=$(printf '%s\\n' "\${STAGE_SKIPS:-}" | cut -d' ' -f"$position")
-  if [ "\${GATE_SKIP:-}" = true ] && [ "$flag" = true ] && [ "$result" = skipped ]; then
+  if [ "$flag" = true ] && [ "$result" = skipped ]; then
     case "$position" in ${skippablePositions.join('|')}) continue ;; esac
   fi
   exit 1
