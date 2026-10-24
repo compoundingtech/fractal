@@ -96,6 +96,52 @@ class PrepareDependenciesTest(unittest.TestCase):
         self.assertFalse(any('node_modules' in name for name in overlay))
         self.assertIn(f'key={self.key} linked=3 copied=0', result.stderr)
 
+    def test_reuses_clone_a_generation_with_clone_b_pinned_workspace(self):
+        source_a = self.source
+        source_b = self.root / 'source-b'
+        shutil.copytree(source_a, source_b, symlinks=True,
+                        ignore=shutil.ignore_patterns('node_modules'))
+        (source_a / 'packages/workspace/index.js').write_text('clone A mutable workspace\n')
+        (source_b / 'packages/workspace/index.js').write_text('clone B mutable workspace\n')
+        (self.snapshot / 'packages/workspace/index.js').write_text('clone B pinned workspace\n')
+        self.assertEqual(install_key(source_b), self.key)
+        self.source = source_b
+
+        self.prepare()
+
+        for relative in ('node_modules/workspace', 'node_modules/absolute-workspace',
+                         'apps/fractal-web/node_modules/workspace'):
+            with self.subTest(relative=relative):
+                link = self.snapshot / relative
+                self.assertTrue(link.is_symlink())
+                self.assertFalse(Path(os.readlink(link)).is_absolute())
+                self.assertNotIn(str(source_a), os.readlink(link))
+                self.assertEqual(link.resolve(), self.snapshot / 'packages/workspace')
+                self.assertEqual((link / 'index.js').read_text(), 'clone B pinned workspace\n')
+        self.assertEqual((self.snapshot / 'node_modules/fixture/index.js').read_text(),
+                         'immutable root dependency\n')
+        self.assertEqual(json.loads(self.manifest.read_text())['dependencyKey'], self.key)
+
+    def test_rejects_workspace_symlink_ancestor_outside_snapshot(self):
+        outside = self.root / 'outside'
+        (self.snapshot / 'packages').rename(outside)
+        (self.snapshot / 'packages').symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'dependency symlink escapes snapshot and generation'):
+            self.prepare()
+        self.assertFalse(self.manifest.exists())
+
+    def test_allows_dangling_workspace_links_within_snapshot(self):
+        shutil.rmtree(self.snapshot / 'packages/workspace')
+
+        self.prepare()
+
+        for relative in ('node_modules/workspace', 'node_modules/absolute-workspace',
+                         'apps/fractal-web/node_modules/workspace'):
+            link = self.snapshot / relative
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(link.exists())
+            self.assertEqual(link.resolve(strict=False), self.snapshot / 'packages/workspace')
+
     def test_rejects_marker_mismatch_before_copying(self):
         (self.generation / '.fractal-dep-key').write_text('0' * 64 + '\n')
         with self.assertRaises(ValueError):

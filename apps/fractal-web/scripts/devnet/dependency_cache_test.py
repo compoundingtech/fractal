@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -103,6 +104,112 @@ class DependencyCacheTest(unittest.TestCase):
         self.assertEqual(result.stdout, '')
         self.assertIn('reused key=' + key, result.stderr)
         self.assertEqual(self.fingerprint(generation), before)
+
+    def test_absolute_workspace_links_are_relative_and_reused_across_clones(self):
+        workspace = self.source / 'packages/pkg'
+        workspace.mkdir(parents=True)
+        (workspace / 'index.js').write_text('clone A workspace\n')
+        (self.source / 'node_modules/pkg').symlink_to(workspace)
+        key = self.populate()
+        generation = self.cache / key
+        self.assertEqual(os.readlink(generation / 'node_modules/pkg'), '../packages/pkg')
+        self.assertFalse((generation / 'node_modules/pkg').exists())
+        before = self.fingerprint(generation)
+
+        clone = self.fixture / 'clone-b'
+        shutil.copytree(self.source, clone, symlinks=True)
+        (clone / 'node_modules/pkg').unlink()
+        (clone / 'node_modules/pkg').symlink_to(clone / 'packages/pkg')
+        (clone / 'packages/pkg/index.js').write_text('clone B workspace\n')
+        self.assertEqual(dependency_cache.install_key(clone), key)
+        with (self.cache / '.cache.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            dependency_cache.populate(clone, self.cache, key)
+        self.assertEqual(self.fingerprint(generation), before)
+        for link in generation.rglob('*'):
+            if link.is_symlink():
+                self.assertFalse(Path(os.readlink(link)).is_absolute())
+                self.assertNotIn(str(self.source), os.readlink(link))
+        # The same stored topology points into whichever clone supplies files.
+        (clone / 'node_modules/pkg').unlink()
+        (clone / 'node_modules/pkg').symlink_to(os.readlink(generation / 'node_modules/pkg'))
+        self.assertEqual((clone / 'node_modules/pkg/index.js').read_text(),
+                         'clone B workspace\n')
+
+    def test_normalization_preserves_logical_workspace_paths(self):
+        outside = self.fixture / 'mounted-workspace'
+        (outside / 'pkg').mkdir(parents=True)
+        (self.source / 'packages').symlink_to(outside, target_is_directory=True)
+        (self.source / 'node_modules/pkg').symlink_to(self.source / 'packages/pkg')
+        key = self.populate()
+        self.assertEqual(os.readlink(self.cache / key / 'node_modules/pkg'), '../packages/pkg')
+
+    def test_resolved_source_targets_map_back_to_source_topology(self):
+        workspace = self.source / 'packages/pkg'
+        workspace.mkdir(parents=True)
+        alias = self.fixture / 'source-alias'
+        alias.symlink_to(self.source, target_is_directory=True)
+        (self.source / 'node_modules/pkg').symlink_to(alias / 'packages/pkg')
+        key = self.populate()
+        self.assertEqual(os.readlink(self.cache / key / 'node_modules/pkg'), '../packages/pkg')
+
+    def test_internal_pnpm_links_and_dangling_workspace_links_are_valid(self):
+        store = self.source / 'node_modules/.pnpm/pkg@1/node_modules/pkg'
+        store.mkdir(parents=True)
+        (store / 'index.js').write_text('pnpm dependency\n')
+        (self.source / 'node_modules/pkg').symlink_to('.pnpm/pkg@1/node_modules/pkg')
+        scope = self.source / 'apps/web/node_modules/@scope'
+        scope.mkdir()
+        (scope / 'pkg').symlink_to('../../../../node_modules/.pnpm/pkg@1/node_modules/pkg')
+        (self.source / 'node_modules/absent').symlink_to('../packages/absent')
+        key = self.populate()
+        generation = self.cache / key
+        self.assertEqual((generation / 'node_modules/pkg/index.js').read_text(),
+                         'pnpm dependency\n')
+        self.assertEqual((generation / 'apps/web/node_modules/@scope/pkg/index.js').read_text(),
+                         'pnpm dependency\n')
+        self.assertFalse((generation / 'node_modules/absent').exists())
+        self.assertEqual(dependency_cache.verify_generation(generation, key),
+                         ['node_modules', 'apps/web/node_modules'])
+
+    def test_external_source_links_fail_atomically(self):
+        key = self.populate()
+        generation = self.cache / key
+        before = self.fingerprint(generation)
+        selection = (self.cache / '.selection.json').read_bytes()
+        self.change_key('different dependency inputs')
+        outside = self.fixture / 'outside'
+        outside.mkdir()
+        for target in (outside, Path('../../outside'), self.fixture / 'missing'):
+            with self.subTest(target=target):
+                link = self.source / 'node_modules/external'
+                link.symlink_to(target)
+                with self.assertRaisesRegex(ValueError, 'symlink escapes source'):
+                    self.populate()
+                self.assertEqual(self.generations(), {key})
+                self.assertEqual(self.fingerprint(generation), before)
+                self.assertEqual((self.cache / '.selection.json').read_bytes(), selection)
+                self.assertEqual(list(self.cache.glob('.staging-*')), [])
+                link.unlink()
+
+    def test_unsafe_published_links_refuse_reuse_without_repair(self):
+        key = self.populate()
+        generation = self.cache / key
+        selection = (self.cache / '.selection.json').read_bytes()
+        link = generation / 'node_modules/workspace'
+        for target in (self.source / 'apps/web', generation / 'apps/web',
+                       self.fixture / 'outside', Path('../../outside')):
+            with self.subTest(target=target):
+                link.unlink()
+                link.symlink_to(target)
+                before = self.fingerprint(generation)
+                with self.assertRaisesRegex(ValueError, 'symlink escapes generation'):
+                    dependency_cache.verify_generation(generation, key)
+                with self.assertRaisesRegex(ValueError, 'symlink escapes generation'):
+                    self.populate()
+                self.assertEqual(self.fingerprint(generation), before)
+                self.assertEqual((self.cache / '.selection.json').read_bytes(), selection)
+                self.assertEqual(list(self.cache.glob('.staging-*')), [])
 
     def test_marker_inventory_and_metadata_rejection(self):
         key = self.populate()

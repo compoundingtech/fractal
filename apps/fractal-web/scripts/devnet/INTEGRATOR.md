@@ -104,6 +104,11 @@ renames it into place. Source-to-cache copying never hardlinks mutable source fi
 Published generations are never rewritten. `.fractal-dep-key` and
 `.node-modules.json` inside each generation identify its key and safe source-relative
 dependency directories; mismatched markers or escaping inventories fail closed.
+Workspace symlinks are normalized in staging to clone-independent relative topology:
+an absolute link into clone A's `packages/` becomes a relative workspace link, so
+the same-key generation reused by clone B cannot retain A's mutable path.
+Published generations with absolute or escaping dependency links are rejected,
+not repaired in place; use a fresh cache root when adopting this invariant.
 
 `.selection.json` outside the generations records the selected current and previous
 generation. Reusing an older generation updates selection lineage without mutating it.
@@ -122,6 +127,9 @@ not the cache parent. An `EXDEV` hardlink failure emits an immediate warning bef
 copying; the final warning and `dependencyFiles.linked` / `dependencyFiles.copied`
 manifest/receipt fields count actual hardlinks and fallback copies.
 `dependencyKey` in the manifest and receipt identifies the selected generation.
+After all dependency trees are copied, every dependency symlink must resolve beneath
+the pinned snapshot or selected generation. A workspace ancestor that redirects a
+link outside those roots fails the build, even when the stored link itself is relative.
 Production state, manifests, snapshots, private overlay and credentials remain
 deployment-owned. The helper stages `current`; it never prunes immutable builds
 or publishes Devnet. The integrator alone prunes current plus one rollback build

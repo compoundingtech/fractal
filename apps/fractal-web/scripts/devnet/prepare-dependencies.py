@@ -87,6 +87,19 @@ def prepare(source, snapshot, manifest_path, generation, expected):
                     link.unlink()
                     link.symlink_to(os.path.relpath(replacement, link.parent))
 
+    # Resolve only after every dependency tree and workspace redirection is in place:
+    # a source-relative link can escape through a snapshot workspace ancestor.
+    generation_root = generation.resolve(strict=True)
+    for _, dst in dependencies:
+        for copied_root, copied_dirs, files in os.walk(dst):
+            for name in copied_dirs + files:
+                link = Path(copied_root) / name
+                if not link.is_symlink():
+                    continue
+                target = link.resolve(strict=False)
+                if not (target.is_relative_to(snapshot) or target.is_relative_to(generation_root)):
+                    raise ValueError(f'dependency symlink escapes snapshot and generation: {link}')
+
     print(f"prepare-dependencies: key={expected} linked={dependency_files['linked']} copied={dependency_files['copied']}" +
           (' WARNING: EXDEV copy fallback' if dependency_files['copied'] else ''),
           file=sys.stderr, flush=True)

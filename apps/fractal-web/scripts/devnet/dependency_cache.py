@@ -53,9 +53,50 @@ def _dependency_root(root, relative):
     return candidate
 
 
+def _symlinks(root):
+    """Visit links without following symlinked dependency directories."""
+    for directory, dirs, files in os.walk(root):
+        for name in dirs + files:
+            path = Path(directory) / name
+            if path.is_symlink():
+                yield path
+
+
+def _lexical_target(link, target):
+    return Path(os.path.abspath(link.parent / target))
+
+
+def _validate_generation_links(generation):
+    for link in _symlinks(generation):
+        target = Path(os.readlink(link))
+        if target.is_absolute() or not _lexical_target(link, target).is_relative_to(generation):
+            raise ValueError(f'dependency symlink escapes generation: {link.relative_to(generation)}')
+
+
+def _normalize_generation_links(source, staging):
+    """Store clone-independent topology, not paths into the mutable source."""
+    resolved_source = source.resolve()
+    for link in _symlinks(staging):
+        original = source / link.relative_to(staging)
+        raw_target = Path(os.readlink(link))
+        target = _lexical_target(original, raw_target)
+        if target.is_relative_to(source):
+            # Keep logical workspace/member paths even through source mounts.
+            relative = target.relative_to(source)
+        else:
+            resolved = (original.parent / raw_target).resolve(strict=False)
+            if not resolved.is_relative_to(resolved_source):
+                raise ValueError(f'dependency symlink escapes source clone: {original}')
+            relative = resolved.relative_to(resolved_source)
+        normalized = os.path.relpath(staging / relative, link.parent)
+        link.unlink()
+        link.symlink_to(normalized)
+    _validate_generation_links(staging)
+
+
 def verify_generation(generation, expected):
     """Return validated source-relative node_modules roots from a generation."""
-    generation = Path(generation)
+    generation = Path(os.path.abspath(generation))
     _validate_key(expected)
     if generation.is_symlink() or generation.name != expected or not generation.is_dir():
         raise ValueError('dependency generation path does not match key')
@@ -79,6 +120,7 @@ def verify_generation(generation, expected):
             raise ValueError('duplicate or overlapping dependency inventory paths')
         _dependency_root(generation, relative)
         relatives.append(relative)
+    _validate_generation_links(generation)
     return inventory
 
 
@@ -130,9 +172,9 @@ def _prune(cache, current, previous):
 
 def populate(source, cache, expected):
     """Copy source installs into CACHE/KEY atomically; caller holds .cache.lock."""
-    source, cache = Path(source).resolve(), Path(cache).resolve()
+    source, cache = Path(os.path.abspath(source)), Path(cache).resolve()
     _validate_key(expected)
-    if cache.is_relative_to(source):
+    if cache.is_relative_to(source.resolve()):
         raise ValueError('dependency cache must be outside source clone')
     if install_key(source) != expected:
         raise ValueError('source install key changed before cache publication')
@@ -166,6 +208,7 @@ def populate(source, cache, expected):
             original = _dependency_root(source, relative)
             inventory.append(relative.as_posix())
             shutil.copytree(original, staging / relative, symlinks=True, copy_function=copy_file)
+        _normalize_generation_links(source, staging)
         if install_key(source) != expected:
             raise ValueError('source install key changed during cache population')
         (staging / '.fractal-dep-key').write_text(expected + '\n')
