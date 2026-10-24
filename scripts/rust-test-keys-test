@@ -216,6 +216,19 @@ class Keys(unittest.TestCase):
         self.assertRegex(out.stdout, r'^base\t[0-9a-f]{40,64}\n$')
 
 
+class NoTests(unittest.TestCase):
+    def test_the_no_tests_list_must_be_an_array_of_crate_names(self):
+        ws = workspace(self)
+        for bad in ('"a"', '[1]', '{"a": 1}'):
+            ws.write('.st/rust-test-inputs.json', '{"global": [], "crates": {}, "no_tests": %s}' % bad)
+            ws.commit()
+            with self.assertRaises(keys.Failure, msg=bad):
+                keys.read_inputs(str(ws.dir), 'HEAD')
+        ws.write('.st/rust-test-inputs.json', '{"global": [], "crates": {}, "no_tests": ["a"]}')
+        ws.commit()
+        self.assertEqual(keys.read_inputs(str(ws.dir), 'HEAD')['no_tests'], ['a'])
+
+
 class Repository(unittest.TestCase):
     """This repository's own tree and its committed .st/rust-test-inputs.json."""
 

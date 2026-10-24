@@ -145,6 +145,16 @@ and a stale pass is reused. Four controls, in order of when they bite:
   the member keys), and `crates` (crate to record). `--members --project` prints `{crates: {name: key}}` for the gate's one batched fetch.
   The gate must copy the base's `evidence-verify` and `rust-test-keys` side by side.
 - `PROTECTED` in the gate now includes `scripts/rust-test-keys`, `.st/rust-test-inputs.json` and `scripts/ci-rust-test-result`.
+- A note counts for a crate only when its run ran at least one test (`tests_run` > 0) once a policy judges it: a run whose selection matched
+  nothing (nextest exit 4, or a filter that no longer names the crate) signs `tests_run=0` and passes, and that must not stand for a crate.
+  A crate that really has no test is listed under `no_tests` in `.st/rust-test-inputs.json` at the accepted base (reviewed; a tree cannot list
+  its own crate, and a list that is not an array of names is a verifier `error`, never an empty allowance). `st-test` names the crates that
+  ran no test so the list can be reviewed. The same rule applies to `--crate-key` when `--policy-from` is given; without a policy a note
+  counts by signature, crate and key alone, as before.
+- The verifier keys a tree only with the accepted base's `rust-test-keys` and `.st/rust-test-inputs.json`: a base without them is an `error`
+  (`--members` refuses; the gate reports it unavailable), never the tree's own copy. `st-test` falls back to the tree's own tool only while
+  the base's policy does not name `rust-tests` (the change that introduces them is judged by itself); once it does, a base without them is a
+  refusal there too.
 - The gate job itself (skip the test stage on `evidence-gate-rust-tests`, pull_request only) is skip-ci-lead-2's part of step 3.
 
 Measured with the committed extras over the last 57 first-parent merges of main (2026-10-23): the median merge changes the key of 5 of 52

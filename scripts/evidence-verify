@@ -625,9 +625,32 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
     return result
 
 
-def signed_for_crate(statement, crate, key):
+def signed_for_crate(statement, crate, key, needs_tests=False):
+    """Whether the record signed this crate and this key. `needs_tests` (the accepted base judges the check, and the crate is not listed
+    under `no_tests` in its .st/rust-test-inputs.json) also requires a run that ran at least one test: a run whose selection matched
+    nothing (nextest exit 4, a filter that no longer names the crate) signs tests_run=0 and passes, and that must not stand for the crate."""
     inputs = statement['predicate']['observed'].get('inputs', {})
-    return inputs.get('crate') == crate and inputs.get('source_inputs') == key
+    if inputs.get('crate') != crate or inputs.get('source_inputs') != key:
+        return False
+    if needs_tests:
+        ran = str(inputs.get('tests_run', ''))
+        return ran.isdigit() and int(ran) > 0
+    return True
+
+
+def zero_test_crates(repo, policy_base):
+    """The crates the accepted base lists under `no_tests` (reviewed: they have no test to run). Empty when the base has no such list;
+    a list that is not an array of crate names is a verifier error, never an empty allowance by accident."""
+    code, data = no_lazy(repo, 'show', '--end-of-options', f'{policy_base}:.st/rust-test-inputs.json')
+    if code != 0:
+        return set()
+    try:
+        listed = json.loads(data.decode()).get('no_tests', [])
+    except (ValueError, AttributeError, UnicodeDecodeError):
+        raise Failure('error', '.st/rust-test-inputs.json at the accepted base is not readable')
+    if not isinstance(listed, list) or not all(isinstance(name, str) for name in listed):
+        raise Failure('error', '.st/rust-test-inputs.json: no_tests must be an array of crate names')
+    return set(listed)
 
 
 def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
@@ -635,7 +658,7 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
     """`level_lane`, when given, is a callable returning the lane check at the policy's base; it is used only for a signer level
     whose by_level rule says `lane: true`, so the cost and any lane-file error fall on those records alone.
 
-    `crate_key` is (crate, key) for a per-crate check (docs/per-crate-test-signing.md): the key is the crate's own input key rather than a
+    `crate_key` is (crate, key[, needs_tests]) for a per-crate check (docs/per-crate-test-signing.md): the key is the crate's own input key rather than a
     projection of the policy's declared paths, and a record counts only if it signed that crate AND that key, whichever tree it is for
     (the several records of one tree, one per crate, are told apart by the signed `crate`)."""
     with tempfile.NamedTemporaryFile() as revocations:
@@ -844,6 +867,7 @@ def verify_members(repo, tree, check, keys, command, kinds, bind, max_age, runne
     names the oldest note's time and the weakest signer level so the gate's age and trust conditions judge the weakest link, and a
     combined key (the sha1 of the sorted crate=key lines) for the gate's sampling seed."""
     members = member_keys(repo, tree, policy_base)
+    no_tests = zero_test_crates(repo, policy_base)
     lane_cache = []
 
     def memoized_level_lane():
@@ -858,7 +882,7 @@ def verify_members(repo, tree, check, keys, command, kinds, bind, max_age, runne
             continue
         try:
             found[crate] = verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, None, rules, lane,
-                                    memoized_level_lane if level_lane else None, run_inputs, (crate, key))
+                                    memoized_level_lane if level_lane else None, run_inputs, (crate, key, crate not in no_tests))
         except Failure as failure:
             missing[crate] = failure.reason
     if missing:
@@ -1193,7 +1217,8 @@ def main(argv):
             crate, sep, key = args.crate_key.partition('=')
             if not sep or not crate or not OID.match(key):
                 raise Failure('error', f'--crate-key must be CRATE=KEY with a git tree id, not {args.crate_key!r}')
-            crate_key = (crate, key)
+            # Judged by a policy (the accepted base is given): a note must have run a test unless the base lists the crate as having none.
+            crate_key = (crate, key, bool(policy_base) and crate not in zero_test_crates(args.repo, policy_base))
         level_lane = (lambda: lane_for(args.repo, tree, (read_lanes(args.repo, policy_base), policy_base), args.check,
                                        args.lane_base)) if policy_base else None
         if args.members:

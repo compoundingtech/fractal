@@ -819,6 +819,8 @@ code = int(os.environ.get('FAKE_EXIT', '0'))
 if os.environ.get('FAKE_NO_REPORT') != '1':
     out = ['<testsuites name="nextest-run">']
     for package in os.environ['CI_TEST_PACKAGES'].split(','):
+        if package == os.environ.get('FAKE_EMPTY'):
+            continue  # the selection matched no test of this crate
         out.append('<testsuite name=%s>' % quoteattr(package))
         out.append('<testcase name="unit_one" classname=%s></testcase>' % quoteattr(package))
         failing = package == os.environ.get('FAKE_FAIL')
@@ -972,6 +974,53 @@ class PerCrate(StTest):
         self.assertEqual((code, sorted(result['missing'])), (1, ['top']), 'base is below top and keeps its note')
         self.run_crates()
         self.assertEqual(self.members()[0], 0)
+
+    def on_main(self, message, change):
+        git(self.work, 'checkout', '-q', 'main')
+        change()
+        git(self.work, 'commit', '-qam', message)
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+
+    def test_a_note_that_ran_no_test_covers_a_crate_only_when_the_base_lists_it_as_having_none(self):
+        code, out, err = self.run_crates(FAKE_EMPTY='base')
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('1 ran no test (list under no_tests if they have none): base', out)
+        code, result = self.members()
+        self.assertEqual((code, sorted(result['missing'])), (1, ['base']), 'top ran tests; base ran none')
+        # The same judgement on the local skip decision: base is still to run, top is covered.
+        code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
+        self.assertEqual(code, 3, out + err)
+        self.assertIn('to run: base', out)
+        # A tree cannot list its own crate: only the accepted base's list counts.
+        inputs = json.loads((self.work / '.st/rust-test-inputs.json').read_text())
+        self.commit('.st/rust-test-inputs.json', json.dumps(dict(inputs, no_tests=['base'])))
+        self.assertEqual(self.members()[0], 1)
+        git(self.work, 'reset', '-q', '--hard', 'HEAD~1')
+        branch_point = git(self.work, 'rev-parse', 'origin/main').strip()
+        self.on_main('list base as having no test', lambda: (self.work / '.st/rust-test-inputs.json').write_text(json.dumps(dict(inputs, no_tests=['base']))))
+        git(self.work, 'fetch', '-q', 'origin')
+        # The notes were signed at the branch point; the list is a change of the lane's definition on main, so they are judged there.
+        code, result = self.members('--lane-base', branch_point)
+        self.assertEqual((code, result['satisfied']), (0, True), result)
+
+    def test_a_malformed_no_tests_list_is_an_error_never_an_empty_allowance(self):
+        self.run_crates()
+        branch_point = git(self.work, 'rev-parse', 'origin/main').strip()
+        inputs = json.loads((self.work / '.st/rust-test-inputs.json').read_text())
+        self.on_main('break the list', lambda: (self.work / '.st/rust-test-inputs.json').write_text(json.dumps(dict(inputs, no_tests='base'))))
+        git(self.work, 'fetch', '-q', 'origin')
+        code, result = self.members('--lane-base', branch_point)
+        self.assertEqual((code, result['reason']), (1, 'error'), result)
+
+    def test_a_base_that_judges_rust_tests_without_the_key_tool_is_an_error_never_a_fallback_to_the_trees_own(self):
+        self.on_main('drop the tool', lambda: git(self.work, 'rm', '-q', 'scripts/rust-test-keys'))
+        git(self.work, 'fetch', '-q', 'origin')
+        code, out, err = self.run_crates()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('only the base\'s tool and inputs may key a note', out)
+        self.assertEqual(self.crate_records(), [])
+        self.assertEqual(self.ran(), [], 'nothing was tested or signed')
 
     def test_a_failed_crate_note_keeps_the_members_check_unsatisfied(self):
         self.run_crates(FAKE_FAIL='top')

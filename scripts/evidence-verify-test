@@ -1590,6 +1590,44 @@ class CommittedPolicy(unittest.TestCase):
         self.assertEqual(web['kinds']['wrapper']['input_order'], {'kit_inputs': ['true', 'false']})
 
 
+class PerCrateNotes(unittest.TestCase):
+    """What counts as a note for one crate (docs/per-crate-test-signing.md): the crate, the key, and, once a policy judges it, a run that ran a test."""
+
+    def statement(self, **inputs):
+        return {'predicate': {'observed': {'inputs': dict({'crate': 'base', 'source_inputs': 'k' * 40}, **inputs)}}}
+
+    def test_a_note_counts_for_its_crate_and_key_only(self):
+        note = self.statement(tests_run='3')
+        self.assertTrue(evidence_verify.signed_for_crate(note, 'base', 'k' * 40))
+        self.assertFalse(evidence_verify.signed_for_crate(note, 'top', 'k' * 40))
+        self.assertFalse(evidence_verify.signed_for_crate(note, 'base', 'j' * 40))
+
+    def test_a_run_that_ran_no_test_does_not_count_when_tests_are_needed(self):
+        for ran in ('0', '', 'many', '-1', None):
+            note = self.statement(tests_run=ran) if ran is not None else self.statement()
+            self.assertTrue(evidence_verify.signed_for_crate(note, 'base', 'k' * 40), ran)  # no policy judges it
+            self.assertFalse(evidence_verify.signed_for_crate(note, 'base', 'k' * 40, True), ran)
+        self.assertTrue(evidence_verify.signed_for_crate(self.statement(tests_run='1'), 'base', 'k' * 40, True))
+        self.assertTrue(evidence_verify.signed_for_crate(self.statement(tests_run=2), 'base', 'k' * 40, True))
+
+    def test_the_no_tests_list_is_the_bases_and_must_be_an_array_of_names(self):
+        f = Fixture()
+        self.addCleanup(f.tmp.cleanup)
+        def at_base(text):
+            (f.repo / '.st').mkdir(exist_ok=True)
+            (f.repo / '.st/rust-test-inputs.json').write_text(text)
+            f.git('add', '-A')
+            f.git('commit', '-q', '-m', text)
+            return f.git('rev-parse', 'HEAD')
+        repo = str(f.repo)
+        self.assertEqual(evidence_verify.zero_test_crates(repo, at_base('{"global": []}')), set())
+        self.assertEqual(evidence_verify.zero_test_crates(repo, at_base('{"no_tests": ["a", "b"]}')), {'a', 'b'})
+        for bad in ('{"no_tests": "a"}', '{"no_tests": [1]}', 'not json', '[]'):
+            with self.assertRaises(evidence_verify.Failure) as caught:
+                evidence_verify.zero_test_crates(repo, at_base(bad))
+            self.assertEqual(caught.exception.reason, 'error', bad)
+
+
 class ValueRules(unittest.TestCase):
     """input_order and shard_inputs: a kind's checks on input values (docs/st3/gate-evidence.md, "Input values")."""
 
