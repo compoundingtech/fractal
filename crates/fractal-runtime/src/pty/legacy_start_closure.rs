@@ -28,6 +28,32 @@ pub struct LegacyStartClosureEvidence {
     pub operation_pids: Vec<u32>,
 }
 
+/// Nonsecret metadata for a process whose absence could not be proved.
+/// Permission errors remain refusals, never evidence that a producer is absent.
+#[derive(Debug)]
+pub struct LegacyStartProofUnavailable {
+    pub stage: &'static str,
+    pub pid: u32,
+    pub errno: Option<i32>,
+}
+
+impl std::fmt::Display for LegacyStartProofUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "legacy start proof unavailable at {} for pid {}", self.stage, self.pid)
+    }
+}
+
+impl std::error::Error for LegacyStartProofUnavailable {}
+
+#[cfg(target_os = "linux")]
+fn process_proof_error(stage: &'static str, pid: u32, error: anyhow::Error) -> anyhow::Error {
+    LegacyStartProofUnavailable {
+        stage,
+        pid,
+        errno: error.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error),
+    }.into()
+}
+
 /// The private file owns the flock until the Store writer has consumed the evidence.
 #[derive(Debug)]
 pub struct LegacyStartClosureProof {
@@ -232,7 +258,7 @@ fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str) -> 
         if !uids.contains(&owner_uid) && directory.metadata()?.uid() != owner_uid {
             continue;
         }
-        if owner_process_has_operation(&path, operation)? {
+        if owner_process_has_operation(&path, operation, pid)? {
             matching.insert(pid);
         }
     }
@@ -240,14 +266,15 @@ fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str) -> 
 }
 
 #[cfg(target_os = "linux")]
-fn owner_process_has_operation(path: &Path, operation: &str) -> Result<bool> {
+fn owner_process_has_operation(path: &Path, operation: &str, pid: u32) -> Result<bool> {
     match std::fs::read(path.join("environ")) {
-        Ok(environment) => Ok(has_operation(&environment, operation) && !process_exited(path)?),
+        Ok(environment) => Ok(has_operation(&environment, operation)
+            && !process_exited(path).map_err(|error| process_proof_error("proc-stat", pid, error))?),
         Err(error) => {
-            if process_exited(path)? {
+            if process_exited(path).map_err(|error| process_proof_error("proc-stat", pid, error))? {
                 Ok(false)
             } else {
-                Err(error).context("read owner process environment")
+                Err(process_proof_error("proc-environ", pid, error.into()))
             }
         }
     }
@@ -361,16 +388,270 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn non_dumpable_marked_owner_child_remains_a_typed_refusal() {
+        const CHILD: &str = "FRACTAL_PROOF_NON_DUMPABLE_CHILD";
+        const READER: &str = "FRACTAL_PROOF_UNPRIVILEGED_READER";
+        const TEST: &str = "pty::legacy_start_closure::tests::non_dumpable_marked_owner_child_remains_a_typed_refusal";
+        const OPERATION: &str = "legacy-proof-unreadable-producer";
+        const CONTROL: &str = "FRACTAL_PROOF_DUMPABLE_CONTROL";
+        const CONTROL_PID: &str = "FRACTAL_PROOF_CONTROL_PROCFS_PID";
+        fn reader_diagnostics() -> String {
+            let status = std::fs::read_to_string("/proc/self/status");
+            let fields = status.as_ref().map(|text| text.lines()
+                .filter(|line| line.starts_with("CapEff:") || line.starts_with("NSpid:"))
+                .collect::<Vec<_>>());
+            let mounts = std::fs::read_to_string("/proc/self/mountinfo");
+            let proc_mounts = mounts.as_ref().map(|text| text.lines()
+                .filter(|line| line.split_whitespace().nth(4) == Some("/proc"))
+                .collect::<Vec<_>>());
+            format!("reader_local_pid={} reader_procself={:?} reader_fields={fields:?} proc_mounts={proc_mounts:?}",
+                std::process::id(), std::fs::read_link("/proc/self"))
+        }
+        fn process_diagnostics(pid: u32) -> String {
+            let path = PathBuf::from(format!("/proc/{pid}"));
+            let status = std::fs::read_to_string(path.join("status"));
+            let fields = status.as_ref().map(|text| text.lines()
+                .filter(|line| line.starts_with("Uid:") || line.starts_with("NSpid:"))
+                .collect::<Vec<_>>());
+            format!("procfs_pid={pid} exists={:?} metadata={:?} fields={fields:?}",
+                path.try_exists(), std::fs::metadata(&path))
+        }
+        if std::env::var_os(CONTROL).is_some() {
+            println!("proof-control-ready {}", std::fs::read_link("/proc/self")
+                .expect("control readiness: /proc/self").display());
+            use std::io::Read as _;
+            std::io::stdin().read_exact(&mut [0]).expect("control hold: stdin");
+            return;
+        }
+        if std::env::var_os(CHILD).is_some() {
+            // SAFETY: these prctl operations affect only this dedicated child.
+            unsafe {
+                assert_eq!(libc::prctl(libc::PR_SET_NAME, c"systemd".as_ptr()), 0, "producer prctl(PR_SET_NAME): {}", std::io::Error::last_os_error());
+                assert_eq!(libc::prctl(libc::PR_SET_DUMPABLE, 0), 0, "producer prctl(PR_SET_DUMPABLE=0): {}", std::io::Error::last_os_error());
+            }
+            // These calls happen after re-exec, in the producer itself.
+            let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE) };
+            assert_eq!(dumpable, 0, "producer prctl(PR_GET_DUMPABLE): {}", std::io::Error::last_os_error());
+            // procfs may be mounted from an ancestor PID namespace. Production
+            // enumerates its PIDs, not the namespace-local Child::id values.
+            let proc_pid = std::fs::read_link("/proc/self").expect("producer readiness: readlink /proc/self");
+            let proc_pid: u32 = proc_pid.to_str().expect("producer readiness: UTF-8 /proc/self")
+                .parse().expect("producer readiness: numeric /proc/self pid");
+            let status = std::fs::read_to_string("/proc/self/status").expect("producer readiness: status");
+            let nspid = status.lines().find_map(|line| line.strip_prefix("NSpid:"))
+                .unwrap_or("missing").split_whitespace().collect::<Vec<_>>().join(":");
+            println!("proof-child-ready pid={} proc_pid={proc_pid} dumpable={dumpable} NSpid={nspid}", std::process::id());
+            eprintln!("producer readiness diagnostics: proc_pid={proc_pid} {}; {}",
+                status.lines().find(|line| line.starts_with("NSpid:")).unwrap_or("NSpid: missing"),
+                reader_diagnostics());
+            // Keep the producer alive until the parent completes its scan.
+            // A fixed sleep can expire under a heavily loaded CI scheduler.
+            use std::io::Read as _;
+            let mut release = [0];
+            std::io::stdin().read_exact(&mut release).expect("producer hold: read stdin pipe");
+            return;
+        }
+        fn assert_denied(pid: u32, reported_pid: u32, owner_uid: u32) -> Result<()> {
+            use std::os::unix::fs::MetadataExt as _;
+            let path = PathBuf::from(format!("/proc/{pid}"));
+            let reader = std::fs::read_to_string("/proc/self/status").context("reader diagnostics: read /proc/self/status")?;
+            let caps = reader.lines().find(|line| line.starts_with("CapEff:")).unwrap_or("CapEff: missing");
+            let namespace = std::fs::read_link("/proc/self/ns/user").context("reader diagnostics: readlink /proc/self/ns/user")?;
+            let visibility = format!("{} producer=[{}] control=[{}]", reader_diagnostics(),
+                process_diagnostics(pid), std::env::var(CONTROL_PID)
+                    .ok().and_then(|value| value.parse().ok())
+                    .map(process_diagnostics).unwrap_or_else(|| "control pid unavailable".to_owned()));
+            let producer = std::fs::read_to_string(path.join("status"))
+                .with_context(|| format!("owner inclusion: read /proc/{pid}/status; {visibility}"))?;
+            let uids = producer.lines().find_map(|line| line.strip_prefix("Uid:"))
+                .with_context(|| format!("owner inclusion: Uid field in /proc/{pid}/status missing"))?.split_whitespace()
+                .map(str::parse::<u32>).collect::<std::result::Result<Vec<_>, _>>()
+                .with_context(|| format!("owner inclusion: parse Uid in /proc/{pid}/status"))?;
+            let metadata_uid = std::fs::metadata(&path).with_context(|| format!("owner inclusion: stat /proc/{pid}"))?.uid();
+            let stat = std::fs::read_to_string(path.join("stat"))
+                .with_context(|| format!("producer liveness: read /proc/{pid}/stat"))?;
+            let state = stat.rsplit_once(") ").with_context(|| format!("producer liveness: malformed /proc/{pid}/stat"))?.1
+                .split_whitespace().next().with_context(|| format!("producer liveness: state missing in /proc/{pid}/stat"))?;
+            let errno = std::fs::read(path.join("environ")).err().and_then(|error| error.raw_os_error());
+            let diagnostics = format!(
+                "reader_pid={} uid={} euid={} {caps} userns={} producer_procfs_pid={pid} producer_namespace_pid={reported_pid} producer_dumpable=0 (post-exec readiness, unchanged while blocked on stdin) producer_state={state} environ_errno={errno:?} owner_uid={owner_uid} producer_uids={uids:?} metadata_uid={metadata_uid}",
+                std::process::id(), unsafe { libc::getuid() }, unsafe { libc::geteuid() }, namespace.display(),
+            );
+            // Match production's owner test: non-dumpable procfs metadata may
+            // be root-owned even though the status UIDs identify the owner.
+            anyhow::ensure!(uids.contains(&owner_uid) || metadata_uid == owner_uid,
+                "positive owner-pid inclusion failed: {diagnostics}");
+            anyhow::ensure!(matches!(state, "S" | "R"), "producer is not live: {diagnostics}");
+            let error = owner_process_has_operation(&path, OPERATION, pid)
+                .err().with_context(|| format!("unreadable producer was incorrectly excluded: {diagnostics}"))?;
+            let refusal = error.downcast_ref::<LegacyStartProofUnavailable>()
+                .with_context(|| format!("production helper returned an untyped refusal: {diagnostics}"))?;
+            assert_eq!(refusal.stage, "proc-environ", "{diagnostics}");
+            assert_eq!(refusal.pid, pid, "{diagnostics}");
+            assert_eq!(refusal.errno, Some(libc::EACCES), "{diagnostics}");
+            anyhow::ensure!(errno == Some(libc::EACCES), "positive EACCES read failed: {diagnostics}");
+            eprintln!("{TEST}: positive owner-pid inclusion and EACCES: {diagnostics}");
+            Ok(())
+        }
+        if let Ok(pid) = std::env::var(READER) {
+            let mut fields = pid.split(':');
+            let proc_pid = fields.next().expect("reader marker procfs pid").parse().expect("parse reader marker procfs pid");
+            let reported_pid = fields.next().expect("reader marker namespace pid").parse().expect("parse reader marker namespace pid");
+            let owner_uid = fields.next().expect("reader marker owner uid").parse().expect("parse reader marker owner uid");
+            assert_denied(proc_pid, reported_pid, owner_uid).unwrap();
+            eprintln!("{TEST}: EACCES assertion exercised by user-namespace reader");
+            return;
+        }
+        let status = std::fs::read_to_string("/proc/self/status").expect("reader lane selection: read /proc/self/status");
+        let effective = u64::from_str_radix(
+            status.lines().find_map(|line| line.strip_prefix("CapEff:")).expect("reader lane selection: CapEff missing in /proc/self/status").trim(),
+            16,
+        ).expect("reader lane selection: parse CapEff in /proc/self/status");
+        const CAP_SYS_PTRACE: u32 = 19;
+        let executable = std::env::current_exe().expect("resolve fixture test binary using /proc/self/exe");
+        let mut child = Command::new(&executable)
+            .args(["--exact",
+                "pty::legacy_start_closure::tests::non_dumpable_marked_owner_child_remains_a_typed_refusal",
+                "--nocapture"])
+            .env(CHILD, "1").env("ST3_START_OPERATION", OPERATION)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped()).spawn()
+            .with_context(|| format!("spawn producer test binary {}", executable.display())).unwrap();
+        let mut control = None;
+        let mut control_pid = None;
+        let mut readiness = String::new();
+        let result = (|| -> Result<()> {
+            use std::io::BufRead as _;
+            let mut sibling = Command::new(&executable).args(["--exact", TEST, "--nocapture"])
+                .env(CONTROL, "1").stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped()).spawn().context("spawn dumpable control child")?;
+            let output = sibling.stdout.take().context("control readiness: acquire stdout")?;
+            control = Some(sibling);
+            for line in std::io::BufReader::new(output).lines() {
+                let line = line.context("control readiness: read stdout")?;
+                if let Some(pid) = line.strip_prefix("proof-control-ready ") {
+                    control_pid = Some(pid.parse::<u32>().context("control readiness: parse procfs pid")?);
+                    break;
+                }
+            }
+            let sibling_pid = control_pid.context("control readiness: missing procfs pid")?;
+            let output = child.stdout.take().context("producer readiness: acquire child stdout pipe")?;
+            let mut producer_pid = None;
+            for line in std::io::BufReader::new(output).lines() {
+                let line = line.context("producer readiness: read stdout pipe")?;
+                readiness.push_str(&line);
+                readiness.push('\n');
+                if let Some(fields) = line.strip_prefix("proof-child-ready ") {
+                    let fields: Vec<_> = fields.split_whitespace().collect();
+                    anyhow::ensure!(fields.len() == 4 && fields[0] == format!("pid={}", child.id()) && fields[2] == "dumpable=0",
+                        "producer readiness: mismatched pid/dumpable: {line}; spawned pid={}", child.id());
+                    producer_pid = Some(fields[1].strip_prefix("proc_pid=").context("producer readiness: proc_pid field missing")?
+                        .parse::<u32>().context("producer readiness: parse procfs pid")?);
+                    break;
+                }
+            }
+            let producer_pid = producer_pid.with_context(|| format!("producer readiness: expected pid={} dumpable=0 from {}", child.id(), executable.display()))?;
+            if effective & (1 << CAP_SYS_PTRACE) == 0 {
+                assert_denied(producer_pid, child.id(), unsafe { libc::geteuid() })
+                    .with_context(|| format!("direct reader control: {}", process_diagnostics(sibling_pid)))?;
+                eprintln!("{TEST}: EACCES assertion exercised directly (CAP_SYS_PTRACE not effective)");
+            } else {
+                use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+                let uid = unsafe { libc::getuid() };
+                let gid = unsafe { libc::getgid() };
+                let uid_map = format!("{uid} {uid} 1");
+                let gid_map = format!("{gid} {gid} 1");
+                let mut command = Command::new(&executable);
+                command.args(["--exact", TEST, "--nocapture"])
+                    .env(READER, format!("{producer_pid}:{}:{uid}", child.id()))
+                    .env(CONTROL_PID, sibling_pid.to_string());
+                // SAFETY: pre_exec runs only in the isolated, single-threaded
+                // post-fork reader. User-namespace unshare in a libtest worker
+                // would fail EINVAL because its harness is multithreaded.
+                // The closure uses only raw async-signal-safe syscalls and
+                // preallocated map strings; no allocator or Rust file I/O.
+                unsafe {
+                    command.pre_exec(move || {
+                        if libc::unshare(libc::CLONE_NEWUSER) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        fn write_map(path: &std::ffi::CStr, contents: &[u8]) -> std::io::Result<()> {
+                            // SAFETY: valid C path and live slice; descriptor
+                            // is used and closed only by this post-fork child.
+                            unsafe {
+                                fn failed(path: &std::ffi::CStr, stage: &[u8]) -> std::io::Error {
+                                    // Raw stderr writes remain safe after fork;
+                                    // retain the exact failing step and path.
+                                    unsafe {
+                                        libc::write(2, stage.as_ptr().cast(), stage.len());
+                                        libc::write(2, path.as_ptr().cast(), path.to_bytes().len());
+                                        libc::write(2, b"\n".as_ptr().cast(), 1);
+                                    }
+                                    std::io::Error::from_raw_os_error(libc::EIO)
+                                }
+                                let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+                                if fd < 0 { return Err(failed(path, b"fixture: open namespace map failed: ")); }
+                                let written = libc::write(fd, contents.as_ptr().cast(), contents.len());
+                                let closed = libc::close(fd);
+                                if written != contents.len() as isize {
+                                    return Err(failed(path, b"fixture: write namespace map failed: "));
+                                }
+                                if closed != 0 { return Err(failed(path, b"fixture: close namespace map failed: ")); }
+                            }
+                            Ok(())
+                        }
+                        // Preserve the owner's numeric identity. Mapping
+                        // failures use EIO, never the unshare-only skip lane.
+                        write_map(c"/proc/self/setgroups", b"deny")?;
+                        write_map(c"/proc/self/uid_map", uid_map.as_bytes())?;
+                        write_map(c"/proc/self/gid_map", gid_map.as_bytes())?;
+                        Ok(())
+                    });
+                }
+                let mut reader = match command.spawn() {
+                    Ok(reader) => reader,
+                    Err(error) if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EINVAL | libc::ENOSPC)) => {
+                        eprintln!("{TEST}: SKIP EACCES assertion: privileged reader; user namespace forbidden or unavailable ({error})");
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error).with_context(|| format!("spawn mapped user-namespace reader test binary {}", executable.display())),
+                };
+                let reader = reader.wait().with_context(|| format!("wait mapped reader test binary {}", executable.display()))?;
+                if reader.signal() == Some(libc::SIGSYS) {
+                    eprintln!("{TEST}: SKIP EACCES assertion: privileged reader; user namespace forbidden by sandbox (SIGSYS)");
+                } else {
+                    anyhow::ensure!(reader.success(), "isolated EACCES reader failed: {reader}");
+                }
+            }
+            Ok(())
+        })();
+        let final_diagnostics = format!("fixture failure diagnostics: {}; producer readiness={readiness:?}; control={:?}",
+            reader_diagnostics(), control_pid.map(process_diagnostics));
+        child.kill().with_context(|| format!("cleanup: kill producer pid={}", child.id())).unwrap();
+        child.wait().with_context(|| format!("cleanup: wait producer pid={}", child.id())).unwrap();
+        if let Some(mut sibling) = control {
+            sibling.kill().context("cleanup: kill dumpable control").unwrap();
+            sibling.wait().context("cleanup: wait dumpable control").unwrap();
+        }
+        result.context(final_diagnostics).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn unreadable_environment_requires_positive_exit_evidence() {
         let proc = tempfile::tempdir().unwrap();
         std::fs::write(proc.path().join("stat"), "123 (producer) S 1 2 3").unwrap();
-        assert!(owner_process_has_operation(proc.path(), "op").is_err());
+        let error = owner_process_has_operation(proc.path(), "op", 123).unwrap_err();
+        let refusal = error.downcast_ref::<LegacyStartProofUnavailable>().unwrap();
+        assert_eq!(refusal.stage, "proc-environ");
+        assert_eq!(refusal.pid, 123);
+        assert_eq!(refusal.errno, Some(libc::ENOENT));
         std::fs::write(proc.path().join("stat"), "123 (producer) Z 1 2 3").unwrap();
-        assert!(!owner_process_has_operation(proc.path(), "op").unwrap());
+        assert!(!owner_process_has_operation(proc.path(), "op", 123).unwrap());
         std::fs::write(proc.path().join("stat"), "unreadable evidence").unwrap();
-        assert!(owner_process_has_operation(proc.path(), "op").is_err());
+        assert!(owner_process_has_operation(proc.path(), "op", 123).is_err());
         std::fs::remove_file(proc.path().join("stat")).unwrap();
-        assert!(!owner_process_has_operation(proc.path(), "op").unwrap());
+        assert!(!owner_process_has_operation(proc.path(), "op", 123).unwrap());
     }
 
     #[cfg(target_os = "linux")]
