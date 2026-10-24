@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "fractal-ui agent row popovers disclose reported main-session context without changing the production row layout",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, columns, indexes or triggers."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "`SidebarAgentRowData` gains optional `context`, and `SidebarContext` is an exported type. Main's MilestoneAgentRow production layout and public extension APIs are unchanged. Context is shown only in the shared row popovers."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover."
+  }
+}

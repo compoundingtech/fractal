@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refresh the responsive agent sidebar against the native two-line row and inspector behavior. Context remains in the row popover only; remove the status ring, unused Layout C metrics and their extension API. Exercise production sidebar drag cleanup at a declared 1100px browser viewport and retain stale decode notices in every sidebar host.",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No storage or wire schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Main public extension APIs and native row behavior are retained. The unmerged Layout C spend extension requirement is removed."},
+  "downtime": {"status": "none", "detail": "No downtime; reload the web application."},
+  "manual": {"status": "none", "detail": "No manual upgrade step."},
+  "recovery": {"status": "none", "detail": "Revert the web build; no persistent state repair is required."}
+}

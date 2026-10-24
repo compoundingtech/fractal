@@ -1153,6 +1153,7 @@ export const liveSource = ({
       resources,
       terminal,
       terminalInterest: (ref) => retainTerminal(ref).interest,
+      prefetchTerminal: (ref) => retainTerminal(ref).prefetch(),
       retryTerminal: (ref) => {
         const entry = terminalFamily(ref)
         const feed = registry.get(entry.atom)

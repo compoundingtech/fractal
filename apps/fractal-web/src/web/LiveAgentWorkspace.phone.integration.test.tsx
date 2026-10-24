@@ -68,6 +68,11 @@ it('opens, traps focus, closes with Escape and returns focus without remounting 
   expect(dialog.contains(document.activeElement)).toBe(true)
   await act(async () => trigger.focus())
   await vi.waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true))
+  // Keyboard-visible phone focus keeps the kit tooltip policy: Escape dismisses that disclosure first.
+  await vi.waitFor(() => expect(document.querySelector('[role="tooltip"]')).not.toBeNull())
+  await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
+  await vi.waitFor(() => expect(document.querySelector('[role="tooltip"]')).toBeNull())
+  expect(trigger.getAttribute('aria-expanded')).toBe('true')
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
   await vi.waitFor(() => expect(document.activeElement).toBe(trigger))

@@ -113,6 +113,7 @@ export function AgentRowDetails({ row, reportedStatusOnly = false, ...clock }: {
     {row.harness !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Harness</dt><dd {...stylex.props(styles.detailValue)}>{row.harness}</dd></>}
     {row.model !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Model</dt><dd {...stylex.props(styles.detailValue)}>{row.model}</dd></>}
     {row.usage._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Usage</dt><dd {...stylex.props(styles.detailValue)}>{usageText(row.usage)}</dd></>}
+    <ContextDetails row={row} />
     {row.duration._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Duration</dt><dd {...stylex.props(styles.detailValue)}><SidebarDuration duration={row.duration} /></dd></>}
     {row.lastTurn._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Last turn or activity</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.lastTurn.at} {...clock} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} showKind /></dd></>}
     {row.branch !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Branch</dt><dd {...stylex.props(styles.detailValue)}>{row.branch}</dd></>}
@@ -144,6 +145,7 @@ export function AgentHoverCard({ row, reportedStatusOnly = false, ...clock }: { 
     {row.description !== undefined && <p {...stylex.props(styles.cardWork)}><Icon name="message" size={12} />{row.description}</p>}
     <dl {...stylex.props(styles.details)}>
       {row.usage._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="dot" size={12} />{row.usage.usd === undefined ? 'Tokens' : 'Spend'}</dt><dd {...stylex.props(styles.detailValue)}>{row.usage.usd === undefined ? '' : `${spendCount.format(row.usage.usd)} · `}{tokenCount.format(row.usage.tokens)} tokens<div {...stylex.props(styles.cardScope)}>{row.usage.scope === '24h-root-and-subagents' ? '24h · includes subagents' : row.usage.scope === 'lifetime-incl-subagents' ? 'Lifetime · includes subagents' : 'Reported by agent'}</div></dd></>}
+      <ContextDetails row={row} />
       {row.duration._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="clock" size={12} />Duration</dt><dd {...stylex.props(styles.detailValue)}><SidebarDuration duration={row.duration} /></dd></>}
       {row.lastTurn._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="clock" size={12} />{row.lastTurn.kind === 'turn-completed' ? 'Last turn' : 'Last activity'}</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.lastTurn.at} {...clock} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} /></dd></>}
       {row.model !== undefined && <><dt {...stylex.props(styles.cardLabel)}><Icon name="gear" size={12} />Model</dt><dd {...stylex.props(styles.detailValue)}>{row.model}</dd></>}
@@ -153,6 +155,16 @@ export function AgentHoverCard({ row, reportedStatusOnly = false, ...clock }: { 
     </dl>
   </div>
 }
+/** Context is disclosed only in popovers, with its native scope and observation provenance. */
+const ContextDetails = ({ row }: { readonly row: Row }) => row.context?._tag !== 'Known' ? null : <>
+  <dt {...stylex.props(styles.detailLabel)}>Context</dt>
+  <dd data-context-observation {...stylex.props(styles.detailValue)}>
+    {row.freshness === 'live' ? 'Reported' : 'Last observed'} main-session context: {Math.round(row.context.usedPercent)}%
+    {row.context.usedTokens === undefined ? '' : `; ${row.context.usedTokens.toLocaleString('en')} used tokens`}
+    {row.context.windowTokens === undefined ? '' : `; ${row.context.windowTokens.toLocaleString('en')} token window`}
+    {`; as of ${new Date(row.context.observedAt).toISOString()}`}
+  </dd>
+</>
 /** Opening selects the host workspace (with its parent, for subagents) and notifies the host. */
 const openRow = (row: Row, actions: SidebarActions | undefined, onOpen: ((row: Row) => void) | undefined) => { actions?.select?.(row.id, row.parentRef?.replace(/^agent\//, '')); onOpen?.(row) }
 export interface AgentRowActionsProps extends SidebarClock {
