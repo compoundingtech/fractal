@@ -44,9 +44,10 @@ for the separate launcher scripts.
 
 ## Tick observability
 
-Every tick reads `servedSha` from `/build-identity.json` (`rev`) at `devnet url <purpose> --local`.
+Every tick reads `servedSha` from `/build-identity.json` (`rev`) at the published `devnet url <purpose> --remote` edge.
 `current` requires no `error`, a non-null `sha`, and equality with `servedSha`, not a disk build.
 A failed lookup/fetch/identity decode sets `servedSha=null`, `current=false`, and a short `servedError`; lock-held ticks are false.
+The `--local` probe records `localServedSha`/`localServedError` for diagnostics only; it never determines `current`.
 `build` is `built`, `skipped`, `failed`, or `dry-run`; it is not a freshness signal.
 Skipped `reason` is `unchanged`, `lock-held`, or `known-built-tree`/`known-failed-tree`.
 Dry-run `reason` is `merged-and-regenerated-no-build-no-swap`; errors retain `build=failed`.

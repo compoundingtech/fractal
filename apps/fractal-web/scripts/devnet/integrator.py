@@ -402,24 +402,27 @@ def activate(previous):
     status=subprocess.run(['devnet','status',purpose],cwd=C/'apps/fractal-web',env=cleanenv,text=True,capture_output=True,check=True)
     return json.loads(status.stdout)['tags']['run.url.edge']
 def observe_served(row):
-    """Compare the candidate with the running server's machine-readable identity."""
-    row['servedSha']=None
+    """Compare the candidate with the published edge; retain local diagnostics."""
     cleanenv={k:v for k,v in os.environ.items() if k not in ('PTY_SESSION','ST_AGENT')}
     cleanenv['PWD']=str(C/'apps/fractal-web')
-    try:
-        local=subprocess.run(['devnet','url',purpose,'--local'],cwd=C/'apps/fractal-web',
-                             env=cleanenv,text=True,capture_output=True,timeout=30,check=True)
-        url=local.stdout.strip()
-        if not url.startswith(('http://','https://')):
-            raise ValueError('devnet returned no HTTP local URL')
-        response=subprocess.run(['curl','-fsS','--max-time','15','--',url.rstrip('/')+'/build-identity.json'],
-                                env=cleanenv,text=True,capture_output=True,timeout=20,check=True)
-        revision=json.loads(response.stdout)['rev']
-        if not isinstance(revision,str) or not re.fullmatch(r'[0-9a-f]{40}',revision):
-            raise ValueError('served build identity has no full revision')
-        row['servedSha']=revision
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-        row['servedError']=str(error)[:240]
+    for location, sha_field, error_field in (
+            ('--remote','servedSha','servedError'),
+            ('--local','localServedSha','localServedError')):
+        row[sha_field]=None
+        try:
+            address=subprocess.run(['devnet','url',purpose,location],cwd=C/'apps/fractal-web',
+                                   env=cleanenv,text=True,capture_output=True,timeout=30,check=True)
+            url=address.stdout.strip()
+            if not url.startswith(('http://','https://')):
+                raise ValueError(f'devnet returned no HTTP {location} URL')
+            response=subprocess.run(['curl','-fsS','--max-time','15','--',url.rstrip('/')+'/build-identity.json'],
+                                    env=cleanenv,text=True,capture_output=True,timeout=20,check=True)
+            revision=json.loads(response.stdout)['rev']
+            if not isinstance(revision,str) or not re.fullmatch(r'[0-9a-f]{40}',revision):
+                raise ValueError('served build identity has no full revision')
+            row[sha_field]=revision
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            row[error_field]=str(error)[:240]
     row['current']=('error' not in row and row.get('sha') is not None
                     and row['sha']==row['servedSha'])
 
