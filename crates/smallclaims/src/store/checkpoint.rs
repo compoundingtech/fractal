@@ -646,6 +646,9 @@ fn clone_file(_source: &Path, _target: &Path) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 
+/// Proof copies rewrite the store; keep their cache independent of ordinary reader targets.
+const CHECKPOINT_COPY_CACHE_KIB: usize = 8192;
+
 fn open_checkpoint_copy(copy: &Path, vfs: Option<&super::checkpoint_space::ProofVfs>) -> Result<Connection> {
     let connection = if let Some(vfs) = vfs {
         Connection::open_with_flags_and_vfs(copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE, vfs.name())?
@@ -656,10 +659,10 @@ fn open_checkpoint_copy(copy: &Path, vfs: Option<&super::checkpoint_space::Proof
     // This scratch transaction can rewrite most of the store twice. Its rollback journal
     // belongs on disk, not in an allocation proportional to the database's size. The copy is
     // discarded after the proof, so its commits need not wait for the disk.
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd107c49c5ec5 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!(
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f1ffacf1528 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!(
         "PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE; PRAGMA synchronous = OFF;
          PRAGMA cache_size = -{}; PRAGMA temp_store = FILE; PRAGMA mmap_size = 0;",
-        crate::sqlite::READ_CACHE_KIB,
+        CHECKPOINT_COPY_CACHE_KIB,
     ))?;
     Ok(connection)
 }
@@ -1927,7 +1930,7 @@ mod memory_tests {
         );
         assert_eq!(
             connection.query_row("PRAGMA cache_size", [], |row| row.get::<_, i64>(0)).unwrap(),
-            -(crate::sqlite::READ_CACHE_KIB as i64)
+            -8192
         );
         assert_eq!(
             connection.query_row("PRAGMA temp_store", [], |row| row.get::<_, i64>(0)).unwrap(),
