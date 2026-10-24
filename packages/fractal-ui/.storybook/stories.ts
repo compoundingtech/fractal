@@ -4,6 +4,7 @@ export const storyGlobs: string[] = [
   '../../../apps/fractal-web/src/web/ColdOpen.stories.tsx',
   '../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx',
   '../../../apps/fractal-web/src/web/ComposerImages.stories.tsx',
+  '../../../apps/fractal-web/src/web/TranscriptImages.stories.tsx',
   // The live roster story replays captured daemon payloads through the SDK decode.
   '../../../apps/fractal-web/src/web/LiveRoster.stories.tsx',
 ]

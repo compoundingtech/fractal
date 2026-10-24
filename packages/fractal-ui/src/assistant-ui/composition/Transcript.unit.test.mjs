@@ -68,24 +68,36 @@ test('an unconfirmed send reads as not confirmed yet with Send again, never as a
   assert.doesNotMatch(bare, /Send again/)
 })
 
-test('a sent image is a named file card unless the host resolves it, and never an empty frame', () => {
-  const sent = { ...prompt, attachments: [{ id: 'blob/layout', mediaType: 'image/png', name: 'layout.png' }, { id: 'blob/unnamed', mediaType: 'image/webp' }] }
-  const render = (resolveImage) => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {
+test('a sent image is a named file card until the host loads it, and never an empty frame', () => {
+  const sent = { ...prompt, attachments: [{ id: 'blob/layout', mediaType: 'image/png', name: 'layout.png' }, { id: 'blob/unnamed', mediaType: 'image/webp', size: 2048 }] }
+  const render = (props = {}) => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {
     options: { messages: [sent], isRunning: false, onNew: async () => {} },
-  }, React.createElement(Transcript, { turns: [{ ...turn, prompt: sent }], title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now, ...(resolveImage === undefined ? {} : { resolveImage }) })))
-  const cards = render(undefined)
+  }, React.createElement(Transcript, { turns: [{ ...turn, prompt: sent }], title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now, ...props })))
+  const cards = render()
   assert.match(cards, /role="group" aria-label="Image: layout.png, PNG"/)
   assert.match(cards, /role="group" aria-label="Image: Unnamed image, WebP"/)
-  assert.match(cards, /· PNG image/)
-  assert.match(cards, /· WebP image/)
-  assert.doesNotMatch(cards, /Size unavailable/)
-  assert.doesNotMatch(cards, /<img/)
-  // Only an id the host resolves loads; the other stays a card.
-  const resolved = render(id => id === 'blob/layout' ? { _tag: 'Load', src: 'data:image/png;base64,AA==' } : { _tag: 'Defer' })
-  assert.match(resolved, /aria-label="Open layout.png"/)
-  assert.match(resolved, /<img src="data:image\/png;base64,AA==" alt="layout.png"/)
-  assert.match(resolved, /aria-label="Image: Unnamed image, WebP"/)
-  assert.doesNotMatch(resolved, /src="blob\/unnamed"/)
+  assert.match(cards, /· PNG image · Size unavailable/)
+  assert.match(cards, /· WebP image · 2 KB/)
+  assert.doesNotMatch(cards, /<img|Show image/)
+  // Markdown's resolver never reaches attachments.
+  assert.doesNotMatch(render({ resolveImage: () => ({ _tag: 'Load', src: 'data:image/png;base64,AA==' }) }), /<img/)
+  const withStates = (states) => render({ attachmentImages: { state: id => states[id] ?? { _tag: 'Deferred' }, load: () => {} } })
+  const deferredHost = withStates({})
+  assert.match(deferredHost, /aria-label="Show image layout.png"/)
+  assert.match(deferredHost, /data-attachment-state="deferred"/)
+  assert.match(withStates({ 'blob/layout': { _tag: 'Loading' } }), /data-attachment-state="loading"[\s\S]*Loading image/)
+  const unauthorized = withStates({ 'blob/layout': { _tag: 'Unauthorized' } })
+  assert.match(unauthorized, /Not authorized/)
+  assert.doesNotMatch(unauthorized, /Retry loading layout.png/)
+  const failed = withStates({ 'blob/layout': { _tag: 'Failed' } })
+  assert.match(failed, /Couldn&#x27;t load image/)
+  assert.match(failed, /aria-label="Retry loading layout.png"/)
+  // Only the id the host loaded shows; the other stays a card.
+  const loaded = withStates({ 'blob/layout': { _tag: 'Loaded', src: 'data:image/png;base64,AA==' } })
+  assert.match(loaded, /aria-label="Open layout.png"/)
+  assert.match(loaded, /<img src="data:image\/png;base64,AA==" alt="layout.png"/)
+  assert.match(loaded, /aria-label="Image: Unnamed image, WebP"/)
+  assert.doesNotMatch(loaded, /src="blob\/unnamed"/)
 })
 
 test('host-owned header omits only the duplicate band, including unavailable history', () => {

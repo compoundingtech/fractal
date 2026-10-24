@@ -60,6 +60,17 @@ leaves `resolveImage` at its default `Defer`. The kit renders no remote image be
 or after this callback; it never fetches the URL on the app's behalf.
 `onOpenResource` remains reserved for workspace references.
 
+Sent and received image attachments use a separate consent boundary: **Show image**
+reads the attachment through `AttachmentPort.chunk`, retaining the native message
+carrier so the gateway authorizes the viewer. No upload preview URL is reused.
+The viewer-scoped cache holds at most 24 entries and 40 MiB of image bytes, accepts
+images up to 10 MiB, and revokes object URLs on eviction and unmount. A pending
+read whose entry was evicted or disposed cannot publish a late object URL.
+Loading, unauthorized and failed reads keep the file card; failures offer **Retry**.
+Loaded thumbnails open in the kit's image viewer. Existing mailbox attachment
+metadata supplies sizes; native content that carries only an attachment ID keeps
+**Size unavailable** without changing the wire contract.
+
 Run the regression proofs with:
 
 ```sh
