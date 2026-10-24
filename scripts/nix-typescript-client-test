@@ -3,13 +3,14 @@
 import contextlib
 import importlib.machinery
 import importlib.util
-import os
+import io
+import json
 from pathlib import Path
 import re
-import stat
-import sys
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 root = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader('refresh', str(root / 'scripts/nix-typescript-client-deps-hash'))
@@ -18,9 +19,14 @@ loader.exec_module(refresh)
 
 
 class ManifestTests(unittest.TestCase):
-    def test_the_hash_file_is_one_sri_hash(self):
-        text = (root / 'nix/typescript-client-deps.hash').read_text()
-        self.assertRegex(text, r'^sha256-[A-Za-z0-9+/]{43}=\n\Z')
+    def test_the_hash_file_pins_the_output_and_its_source_identity(self):
+        pin = json.loads((root / 'nix/typescript-client-deps.hash').read_text())
+        self.assertEqual(set(pin), {'hash', 'effectUtilsNarHash'})
+        for value in pin.values():
+            self.assertRegex(value, r'^sha256-[A-Za-z0-9+/]{43}=\Z')
+        lock = json.loads((root / 'flake.lock').read_text())
+        source = lock['nodes'][lock['nodes']['root']['inputs']['effect-utils']]['locked']
+        self.assertEqual(pin['effectUtilsNarHash'], source['narHash'])
 
     def test_the_installation_name_carries_the_lockfile_and_the_effect_utils_revision(self):
         derivation = (root / 'nix/typescript-client.nix').read_text()
@@ -40,27 +46,58 @@ class ManifestTests(unittest.TestCase):
 
 
 class RefreshTests(unittest.TestCase):
-    def run_refresh(self, stderr, returncode):
+    def run_refresh(self, stderr, returncode, system='x86_64-linux', eval_returncode=0, build_error=None):
         with tempfile.TemporaryDirectory() as directory:
-            directory = Path(directory)
-            hash_file = directory / 'deps.hash'
-            hash_file.write_text('sha256-' + 'B' * 43 + '=\n')
-            nix = directory / 'nix'
-            nix.write_text(f'#!/bin/sh\ncat "{directory}/seen" 2>/dev/null; cat "{hash_file}" > "{directory}/seen"\nprintf %s "$STDERR" >&2\nexit {returncode}\n')
-            nix.chmod(nix.stat().st_mode | stat.S_IXUSR)
-            os.environ['STDERR'] = stderr
-            with contextlib.redirect_stdout(open(os.devnull, 'w')), contextlib.redirect_stderr(open(os.devnull, 'w')):
-                status = refresh.main([], nix=(str(nix),), hash_file=hash_file)
-            return status, hash_file.read_text(), (directory / 'seen').read_text()
+            hash_file = Path(directory) / 'deps.hash'
+            before = json.dumps({'hash': 'sha256-' + 'B' * 43 + '=',
+                                 'effectUtilsNarHash': 'sha256-' + 'D' * 43 + '='}) + '\n'
+            hash_file.write_text(before)
+            source = 'sha256-' + 'E' * 43 + '='
+            seen = []
+            target = f'.#checks.{system}.typescript-client.installation'
 
-    def test_the_reported_hash_is_written_after_a_placeholder_build(self):
+            def run(command, **kwargs):
+                if command[1] == 'eval':
+                    self.assertEqual(command, ['nix', 'eval', '--raw', f'{target}.effectUtilsNarHash'])
+                    self.assertEqual(hash_file.read_text(), before)
+                    return subprocess.CompletedProcess(command, eval_returncode, source, 'evaluation failed')
+                self.assertEqual(command, ['nix', 'build', target, '--no-link', '-L'])
+                seen.append(json.loads(hash_file.read_text()))
+                if build_error:
+                    raise build_error
+                return subprocess.CompletedProcess(command, returncode, '', stderr)
+
+            with patch.object(refresh.subprocess, 'run', side_effect=run):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    if build_error:
+                        with self.assertRaises(type(build_error)):
+                            refresh.main(['--system', system], nix=('nix',), hash_file=hash_file)
+                        status = None
+                    else:
+                        status = refresh.main(['--system', system], nix=('nix',), hash_file=hash_file)
+            return status, hash_file.read_text(), seen, before, source
+
+    def test_the_reported_hash_and_actual_source_identity_are_written(self):
         good = 'sha256-' + 'C' * 43 + '='
-        status, written, seen = self.run_refresh(f'error: hash mismatch in fixed-output derivation\n         specified: x\n            got:    {good}\n', 1)
-        self.assertEqual((status, written, seen), (0, good + '\n', refresh.PLACEHOLDER + '\n'))
+        for system in ('x86_64-linux', 'aarch64-linux', 'aarch64-darwin'):
+            with self.subTest(system=system):
+                status, written, seen, _, source = self.run_refresh(f'error: hash mismatch in fixed-output derivation\n         specified: x\n            got:    {good}\n', 1, system)
+                self.assertEqual(seen, [{'hash': refresh.PLACEHOLDER, 'effectUtilsNarHash': source}])
+                self.assertEqual((status, json.loads(written)), (0, {'hash': good, 'effectUtilsNarHash': source}))
 
-    def test_another_failure_restores_the_file(self):
-        status, written, _ = self.run_refresh('error: builder failed\n', 1)
-        self.assertEqual((status, written), (1, 'sha256-' + 'B' * 43 + '=\n'))
+    def test_another_build_failure_restores_the_exact_file(self):
+        for returncode in (0, 1):
+            with self.subTest(returncode=returncode):
+                status, written, _, before, _ = self.run_refresh('error: builder failed\n', returncode)
+                self.assertEqual((status, written), (1, before))
+
+    def test_evaluation_failure_does_not_change_the_file_or_build(self):
+        status, written, seen, before, _ = self.run_refresh('', 1, eval_returncode=1)
+        self.assertEqual((status, written, seen), (1, before, []))
+
+    def test_interrupted_build_restores_the_exact_file(self):
+        _, written, _, before, _ = self.run_refresh('', 1, build_error=KeyboardInterrupt())
+        self.assertEqual(written, before)
 
 
 if __name__ == '__main__':
