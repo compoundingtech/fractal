@@ -196,6 +196,17 @@ fn cli_command_with_bindings(
         .mut_subcommands(|command| cli_command_with_bindings(command, bindings))
 }
 
+/// The reconcile pass cap when the config sets none. The test fixture runs at the fastest
+/// supported cap, so integration tests check what converges without waiting out pass spacing;
+/// a test about spacing sets its cap in the config. The binary name is a compile-time value.
+fn default_max_passes_per_minute() -> u32 {
+    if env!("CARGO_BIN_NAME") == "st3-fixture" {
+        600
+    } else {
+        fractal_daemon::config::DEFAULT_MAX_PASSES_PER_MINUTE
+    }
+}
+
 fn agent_environment_present() -> bool {
     std::env::var_os("FRACTAL_AGENT").is_some() || std::env::var_os("ST_AGENT").is_some()
 }
@@ -2166,7 +2177,14 @@ struct RecorderReportArgs {
 #[derive(Subcommand)]
 enum RepairCommand {
     /// Compute the exact read-only repair plan and approval token.
-    DryRun,
+    DryRun {
+        /// Restrict repair items to these exact subjects (repeatable).
+        #[arg(long = "subject")]
+        subjects: Vec<String>,
+        /// Restrict repair items to these classes (repeatable).
+        #[arg(long = "class")]
+        classes: Vec<String>,
+    },
     /// Apply exactly the plan identified by a dry-run token.
     Apply { token: String },
 }
@@ -6233,7 +6251,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
     )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
-    reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
+    reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
@@ -10470,10 +10488,38 @@ async fn run_doctor(
     Ok(())
 }
 
+fn repair_plan_path(subjects: &[String], classes: &[String]) -> Result<String> {
+    if subjects.is_empty() && classes.is_empty() { return Ok("/v1/repair".into()); }
+    Ok(format!("/v1/repair?subjects={}&classes={}",
+        urlencoding::encode(&serde_json::to_string(subjects)?),
+        urlencoding::encode(&serde_json::to_string(classes)?)))
+}
+
+fn validate_repair_plan_filters(
+    plan: &OperationalRepairPlan, subjects: &[String], classes: &[String],
+) -> Result<()> {
+    let mut subjects = subjects.to_vec();
+    let mut classes = classes.to_vec();
+    subjects.sort();
+    subjects.dedup();
+    classes.sort();
+    classes.dedup();
+    let actual = Store::operational_repair_token_filters(&plan.token)?;
+    anyhow::ensure!(actual == (subjects.clone(), classes.clone()),
+        "the serving daemon did not bind the requested repair filters; upgrade the daemon before applying repair");
+    anyhow::ensure!(plan.items.iter().all(|item|
+        (subjects.is_empty() || subjects.binary_search(&item.subject).is_ok())
+            && (classes.is_empty() || classes.binary_search(&item.class).is_ok())),
+        "the serving daemon returned repair items outside the requested filters");
+    Ok(())
+}
+
 async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) -> Result<()> {
     match command {
-        RepairCommand::DryRun => {
-            let plan: OperationalRepairPlan = client.get("/v1/repair").await?;
+        RepairCommand::DryRun { subjects, classes } => {
+            let path = repair_plan_path(&subjects, &classes)?;
+            let plan: OperationalRepairPlan = client.get(&path).await?;
+            validate_repair_plan_filters(&plan, &subjects, &classes)?;
             if json_output {
                 print_value(&plan, true)?;
             } else {
@@ -10493,6 +10539,9 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                     );
                     for subject in &item.affected_subjects {
                         println!("  affected\t{subject}");
+                    }
+                    if item.class == "revoked-legacy-runtime-start" {
+                        println!("  evidence\t{}", serde_json::to_string(&item.details)?);
                     }
                 }
                 println!("Apply this exact plan with: st repair apply {}", plan.token);
@@ -18105,7 +18154,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
         match reloaded {
             Some(Ok((reloaded, reconcile))) => {
                 // Validation already passed; preserve last-start history while changing the rate.
-                reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute)
+                reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
                 limits = reloaded;
