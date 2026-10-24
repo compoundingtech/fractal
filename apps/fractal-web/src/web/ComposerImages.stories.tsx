@@ -11,23 +11,42 @@ function ComposerImages({ scheme, slow = false, previewImages = false }: { reado
   const [receipts, setReceipts] = React.useState<readonly string[]>([])
   const [messages, setMessages] = React.useState<readonly (TextItem & { readonly role: 'user' })[]>([])
   const [blobUrls] = React.useState(() => new Map<string, string>())
-  const [transport, setTransport] = React.useState<{ readonly _tag: 'Idle' | 'Pending' | 'Complete' } | { readonly _tag: 'Aborted'; readonly signalAborted: boolean }>({ _tag: 'Idle' })
+  const [transport, setTransport] = React.useState<
+    { readonly _tag: 'Idle' } |
+    { readonly _tag: 'Pending' | 'Complete'; readonly attempt: number; readonly freshSignal: boolean } |
+    { readonly _tag: 'Aborted'; readonly attempt: number; readonly freshSignal: boolean; readonly signalAborted: boolean }
+  >({ _tag: 'Idle' })
   const [upload] = React.useState(() => {
-    let finish!: () => void
-    const pending = new Promise<void>(resolve => { finish = resolve })
-    return { pending, finish }
+    let finish = () => {}
+    let previousSignal: AbortSignal | undefined
+    let attempts = 0
+    return {
+      begin: (signal: AbortSignal) => {
+        const attempt = ++attempts
+        const freshSignal = signal !== previousSignal && !signal.aborted
+        previousSignal = signal
+        const pending = new Promise<void>(resolve => { finish = resolve })
+        return { pending, attempt, freshSignal }
+      },
+      finish: () => finish(),
+    }
   })
   const [adapter] = React.useState(() => imageUploadAdapter(async ({ bytes, mediaType, signal }) => {
     signal?.throwIfAborted()
+    let attempt = 0
+    let freshSignal = true
     if (slow) {
       if (signal === undefined) throw new Error('The live composer must supply an upload AbortSignal.')
-      setTransport({ _tag: 'Pending' })
+      const current = upload.begin(signal)
+      attempt = current.attempt
+      freshSignal = current.freshSignal
+      setTransport({ _tag: 'Pending', attempt, freshSignal })
       // This controlled transport behaves like fetch: abort rejects the pending operation, not just its consumer.
       await new Promise<void>((resolve, reject) => {
-        const abort = () => { setTransport({ _tag: 'Aborted', signalAborted: signal.aborted }); reject(signal.reason) }
+        const abort = () => { setTransport({ _tag: 'Aborted', attempt, freshSignal, signalAborted: signal.aborted }); reject(signal.reason) }
         signal.addEventListener('abort', abort, { once: true })
         if (signal.aborted) { abort(); return }
-        void upload.pending.then(() => {
+        void current.pending.then(() => {
           signal.removeEventListener('abort', abort)
           if (signal.aborted) reject(signal.reason)
           else resolve()
@@ -46,7 +65,7 @@ function ComposerImages({ scheme, slow = false, previewImages = false }: { reado
     })
     signal?.throwIfAborted()
     blobUrls.set(blob, url)
-    setTransport({ _tag: 'Complete' })
+    setTransport({ _tag: 'Complete', attempt, freshSignal })
     return { _tag: 'Success', value: { blob, sha256, size: file.size, media_type: mediaType } }
   }))
   const options: ConversationRuntimeOptions = {
@@ -69,10 +88,10 @@ function ComposerImages({ scheme, slow = false, previewImages = false }: { reado
   return <section aria-label={slow ? 'Controlled image upload' : 'Live image adapter'} data-scheme={scheme} {...stylex.props(styles.surface, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
     <EmbraceRuntimeProvider options={options}>
       {messages.length > 0 && <div {...stylex.props(styles.transcript)}><Transcript turns={turns} title="Image review" showHeader={false} sync={{ _tag: 'Live', since: 0 }} now={1792822871000} observedAt={1792822871000} {...(previewImages ? { resolveImage: (id: string) => { const src = blobUrls.get(id); return src === undefined ? { _tag: 'Defer' as const } : { _tag: 'Load' as const, src } } } : {})} /></div>}
-      <EmbraceComposer variant="C1" readingColumn conversationLabel="Image review" imageAttachments={{ max: 4 }} />
+      <EmbraceComposer variant="C1" readingColumn conversationLabel={slow ? 'Pending image review' : 'Image review'} imageAttachments={{ max: 4 }} />
     </EmbraceRuntimeProvider>
     {slow && <button onClick={upload.finish}>Complete fixture upload</button>}
-    {slow && <output data-testid="fixture-upload-transport" data-state={transport._tag} data-signal-aborted={transport._tag === 'Aborted' ? transport.signalAborted : undefined}>{transport._tag === 'Aborted' ? 'Upload transport aborted' : transport._tag === 'Complete' ? 'Fixture upload completed' : ''}</output>}
+    {slow && <output data-testid="fixture-upload-transport" data-state={transport._tag} data-attempt={transport._tag === 'Idle' ? undefined : transport.attempt} data-fresh-signal={transport._tag === 'Idle' ? undefined : transport.freshSignal} data-signal-aborted={transport._tag === 'Aborted' ? transport.signalAborted : undefined}>{transport._tag === 'Aborted' ? 'Upload transport aborted' : transport._tag === 'Complete' ? 'Fixture upload completed' : ''}</output>}
     <div role="log" aria-label="Fixture send receipts">{receipts.map((receipt, index) => <p key={index}>{receipt}</p>)}</div>
   </section>
 }
@@ -154,7 +173,20 @@ export const UploadCancelled: Story = {
     await expect(canvasElement.querySelector('[data-attachment-status="incomplete"]')).toBeNull()
     await userEvent.click(canvas.getByRole('button', { name: 'Complete fixture upload' }))
     await expect(canvas.getByRole('log', { name: 'Fixture send receipts' })).toBeEmptyDOMElement()
-    await userEvent.click(canvas.getByRole('button', { name: 'Remove workspace-review.png' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
+    const transport = canvas.getByTestId('fixture-upload-transport')
+    await waitFor(() => expect(transport).toHaveAttribute('data-state', 'Pending'))
+    await expect(transport).toHaveAttribute('data-attempt', '2')
+    await expect(transport).toHaveAttribute('data-fresh-signal', 'true')
+    await expect(canvas.getByRole('button', { name: 'Cancel upload of workspace-review.png' })).toBeVisible()
+    await expect(canvas.getByRole('log', { name: 'Fixture send receipts' })).toBeEmptyDOMElement()
+    await userEvent.click(canvas.getByRole('button', { name: 'Complete fixture upload' }))
+    await waitFor(() => expect(transport).toHaveAttribute('data-state', 'Complete'))
+    const receipts = canvas.getByRole('log', { name: 'Fixture send receipts' })
+    await waitFor(() => expect(receipts).toHaveTextContent(/^Sent 1 image$/))
+    await expect(receipts.children).toHaveLength(1)
+    await expect(canvas.queryByRole('alert')).toBeNull()
+    await expect(canvasElement.querySelector('[data-attachment-status="incomplete"]')).toBeNull()
     await expect(canvas.queryByTestId('composer-attachments')).toBeNull()
   },
 }
@@ -177,11 +209,37 @@ export const ResolvedImageFollowup: Story = {
 }
 export const LongFilename: Story = {
   tags: ['critical'],
+  render: args => <div style={{ width: '390px', maxWidth: '100%' }}><ComposerImages scheme={args.scheme} /><ComposerImages scheme={args.scheme} slow /></div>,
   play: async ({ canvasElement }) => {
-    await pasteImages(canvasElement, ['Screenshot 2026-10-24 at 06.21.11.png'])
-    const canvas = within(canvasElement)
-    await expect(canvas.getByRole('button', { name: 'Remove Screenshot 2026-10-24 at 06.21.11.png' })).toBeVisible()
-    await expect(canvasElement.scrollWidth).toBeLessThanOrEqual(canvasElement.clientWidth)
+    const sections = canvasElement.querySelectorAll<HTMLElement>('section')
+    const name = 'screenshot-WWWWWWWW.png'
+    for (const [index, section] of [...sections].entries()) {
+      const canvas = within(section)
+      await pasteImages(section, [name])
+      if (index === 1) {
+        await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
+        await waitFor(() => expect(canvas.getByTestId('fixture-upload-transport')).toHaveAttribute('data-state', 'Pending'))
+      }
+      const control = canvas.getByRole('button', { name: `${index === 0 ? 'Remove' : 'Cancel upload of'} ${name}` })
+      await expect(control).toBeVisible()
+      const filename = section.querySelector<HTMLElement>(`[title="${name}"]`)!
+      const tail = filename.lastElementChild!
+      const text = filename.parentElement!
+      const chip = text.parentElement!
+      const filenameBox = filename.getBoundingClientRect()
+      const tailBox = tail.getBoundingClientRect()
+      const controlBox = control.getBoundingClientRect()
+      await expect(filename.title).toBe(name)
+      await expect(chip.getBoundingClientRect().width).toBeLessThanOrEqual(matchMedia('(min-width: 600px)').matches ? 240 : 180)
+      await expect(filenameBox.right).toBeLessThanOrEqual(controlBox.left)
+      await expect(tailBox.right).toBeLessThanOrEqual(filenameBox.right + 1)
+      await expect(filename.scrollWidth).toBeLessThanOrEqual(filename.clientWidth + 1)
+      await expect(filename.firstElementChild!.getBoundingClientRect().right).toBeLessThanOrEqual(tailBox.left + 1)
+      await expect(tailBox.width).toBeLessThanOrEqual(text.getBoundingClientRect().width + 1)
+      await expect(getComputedStyle(tail).overflowX).toBe('hidden')
+      await expect(canvas.getByRole('img', { name })).toBeVisible()
+      await expect(section.scrollWidth).toBeLessThanOrEqual(section.clientWidth)
+    }
   },
 }
 export const AllStates: Story = {

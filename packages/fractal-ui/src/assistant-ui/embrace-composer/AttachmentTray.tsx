@@ -232,11 +232,13 @@ const styles = stylex.create({
   // Inner radius = tile radius − padding, floored at 4px; the inset hairline separates white or black edges from the tile.
   image: { width: g.band, height: g.band, flexShrink: 0, objectFit: 'cover', borderRadius: r.keyboard, outlineWidth: g.hairline, outlineStyle: 'solid', outlineColor: border.rail, outlineOffset: `calc(${g.hairline} * -1)` },
   text: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minWidth: 0, marginInlineEnd: s.xs },
-  // Head and tail split a long name so the ellipsis falls in its middle; `pre` keeps a space at the split.
+  // Head and tail split a long name so the ellipsis falls in its middle; `pre` keeps a space at the split. The head
+  // gives way first; on a chip too narrow for the tail alone (wide glyphs on a phone), the tail is capped to the name
+  // and ends in its own ellipsis rather than painting past the text into the trailing control.
   name: { display: 'flex', minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fg },
   nameHead: { flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'pre' },
-  nameTail: { flexShrink: 0, whiteSpace: 'pre' },
-  detail: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
+  nameTail: { flex: '0 0 auto', minWidth: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'pre' },
+  detail: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fg },
   problem: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: tone.dangerFg },
   // Indeterminate: the upload reports no byte progress. A still segment under reduced motion.
   activity: { display: 'block', height: g.progressSm, marginBlockStart: s.xs, overflow: 'hidden', borderRadius: r.full, backgroundColor: interaction.wash },
