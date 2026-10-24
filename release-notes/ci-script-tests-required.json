@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "ci-script-tests joins the required checks: the ruleset source (repo-settings.json.genie.ts and its generated file), the merge-queue watcher's REQUIRED set (scripts/ci-queue-watch, embedded in fleet.yml), scripts/check-main-ci and docs/ci.md. The live ruleset was already updated.",
+  "replay": {
+    "status": "none",
+    "detail": "CI machinery only (the required-check list); no product protocol, schema, rule or note change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "CI machinery only (the required-check list); no product protocol, schema, rule or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "CI machinery only (the required-check list); no product protocol, schema, rule or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "CI machinery only (the required-check list); no product protocol, schema, rule or note change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "CI machinery only (the required-check list); no product protocol, schema, rule or note change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None: the live ruleset already requires it."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert; remove the context from the live ruleset."
+  }
+}
