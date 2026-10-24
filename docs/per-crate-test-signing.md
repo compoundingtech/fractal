@@ -204,3 +204,13 @@ crates that have no passing note for their key from that report, running nothing
 sha256 of linux-gate's command as `run_command_sha256`, so it is told apart from a filtered run. When linux-gate did not run (a lane edit) or left no
 whole report, `rust-tests` runs the crates it lacks itself, as before. When the enforce step has landed (linux-gate's test jobs skip on
 `evidence-gate-rust-tests`), linux-gate's local command shrinks to clippy and fleet-compat and `rust-tests` is the only run of the tests.
+
+## 11. Seeding main's tree: `st-test --seed`
+
+A merge that moves a crate's key, or the lane's definition (anything under `scripts/` or `.st`), leaves main's tree with crates that have no note, so
+the gate asks for them again on the next pull request. `scripts/st-test --seed [REF]` is the entry point a merge-queue signer runs after such a merge,
+from any checkout and whatever HEAD is: it signs the per-crate `rust-tests` notes of REF's tree (default: the base, `origin/main`, fetched first)
+for the crates that lack one, runs only those crates, and pushes the notes (to `origin` unless `--push` says otherwise). It takes no other check; it
+exits 0 when every crate is covered or signed, and `--crate NAME` narrows it. Measured: a full seeding of 52 crates is about 12 minutes on this host
+(prep 158 s, nextest 480 s, signing 53 s); after a merge that touched 2 crates it runs only those 2.
+
