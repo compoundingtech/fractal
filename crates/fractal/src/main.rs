@@ -82,6 +82,7 @@ mod directive_note;
 mod completion;
 mod doctor_cli;
 mod fractal;
+mod release_version;
 #[cfg(test)]
 mod follow_tests;
 mod presentation;
@@ -4643,6 +4644,10 @@ fn cli_main() -> ExitCode {
                 "{}",
                 json!({ "machine_version": fractal_drivers::version::machine_version() })
             );
+            return ExitCode::SUCCESS;
+        }
+        Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion => {
+            release_version::print();
             return ExitCode::SUCCESS;
         }
         Err(error) => exit_usage_error(error),
