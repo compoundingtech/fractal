@@ -83,6 +83,9 @@ The helper takes `SOURCE_DIR SHA NAME` arguments and requires:
 | `FRACTAL_BUILD_ROOT` | Deployment-owned parent of per-name production directories (`<root>/<name>/builds/<sha>`) |
 | `FRACTAL_BUILD_SNAPSHOT_ROOT` | Deployment-owned snapshot parent, outside the source clone and on its filesystem |
 
+Both root inputs are canonicalized against the caller's directory before the helper
+changes into a snapshot, so relative roots retain their original meaning.
+
 The helper creates detached worktrees at `<snapshot-root>/<name>/<sha>-<pid>`.
 Each run holds an exclusive `<snapshot>.lock` flock for its snapshot's lifetime.
 Reclamation removes a matching revision/PID snapshot only after acquiring that

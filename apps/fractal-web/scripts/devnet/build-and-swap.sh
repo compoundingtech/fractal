@@ -9,6 +9,9 @@ requested=${2:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
 name=${3:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
 [[ $name =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ && $name != . && $name != .. ]] || { echo 'Invalid deployment name' >&2; exit 2; }
 SOURCE=$(realpath "$SOURCE")
+mkdir -p "$ROOT" "$SNAPSHOT_ROOT"
+ROOT=$(realpath -- "$ROOT")
+SNAPSHOT_ROOT=$(realpath -- "$SNAPSHOT_ROOT")
 P=$ROOT/$name
 started=$(date +%s%3N)
 sha=$requested

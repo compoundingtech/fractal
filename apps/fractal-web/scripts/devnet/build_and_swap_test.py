@@ -44,7 +44,7 @@ elif args[:2] == ['worktree', 'add']:
     (pathlib.Path(args[3]) / 'apps/fractal-web').mkdir(parents=True)
 elif args[:2] == ['worktree', 'remove']:
     target = pathlib.Path(args[3])
-    assert target.is_relative_to(root / 'snapshots')
+    assert any(target.is_relative_to(root / name) for name in ('snapshots', 'relative-snapshot-root'))
     shutil.rmtree(target)
 else:
     raise SystemExit(f'unexpected git arguments: {args}')
@@ -107,6 +107,20 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
                 self.assertFalse(live_snapshot.exists())
                 self.assertTrue((fixture / 'build-root-a/shared/builds' / first_sha).is_dir())
                 self.assertTrue((fixture / 'build-root-b/shared/builds' / second_sha).is_dir())
+                relative_sha = 'c' * 40
+                relative_env = {**base_env, 'FRACTAL_BUILD_ROOT': 'relative-build-root',
+                                'FRACTAL_BUILD_SNAPSHOT_ROOT': 'relative-snapshot-root',
+                                'SNAPSHOT_LEASE_SHA': relative_sha, 'SNAPSHOT_LEASE_HOLD': '0'}
+                relative = subprocess.run(['bash', str(HELPER), str(source), relative_sha, 'shared'],
+                                          cwd=fixture, env=relative_env, capture_output=True,
+                                          text=True, timeout=15)
+                self.assertEqual(relative.returncode, 0, relative.stderr)
+                relative_build = fixture / 'relative-build-root/shared/builds' / relative_sha
+                self.assertEqual((fixture / 'relative-build-root/shared/current').resolve(), relative_build)
+                receipt = json.loads((relative_build / 'build-receipt.json').read_text())
+                self.assertEqual(receipt['buildIdentity']['rev'], relative_sha)
+                self.assertTrue((fixture / 'relative-build-root/shared/builds.jsonl').is_file())
+                self.assertEqual(list((fixture / 'relative-snapshot-root/shared').iterdir()), [])
             finally:
                 if first.poll() is None:
                     os.killpg(first.pid, signal.SIGTERM)
