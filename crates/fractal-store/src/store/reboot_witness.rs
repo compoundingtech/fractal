@@ -38,7 +38,7 @@ impl Store {
             let now = now_ms();
             // sqlite-large-value: allow-for-now lv-h90797e284665 owner=fractal_store::store::reboot_witness TODO=bound-or-reference-values-and-reclamation
             tx.execute("INSERT INTO local_observations(after_store_index,subject,kind,actor,body,observed_at_unix_ms) VALUES (?1,?2,?3,'daemon/runtime',?4,?5)",
-                params![current_index(tx)?, operation.subject, KIND, canonical_json_text(&body)?, now.to_string()])?;
+                params![current_index(tx)?, operation.subject, KIND, canonical_json_text(&body)?, now.min(i64::MAX as u128) as i64])?;
             let id = tx.last_insert_rowid();
             // Retain the authentic witness until this operation is closed. The
             // existing observation trimmer respects these operation evidence pins.

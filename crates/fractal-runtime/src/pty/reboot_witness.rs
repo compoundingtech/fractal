@@ -106,11 +106,12 @@ impl PtyRuntime {
             anyhow::ensure!(!operation.is_empty() && !host.is_empty(), "invalid reboot witness target");
             let lock = self.try_spawn_lock(runtime_id)?.context("runtime spawn fence busy")?;
             let before = boot_identity()?;
+            let captured_at_unix_ms = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+            // Age the oldest observation, not just the end of a potentially long scan.
             let mut roots = vec![self.root.clone(), pty_core::registry::session_dir(), home.join(".local/state/pty")];
             roots.sort(); roots.dedup();
             let scans = scan_stores(home, state_root, &roots, operation)?;
             anyhow::ensure!(boot_identity()? == before, "boot changed during witness capture");
-            let captured_at_unix_ms = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
             let manifest = RebootWitnessManifest {
                 version: 1, operation_id: operation.into(), runtime_id: runtime_id.into(), host: host.into(),
                 owner_uid: unsafe { libc::geteuid() }, boot_id: before.id,
@@ -178,5 +179,15 @@ mod tests {
         assert!(validate_manifest(&m, "host", "operation", "runtime", &boot).is_err());
         let mut boot = boot; boot.started_at_unix_ms = 1001 + REBOOT_WITNESS_MAX_PREBOOT_AGE_MS;
         assert!(validate_manifest(&manifest(), "host", "operation", "runtime", &boot).is_err());
+    }
+    #[test]
+    fn reboot_witness_missing_manifest_is_a_typed_closed_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(directory.path().join("pty"));
+        let error = runtime.prove_reboot_witness(
+            "runtime", "operation", "host", &serde_json::Value::Null, "missing", "missing",
+            directory.path(), &directory.path().join("state"),
+        ).unwrap_err();
+        assert_eq!(error.downcast_ref::<LegacyStartProofUnavailable>().unwrap().stage, "reboot-witness");
     }
 }
