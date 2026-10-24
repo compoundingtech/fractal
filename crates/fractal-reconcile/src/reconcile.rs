@@ -8949,6 +8949,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Reuse the observation needed for record-once deduplication. Unmarked agents
         // need no extra actual-state query or harness fold on this hot path.
         let previous = self.store.latest_observation(&subject.subject, "runtime.observed")?;
+        // An exec incarnation that has ended cannot run again; a restart is a new incarnation. The
+        // `st3 driver exec` wrapper reports its child's exit before it exits itself, so its own
+        // process can still look live here for a moment. Recording that would put `running` over
+        // the exit until the next full pass. Only a terminal latest observation needs the fold.
+        // Execs only: a pty a registry snapshot wrongly called vanished must read running again at
+        // once, or the reconciler could relaunch or clean up a live seat.
+        if member.kind == MemberKind::Exec
+            && matches!(observation.status.as_str(), "running" | "starting")
+            && let Some(incarnation) = observation.incarnation_id.as_deref()
+            && previous.as_ref().is_some_and(|claim| {
+                matches!(
+                    claim.body.pointer("/fields/status").and_then(Value::as_str),
+                    Some("exited" | "vanished" | "stopped")
+                )
+            })
+            && let Some(actual) = self.store.latest_actual_value(&subject.subject)?
+            && actual_field(&actual, "incarnation_id").and_then(Value::as_str) == Some(incarnation)
+            && matches!(
+                actual_field(&actual, "status").and_then(Value::as_str),
+                Some("exited" | "vanished" | "stopped")
+            )
+        {
+            return Ok(());
+        }
         if subject.kind == "agent"
             && let Some(from) = previous.as_ref()
                 .and_then(|claim| claim.body.pointer("/fields/restarting_from"))
@@ -19962,6 +19986,161 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             reconciler.evaluate_gate(&stage, &gate).unwrap(),
             GateOutcome::Fail(_)
         ));
+    }
+
+    /// An exec started by a pass, observed running as `incarnation`, whose `st3 driver exec`
+    /// wrapper has just reported its child's exit (with no incarnation, as the wrapper does).
+    fn exec_whose_wrapper_reported_its_exit() -> (Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>, String, String, u64) {
+        use serde_json::json;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nexec \"orchid/probe\" { workspace \"/tmp\"; command \"exit 2\"; restart \"never\" }",
+            "exec",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.reconcile_once().unwrap();
+        let subject = "exec/orchid/probe".to_owned();
+        let desired = store.desired_subject_with_writer(&subject).unwrap().unwrap().0;
+        let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+        let incarnation = store
+            .observations_for(&subject, "runtime.action.succeeded")
+            .unwrap()
+            .into_iter()
+            .find(|claim| claim.body["fields"]["action"] == "start")
+            .unwrap().body["fields"]["incarnation_id"]
+            .as_str().unwrap().to_owned();
+        runtime.execs.lock().unwrap().insert(
+            runtime_id.clone(),
+            RuntimeObservation {
+                runtime_id: runtime_id.clone(),
+                terminal: false,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(incarnation.clone()),
+            },
+        );
+        reconciler.reconcile_once().unwrap();
+        let report = store
+            .append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.clone()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("exited")),
+                    ("exit_code".into(), json!(2)),
+                    ("exit_signal".into(), Value::Null),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        (store, runtime, reconciler, subject, incarnation, report.store_index)
+    }
+
+    #[test]
+    fn the_folded_actual_keeps_the_incarnation_a_wrapper_exit_report_omits() {
+        // The guard against a late `running` matches the exit to its incarnation through this fold.
+        let (store, _runtime, _reconciler, subject, incarnation, _) =
+            exec_whose_wrapper_reported_its_exit();
+        let actual = store.latest_actual_value(&subject).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("exited"));
+        assert_eq!(actual_field(&actual, "exit_code").and_then(Value::as_i64), Some(2));
+        assert_eq!(
+            actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+            Some(incarnation.as_str())
+        );
+    }
+
+    #[test]
+    fn a_wrapper_still_live_after_its_exit_report_does_not_make_the_exec_run_again() {
+        let (store, runtime, reconciler, subject, incarnation, report) =
+            exec_whose_wrapper_reported_its_exit();
+        // The wrapper's own process is still alive for a moment after it reports its child's exit.
+        reconciler.reconcile_once().unwrap();
+        let after = store
+            .claims_for(&subject, Some("runtime.observed"))
+            .unwrap()
+            .into_iter()
+            .filter(|claim| claim.store_index > report)
+            .map(|claim| claim.body["fields"]["status"].clone())
+            .collect::<Vec<_>>();
+        assert!(!after.contains(&Value::from("running")), "{after:?}");
+        let actual = store.latest_actual_value(&subject).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("exited"));
+        // A new incarnation is a new launch and still records running.
+        let runtime_id = runtime.execs.lock().unwrap().keys().next().unwrap().clone();
+        runtime.execs.lock().unwrap().insert(
+            runtime_id.clone(),
+            RuntimeObservation {
+                runtime_id,
+                terminal: false,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(format!("{incarnation}-next")),
+            },
+        );
+        // A real relaunch writes its start receipt; this one only swaps the runtime's answer, and
+        // the exec watch compares statuses, so tell the incremental pass what changed.
+        reconciler.incremental.touch("exec:exec.orchid.probe");
+        reconciler.reconcile_once().unwrap();
+        let actual = store.latest_actual_value(&subject).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("running"));
+        assert_eq!(
+            actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+            Some(format!("{incarnation}-next").as_str())
+        );
+    }
+
+    #[test]
+    fn a_pty_seen_again_after_a_vanished_report_still_reads_running() {
+        use serde_json::json;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"orchid/seat\" { workspace \"/tmp\"; command \"true\" }",
+            "seat",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.reconcile_once().unwrap();
+        let subject = "agent/orchid/seat".to_owned();
+        let runtime_id = runtime.started_members.lock().unwrap()[0].runtime_id.clone();
+        let incarnation = "4242:1792800000".to_owned();
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id,
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(incarnation.clone()),
+        });
+        reconciler.reconcile_once().unwrap();
+        // A registry snapshot that missed the live pty, recorded for the same pid:created.
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("status".into(), json!("vanished")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        let actual = store.latest_actual_value(&subject).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("running"));
+        assert_eq!(
+            actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+            Some(incarnation.as_str())
+        );
     }
 
     #[test]
