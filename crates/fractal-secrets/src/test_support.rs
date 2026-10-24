@@ -68,6 +68,18 @@ fn noexec_in(mounts: &str, point: &Path) -> bool {
     })
 }
 
+/// A temporary directory on a disk, for a test about durability or disk cost: below
+/// `CI_TEST_DISK_TMPDIR` when the test lane moved `TMPDIR` onto a memory filesystem
+/// (`scripts/ci-linux`, `scripts/ci-local`), else in the ordinary temporary directory.
+pub fn disk_tempdir() -> tempfile::TempDir {
+    match std::env::var_os("CI_TEST_DISK_TMPDIR").filter(|value| !value.is_empty()) {
+        Some(disk) => tempfile::Builder::new()
+            .tempdir_in(disk)
+            .expect("temporary directory on disk"),
+        None => canonical_tempdir(),
+    }
+}
+
 fn canonical_temp_base() -> PathBuf {
     let base = if cfg!(target_os = "macos") {
         PathBuf::from("/tmp")
