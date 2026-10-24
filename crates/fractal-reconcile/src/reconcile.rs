@@ -15363,25 +15363,43 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Keep declarations and watch identities intact: only their effective read/fanout
         // resource changes. Unknown identities must be observed before they can be grouped.
         let mut repositories = BTreeMap::<u64, Vec<(&DesiredSubject, ObserverSpec)>>::new();
+        let mut renamed_resources = BTreeMap::<u64, String>::new();
         for item in desired.iter().filter(|item| item.kind == "observer") {
             let Some(spec) = crate::graph::observer_spec(&item.desired).filter(|spec| {
                 !spec.stopped && crate::github_watch::is_standing_observer(&item.subject, spec)
             }) else {
                 continue;
             };
-            let Some(id) = self.store.latest_actual_value(&spec.resource)?
-                .and_then(|actual| actual["facts"]["repository_id"].as_u64())
-                .filter(|id| *id != 0)
-            else {
+            let Some(actual) = self.store.latest_actual_value(&spec.resource)? else {
                 continue;
             };
+            let Some(id) = actual["facts"]["repository_id"].as_u64().filter(|id| *id != 0) else {
+                continue;
+            };
+            if let Some(target) = actual["facts"]["moved_to"].as_str()
+                && target.starts_with("resource/github/")
+                && self.store.latest_actual_value(target)?
+                    .is_some_and(|target| target["facts"]["repository_id"].as_u64() == Some(id))
+            {
+                renamed_resources.insert(id, target.to_owned());
+            }
             repositories.entry(id).or_default().push((item, spec));
         }
         let mut effective = HashMap::<String, ObserverSpec>::new();
         let mut suppressed = BTreeSet::new();
-        for mut aliases in repositories.into_values().filter(|aliases| aliases.len() > 1) {
+        for (id, mut aliases) in repositories {
+            if aliases.len() == 1 && !renamed_resources.contains_key(&id) {
+                continue;
+            }
             aliases.sort_by(|(left, _), (right, _)| left.subject.cmp(&right.subject));
-            let canonical = aliases[0].1.clone();
+            let mut canonical = aliases[0].1.clone();
+            // Keep the canonical resource even after its last directly named watch ends.
+            // Otherwise the surviving old alias would resume from stale per-item facts and
+            // redeliver events that the shared observer already delivered.
+            if let Some(resource) = renamed_resources.get(&id) {
+                canonical.resource.clone_from(resource);
+                canonical.locator = resource.trim_start_matches("resource/github/").to_owned();
+            }
             // A refresh addressed to an old alias still completes on that alias, using the
             // same shared resource. Select it deterministically instead of starting a second
             // poll or leaving its refresh request pending forever.

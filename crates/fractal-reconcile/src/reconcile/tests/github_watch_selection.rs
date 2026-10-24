@@ -344,9 +344,13 @@ async fn repository_aliases_share_one_request_and_fan_out_without_rewriting_watc
         resource: "resource/github/acme/orchid".into(),
     };
     for source in [&fixture, &other] {
-        source.observe(json!({"repository_id": 1310762902, "pull_requests": [
+        let mut facts = json!({"repository_id": 1310762902, "pull_requests": [
             watched_pull(12, json!({"recent_comments": []}))
-        ]}));
+        ]});
+        if source.observer == fixture.observer {
+            facts["moved_to"] = json!("resource/github/acme/orchid");
+        }
+        source.observe(facts);
     }
     let declarations = [original.clone(), renamed.clone()].map(|subject| {
         fixture.store.desired_subjects_named(&[subject]).unwrap().remove(0).desired
@@ -376,17 +380,37 @@ async fn repository_aliases_share_one_request_and_fan_out_without_rewriting_watc
             tokio::task::yield_now().await;
         }
     }).await.expect("one observation wakes both original alias subscribers");
-    let requests = requests.lock().await;
-    assert_eq!(requests.len(), 1, "aliases must not start independent provider requests");
-    assert_eq!(requests[0].locator, "acme/garden");
-    assert!(requests[0].fields.contains("comments"));
-    assert!(requests[0].fields.contains("pull_requests"));
+    {
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 1, "aliases must not start independent provider requests");
+        assert_eq!(captured[0].locator, "acme/orchid");
+        assert!(captured[0].fields.contains("comments"));
+        assert!(captured[0].fields.contains("pull_requests"));
+    }
     assert_eq!(fixture.wakes(planner).len(), 1);
     assert_eq!(fixture.wakes(reviewer).len(), 1);
-    for (index, subject) in [original, renamed].into_iter().enumerate() {
+    for (index, subject) in [original, renamed.clone()].into_iter().enumerate() {
         assert_eq!(fixture.store.desired_subjects_named(&[subject]).unwrap()[0].desired,
             declarations[index], "deduplication must not migrate declarations or watch deadlines");
     }
+    // The surviving old-name watch must keep the canonical resource's item history.
+    fixture.store.end_watch(&renamed, "unwatched", None).unwrap();
+    reconciler.reconcile_github_watches(&fixture.store.github_watch_declarations().unwrap()).unwrap();
+    assert!(!fixture.running(&other.observer));
+    let revision = fixture.store.selected_desired_revision(&fixture.observer).unwrap().unwrap();
+    let key = format!("{}:{revision}", fixture.observer);
+    reconciler.armed_observers.lock().unwrap().clear();
+    reconciler.observer_deadlines.lock().unwrap().insert(key.clone(), 0);
+    reconciler.reconcile_resource_observers(&fixture.store.desired_subjects().unwrap(), &[]).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while reconciler.observer_deadlines.lock().unwrap().get(&key) == Some(&0) {
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("the remaining old alias continues observing");
+    let captured = requests.lock().await;
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[1].locator, "acme/orchid");
+    assert_eq!(fixture.wakes(planner).len(), 1, "old alias must not redeliver known comments");
 }
 
 #[test]

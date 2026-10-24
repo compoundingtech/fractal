@@ -73,7 +73,10 @@ required; no live admission or savings claim is made here.
 
 Standing repository observers with the same observed numeric `repository_id`
 share one poll across the fleet declaration union. The lexicographically first
-observer supplies the shared locator and resource; a pending explicit refresh
+observer supplies the poll. An observed rename target with the same numeric ID
+supplies the shared locator and resource; otherwise the elected observer's
+resource is shared. That target remains shared when its directly named watches
+end, preserving the surviving aliases' item history. A pending explicit refresh
 temporarily selects the addressed alias to complete that refresh on the same
 resource. Each alias keeps its existing watch subjects, deadlines and recipients.
 The elected observation reads the union of their fields and fans out to every
