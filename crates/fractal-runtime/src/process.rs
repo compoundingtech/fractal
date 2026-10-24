@@ -284,6 +284,7 @@ impl ExecRuntime {
             Err(error) if process_is_absent(&error) => {
                 self.observe_exited_group(id, generation).map(Some)
             }
+            Err(error) if error.is::<crate::ProcessNamespaceMismatch>() => Err(error),
             Err(error) => Ok(Some(ExecObservation::Indeterminate(error.to_string()))),
         }
     }
@@ -498,11 +499,13 @@ fn observe_exited_group(generation: ExecGeneration) -> Result<ExecObservation> {
         }
         Ok(_) => {}
         Err(error) if process_is_absent(&error) => {}
+        Err(error) if error.is::<crate::ProcessNamespaceMismatch>() => return Err(error),
         Err(error) => return Ok(ExecObservation::Indeterminate(error.to_string())),
     }
     match process_group_is_live(generation.pid) {
         Ok(true) => Ok(ExecObservation::Running(generation)),
         Ok(false) => Ok(ExecObservation::Exited(generation)),
+        Err(error) if error.is::<crate::ProcessNamespaceMismatch>() => Err(error),
         Err(error) => Ok(ExecObservation::Indeterminate(error.to_string())),
     }
 }
@@ -677,7 +680,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn inherited_outer_procfs_refuses_spawn_before_creating_a_child() {
+    fn inherited_outer_procfs_refuses_launch_and_control_before_mutation() {
         const ROOT: &str = "FRACTAL_EXEC_INHERITED_PROCFS_TEST_ROOT";
         if let Some(root) = std::env::var_os(ROOT) {
             let root = PathBuf::from(root);
@@ -729,6 +732,46 @@ mod tests {
             assert!(!root.join("exec").exists());
             assert!(!root.join("logs").exists());
             assert!(!root.join("child-created").exists());
+            let control = ExecRuntime::new(root.join("control"), root.join("control-logs"));
+            fs::create_dir_all(&control.state_dir).unwrap();
+            for exit_code in [None, Some(0)] {
+                let generation = ExecGeneration {
+                    schema: SCHEMA.into(),
+                    pid: i32::MAX as u32,
+                    created_at_unix_ms: 1,
+                    start_token: 0,
+                    generation_id: "namespace-control-refusal".into(),
+                    exit_code,
+                    exit_signal: None,
+                    group_exited: false,
+                    isolation_mode: "detached".into(),
+                    scope_unit: None,
+                    start_operation: None,
+                };
+                control.write_generation("control", &generation).unwrap();
+                let before = fs::read(control.record_path("control")).unwrap();
+                let error = control.observe("control").unwrap_err();
+                assert!(error.is::<crate::ProcessNamespaceMismatch>());
+                for (operation, result) in [
+                    ("stop", control.stop("control")),
+                    ("kill", control.kill("control")),
+                    (
+                        "signal",
+                        control.signal_if("control", None, libc::SIGTERM),
+                    ),
+                ] {
+                    let error = result.unwrap_err();
+                    assert!(
+                        error.is::<crate::ProcessNamespaceMismatch>(),
+                        "{operation} lost the typed refusal: {error:#}"
+                    );
+                    eprintln!(
+                        "namespace control refusal: {operation}, exit_code={exit_code:?}, typed={error}"
+                    );
+                }
+                assert_eq!(fs::read(control.record_path("control")).unwrap(), before);
+            }
+            assert!(!root.join("control-logs").exists());
             fs::write(root.join("refusal-confirmed"), b"before-child").unwrap();
             return;
         }
@@ -741,7 +784,7 @@ mod tests {
             .arg(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "process::tests::inherited_outer_procfs_refuses_spawn_before_creating_a_child",
+                "process::tests::inherited_outer_procfs_refuses_launch_and_control_before_mutation",
                 "--nocapture",
             ])
             .env(ROOT, root.path())
