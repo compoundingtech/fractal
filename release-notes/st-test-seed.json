@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test --seed [REF] signs and pushes the per-crate rust-tests notes of REF's tree (default the base) for the crates that lack one, from any checkout, so a merge-queue signer can refresh main's tree after a merge that moved a crate key or the lane",
+  "replay": {"status": "none", "detail": "CI and local tooling only; no product code changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product contract change. The records are the ones st-test --check rust-tests already signs."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}
