@@ -55,6 +55,8 @@ mod pairing_order_tests;
 #[cfg(test)]
 mod collection_refresh_tests;
 #[cfg(test)]
+mod machine_reader_probe;
+#[cfg(test)]
 mod conversation_follow_tests;
 #[cfg(test)]
 mod launch_detail_tests;
