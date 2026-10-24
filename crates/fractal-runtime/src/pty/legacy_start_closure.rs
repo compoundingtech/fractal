@@ -425,6 +425,33 @@ mod tests {
             #[repr(C)]
             #[derive(Clone, Copy, Default)]
             struct Capabilities { effective: u32, permitted: u32, inheritable: u32 }
+            struct RestoreCapabilities {
+                header: Header,
+                original: [Capabilities; 2],
+                armed: bool,
+                _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+            }
+            impl RestoreCapabilities {
+                fn restore(&mut self) -> Result<()> {
+                    // SAFETY: both ABI-sized buffers are owned by this
+                    // thread-bound guard; pid=0 addresses the calling thread.
+                    let restored = unsafe {
+                        libc::syscall(libc::SYS_capset, &self.header, self.original.as_ptr())
+                    };
+                    anyhow::ensure!(restored == 0, "restore test reader capabilities: {}", std::io::Error::last_os_error());
+                    self.armed = false;
+                    Ok(())
+                }
+            }
+            impl Drop for RestoreCapabilities {
+                fn drop(&mut self) {
+                    if self.armed {
+                        // Best-effort unwind fallback must not double-panic.
+                        // The normal path below always checks restoration.
+                        let _ = self.restore();
+                    }
+                }
+            }
             // Linux capability ABI v3 contains two 32-bit words.
             let mut header = Header { version: 0x2008_0522, pid: 0 };
             let mut capabilities = [Capabilities::default(); 2];
@@ -437,11 +464,13 @@ mod tests {
             capabilities[0].effective &= !(1 << CAP_SYS_PTRACE);
             let dropped = unsafe { libc::syscall(libc::SYS_capset, &header, capabilities.as_ptr()) };
             anyhow::ensure!(dropped == 0, "restrict test reader capabilities: {}", std::io::Error::last_os_error());
+            let mut restore = RestoreCapabilities {
+                header, original, armed: true, _thread: std::marker::PhantomData,
+            };
             let observed = owner_process_has_operation(
                 Path::new(&format!("/proc/{}", child.id())), OPERATION, child.id(),
             );
-            let restored = unsafe { libc::syscall(libc::SYS_capset, &header, original.as_ptr()) };
-            anyhow::ensure!(restored == 0, "restore test reader capabilities: {}", std::io::Error::last_os_error());
+            restore.restore()?;
             observed.err().context("unreadable producer was incorrectly excluded")
         })();
         let _ = child.kill();
