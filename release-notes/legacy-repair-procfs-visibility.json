@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refuse legacy-start repair when procfs can hide live producers",
+  "replay": { "status": "none", "detail": "No replay or backfill." },
+  "schema": { "status": "none", "detail": "No storage, evidence, or replicated receipt schema changes." },
+  "rules": { "status": "none", "detail": "No claim admission or projection rule changes." },
+  "compatibility": { "status": "none", "detail": "Repair now fails closed with HTTP 422 legacy-start-proof-unavailable, stage procfs-visibility, when the actual procfs mount has hidepid other than 0/off (including 1, 2, invisible, noaccess, or ptraceable), or subset=pid. It also refuses unreadable, malformed, or missing mount evidence with a distinct reason. Normal procfs behavior is unchanged." },
+  "downtime": { "status": "none", "detail": "Normal restart; no migration or rebuild." },
+  "manual": { "status": "none", "detail": "No automatic configuration changes. Hosts whose procfs can hide processes cannot use legacy-start repair until complete process visibility is established." },
+  "recovery": { "status": "none", "detail": "Refusal changes no runtime or store state. Earlier binaries do not enforce this procfs visibility precondition." }
+}
