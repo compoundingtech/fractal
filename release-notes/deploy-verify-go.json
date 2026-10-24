@@ -6,6 +6,6 @@
   "rules": {"status": "none", "detail": "No checkpoint or claim retention changes."},
   "compatibility": {"status": "changed", "detail": "The new deploy verify-go command requires a local Unix daemon and refuses missing, unreadable or unsupported packaged policy. Existing commands and claim kinds retain their behavior."},
   "manual": {"status": "changed", "detail": "Package an immutable deployPolicyFile to enable authorization. There is no runtime, environment or CLI policy path override. Offline verification requires a successful local synchronization receipt from the GO claim origin within ten minutes."},
-  "recovery": {"status": "none", "detail": "Expired, revoked, consumed, mismatched, stale or STOP-blocked GOs fail closed. Verification does not synchronize, issue claims or mutate deployment state."},
+  "recovery": {"status": "none", "detail": "Same-operation consumption permits read-only replay with consumed=true in the receipt; other-operation consumption, wrong signer or wrong origin refuses authorization. Expired, revoked, mismatched, stale or STOP-blocked GOs fail closed. Verification does not synchronize, issue claims or mutate deployment state."},
   "downtime": {"status": "unknown", "detail": "No measured downtime claim. Installer wiring remains absent."}
 }

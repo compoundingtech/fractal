@@ -165,16 +165,51 @@ fn compatibility_requires_authorized_typed_exact_reference() {
 }
 
 #[test]
-fn revocation_and_any_consumption_refuse_reuse() {
+fn same_operation_consumption_allows_read_only_replay() {
+    for operation in ["install", "rollback"] {
+        let mut fixture = Fixture::new();
+        let mut go = fixture.go.clone();
+        go["operation"] = json!(operation);
+        fixture.replace_go(go);
+        fixture.request.operation = operation.into();
+        assert!(!fixture.verify().unwrap().consumed);
+        publish(&fixture.local, "deploy.go-consumed", EXECUTOR, json!({
+            "version":1,"goId":fixture.request.go_id,"operation":operation,"result":"example"
+        }));
+        let before = fixture.local.event_bounds().unwrap();
+        assert!(fixture.verify().unwrap().consumed);
+        assert!(fixture.verify().unwrap().consumed);
+        assert_eq!(fixture.local.event_bounds().unwrap(), before);
+        fixture.stop("example-stop", "installer-entry", "host-a");
+        assert_eq!(fixture.verify().unwrap_err().code, "deploy-stopped");
+    }
+}
+
+#[test]
+fn revocation_and_other_operation_consumption_refuse_reuse() {
     let fixture = Fixture::new();
     fixture.record("deploy.go-revoked", MANAGER, json!({"version":1,"goId":fixture.request.go_id}));
-    assert!(fixture.verify().is_err());
-    for (actor, operation, correct_origin) in [(EXECUTOR,"install",true),(EXECUTOR,"rollback",true),(OTHER,"install",true),(EXECUTOR,"install",false)] {
+    assert_eq!(fixture.verify().unwrap_err().code, "deploy-revoked");
+    let fixture = Fixture::new();
+    publish(&fixture.local, "deploy.go-consumed", EXECUTOR, json!({
+        "version":1,"goId":fixture.request.go_id,"operation":"rollback","result":"example"
+    }));
+    assert_eq!(fixture.verify().unwrap_err().code, "deploy-consumed-other-operation");
+}
+
+#[test]
+fn wrong_signer_or_origin_consumption_is_refused_not_replay_authority() {
+    for (actor, correct_origin, expected) in [
+        (OTHER, true, "deploy-unauthorized-signer"),
+        (EXECUTOR, false, "deploy-consumption-origin"),
+    ] {
         let fixture = Fixture::new();
-        let data = json!({"version":1,"goId":fixture.request.go_id,"operation":operation,"result":"example"});
+        let data = json!({"version":1,"goId":fixture.request.go_id,"operation":"install","result":"example"});
         if correct_origin { publish(&fixture.local,"deploy.go-consumed",actor,data); }
         else { fixture.record("deploy.go-consumed",actor,data); }
-        assert!(fixture.verify().is_err());
+        assert_eq!(fixture.verify().unwrap_err().code, expected);
+        fixture.stop("example-stop", "installer-entry", "host-a");
+        assert!(fixture.verify().is_err(), "forged consumption cannot make a blocked GO valid");
     }
 }
 

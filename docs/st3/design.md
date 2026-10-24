@@ -68,9 +68,12 @@ local serving state. Unsigned, held or invalid signatures cannot grant authoriza
 The caller supplies the executing host and actor, operation, train ID, both exact package
 tuples, preview digest and failure-restore choice. Every value must match the GO. The
 current time must be at or after issue and strictly before expiry, with the four-hour
-lifetime cap still enforced. A GO is unusable after any consumption or revocation.
-Consumption is authoritative only when signed by the GO's actor on its host; that actor
-must also be authorized by the packaged consumption-signer policy.
+lifetime cap still enforced. Revocation makes a GO unusable. A consumption for the same
+GO and operation permits replay, reported as `consumed: true` in the verification receipt;
+a consumption for another operation refuses authorization. Consumption must be signed
+by the GO's actor on its host, and that actor must also be authorized by the packaged
+consumption-signer policy. Wrong-signer or wrong-origin consumption is refused, not ignored,
+and never grants replay authority. Replay still requires every other GO and STOP check.
 
 `compatSignoffId` must resolve to a verified `deploy.compat-signoff` from an allowed
 signer with the same train and old/new commits. Revocation, consumption and STOP-release

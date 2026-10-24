@@ -69,6 +69,8 @@ pub struct VerifyGoReceipt {
     pub operation: String,
     pub train_id: String,
     pub expires_at: String,
+    /// A valid same-operation consumption was observed; this verification is a replay.
+    pub consumed: bool,
     pub policy_path: Option<String>,
     pub policy_hash: String,
 }

@@ -144,11 +144,13 @@ async fn verifier_cli_api_uses_signed_local_replica_and_fixed_policy() {
         let receipt = api.unwrap();
         assert_eq!(receipt.go_id, request.go_id);
         assert_eq!(receipt.origin, "host-b");
+        assert!(!receipt.consumed);
         assert!(receipt.policy_path.is_some());
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let printed: VerifyGoReceipt = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(printed.go_id, request.go_id);
         assert_eq!(printed.origin, "host-b");
+        assert!(!printed.consumed);
         let mut mismatched = request.clone();
         mismatched.preview_digest.push_str("-changed");
         assert!(client.verify_deploy_go(&mismatched).await.unwrap_err().to_string().contains("deploy-request-mismatch"));

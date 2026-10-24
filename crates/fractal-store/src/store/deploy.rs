@@ -117,6 +117,7 @@ impl Store {
             .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
         let mut stops = BTreeMap::new();
         let mut lifts = Vec::new();
+        let mut consumed = false;
         for (id, kind) in records {
             let signers = match kind.as_str() {
                 "deploy.go-consumed" => &policy.consumption_signers,
@@ -135,11 +136,14 @@ impl Store {
                             return Err(refuse("deploy-consumption-origin", "consumption must originate on GO host"));
                         }
                         if data.get("operation") != target.get("operation") {
-                            return Err(refuse("deploy-consumption-operation", "consumption operation must match its GO"));
+                            return Err(refuse("deploy-consumed-other-operation", "consumption operation must match its GO and caller"));
                         }
                     }
                     if target_id == request.go_id {
-                        return Err(refuse(if kind == "deploy.go-revoked" { "deploy-revoked" } else { "deploy-consumed" }, "GO is no longer unused authority"));
+                        if kind == "deploy.go-revoked" {
+                            return Err(refuse("deploy-revoked", "GO has been revoked"));
+                        }
+                        consumed = true;
                     }
                 }
                 "deploy.stop" => {
@@ -179,6 +183,7 @@ impl Store {
         Ok(VerifyGoReceipt {
             go_id: claim.id, origin: claim.origin, actor: request.actor.clone(), host: request.host.clone(),
             operation: request.operation.clone(), train_id: request.train_id.clone(), expires_at: text(&go, "expiresAt")?.to_owned(),
+            consumed,
             policy_path: Policy::packaged_path().map(str::to_owned), policy_hash: policy.content_hash().to_owned(),
         })
     }
