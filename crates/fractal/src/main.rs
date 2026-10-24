@@ -231,7 +231,7 @@ enum Command {
     /// the daemon rendezvous URL. This command does not start a server.
     Web {
         /// Read the web rendezvous URL from this daemon state directory.
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", allow_hyphen_values = true)]
         state_dir: Option<PathBuf>,
     },
     /// Play a scripted demo of fractal in the terminal interface, in its own instance.

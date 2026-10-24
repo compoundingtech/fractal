@@ -2496,6 +2496,91 @@ fn web_is_visible_in_root_help_and_parses_as_a_public_command() {
 }
 
 #[test]
+fn web_without_arguments_uses_the_configured_state_directory() {
+    for program in ["fractal", "st", "st3"] {
+        assert!(matches!(
+            Cli::try_parse_from([program, "web"]).unwrap().command,
+            Command::Web { state_dir: None }
+        ));
+    }
+}
+
+#[test]
+fn web_long_help_exits_successfully() {
+    let error = Cli::try_parse_from(["fractal", "web", "--help"]).err().unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert_eq!(error.exit_code(), 0);
+}
+
+#[test]
+fn web_short_help_exits_successfully() {
+    let error = Cli::try_parse_from(["fractal", "web", "-h"]).err().unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert_eq!(error.exit_code(), 0);
+}
+
+#[test]
+fn web_state_directory_preserves_every_legacy_value_form() {
+    // The previous positional parser accepted any OS string after --state-dir,
+    // including strings that otherwise name flags or delimit options.
+    for directory in ["/example/state", "relative", "", "-state", "--help", "-h", "--", "--state-dir"] {
+        let cli = Cli::try_parse_from(["fractal", "web", "--state-dir", directory]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Web { state_dir: Some(path) } if path == PathBuf::from(directory)
+        ), "{directory:?}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let directory = std::ffi::OsString::from_vec(vec![b'-', 0xff]);
+        let cli = Cli::try_parse_from([
+            std::ffi::OsString::from("fractal"), "web".into(), "--state-dir".into(), directory.clone(),
+        ]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Web { state_dir: Some(path) } if path == PathBuf::from(directory)
+        ));
+    }
+}
+
+#[test]
+fn web_rejects_missing_values_repeats_positionals_and_unknown_flags_with_usage_status() {
+    for arguments in [
+        vec!["fractal", "web", "--state-dir"],
+        vec!["fractal", "web", "--state-dir", "one", "--state-dir", "two"],
+        vec!["fractal", "web", "unexpected"],
+        vec!["fractal", "web", "--unknown"],
+        vec!["fractal", "web", "--unknown", "value"],
+        vec!["fractal", "web", "--state-dir", "one", "extra"],
+        vec!["fractal", "web", "--", "unexpected"],
+    ] {
+        let error = Cli::try_parse_from(arguments.clone()).err().expect("invalid web arguments");
+        assert_eq!(error.exit_code(), 2, "{arguments:?}: {error}");
+    }
+}
+
+#[test]
+fn web_uses_clap_option_delimiters_equals_values_and_global_options() {
+    for arguments in [
+        vec!["fractal", "web", "--state-dir=relative"],
+        vec!["fractal", "web", "--state-dir", "relative", "--"],
+    ] {
+        assert!(matches!(
+            Cli::try_parse_from(arguments).unwrap().command,
+            Command::Web { state_dir: Some(path) } if path == PathBuf::from("relative")
+        ));
+    }
+    assert!(matches!(
+        Cli::try_parse_from(["fractal", "web", "--"]).unwrap().command,
+        Command::Web { state_dir: None }
+    ));
+    let cli = Cli::try_parse_from(["fractal", "web", "--json"]).unwrap();
+    assert!(cli.json);
+    assert!(matches!(cli.command, Command::Web { state_dir: None }));
+}
+
+#[test]
 fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
     let contract: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h386966f4e028 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../docs/st3/operational-state/cli-commands.json"
