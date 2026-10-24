@@ -185,7 +185,8 @@
    "extra": [
     "README.md",
     "docs/st3/client-v0/fixtures/events.json",
-    "docs/st3/client-v0/fixtures/resources.json"
+    "docs/st3/client-v0/fixtures/resources.json",
+    "docs/st3/client-v0/fixtures/terminal-screen.json"
    ]
   },
   "fractal-github": {
