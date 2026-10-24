@@ -708,6 +708,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/doctor", get(operations::doctor))
         .route("/v1/repair", get(operations::operational_repair_plan))
         .route("/v1/repair/apply", post(operations::apply_operational_repair))
+        .route("/v1/repair/apply-attributed", post(operations::apply_attributed_operational_repair))
         .route("/v1/backup", get(operations::backup_export))
         .route("/v1/replication/status", get(replication::replication_status))
         .route("/v1/replication/records", get(replication::replication_records))
@@ -6625,6 +6626,12 @@ pub async fn guard_bound_request(
         )));
     }
     let path = request.uri().path();
+    if path == "/v1/repair/apply" {
+        return Err(ApiError::bad(St3Error::new(
+            "foreign-agent-actor",
+            "bound harnesses must use the attributed repair apply route",
+        )));
+    }
     // A forwarded client read carries a person's authority between fleet members. Only the
     // replication worker, which runs in no harness, hands one over.
     if path.starts_with(crate::peer::CLIENT_READ_FORWARD_PATH) {
@@ -6673,7 +6680,7 @@ pub async fn guard_bound_request(
         .await
         .map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-        if parts.uri.path() == "/v1/repair/apply"
+        if parts.uri.path() == "/v1/repair/apply-attributed"
             && value.get("actor").and_then(Value::as_str).is_none_or(str::is_empty)
         {
             return Err(ApiError::bad(St3Error::new(
