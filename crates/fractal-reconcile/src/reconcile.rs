@@ -35284,7 +35284,8 @@ observer "repo" {
                 let mut facts = serde_json::json!({"repository_id": 7});
                 if change != 2 {
                     facts["issues"] = serde_json::json!([{
-                        "id": 11, "number": 1, "state": "open",
+                        "node_id": "I_fixture", "number": 1, "state": "open",
+                        "url": "https://github.com/example/repo/issues/1",
                         "title": if change == 0 { "before" } else { "after" },
                     }]);
                 }
@@ -35325,6 +35326,8 @@ observer "repo" {
                     let deadline = reconciler.observer_deadlines.lock().unwrap().get(&key).copied();
                     if calls.load(Ordering::SeqCst) == expected
                         && deadline.is_some() && deadline != old {
+                        let actual = reconciler.store.latest_actual_value(subject).unwrap().unwrap();
+                        assert_eq!(actual["state"], "healthy", "{subject} poll {expected}: {actual}");
                         let deadline = deadline.unwrap();
                         assert!(deadline >= before + interval,
                             "{subject} poll {expected}: next delay {}ms, expected at least {interval}ms", deadline.saturating_sub(before));
@@ -35341,9 +35344,9 @@ observer "repo" {
             let standing = subject.starts_with("github/");
             let subject_id = format!("observer/{subject}");
             let source = format!(r#"version 2
-resource "repo" {{ kind "vcs.repository" }}
+resource "github/example/repo" {{ kind "vcs.repository" }}
 observer "{subject}" {{
-  resource "resource/repo"
+  resource "resource/github/example/repo"
   provider "github.repository"
   locator "example/repo"
   field "issues"
