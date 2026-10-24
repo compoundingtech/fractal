@@ -174,8 +174,12 @@ stage scripts). So about half the merges re-run a handful of crates and one in s
   - asks `--members`.
   A base whose verifier lacks `--members`, or that has no `scripts/rust-test-keys`, makes the outcome `unavailable`, and the check runs.
 - The decision line adds `members` (workspace members), `missing` (how many have no satisfying note), `manifests_fetch` and `members_fetch`.
-- Next, on Factory's sign-off: the enforce step. linux-gate's test jobs skip on `evidence-gate-rust-tests` (pull_request only, sampled 1 in 5),
-  with the aggregate counting them as covered; then `rust-tests` joins `scripts/st-test`'s default.
+- The test jobs are wired to it: `linux-tests` and its shards (and through them `linux-test-build`) skip when linux-gate's note OR every
+  crate's per-crate note covers the tree; clippy and fleet compatibility still need linux-gate's own note. The linux-gate verdict accepts
+  a skipped stage only when one of those gates decided skip and that stage's own rule says skip. Nothing changes while the rust-tests entry is
+  shadow (its gate never says skip). The enforce step is then the policy flip alone (`enforce: true`, `events: ["pull_request"]`,
+  sampled 1 in 5, merge queue unchanged), on its own trigger; before it, scripts/evidence-flip-ready must count the jobs that read
+  rust-tests' skip as its members, so a red they would hide is seen.
 
 ## 9. Signing time (measured 2026-10-24)
 

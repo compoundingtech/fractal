@@ -865,7 +865,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-gate-rust-tests":[],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-fractal-web","evidence-gate-rust-tests"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","genie-freshness","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-genie-freshness","evidence-gate-typescript-client","evidence-gate-fractal-web","evidence-gate-rust-tests"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-gate-rust-tests":[],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-fractal-web","evidence-gate-rust-tests"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","evidence-gate-rust-tests"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","genie-freshness","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-genie-freshness","evidence-gate-typescript-client","evidence-gate-fractal-web","evidence-gate-rust-tests"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -1534,8 +1534,8 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   linux-test-build:
     name: linux-test-build
-    needs: [pick-runner, evidence-gate-linux-gate]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.evidence-gate-linux-gate.outputs.skip == 'true'))) }}
+    needs: [pick-runner, evidence-gate-linux-gate, evidence-gate-rust-tests]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true'))) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && vars.CI_MERGE_TEST_BUILD_OWNED && (needs.pick-runner.outputs.ci1_build || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) || github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
     env:
@@ -1712,8 +1712,8 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   linux-tests:
     name: linux-tests
-    needs: [pick-runner, linux-test-build, evidence-gate-linux-gate]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true')) }}
+    needs: [pick-runner, linux-test-build, evidence-gate-linux-gate, evidence-gate-rust-tests]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true')) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -1915,8 +1915,8 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   linux-tests-shard-2:
     name: linux-tests-shard-2
-    needs: [pick-runner, linux-test-build, evidence-gate-linux-gate]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true')) }}
+    needs: [pick-runner, linux-test-build, evidence-gate-linux-gate, evidence-gate-rust-tests]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true')) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_secondary) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -2115,8 +2115,8 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   linux-tests-shard-3:
     name: linux-tests-shard-3
-    needs: [pick-runner, linux-test-build, evidence-gate-linux-gate]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && github.event_name == 'merge_group') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true')) }}
+    needs: [pick-runner, linux-test-build, evidence-gate-linux-gate, evidence-gate-rust-tests]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && github.event_name == 'merge_group') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true')) }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -2315,8 +2315,8 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   linux-tests-shard-4:
     name: linux-tests-shard-4
-    needs: [pick-runner, linux-test-build, evidence-gate-linux-gate]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && github.event_name == 'merge_group') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true')) }}
+    needs: [pick-runner, linux-test-build, evidence-gate-linux-gate, evidence-gate-rust-tests]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && github.event_name == 'merge_group') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true')) }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
@@ -2943,17 +2943,18 @@ jobs:
       - linux-tests-shard-4
       - linux-clippy
       - linux-fleet-compat
+      - evidence-gate-rust-tests
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every Linux stage to pass
         env:
-          GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip }}
+          GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }}
           RESULTS: "${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }}"
           EVENT: ${{ github.event_name }}
           MERGE_RESULTS: "${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}"
-          STAGE_SKIPS: "${{ (needs.evidence-gate-linux-gate.outputs.skip == 'true') }} false ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}"
+          STAGE_SKIPS: "${{ (needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true') }} false ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }} ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true' }}"
         run: |
           set -eu
           set -- $RESULTS
@@ -2970,9 +2971,9 @@ jobs:
           for result in $RESULTS; do
             position=$((position + 1))
             [ "$result" = success ] && continue
-            # A stage the evidence gate skipped reports `skipped`: accepted only when this gate decided to skip, only
-            # in the positions of stages skipped at job level, only when that stage's own skip rule says skip, and never
-            # for a failure or a cancellation.
+            # A stage an evidence gate skipped reports `skipped`: accepted only when a gate the stages read decided to skip,
+            # only in the positions of stages skipped at job level, only when that stage's own skip rule says skip (linux-gate's
+            # gate, or for the test stages the per-crate rust-tests gate as well), and never for a failure or a cancellation.
             flag=$(printf '%s\n' "${STAGE_SKIPS:-}" | cut -d' ' -f"$position")
             if [ "${GATE_SKIP:-}" = true ] && [ "$flag" = true ] && [ "$result" = skipped ]; then
               case "$position" in 1|3|4|5|6|7|8) continue ;; esac
