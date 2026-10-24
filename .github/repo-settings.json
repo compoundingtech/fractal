@@ -57,10 +57,6 @@
                 "integration_id": 15368
               },
               {
-                "context": "ci-script-tests",
-                "integration_id": 15368
-              },
-              {
                 "context": "typescript-client",
                 "integration_id": 15368
               },

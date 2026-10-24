@@ -579,7 +579,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     }),
     'linux-gate': {
       name: 'linux-gate',
-      needs: [pickRunnerJobId, 'evidence-gate-linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat'],
+      needs: [pickRunnerJobId, 'evidence-gate-linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'ci-script-tests', 'evidence-gate-ci-script-tests'],
       // A skipped or cancelled stage must fail the gate, so it runs even when a stage failed.
       if: 'always()',
       // Aggregation needs no build caches and must not queue behind the work it summarizes.
@@ -614,6 +614,18 @@ for result in $RESULTS; do
   fi
   exit 1
 done`,
+        },
+        {
+          // ci-script-tests is not a required context of its own (a head from before it existed has no run of it, and would be blocked):
+          // this job, which every head reports, carries its verdict. A failure or a cancellation fails the gate; `skipped` is accepted only
+          // when its own evidence gate decided to skip (a trusted note covered its inputs).
+          name: 'Require ci-script-tests to pass',
+          env: { SCRIPT_TESTS_RESULT: '${{ needs.ci-script-tests.result }}', SCRIPT_TESTS_SKIPPED_BY_GATE: '${{ needs.evidence-gate-ci-script-tests.outputs.skip }}' },
+          run: `set -eu
+echo "ci-script-tests: $SCRIPT_TESTS_RESULT (evidence skip: \${SCRIPT_TESTS_SKIPPED_BY_GATE:-none})"
+[ "$SCRIPT_TESTS_RESULT" = success ] && exit 0
+[ "$SCRIPT_TESTS_RESULT" = skipped ] && [ "\${SCRIPT_TESTS_SKIPPED_BY_GATE:-}" = true ] && exit 0
+exit 1`,
         },
       ],
     },

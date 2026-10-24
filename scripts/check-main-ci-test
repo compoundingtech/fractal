@@ -63,7 +63,7 @@ queue_loader = importlib.machinery.SourceFileLoader('ci_queue_watch', str(ROOT /
 queue_spec = importlib.util.spec_from_loader(queue_loader.name, queue_loader)
 queue = importlib.util.module_from_spec(queue_spec)
 queue_loader.exec_module(queue)
-assert {'fractal-web', 'ci-script-tests'} <= module.REQUIRED and module.REQUIRED == queue.REQUIRED, (module.REQUIRED, queue.REQUIRED)
+assert 'fractal-web' in module.REQUIRED and module.REQUIRED == queue.REQUIRED, (module.REQUIRED, queue.REQUIRED)
 fractal_red = [dict(c, conclusion='failure') if c['name'] == 'fractal-web' else c for c in checks]
 check('reject a red fractal-web', [run], fractal_red, 1)
 

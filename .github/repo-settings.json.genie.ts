@@ -38,7 +38,6 @@ export default githubRepoSettings({
           required_status_checks: [
             { context: 'linux-gate', integration_id: 15368 },
             { context: 'genie-freshness', integration_id: 15368 },
-            { context: 'ci-script-tests', integration_id: 15368 },
             { context: 'typescript-client', integration_id: 15368 },
             { context: 'fractal-web', integration_id: 15368 },
           ],

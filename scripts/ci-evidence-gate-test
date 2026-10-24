@@ -2045,6 +2045,22 @@ class WorkflowStructure(unittest.TestCase):
         self.assertNotIn('true', condition)
         self.assertEqual(condition.count('||'), 3 + condition.count("github.event_name != 'pull_request' ||"))
 
+    def test_ci_script_tests_is_enforced_through_the_linux_gate_job_not_as_a_required_context_of_its_own(self):
+        # A required context blocks every head from before the check existed (no run at that head). linux-gate is reported by every head
+        # and always waits for the long stages, so it carries ci-script-tests' verdict at no extra latency.
+        block = self.job_text('linux-gate')
+        self.assertRegex(block, r'needs:[^\n]*\bci-script-tests\b[^\n]*|needs:\n(?:\s+- .*\n)*?\s+- ci-script-tests\n')
+        self.assertIn('evidence-gate-ci-script-tests', block)
+        step = block.split('- name: Require ci-script-tests to pass', 1)[1].split('\n      - name:', 1)[0]
+        self.assertIn('needs.ci-script-tests.result', step)
+        self.assertIn('needs.evidence-gate-ci-script-tests.outputs.skip', step)
+        self.assertIn('[ "$SCRIPT_TESTS_RESULT" = success ] && exit 0', step)
+        self.assertNotIn('failure', step)  # a failure or a cancellation falls through to exit 1
+        self.assertTrue(step.rstrip().endswith('exit 1'))
+        settings = json.loads((ROOT / '.github/repo-settings.json').read_text())
+        required = re.findall(r'"context":\s*"([^"]+)"', json.dumps(settings))
+        self.assertNotIn('ci-script-tests', required)
+
     def test_every_evidence_test_script_runs_in_a_required_check(self):
         # The self-tests that read only the CI scripts run in ci-script-tests; the ones that read the whole tree run in genie-freshness.
         listed = (ROOT / 'scripts/ci-genie-freshness').read_text() + (ROOT / 'scripts/ci-script-tests').read_text()
