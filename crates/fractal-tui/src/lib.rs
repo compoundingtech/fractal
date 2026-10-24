@@ -712,7 +712,7 @@ pub struct Args {
     /// Use the local daemon even when a paired-device profile exists.
     #[arg(long, conflicts_with = "client")]
     pub local: bool,
-    /// Require a paired device; pair with `st devices complete` first.
+    /// Require a paired device; pair with `fractal devices complete` first.
     #[arg(long)]
     pub client: bool,
     /// Print this device's recent quality summaries and exit.
@@ -744,10 +744,10 @@ pub enum Action {
     ///
     /// `agent/NAME` opens the conversation. `mission/NAME` and `mission-run/NAME/RUN` open the
     /// mission view, which stays open and follows the mission from step to step.
-    /// `doc/NAME@HASH`, as `st documents put` prints it, shows that document's text. An item that
+    /// `doc/NAME@HASH`, as `fractal documents put` prints it, shows that document's text. An item that
     /// is already open is shown again, never opened twice. The pane takes the person's focus,
     /// unless they are typing a message or `--keep-focus` says to leave it. The request waits
-    /// for st to know the subject, so an agent made a moment ago can be opened.
+    /// for fractal to know the subject, so an agent made a moment ago can be opened.
     Open(OpenArgs),
 }
 

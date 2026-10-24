@@ -1511,7 +1511,11 @@ and cache directories are a scratch directory that is removed afterwards, and no
 since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST2_OTELITE_BIN`, `ST3_OTELITE_BIN` and
 `FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's st state, harness
 configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
-rustup homes (the dependency cache) and `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues: the
+rustup homes (the dependency cache), `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues, and the
+host's admission itself: the shims and the `build-admission` program look for their program, limits, priorities and queue state
+under the account's home, which the stages' `HOME` would hide (every build then took the shims' fallback cap under a lock of its own),
+so `scripts/ci-local` names them from the account's home (`BUILD_ADMISSION_BIN`, `BUILD_ADMISSION_CONFIG`, `BUILD_ADMISSION_STATE`,
+`BUILD_ADMISSION_FALLBACK_LOCK`, `CARGO_PRIORITY_FILE`, `CARGO_HEAVY_SLOTS`; a value the caller set is kept). The
 stage takes an ordinary heavy admission slot, with no priority of its own. Test binaries run outside that gate, so on a
 shared host the stages' tests run 12 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
 `ionice -c 3` and `nice -n 10`: an unbounded run (one test per core) held the dev host's IO pressure above its alarm line. The shim is handed the dev shell's own cargo as

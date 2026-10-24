@@ -33,7 +33,7 @@ pub struct SetupArgs {
     /// Skip the setup screen: accept defaults for questions not answered by flags.
     #[arg(long)]
     pub yes: bool,
-    /// Keep st running as a user service (default: true).
+    /// Keep fractal running as a user service (default: true).
     #[arg(long, action = clap::ArgAction::Set)]
     pub service: Option<bool>,
     /// Install st3, the st link and pty in ~/.local/bin (default: true).
