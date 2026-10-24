@@ -7,5 +7,5 @@
   "compatibility": {"status": "changed", "detail": "Standing repository observers start at three minutes, advance to six then ten minutes when facts are unchanged, and reset to three minutes on any observed fact change. Existing standing every=30s declarations adapt by identity without rewriting live state. Explicit non-standing intervals, including faster 30s observers, remain unchanged. Pagination continues at one second; provider rate-limit retry deadlines remain authoritative."},
   "downtime": {"status": "none", "detail": "No data migration or daemon restart is performed by this change."},
   "manual": {"status": "none", "detail": "New standing declarations use every=3m. Refresh remains immediate and resets active cadence; a new revision starts immediately at active cadence."},
-  "recovery": {"status": "none", "detail": "Restart resets quiet cadence to active without clearing ETags, response bodies or provider cursor state. Binary rollback requires no migration."}
+  "recovery": {"status": "none", "detail": "Restart resets quiet cadence to active without clearing ETags, response bodies or provider cursor state. Successful receipts retain a conservative three-minute restart deadline; effective six/ten-minute deadlines stay in memory and use canonical observation outcomes, not raw delta JSON or receipt writes. Binary rollback requires no migration."}
 }
