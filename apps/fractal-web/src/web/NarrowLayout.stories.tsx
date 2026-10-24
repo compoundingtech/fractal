@@ -702,6 +702,10 @@ export const DrawerFocusReturn: Story = {
       await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
       await waitFor(() => expect(toggle).toHaveFocus())
       await expect(terminal).not.toHaveFocus()
+      await nextFrame()
+      await nextFrame()
+      await expect(toggle).not.toHaveAttribute('aria-describedby')
+      await expect(within(document.body).queryByRole('tooltip')).toBeNull()
     }
   }),
 }
