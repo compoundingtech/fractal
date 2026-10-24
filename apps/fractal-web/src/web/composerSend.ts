@@ -12,6 +12,9 @@ type ImageMediaType = SendAttachment['media_type']
 /** The message.send contract: at most four attachments, each a PNG, JPEG, GIF or WebP blob reference. */
 const messageImageLimit = { max: 4 } as const
 const imageMediaTypes: readonly ImageMediaType[] = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
+// Mirrors MAX_BLOB_BYTES in crates/fractal-delivery-base/src/blobs.rs; the client contract exposes no size limit.
+const maxImageBytes = 10 * 1024 * 1024
+const imageSizeRefusal = 'Images must be 10 MiB or smaller. Choose a smaller image and try again.'
 const isImageMediaType = (value: string | undefined): value is ImageMediaType => imageMediaTypes.some(type => type === value)
 
 /**
@@ -22,12 +25,14 @@ export const imageUploadAdapter = (upload: AttachmentPort['upload']): Omit<Attac
   accept: imageMediaTypes.join(','),
   add: async ({ file }) => {
     if (!isImageMediaType(file.type)) throw new Error('Only PNG, JPEG, GIF and WebP images can be attached.')
+    if (file.size > maxImageBytes) throw new Error(imageSizeRefusal)
     return { id: crypto.randomUUID(), type: 'image', name: file.name, contentType: file.type, file, status: { type: 'requires-action', reason: 'composer-send' } }
   },
   remove: async () => {},
   send: async (attachment) => {
     const mediaType = attachment.contentType
     if (!isImageMediaType(mediaType)) throw new Error('Only PNG, JPEG, GIF and WebP images can be attached.')
+    if (attachment.file.size > maxImageBytes) throw new Error(imageSizeRefusal)
     const uploaded = await upload({ bytes: attachment.file, mediaType })
     if (uploaded._tag === 'Refused') throw new Error(uploaded.detail)
     // The upload's blob reference is the attachment; message.send names it, the bytes stay with st.
@@ -78,13 +83,13 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
   readonly onRefused: (refusal: SendRefusal) => void
   /** Capture before dispatch; optimistic clears are not confirmed sends. */
   readonly onSending?: (content: string) => (outcome: { readonly _tag: 'Confirmed' } | { readonly _tag: 'Unconfirmed' }) => void
-  /** Stable across renders (see `imageUploadAdapter`); offered only while sending and image upload are granted. */
+  /** Stable across renders (see `imageUploadAdapter`); retained for removal when upload is unavailable. */
   readonly attachmentAdapter?: AttachmentAdapter
 }): {
   readonly runtime: ConversationRuntimeOptions
   readonly disabledReason?: string
-  /** Present while the composer may attach images: the per-message limit it enforces. */
-  readonly imageAttachments?: { readonly max: number }
+  /** Keep staged images removable even while upload is unavailable. */
+  readonly imageAttachments?: { readonly max: number; readonly disabledReason?: string }
   readonly retry: (item: ConversationItem) => Promise<void>
 } => {
   const disabledReason = refusal !== undefined ? sendFailureDetail(refusal.reason)
@@ -92,6 +97,14 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
     : grants.messageSend !== 'granted' ? 'Message send is not granted for this device.'
     : !readable ? 'Messages can be sent once this conversation loads.' : undefined
   const uploads = attachmentAdapter !== undefined && disabledReason === undefined && grants.attachmentUpload === 'granted' ? attachmentAdapter : undefined
+  const imageDisabledReason = 'Image upload is not available. Remove the staged images to send a text-only message.'
+  // assistant-ui requires an adapter even to remove pending images. Preserve removal, never upload, after grant loss.
+  const runtimeAttachments: AttachmentAdapter | undefined = uploads ?? (attachmentAdapter === undefined ? undefined : {
+    accept: attachmentAdapter.accept,
+    remove: attachmentAdapter.remove,
+    add: async () => { throw new Error(imageDisabledReason) },
+    send: async () => { throw new Error(imageDisabledReason) },
+  })
   const dispatch = async (content: string, attachments: AttachmentSendRequest['parameters']['attachments'], retryKey?: string) => {
     if (source.attachments === undefined || grants.messageSend !== 'granted') return
     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
@@ -117,10 +130,13 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
   }
   return {
     ...(disabledReason === undefined ? {} : { disabledReason }),
-    ...(uploads === undefined ? {} : { imageAttachments: messageImageLimit }),
+    ...(attachmentAdapter === undefined ? {} : { imageAttachments: {
+      ...messageImageLimit,
+      ...(uploads === undefined ? { disabledReason: imageDisabledReason } : {}),
+    } }),
     runtime: {
       messages: items, isDisabled: disabledReason !== undefined,
-      ...(uploads === undefined ? {} : { adapters: { attachments: uploads } }),
+      ...(runtimeAttachments === undefined ? {} : { adapters: { attachments: runtimeAttachments } }),
       onNew: async (message) => {
         if (disabledReason !== undefined) return
         const sendable = uploadedAttachments(message.attachments ?? [])

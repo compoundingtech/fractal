@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Fractal web: the conversation composer attaches and pastes up to four images, uploads them on send and names their blob references in message.send",
+  "summary": "Fractal web: attach or paste up to four PNG, JPEG, GIF or WebP images of at most 10 MiB, upload on send, announce refusals and keep staged images removable when upload permission changes",
   "replay": {
     "status": "none",
     "detail": "No graph, claim or storage change."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Attach appears only on devices granted control.messages and message.send; other devices keep the text-only composer."
+    "detail": "Attach appears only on devices granted control.messages and message.send. Staged images stay removable if upload permission disappears, and removing them restores text-only sending."
   },
   "downtime": {
     "status": "none",

@@ -593,8 +593,15 @@ export const KitLabelResize: Story = { tags: ['critical'],
 function PlainImages({ scheme }: { readonly scheme: Scheme }) {
   const [source] = React.useState(() => createComposerFixture('idle'))
   const snapshot = React.useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot)
+  const [uploadGranted, setUploadGranted] = React.useState(true)
+  const adapter = snapshot.options.adapters!.attachments!
+  const options = { ...snapshot.options, adapters: { ...snapshot.options.adapters, attachments: {
+    accept: 'image/png,image/jpeg,image/gif,image/webp',
+    add: adapter.add.bind(adapter), remove: adapter.remove.bind(adapter), send: adapter.send.bind(adapter),
+  } } }
   return <Surface scheme={scheme}><div {...stylex.props(styles.lane)}>
-    <EmbraceRuntimeProvider options={snapshot.options}><EmbraceComposer variant="C1" readingColumn conversationLabel="Image attachments" imageAttachments={{ max: 1 }} /></EmbraceRuntimeProvider>
+    <button onClick={() => setUploadGranted(false)}>Revoke image upload</button>
+    <EmbraceRuntimeProvider options={options}><EmbraceComposer variant="C1" readingColumn conversationLabel="Image attachments" imageAttachments={{ max: 1, ...(uploadGranted ? {} : { disabledReason: 'Image upload is not available. Remove the staged images to send a text-only message.' }) }} /></EmbraceRuntimeProvider>
     <div aria-label="Accepted fixture messages" role="log" {...stylex.props(styles.receipts)}>{snapshot.receipts.map((receipt, index) => <p key={index} {...stylex.props(styles.receipt)}>Attachments: {receipt.message.attachments?.map(attachment => attachment.name).join(', ')}</p>)}</div>
   </div></Surface>
 }
@@ -609,6 +616,29 @@ export const PlainImageAttachments: Story = { tags: ['critical'],
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.getByRole('button', { name: 'Attach image' })).toBeVisible()
+    // Native picker rejection, including its first file: no staged attachment is required for the live notice.
+    const originalClick = HTMLInputElement.prototype.click
+    HTMLInputElement.prototype.click = function () {
+      if (this.type !== 'file') return originalClick.call(this)
+      const files = new DataTransfer()
+      files.items.add(new File(['<svg/>'], 'picker.svg', { type: 'image/svg+xml' }))
+      Object.defineProperty(this, 'files', { configurable: true, value: files.files })
+      this.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    try { await userEvent.click(canvas.getByRole('button', { name: 'Attach image' })) }
+    finally { HTMLInputElement.prototype.click = originalClick }
+    const notice = canvas.getByTestId('composer-attachment-notice')
+    await waitFor(() => expect(notice).toHaveTextContent("SVG files can't be attached. Use PNG, JPEG, GIF or WebP."))
+    await expect(notice).toHaveAttribute('aria-live', 'polite')
+    await expect(canvas.queryByTestId('composer-attachments')).toBeNull()
+    const unsupportedPaste = new DataTransfer()
+    const pickerNotice = notice.querySelector('p')
+    unsupportedPaste.items.add(new File(['<svg/>'], 'pasted.svg', { type: 'image/svg+xml' }))
+    await userEvent.click(textbox(canvasElement))
+    await userEvent.paste(unsupportedPaste)
+    await waitFor(() => expect(notice.querySelector('p')).not.toBe(pickerNotice))
+    await expect(notice).toHaveTextContent("SVG files can't be attached. Use PNG, JPEG, GIF or WebP.")
+    await expect(canvas.queryByTestId('composer-attachments')).toBeNull()
     await userEvent.click(textbox(canvasElement))
     await userEvent.paste(pngFiles('first.png', 'second.png'))
     await waitFor(() => expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible())
@@ -623,8 +653,16 @@ export const PlainImageAttachments: Story = { tags: ['critical'],
     await userEvent.click(canvas.getByRole('button', { name: 'Remove first.png' }))
     await waitFor(() => expect(canvas.queryByRole('alert')).toBeNull())
     await expect(canvas.queryByRole('button', { name: 'Attach image' })).toBeNull()
+    // Permission loss does not strand the remaining image; text can be sent after removing it.
+    await userEvent.click(canvas.getByRole('button', { name: 'Revoke image upload' }))
+    await waitFor(() => expect(canvas.getByRole('alert')).toHaveTextContent('Remove the staged images to send a text-only message.'))
+    await expect(canvas.getByRole('button', { name: 'Send' })).toBeDisabled()
+    await expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible()
+    await expect(canvas.queryByRole('button', { name: 'Attach image' })).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: 'Remove second.png' }))
+    await userEvent.type(textbox(canvasElement), 'Recovered text draft')
     await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
-    await waitFor(() => expect(within(receiptLog(canvasElement)).getByText('Attachments: second.png')).toBeVisible())
+    await waitFor(() => expect(within(receiptLog(canvasElement)).getByText('Attachments:')).toBeVisible())
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="composer-attachments"]')).toBeNull())
   },
 }

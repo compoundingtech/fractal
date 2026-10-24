@@ -149,15 +149,36 @@ describe('composer send contract', () => {
     await expect(adapter.send(pending)).rejects.toThrow('This device is not granted attachment upload.')
   })
 
-  it('offers image attachments only while both send and upload are granted', () => {
+  it('refuses images over 10 MiB before upload, including drafts staged before validation', async () => {
+    const upload = vi.fn<AttachmentPort['upload']>()
+    const adapter = imageUploadAdapter(upload)
+    const oversized = new File([new Uint8Array(12 * 1024 * 1024)], 'large.png', { type: 'image/png' })
+    await expect(adapter.add({ file: oversized })).rejects.toThrow('Images must be 10 MiB or smaller. Choose a smaller image and try again.')
+    const pending = await adapter.add({ file: new File(['image'], 'small.png', { type: 'image/png' }) })
+    await expect(adapter.send({ ...pending, file: oversized })).rejects.toThrow('Images must be 10 MiB or smaller.')
+    expect(upload).not.toHaveBeenCalled()
+    // The server's exact limit remains accepted; only larger images are refused.
+    await expect(adapter.add({ file: new File([new Uint8Array(10 * 1024 * 1024)], 'limit.png', { type: 'image/png' }) })).resolves.toMatchObject({ name: 'limit.png' })
+  })
+
+  it('retains attachment presentation but offers uploads only while both grants are present', async () => {
     const attachments = { capabilities: vi.fn(), upload: vi.fn<AttachmentPort['upload']>(), chunk: vi.fn(), send: vi.fn<AttachmentPort['send']>() }
     const adapter = imageUploadAdapter(attachments.upload)
     const bind = (overrides: Partial<Grants>, readable = true) => composerSendBinding({ source: { attachments }, agentRef: seat, grants: { ...grants, ...overrides }, readable, items: [], onRefused: vi.fn(), attachmentAdapter: adapter })
+    const pending = await adapter.add({ file: new File(['image'], 'staged.png', { type: 'image/png' }) })
     for (const binding of [bind({ attachmentUpload: 'ungranted' }), bind({ messageSend: 'ungranted' }), bind({}, false)]) {
-      expect(binding.runtime.adapters).toBeUndefined()
-      expect(binding.imageAttachments).toBeUndefined()
+      const removalOnly = binding.runtime.adapters!.attachments!
+      await expect(removalOnly.remove(pending)).resolves.toBeUndefined()
+      await expect(removalOnly.send(pending)).rejects.toThrow('Image upload is not available.')
+      expect(attachments.upload).not.toHaveBeenCalled()
+      expect(binding.imageAttachments).toEqual({ max: 4, disabledReason: 'Image upload is not available. Remove the staged images to send a text-only message.' })
     }
     expect(bind({}).runtime.adapters?.attachments).toBe(adapter)
+    // Losing upload permission must not prevent a recovered text-only draft from sending.
+    attachments.send.mockResolvedValue({ _tag: 'Refused', reason: 'failed', detail: 'Unavailable' })
+    const noUpload = bind({ attachmentUpload: 'ungranted' })
+    await noUpload.runtime.onNew(message)
+    expect(attachments.send).toHaveBeenCalledWith(expect.objectContaining({ parameters: expect.objectContaining({ attachments: [] }) }))
   })
 
   it.each(['future-reason', 'constructor', '__proto__', 'raw-diagnostic-sentinel'])('uses generic copy for unclassified reason %s', reason => {
