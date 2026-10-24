@@ -1594,14 +1594,19 @@ class WorkflowStructure(unittest.TestCase):
         self.assertEqual(len(stage_names), 6)
 
         flags_line = re.search(r'^          STAGE_SKIPS: (.*)$', aggregate, re.M).group(1)
+        # The aggregate's GATE_SKIP is true when any gate its stages read decided skip, and reads exactly those gates.
+        gate_skip = re.search(r'^          GATE_SKIP: (.*)$', aggregate, re.M).group(1)
+        self.assertEqual(set(re.findall(r'needs\.evidence-gate-([a-z-]+)\.outputs\.skip', gate_skip)), {'linux-gate', 'rust-tests'})
+        for lg, rt in itertools.product((False, True), repeat=2):
+            self.assertEqual(self.truth(gate_skip, {'linux-gate': lg, 'rust-tests': rt}, 'pull_request'), lg or rt)
 
         def stage_flags(gates):
             """The per-stage skip flags the workflow would compute for these gate decisions."""
             tokens = re.findall(r'\$\{\{.*?\}\}|\S+', json.loads(flags_line))
             return [str(self.truth(t, gates, 'merge_group')).lower() if t.startswith('${{') else t for t in tokens]
 
-        def accepts(event, results, skip, gates=None, flags=None):
-            flags = flags if flags is not None else stage_flags(gates or {})
+        def accepts(event, results, skip, gates, flags=None):
+            flags = flags if flags is not None else stage_flags(gates)
             env = {**os.environ, 'EVENT': event, 'RESULTS': ' '.join(results[n] for n in stage_names),
                    'MERGE_RESULTS': f"{results['linux-tests-shard-3']} {results['linux-tests-shard-4']}",
                    'STAGE_SKIPS': ' '.join(flags)}
@@ -1610,24 +1615,27 @@ class WorkflowStructure(unittest.TestCase):
                 env['GATE_SKIP'] = skip
             return subprocess.run(['bash', '-c', script], env=env, capture_output=True).returncode == 0
 
+        tests = ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4')
         checked = 0
-        for event, lg in itertools.product(('pull_request', 'merge_group'), (False, True)):
-            gates = {'linux-gate': lg}
+        for event, lg, rt in itertools.product(('pull_request', 'merge_group'), (False, True), (False, True)):
+            # linux-gate's own note covers every stage; the per-crate rust-tests notes cover the test stages only.
+            gates = {'linux-gate': lg, 'rust-tests': rt}
             runs = {job: self.truth(self.job_condition(blocks[job]), gates, event) for job in self.LINUX_JOB_LEVEL}
-            label = (event, lg)
+            label = (event, lg, rt)
             # The build runs whenever any job that needs its output does real work...
-            dependents_work = runs['linux-tests'] or runs['linux-tests-shard-2'] or runs['linux-tests-shard-3'] or runs['linux-tests-shard-4']
+            dependents_work = any(runs[j] for j in tests)
             if dependents_work:
                 self.assertTrue(runs['linux-test-build'], label)
             # ...and it is skipped exactly when everything that needs it is covered.
-            self.assertEqual(not runs['linux-test-build'], lg, label)
-            # Whatever the gate decided, nothing is skipped unless the aggregate's own gate said skip.
-            if not lg:
-                self.assertTrue(all(runs[j] for j in self.LINUX_JOB_LEVEL if j not in ('linux-test-build',)
-                                    and not (event == 'pull_request' and j in ('linux-tests-shard-3', 'linux-tests-shard-4'))), label)
+            self.assertEqual(not runs['linux-test-build'], lg or rt, label)
+            for job in self.LINUX_JOB_LEVEL:
+                if job == 'linux-test-build' or (event == 'pull_request' and job in ('linux-tests-shard-3', 'linux-tests-shard-4')):
+                    continue
+                covered = (lg or rt) if job in tests else lg  # clippy and fleet compatibility: linux-gate's note only
+                self.assertEqual(not runs[job], covered, label + (job,))
             # The real aggregate accepts the consistent outcome...
             results = {n: ('success' if runs.get(n, True) else 'skipped') for n in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']}
-            skip = 'true' if lg else None
+            skip = 'true' if lg or rt else None  # GATE_SKIP: some gate the stages read decided skip
             self.assertTrue(accepts(event, results, skip, gates), label)
             # ...and rejects a failure in ANY job that ran, even under a skip.
             for victim in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']:
@@ -1635,14 +1643,18 @@ class WorkflowStructure(unittest.TestCase):
                     broken = {**results, victim: 'failure'}
                     self.assertFalse(accepts(event, broken, skip, gates), label + (victim,))
             # ...and rejects a skipped upgrade-impact even under a skip: it is never covered by it.
-            if lg:
-                self.assertFalse(accepts(event, {**results, 'upgrade-impact': 'skipped'}, 'true', gates), label)
-            # ...and rejects skipped stages if its own gate had not said skip.
+            if lg or rt:
+                self.assertFalse(accepts(event, {**results, 'upgrade-impact': 'skipped'}, skip, gates), label)
+            # ...and rejects skipped stages when no stage's own rule said skip (no gate decided to skip).
             if any(v == 'skipped' for n, v in results.items() if n not in ('linux-tests-shard-3', 'linux-tests-shard-4')):
-                self.assertTrue(lg, label)  # a stage can only be skipped when the aggregate's gate decided skip
-                self.assertFalse(accepts(event, results, None, gates), label)
+                self.assertTrue(lg or rt, label)  # a stage can only be skipped when a gate it reads decided skip
+                self.assertFalse(accepts(event, results, None, gates, flags=stage_flags({'linux-gate': False, 'rust-tests': False})), label)
+            # ...and, with only the per-crate gate saying skip, rejects a skipped clippy or fleet compatibility: not covered by it.
+            if rt and not lg:
+                for stage in ('linux-clippy', 'linux-fleet-compat'):
+                    self.assertFalse(accepts(event, {**results, stage: 'skipped'}, skip, gates), label + (stage,))
             checked += 1
-        self.assertEqual(checked, 4)
+        self.assertEqual(checked, 8)
 
     def test_a_stage_skipped_for_an_unrelated_reason_fails_even_when_the_aggregate_gate_said_skip(self):
         aggregate = self.blocks()['linux-gate']
@@ -1741,9 +1753,12 @@ class WorkflowStructure(unittest.TestCase):
     def test_the_build_is_skipped_only_through_its_dependents_never_on_its_own_say(self):
         block = self.blocks()['linux-test-build']
         condition = self.job_condition(block)
-        # Derived from every dependent: today only the linux-gate stages need the build.
+        # Derived from every dependent: only the linux-gate test stages need the build, and each skips on linux-gate's note or on
+        # every crate's per-crate note (rust-tests).
         self.assertIn("needs.evidence-gate-linux-gate.outputs.skip == 'true'", condition)
-        self.assertEqual({need for need in self.needs_of(block) if need.startswith('evidence-gate-')}, {'evidence-gate-linux-gate'})
+        self.assertIn("needs.evidence-gate-rust-tests.outputs.skip == 'true'", condition)
+        self.assertEqual({need for need in self.needs_of(block) if need.startswith('evidence-gate-')},
+                         {'evidence-gate-linux-gate', 'evidence-gate-rust-tests'})
         self.assertIn('!cancelled()', condition)
 
     def test_the_skip_output_can_only_come_from_the_marker_step(self):

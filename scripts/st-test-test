@@ -749,7 +749,7 @@ class StTest(unittest.TestCase):
     def test_the_real_table_lists_only_checks_with_a_command_and_prints_them(self):
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list'], capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'fractal-web'])
+        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'fractal-web', 'rust-tests'])
 
     def test_a_check_that_builds_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
@@ -829,7 +829,7 @@ class StTest(unittest.TestCase):
     def test_every_check_of_the_per_pr_suite_runs_by_default_and_all_means_the_same(self):
         # No subset for signing: with no flag st-test runs the whole per-PR suite; --all is an accepted alias; --check selects.
         # The VM tests and the mail redelivery canaries run daily, not here.
-        suite = ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'fractal-web']
+        suite = ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'fractal-web', 'rust-tests']
         for args, names in (([], suite), (['--all'], suite), (['--check', 'linux-gate'], ['linux-gate'])):
             done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)
@@ -856,6 +856,17 @@ if os.environ.get('FAKE_NO_REPORT') != '1':
     out.append('</testsuites>')
     open(os.environ['CI_TEST_JUNIT'], 'w').write('\\n'.join(out))
 sys.exit(code)
+"""
+
+
+FAKE_GATE = """import os, sys
+open(os.environ['FAKE_CALLS'], 'a').write('gate\\n')
+if os.environ.get('FAKE_GATE_NO_REPORT') != '1':
+    out = ['<testsuites name="nextest-run">']
+    for package in ('base', 'top'):
+        out.append('<testsuite name="%s"><testcase name="unit_one" classname="%s"></testcase></testsuite>' % (package, package))
+    out.append('</testsuites>')
+    open(os.environ['CI_TEST_JUNIT'], 'w').write('\\n'.join(out))
 """
 
 
@@ -1169,13 +1180,41 @@ class PerCrate(StTest):
         self.assertIn('2 crates to run', out)
         self.assertIn('to run: base, top', out)
 
-    def test_rust_tests_is_named_with_check_and_is_not_part_of_all_yet(self):
-        self.assertIn('rust-tests', st_test.OPT_IN)
+    def test_rust_tests_is_in_the_default_suite_after_linux_gate(self):
+        self.assertEqual(st_test.OPT_IN, frozenset())
         self.assertIn('rust-tests', st_test.BUILDS)
-        code, out, err = self.run_st_test('--list', '--all')
-        self.assertNotIn('rust-tests', out)
+        for flags in ((), ('--all',)):
+            code, out, err = self.run_st_test('--list', *flags)
+            names = [line.split(':')[0] for line in out.splitlines()]
+            self.assertIn('rust-tests', names, flags)
+            self.assertLess(names.index('linux-gate') if 'linux-gate' in names else -1, names.index('rust-tests'), flags)
         code, out, err = self.run_st_test('--list', '--check', 'rust-tests')
         self.assertIn('rust-tests: python3 scripts/ci-rust-test-result', out)
+
+    def run_with_gate(self, **env):
+        stub = Path(self.tmp.name) / 'fake-gate.py'
+        stub.write_text(FAKE_GATE)
+        st_test.LOCAL['linux-gate'] = [sys.executable, str(stub), 'tests']
+        return self.run_st_test('--check', 'linux-gate', '--check', 'rust-tests',
+                                extra_env=dict({'FAKE_CALLS': str(self.calls), 'ST_EVIDENCE_GOVERN': 'off', 'ST_EVIDENCE_TARGET': 'off'}, **env))
+
+    def test_rust_tests_signs_the_crates_from_linux_gates_own_nextest_run_and_runs_none_of_its_own(self):
+        code, out, err = self.run_with_gate()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['gate'], 'linux-gate ran the tests once; rust-tests ran none')
+        self.assertEqual(self.crate_records(), [('base', 0), ('top', 0)])
+        record = next(s for s in self.statements() if s['predicate']['observed']['inputs'].get('crate') == 'top')['predicate']['observed']['inputs']
+        self.assertEqual((record['filterset'], record['tests_run']), ('workspace', '1'))
+        self.assertIn("2 of 2 crates signed from linux-gate's own nextest run", out)
+        code, out, err = self.run_with_gate()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('all 2 crates already have a passing note', out)
+
+    def test_without_a_report_from_linux_gate_rust_tests_runs_the_crates_it_lacks_itself(self):
+        code, out, err = self.run_with_gate(FAKE_GATE_NO_REPORT='1')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['gate', 'base,top'])
+        self.assertIn('2 of 2 crates run and signed', out)
 
 
 # PerCrate reuses StTest's repository, signer and helpers, not its tests.
