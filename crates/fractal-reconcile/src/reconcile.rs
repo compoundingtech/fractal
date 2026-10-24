@@ -34828,8 +34828,10 @@ observer "repo" {
                     if calls.load(Ordering::SeqCst) == expected
                         && deadline.is_some() && deadline != old {
                         let deadline = deadline.unwrap();
-                        assert!(deadline >= before + interval);
-                        assert!(deadline <= now_ms() + interval);
+                        assert!(deadline >= before + interval,
+                            "{subject} poll {expected}: next delay {}ms, expected at least {interval}ms", deadline.saturating_sub(before));
+                        assert!(deadline <= now_ms() + interval,
+                            "{subject} poll {expected}: next delay {}ms, expected at most {interval}ms", deadline.saturating_sub(now_ms()));
                         break;
                     }
                     tokio::task::yield_now().await;
