@@ -68,6 +68,24 @@ test('an unconfirmed send reads as not confirmed yet with Send again, never as a
   assert.doesNotMatch(bare, /Send again/)
 })
 
+test('a sent image is a named file card unless the host resolves it, and never an empty frame', () => {
+  const sent = { ...prompt, attachments: [{ id: 'blob/layout', mediaType: 'image/png', name: 'layout.png' }, { id: 'blob/unnamed', mediaType: 'image/webp' }] }
+  const render = (resolveImage) => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {
+    options: { messages: [sent], isRunning: false, onNew: async () => {} },
+  }, React.createElement(Transcript, { turns: [{ ...turn, prompt: sent }], title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now, ...(resolveImage === undefined ? {} : { resolveImage }) })))
+  const cards = render(undefined)
+  assert.match(cards, /role="group" aria-label="Image: layout.png, PNG"/)
+  assert.match(cards, /role="group" aria-label="Image: Unnamed image, WebP"/)
+  assert.match(cards, /PNG · Size unavailable/)
+  assert.doesNotMatch(cards, /<img/)
+  // Only an id the host resolves loads; the other stays a card.
+  const resolved = render(id => id === 'blob/layout' ? { _tag: 'Load', src: 'data:image/png;base64,AA==' } : { _tag: 'Defer' })
+  assert.match(resolved, /aria-label="Open layout.png"/)
+  assert.match(resolved, /<img src="data:image\/png;base64,AA==" alt="layout.png"/)
+  assert.match(resolved, /aria-label="Image: Unnamed image, WebP"/)
+  assert.doesNotMatch(resolved, /src="blob\/unnamed"/)
+})
+
 test('host-owned header omits only the duplicate band, including unavailable history', () => {
   for (const availability of [{ _tag: 'Available' }, { _tag: 'Unavailable', reason: 'Not available' }]) {
     const render = (showHeader) => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {

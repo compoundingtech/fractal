@@ -2,23 +2,39 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { AttachmentPrimitive, ComposerPrimitive, useAui, useAuiEvent, useAuiState } from '@assistant-ui/react'
 import { Button } from 'react-aria-components'
-import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { interactionVars as interaction, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { Icon } from '../composition/Icons'
 
 /**
- * The composer's pending attachments, each removable before send. A host limit (`max`) is named in the tray
- * instead of refusing the send later, and so is the host's `disabledReason` while images cannot be uploaded:
- * the staged images stay listed and removable so the draft can still go out as text. Renders nothing while the
- * draft has no attachment.
+ * The composer's pending attachments, each removable before send, in one horizontally scrolling row of equal tiles,
+ * so several images never push the field out of view above a phone keyboard. Renders nothing while the draft has
+ * no attachment. Why a draft cannot be sent is the host's `ComposerSendRefusal`, not the tray's.
  */
-export function ComposerAttachmentTray({ max, disabledReason }: { readonly max?: number; readonly disabledReason?: string }) {
+export function ComposerAttachmentTray() {
   const count = useAuiState(state => state.composer.attachments.length)
   if (count === 0) return null
-  const excess = max === undefined ? 0 : count - max
   return <div data-testid="composer-attachments" {...stylex.props(styles.tray)}>
-    <div {...stylex.props(styles.list)}><ComposerPrimitive.Attachments>{() => <AttachmentPreview />}</ComposerPrimitive.Attachments></div>
-    {disabledReason !== undefined && <div role="alert" {...stylex.props(styles.problem)}>{disabledReason}</div>}
-    {excess > 0 && <div role="alert" {...stylex.props(styles.problem)}>{`A message can carry at most ${max} ${max === 1 ? 'image' : 'images'}. Remove ${excess} to send.`}</div>}
+    <ComposerPrimitive.Attachments>{() => <AttachmentPreview />}</ComposerPrimitive.Attachments>
+  </div>
+}
+
+/**
+ * Why Send is withheld, as a polite live region that stays mounted (visually hidden while empty) so the first
+ * refusal is announced. Send references `id` as its description. Each blocked press bumps `attempt`, which
+ * re-renders the line as a new node: assistive tech announces it again and the line briefly highlights.
+ */
+export function ComposerSendRefusal({ id, message, attempt, action }: {
+  readonly id: string
+  readonly message: string | undefined
+  readonly attempt: number
+  /** One-step recovery shown beside the message, outside the live region so it is not read as part of it. */
+  readonly action?: React.ReactNode
+}) {
+  return <div data-testid="composer-send-refusal" {...stylex.props(styles.refusal, message === undefined && styles.noticeIdle)}>
+    <div id={id} role="status" {...stylex.props(styles.refusalText)}>
+      {message !== undefined && <p key={attempt} data-refusal-attempt={attempt} {...stylex.props(styles.problem, styles.line, attempt > 0 && styles.flash)}>{message}</p>}
+    </div>
+    {message !== undefined && action}
   </div>
 }
 
@@ -43,10 +59,11 @@ export const attachmentAddErrorNotice = (error: AttachmentAddError, accept: stri
 }
 
 /**
- * Refused picker and paste adds for the thread composer, from the public `composer.attachmentAddError` event.
- * Refusals of one pick or paste are listed together; the next accepted add, a removal or a send clears them.
+ * Refused picker and paste adds for the thread composer, from the public `composer.attachmentAddError` event, plus
+ * `refuse` for an add the composer itself withholds (a blocked Attach). Refusals of one pick or paste are listed
+ * together; the next accepted add, a removal or a send clears them.
  */
-export function useAttachmentRefusals(enabled: boolean): readonly AttachmentRefusal[] {
+export function useAttachmentRefusals(enabled: boolean): { readonly refusals: readonly AttachmentRefusal[]; readonly refuse: (message: string) => void } {
   const aui = useAui()
   const [refusals, setRefusals] = React.useState<readonly AttachmentRefusal[]>([])
   const sequence = React.useRef(0)
@@ -78,7 +95,9 @@ export function useAttachmentRefusals(enabled: boolean): readonly AttachmentRefu
     setPrevious(staged)
     if (staged < previous) setRefusals([])
   }
-  return enabled ? refusals : []
+  // A new line each time, so a repeated refusal is announced again.
+  const refuse = React.useCallback((message: string) => setRefusals([{ id: ++sequence.current, message }]), [])
+  return { refusals: enabled ? refusals : [], refuse }
 }
 
 /**
@@ -87,7 +106,7 @@ export function useAttachmentRefusals(enabled: boolean): readonly AttachmentRefu
  */
 export function ComposerAttachmentNotice({ refusals }: { readonly refusals: readonly AttachmentRefusal[] }) {
   return <div aria-live="polite" data-testid="composer-attachment-notice" {...stylex.props(styles.notice, refusals.length === 0 && styles.noticeIdle)}>
-    {refusals.map(refusal => <p key={refusal.id} {...stylex.props(styles.problem, styles.noticeLine)}>{refusal.message}</p>)}
+    {refusals.map(refusal => <p key={refusal.id} {...stylex.props(styles.problem, styles.line)}>{refusal.message}</p>)}
   </div>
 }
 
@@ -107,26 +126,55 @@ function AttachmentPreview() {
   return <AttachmentPrimitive.Root data-attachment-status={attachment.status.type} {...stylex.props(styles.attachment, problem !== undefined && styles.failed)}>
     {url !== undefined && <img src={url} alt={attachment.name} {...stylex.props(styles.image)} />}
     <span {...stylex.props(styles.text)}>
-      <span {...stylex.props(styles.name)}><AttachmentPrimitive.Name /></span>
-      {problem !== undefined ? <span role="alert" {...stylex.props(styles.problem)}>{problem}</span> : uploading ? <span role="status" {...stylex.props(styles.detail)}>Uploading…</span> : null}
+      <span title={attachment.name} {...stylex.props(styles.name)}><AttachmentPrimitive.Name /></span>
+      {problem !== undefined ? <span role="alert" {...stylex.props(styles.problem, styles.line)}>{problem}</span> : uploading ? <span role="status" {...stylex.props(styles.detail)}>Uploading…</span> : null}
     </span>
-    <AttachmentPrimitive.Remove asChild><Button aria-label={`Remove ${attachment.name}`} {...stylex.props(styles.button)}><Icon name="x" /></Button></AttachmentPrimitive.Remove>
+    <AttachmentPrimitive.Remove asChild><Button aria-label={`Remove ${attachment.name}`} {...stylex.props(composerControl.ghost, composerControl.icon, composerControl.touchHit)}><Icon name="x" /></Button></AttachmentPrimitive.Remove>
   </AttachmentPrimitive.Root>
 }
 
+const flash = stylex.keyframes({ from: { backgroundColor: tone.dangerMuted }, to: { backgroundColor: surface.transparent } })
+
+/**
+ * The composer's secondary controls (Attach, Remove, inline recovery): one ghost treatment in both themes, with a
+ * hover/pressed wash. `touchHit` extends the hit area to the 44px touch target around the visible 28px control.
+ */
+export const composerControl = stylex.create({
+  ghost: {
+    position: 'relative', display: 'inline-flex', justifyContent: 'center', alignItems: 'center', gap: s.xs, flexShrink: 0, boxSizing: 'border-box',
+    minHeight: g.controlMd, paddingInline: s.md, borderWidth: 0, borderRadius: r.control,
+    backgroundColor: { default: surface.transparent, ':hover': interaction.wash, ':active': interaction.wash },
+    color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer',
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
+  },
+  icon: { width: g.controlMd, height: g.controlMd, paddingInline: 0 },
+  touchHit: { '::before': { content: '""', position: 'absolute', inset: `min(0px, calc((100% - ${g.touchTarget}) / 2))` } },
+  // Keeps its place and focus but reads as unavailable; activation is guarded by the caller.
+  blocked: { color: ink.fgMuted, cursor: 'not-allowed', backgroundColor: { default: surface.transparent, ':hover': surface.transparent } },
+})
+
 const styles = stylex.create({
-  tray: { display: 'flex', flexDirection: 'column', gap: s.xs, minWidth: 0 },
-  list: { display: 'flex', gap: s.md, flexWrap: 'wrap', minWidth: 0 },
-  notice: { display: 'flex', flexDirection: 'column', gap: s.xs, minWidth: 0 },
+  // Tiles align with the field's text inset; block padding keeps focus rings clear of the scroll clip.
+  tray: {
+    display: 'flex', gap: s.md, minWidth: 0, overflowX: 'auto', overflowY: 'hidden', paddingInline: s.xs, paddingBlock: s.xs2,
+    scrollSnapType: 'x mandatory', scrollPaddingInline: s.xs, overscrollBehaviorX: 'contain', scrollbarWidth: 'thin', scrollbarColor: `${tone.scrollThumb} transparent`,
+  },
+  notice: { display: 'flex', flexDirection: 'column', gap: s.xs, minWidth: 0, paddingInline: s.xs },
   // Out of flow while empty, so the pill keeps its row; still in the accessibility tree as a live region.
   noticeIdle: { position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap' },
-  noticeLine: { margin: 0 },
-  attachment: { display: 'flex', alignItems: 'center', gap: s.md, padding: s.md, borderRadius: r.sm, backgroundColor: surface.rowActive, minWidth: 0 },
-  failed: { borderWidth: g.hairline, borderStyle: 'solid', borderColor: tone.dangerFg },
-  image: { width: g.band, height: g.band, objectFit: 'cover', borderRadius: r.sm },
-  text: { display: 'flex', flexDirection: 'column', minWidth: 0 },
-  name: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, color: ink.fg },
+  line: { margin: 0, textWrap: 'pretty' },
+  refusal: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', columnGap: s.md, rowGap: s.xs, minWidth: 0, paddingInline: s.xs },
+  refusalText: { flex: '1 1 16ch', minWidth: 0 },
+  flash: { borderRadius: r.keyboard, marginInline: `calc(${s.xs} * -1)`, paddingInline: s.xs, animationName: flash, animationDuration: m.reveal, animationTimingFunction: 'ease-out' },
+  attachment: {
+    display: 'flex', alignItems: 'center', gap: s.md, flex: `0 0 ${g.fileMax}`, maxWidth: '75%', boxSizing: 'border-box', minWidth: 0,
+    padding: s.md, borderRadius: r.sm, backgroundColor: surface.rowActive, scrollSnapAlign: 'start',
+  },
+  failed: { outlineWidth: g.hairline, outlineStyle: 'solid', outlineColor: tone.dangerFg, outlineOffset: `calc(${g.hairline} * -1)` },
+  // Inner radius = tile radius − padding, floored at 4px; the inset hairline separates white or black edges from the tile.
+  image: { width: g.band, height: g.band, flexShrink: 0, objectFit: 'cover', borderRadius: r.keyboard, outlineWidth: g.hairline, outlineStyle: 'solid', outlineColor: border.rail, outlineOffset: `calc(${g.hairline} * -1)` },
+  text: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minWidth: 0, marginInlineEnd: s.xs },
+  name: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fg },
   detail: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   problem: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: tone.dangerFg },
-  button: { display: 'inline-flex', justifyContent: 'center', alignItems: 'center', flexShrink: 0, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
 })

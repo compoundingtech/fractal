@@ -97,7 +97,8 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
     : grants.messageSend !== 'granted' ? 'Message send is not granted for this device.'
     : !readable ? 'Messages can be sent once this conversation loads.' : undefined
   const uploads = attachmentAdapter !== undefined && disabledReason === undefined && grants.attachmentUpload === 'granted' ? attachmentAdapter : undefined
-  const imageDisabledReason = 'Image upload is not available. Remove the staged images to send a text-only message.'
+  // The cause only: the composer adds the count-aware way out ("Remove the image to send your text.") and Remove.
+  const imageDisabledReason = grants.attachmentUpload !== 'granted' ? 'You can no longer send images here.' : "Images can't be sent right now."
   // assistant-ui requires an adapter even to remove pending images. Preserve removal, never upload, after grant loss.
   const runtimeAttachments: AttachmentAdapter | undefined = uploads ?? (attachmentAdapter === undefined ? undefined : {
     accept: attachmentAdapter.accept,

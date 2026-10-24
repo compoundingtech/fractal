@@ -166,12 +166,13 @@ describe('composer send contract', () => {
     const adapter = imageUploadAdapter(attachments.upload)
     const bind = (overrides: Partial<Grants>, readable = true) => composerSendBinding({ source: { attachments }, agentRef: seat, grants: { ...grants, ...overrides }, readable, items: [], onRefused: vi.fn(), attachmentAdapter: adapter })
     const pending = await adapter.add({ file: new File(['image'], 'staged.png', { type: 'image/png' }) })
-    for (const binding of [bind({ attachmentUpload: 'ungranted' }), bind({ messageSend: 'ungranted' }), bind({}, false)]) {
+    // The upload grant names a permission loss; other losses are temporary. The composer appends the way out.
+    for (const [binding, cause] of [[bind({ attachmentUpload: 'ungranted' }), 'You can no longer send images here.'], [bind({ messageSend: 'ungranted' }), "Images can't be sent right now."], [bind({}, false), "Images can't be sent right now."]] as const) {
       const removalOnly = binding.runtime.adapters!.attachments!
       await expect(removalOnly.remove(pending)).resolves.toBeUndefined()
-      await expect(removalOnly.send(pending)).rejects.toThrow('Image upload is not available.')
+      await expect(removalOnly.send(pending)).rejects.toThrow(cause)
       expect(attachments.upload).not.toHaveBeenCalled()
-      expect(binding.imageAttachments).toEqual({ max: 4, disabledReason: 'Image upload is not available. Remove the staged images to send a text-only message.' })
+      expect(binding.imageAttachments).toEqual({ max: 4, disabledReason: cause })
     }
     expect(bind({}).runtime.adapters?.attachments).toBe(adapter)
     // Losing upload permission must not prevent a recovered text-only draft from sending.

@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Attach appears only on devices granted control.messages and message.send. Staged images stay removable if upload permission disappears, and removing them restores text-only sending."
+    "detail": "Adding images requires control.messages and message.send. Attach remains visible with an explanation at the image limit or after permission loss. Images stay removable; removing them restores text-only sending. Sent images have an intentional file card until authorized preview retrieval is available."
   },
   "downtime": {
     "status": "none",

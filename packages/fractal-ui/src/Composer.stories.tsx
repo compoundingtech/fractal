@@ -589,7 +589,7 @@ export const KitLabelResize: Story = { tags: ['critical'],
   },
 }
 
-/** The live app's plain composer with host image attachments: paste or Attach adds images; the host limit hides Attach and names the excess. */
+/** The live app's plain composer with host image attachments: paste or Attach adds images; at the host limit Attach stays but explains itself, and an excess or lost upload permission withholds Send with a described refusal. */
 function PlainImages({ scheme }: { readonly scheme: Scheme }) {
   const [source] = React.useState(() => createComposerFixture('idle'))
   const snapshot = React.useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot)
@@ -601,7 +601,7 @@ function PlainImages({ scheme }: { readonly scheme: Scheme }) {
   } } }
   return <Surface scheme={scheme}><div {...stylex.props(styles.lane)}>
     <button onClick={() => setUploadGranted(false)}>Revoke image upload</button>
-    <EmbraceRuntimeProvider options={options}><EmbraceComposer variant="C1" readingColumn conversationLabel="Image attachments" imageAttachments={{ max: 1, ...(uploadGranted ? {} : { disabledReason: 'Image upload is not available. Remove the staged images to send a text-only message.' }) }} /></EmbraceRuntimeProvider>
+    <EmbraceRuntimeProvider options={options}><EmbraceComposer variant="C1" readingColumn conversationLabel="Image attachments" imageAttachments={{ max: 1, ...(uploadGranted ? {} : { disabledReason: 'You can no longer send images here.' }) }} /></EmbraceRuntimeProvider>
     <div aria-label="Accepted fixture messages" role="log" {...stylex.props(styles.receipts)}>{snapshot.receipts.map((receipt, index) => <p key={index} {...stylex.props(styles.receipt)}>Attachments: {receipt.message.attachments?.map(attachment => attachment.name).join(', ')}</p>)}</div>
   </div></Surface>
 }
@@ -639,31 +639,58 @@ export const PlainImageAttachments: Story = { tags: ['critical'],
     await waitFor(() => expect(notice.querySelector('p')).not.toBe(pickerNotice))
     await expect(notice).toHaveTextContent("SVG files can't be attached. Use PNG, JPEG, GIF or WebP.")
     await expect(canvas.queryByTestId('composer-attachments')).toBeNull()
+    const draft = 'Please review the attached layout.'
     await userEvent.click(textbox(canvasElement))
+    await userEvent.type(textbox(canvasElement), draft)
     await userEvent.paste(pngFiles('first.png', 'second.png'))
     await waitFor(() => expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible())
     // The tray takes its own row above the field at every width; the one-line pill would squeeze the draft beside it.
     await settle()
     const tray = canvasElement.querySelector<HTMLElement>('[data-testid="composer-attachments"]')!.getBoundingClientRect()
     await expect(tray.bottom).toBeLessThanOrEqual(textbox(canvasElement).getBoundingClientRect().top + 1)
-    // Over the limit: the excess is named, Send and Attach are withheld instead of a later refusal.
-    await expect(canvas.getByRole('alert')).toHaveTextContent('A message can carry at most 1 image. Remove 1 to send.')
-    await expect(canvas.getByRole('button', { name: 'Send' })).toBeDisabled()
-    await expect(canvas.queryByRole('button', { name: 'Attach image' })).toBeNull()
-    await userEvent.click(canvas.getByRole('button', { name: 'Remove first.png' }))
-    await waitFor(() => expect(canvas.queryByRole('alert')).toBeNull())
-    await expect(canvas.queryByRole('button', { name: 'Attach image' })).toBeNull()
-    // Permission loss does not strand the remaining image; text can be sent after removing it.
+    // Over the limit: the excess is named; Send stays focusable but blocked, described by the refusal.
+    const refusal = canvas.getByTestId('composer-send-refusal')
+    await expect(within(refusal).getByRole('status')).toHaveTextContent('Messages can include 1 image. Remove 1 to send.')
+    const send = canvas.getByRole('button', { name: 'Send' })
+    await expect(send).toBeEnabled()
+    await expect(send).toHaveAttribute('aria-disabled', 'true')
+    await expect(send).toHaveAccessibleDescription('Messages can include 1 image. Remove 1 to send.')
+    // Attach keeps its place, explains the limit and adds nothing.
+    const attach = canvas.getByRole('button', { name: 'Attach image' })
+    await expect(attach).toHaveAttribute('aria-disabled', 'true')
+    await expect(attach).toHaveAccessibleDescription('Messages can include 1 image.')
+    // A blocked press, by pointer or keyboard, never sends: it re-renders the refusal (re-announced, highlighted) and keeps the draft.
+    await userEvent.click(send)
+    await waitFor(() => expect(refusal.querySelector('[data-refusal-attempt="1"]')).not.toBeNull())
+    send.focus()
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(refusal.querySelector('[data-refusal-attempt="2"]')).not.toBeNull())
+    await expect(send).toHaveFocus()
+    await expect(receiptLog(canvasElement).children).toHaveLength(0)
+    await expect(textbox(canvasElement)).toHaveValue(draft)
+    // Remove is named for its file and reachable by keyboard.
+    canvas.getByRole('button', { name: 'Remove first.png' }).focus()
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(within(refusal).getByRole('status')).toBeEmptyDOMElement())
+    await expect(canvas.getByRole('button', { name: 'Attach image' })).toHaveAttribute('aria-disabled', 'true')
+    // Permission loss does not strand the remaining image: the refusal is count-aware with a one-step Remove.
     await userEvent.click(canvas.getByRole('button', { name: 'Revoke image upload' }))
-    await waitFor(() => expect(canvas.getByRole('alert')).toHaveTextContent('Remove the staged images to send a text-only message.'))
-    await expect(canvas.getByRole('button', { name: 'Send' })).toBeDisabled()
+    await waitFor(() => expect(within(refusal).getByRole('status')).toHaveTextContent('You can no longer send images here. Remove the image to send your text.'))
+    await expect(canvas.getByRole('button', { name: 'Send' })).toHaveAttribute('aria-disabled', 'true')
     await expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible()
-    await expect(canvas.queryByRole('button', { name: 'Attach image' })).toBeNull()
-    await userEvent.click(canvas.getByRole('button', { name: 'Remove second.png' }))
-    await userEvent.type(textbox(canvasElement), 'Recovered text draft')
+    await expect(canvas.getByRole('button', { name: 'Attach image' })).toHaveAccessibleDescription('You can no longer send images here.')
+    await userEvent.click(textbox(canvasElement))
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(refusal.querySelector('[data-refusal-attempt="1"]')).not.toBeNull())
+    await expect(receiptLog(canvasElement).children).toHaveLength(0)
+    await expect(textbox(canvasElement)).toHaveValue(draft)
+    await userEvent.click(within(refusal).getByRole('button', { name: 'Remove image' }))
+    await waitFor(() => expect(canvasElement.querySelector('[data-testid="composer-attachments"]')).toBeNull())
+    await expect(textbox(canvasElement)).toHaveFocus()
+    await expect(textbox(canvasElement)).toHaveValue(draft)
+    await expect(canvas.getByRole('button', { name: 'Send' })).not.toHaveAttribute('aria-disabled', 'true')
     await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(within(receiptLog(canvasElement)).getByText('Attachments:')).toBeVisible())
-    await waitFor(() => expect(canvasElement.querySelector('[data-testid="composer-attachments"]')).toBeNull())
   },
 }
 export const PlainImageAttachmentsLight: Story = { ...PlainImageAttachments, args: { scheme: 'light' } }

@@ -1,5 +1,13 @@
 // Every exemption is reviewable by export identity and mode, including count-neutral swaps.
 export const scenarioExemptionIds: readonly string[] = [
+  './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#AllStates:contract-fixture',
+  './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#LongFilename:contract-fixture',
+  './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#ResolvedImageFollowup:contract-fixture',
+  './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#SentImage:contract-fixture',
+  './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#SeveralImages:contract-fixture',
+  './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#SizeRefusal:contract-fixture',
+  './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#UploadCancelled:contract-fixture',
+  './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#UploadInProgress:contract-fixture',
   './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#AgentRowDetails:contract-fixture',
   './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#AgentRowDetailsLight:contract-fixture',
   './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#Drawers:contract-fixture',

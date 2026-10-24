@@ -22,6 +22,7 @@ export const MERGE_ONLY = [
   'fractal-ui-sidebar-roster--hundred-agent-render',
 ]
 export const BOTH_WIDTHS = [
+  'fractal-app-composer-images--several-images',
   'fractal-ui-composer--footer-width-budget',
   'fractal-ui-composer--kit-label-resize',
   'fractal-ui-composer--layout-shapes',
