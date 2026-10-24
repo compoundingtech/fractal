@@ -8,7 +8,10 @@ import shutil
 import stat
 import sys
 from pathlib import Path
+# Isolated host Python excludes cwd and script discovery; trust only this checkout.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dependency_cache import install_key, verify_generation
+from candidate_sandbox import read_regular
 
 
 def destination_path(snapshot, relative):
@@ -35,7 +38,7 @@ def prepare(source, snapshot, manifest_path, generation, expected):
     member_store = source / '.devenv/candidate-members'
     if member_store.resolve() != member_store:
         raise ValueError('candidate member store must not resolve outside its selected path')
-    members = json.loads((source / 'megarepo.lock').read_text())['members']
+    members = json.loads(read_regular(source / 'megarepo.lock'))['members']
     member_paths = []
     member_copies = {}
     for name in members:

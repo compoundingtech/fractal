@@ -37,9 +37,11 @@ class SnapshotLeaseTest(unittest.TestCase):
             python.write_text(f'#!{sys.executable}\n' + '''
 import json, os, pathlib, sys
 args = sys.argv[1:]
+if args[:1] == ['-I']:
+    args = args[1:]
 if args and pathlib.Path(args[0]).name == 'candidate_sandbox.py':
     if args[1:2] == ['--prepare-removal']:
-        os.execv(sys.executable, [sys.executable, *args])
+        os.execv(sys.executable, [sys.executable, '-I', *args])
     args = args[1:]
     root = pathlib.Path(os.environ['SNAPSHOT_LEASE_FIXTURE'])
     with (root / 'sandbox-calls.jsonl').open('a') as stream:
@@ -60,8 +62,9 @@ if args and pathlib.Path(args[0]).name == 'candidate_sandbox.py':
     os.chdir(args[8])
     os.environ['SNAPSHOT_LEASE_SANDBOX'] = '1'
     os.execvp(args[10], args[10:])
-'''+ f'\nos.execv({sys.executable!r}, [{sys.executable!r}, *args])\n')
+'''+ f'\nos.execv({sys.executable!r}, [{sys.executable!r}, "-I", *args])\n')
             python.chmod(0o755)
+            (source / '.git').mkdir(parents=True)
             for relative in ('apps/fractal-web/private/build-live.mjs',
                              'apps/fractal-web/vendor/utils/src/node/cli-build-identity.js',
                              'node_modules/fixture/index.js'):
@@ -75,10 +78,15 @@ if args and pathlib.Path(args[0]).name == 'candidate_sandbox.py':
             git.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, shutil, sys
 root = pathlib.Path(os.environ['SNAPSHOT_LEASE_FIXTURE'])
-args = sys.argv[3:]
+args = sys.argv[1:]
+while args[:1] == ['-c']:
+    args = args[2:]
+args = args[2:]
 with (root / 'git-calls.jsonl').open('a') as stream:
     stream.write(json.dumps(args) + '\\n')
-if args[0] == 'rev-parse':
+if args[0] == 'config':
+    raise SystemExit(1)
+elif args[0] == 'rev-parse':
     print(os.environ['SNAPSHOT_LEASE_SHA'])
 elif args[:2] == ['worktree', 'add']:
     (pathlib.Path(args[3]) / 'apps/fractal-web').mkdir(parents=True)
@@ -103,6 +111,8 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
 (build / 'launch.sh').write_text('#!/bin/sh\\n')
 (build / 'build-receipt.json').write_text(json.dumps({
     'buildIdentity': {'rev': sha, 'dirty': False}, 'stackHead': sha}))
+for name in ('json.py', 're.py', 'sitecustomize.py', 'usercustomize.py'):
+    pathlib.Path(name).write_text('raise RuntimeError(\"candidate module reached host\")\\n')
 sealed = pathlib.Path('.devenv/pnpm-source-inputs/sealed')
 sealed.mkdir(parents=True)
 (sealed / 'payload').write_text('published source input')

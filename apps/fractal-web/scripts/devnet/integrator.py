@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Integrate open Fractal PRs and publish an immutable production build.
 
-Version 9: combine bounded selection caching with sandboxed candidate execution.
+Version 10: isolate host publication and reject executable candidate artifact types.
 """
 import datetime, fcntl, hashlib, json, math, os, pathlib, re, shutil, subprocess, time
+import sys
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
 import candidate_sandbox
 def required_input(name):
     value = os.environ.get(name)
@@ -47,7 +50,7 @@ try:
 except (ValueError, TypeError) as error:
     raise SystemExit(f'invalid integrator trust configuration: {error}')
 PR_METADATA_FIELDS = 'number,headRefName,headRefOid,baseRefName,baseRefOid,changedFiles,isDraft,author,isCrossRepository,headRepositoryOwner'
-INTEGRATOR_VERSION = 9
+INTEGRATOR_VERSION = 10
 DEPENDENCY_SANDBOX_VERSION = candidate_sandbox.DEPENDENCY_POLICY
 try:
     SELECTION_BUDGET_SECONDS = float(os.environ.get('FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS', '60'))
@@ -359,10 +362,10 @@ def prepare_dependencies():
     # Materialize the candidate's locked members before regeneration or cache reuse.
     member_inputs=hashlib.sha256(str(DEPENDENCY_SANDBOX_VERSION).encode())
     for path in ('megarepo.kdl', 'megarepo.lock'):
-        member_inputs.update(path.encode()); member_inputs.update((C/path).read_bytes())
+        member_inputs.update(path.encode()); member_inputs.update(candidate_sandbox.read_regular(C/path))
     member_key=member_inputs.hexdigest()
     member_state=L/f'{C.name}-members-key.json'
-    members=json.loads((C/'megarepo.lock').read_text())['members']
+    members=json.loads(candidate_sandbox.read_regular(C/'megarepo.lock'))['members']
     if (not member_state.exists() or
             json.loads(member_state.read_text())['key'] != member_key or
             any(not (C/'repos'/name).is_dir() or
@@ -381,7 +384,7 @@ def prepare_dependencies():
            or p.startswith(('genie/', 'scripts/ci-fractal-web-licenses', 'buck2/dependencies/'))]
     inputs=hashlib.sha256()
     for path in paths:
-        inputs.update(path.encode()); inputs.update((C/path).read_bytes())
+        inputs.update(path.encode()); inputs.update(candidate_sandbox.read_regular(C/path))
     cache=L/'metadata-cache'/inputs.hexdigest()
     if cache.exists():
         if cache.stat().st_size:
@@ -511,7 +514,9 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
             result=candidate_sandbox.run(command, worktree=cwd or C, shell=sandbox_shell,
                                         network=network, **options)
         else:
-            result=subprocess.run([str(a) for a in args], cwd=cwd, text=True,
+            if command[0] == 'git':
+                command = ['python3', '-I', str(SCRIPT_DIR/'host-git.py'), *command[1:]]
+            result=subprocess.run(command, cwd=SCRIPT_DIR, text=True,
                                   stdout=subprocess.PIPE if capture or log_capture else None,
                                   stderr=subprocess.PIPE if capture or log_capture else None,
                                   check=check and not log_capture, timeout=timeout,
@@ -546,7 +551,7 @@ def install():
     inputs=hashlib.sha256(f'{DEPENDENCY_SANDBOX_VERSION}:{candidate_sandbox.INSTALL_POLICY}'.encode())
     for path in ('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'megarepo.kdl',
                  'megarepo.lock', 'pnpm-source-inputs.json'):
-        inputs.update(path.encode()); inputs.update((C/path).read_bytes())
+        inputs.update(path.encode()); inputs.update(candidate_sandbox.read_regular(C/path))
     lockhash=inputs.hexdigest()
     state=L/f'{C.name}-lockhash'
     if not (C/'node_modules').exists() or not state.exists() or state.read_text()!=lockhash:
@@ -617,7 +622,7 @@ def current_server_url(cleanenv, expected_sha=None):
     return None
 def activate(previous):
     current=os.path.realpath(P/'current')
-    sha=json.loads((P/'current/build-receipt.json').read_text())['buildIdentity']['rev']
+    sha=json.loads(candidate_sandbox.read_regular(P/'current/build-receipt.json'))['buildIdentity']['rev']
     cleanenv={k:v for k,v in os.environ.items() if k not in ('PTY_SESSION','ST_AGENT')}
     cleanenv['PWD']=str(C/'apps/fractal-web')
     if previous==current:
@@ -638,7 +643,7 @@ def activate(previous):
     except Exception:
         subprocess.run(['devnet','down',purpose],cwd=C/'apps/fractal-web',env=cleanenv,check=False)
         if previous and previous!=current:
-            rollback_sha=json.loads((pathlib.Path(previous)/'build-receipt.json').read_text())['buildIdentity']['rev']
+            rollback_sha=json.loads(candidate_sandbox.read_regular(pathlib.Path(previous)/'build-receipt.json'))['buildIdentity']['rev']
             recovery_select_build(rollback_sha)
             subprocess.run(['devnet','up',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
         raise RuntimeError('devnet activation failed; previous build rolled back if available')

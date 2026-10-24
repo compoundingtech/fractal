@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Runner unit tests; add --real to exercise the pinned Linux sandbox too."""
+import errno
 import os
 from pathlib import Path
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -30,6 +33,43 @@ class RunnerTest(unittest.TestCase):
         self.tools = patch.object(sandbox, 'tools', return_value=(self.binaries, self.state, self.store))
         self.tools.start()
         self.addCleanup(self.tools.stop)
+
+    def test_read_regular_returns_bytes_with_nofollow_and_nonblocking(self):
+        artifact = self.root / 'build-receipt.json'
+        artifact.write_bytes(b'{"ok":true}\n')
+        with patch.object(sandbox.os, 'open', wraps=os.open) as opened:
+            self.assertEqual(sandbox.read_regular(artifact), b'{"ok":true}\n')
+        flags = opened.call_args.args[1]
+        self.assertTrue(flags & os.O_NOFOLLOW)
+        self.assertTrue(flags & os.O_NONBLOCK)
+
+    def test_read_regular_rejects_fifo_and_directory(self):
+        fifo = self.root / 'build-receipt.json'
+        os.mkfifo(fifo)
+        for artifact in (fifo, self.worktree):
+            with self.subTest(artifact=artifact), \
+                    self.assertRaisesRegex(RuntimeError, 'must be a regular file'):
+                sandbox.read_regular(artifact)
+
+    def test_read_regular_rejects_symlink(self):
+        target = self.root / 'secret'
+        target.write_text('must not be read')
+        artifact = self.root / 'build-receipt.json'
+        artifact.symlink_to(target)
+        with self.assertRaises(OSError) as raised:
+            sandbox.read_regular(artifact)
+        self.assertEqual(raised.exception.errno, errno.ELOOP)
+
+    def test_read_regular_rejects_device_like_fstat_and_closes_descriptor(self):
+        artifact = self.root / 'build-receipt.json'
+        artifact.write_text('must not be read')
+        device = os.stat_result((stat.S_IFCHR | 0o600,) + (0,) * 9)
+        with patch.object(sandbox.os, 'fstat', return_value=device) as inspected, \
+                self.assertRaisesRegex(RuntimeError, 'must be a regular file'):
+            sandbox.read_regular(artifact)
+        with self.assertRaises(OSError) as raised:
+            os.fstat(inspected.call_args.args[0])
+        self.assertEqual(raised.exception.errno, errno.EBADF)
 
     def test_snapshot_unsealing_preserves_payloads_and_symlink_targets(self):
         root = self.root / 'snapshots'
@@ -170,6 +210,52 @@ class RunnerTest(unittest.TestCase):
         with patch.object(sandbox.subprocess, 'run', side_effect=complete), self.assertRaisesRegex(RuntimeError, 'without symlinks'):
             sandbox.run(['node'], worktree=self.worktree, output=output)
         self.assertFalse(output.exists())
+
+    def test_output_fifo_receipt_is_not_promoted(self):
+        output = self.root / 'production/builds/revision'
+        def complete(argv, **kwargs):
+            stage = Path(argv[argv.index(str(output.parent)) - 1])
+            (stage / output.name).mkdir()
+            os.mkfifo(stage / output.name / 'build-receipt.json')
+            return subprocess.CompletedProcess(argv, 0)
+        with patch.object(sandbox.subprocess, 'run', side_effect=complete), \
+                self.assertRaisesRegex(RuntimeError, 'only regular files and directories.*build-receipt.json'):
+            sandbox.run(['node'], worktree=self.worktree, output=output)
+        self.assertFalse(output.exists())
+
+    def test_output_socket_is_not_promoted(self):
+        output = self.root / 'production/builds/revision'
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            def complete(argv, **kwargs):
+                stage = Path(argv[argv.index(str(output.parent)) - 1])
+                (stage / output.name).mkdir()
+                listener.bind(str(stage / output.name / 'socket'))
+                return subprocess.CompletedProcess(argv, 0)
+            with patch.object(sandbox.subprocess, 'run', side_effect=complete), \
+                    self.assertRaisesRegex(RuntimeError, 'only regular files and directories.*socket'):
+                sandbox.run(['node'], worktree=self.worktree, output=output)
+        self.assertFalse(output.exists())
+
+    def test_output_root_must_be_a_real_directory(self):
+        output = self.root / 'production/builds/revision'
+        for kind in ('fifo', 'socket', 'file', 'symlink', 'missing'):
+            with self.subTest(kind=kind), socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                def complete(argv, **kwargs):
+                    stage = Path(argv[argv.index(str(output.parent)) - 1])
+                    artifact = stage / output.name
+                    if kind == 'fifo':
+                        os.mkfifo(artifact)
+                    elif kind == 'socket':
+                        listener.bind(str(artifact))
+                    elif kind == 'file':
+                        artifact.write_text('not a directory')
+                    elif kind == 'symlink':
+                        artifact.symlink_to(self.worktree, target_is_directory=True)
+                    return subprocess.CompletedProcess(argv, 0)
+                with patch.object(sandbox.subprocess, 'run', side_effect=complete), \
+                        self.assertRaisesRegex(RuntimeError, 'must be a directory without symlinks or special files'):
+                    sandbox.run(['node'], worktree=self.worktree, output=output)
+                self.assertFalse(output.exists())
 
     def test_nested_dependencies_are_readonly(self):
         modules = self.worktree / 'apps/web/node_modules'

@@ -65,7 +65,7 @@ The immutable dependency cache
 remains in the `bwrap-v1` namespace and copies installed packages, not the external
 content-addressed package store.
 
-Run `python3 apps/fractal-web/scripts/devnet/integrator.py` for the five-minute
+Run `python3 -I apps/fractal-web/scripts/devnet/integrator.py` for the five-minute
 loop, or append `--once` for one tick. `--dry-run` additionally requires
 `FRACTAL_DRY_RUN_CLONE`; it merges and regenerates dependencies without building
 or swapping production. A dry run still mutates its disposable clone and caches.
@@ -378,9 +378,26 @@ the pnpm cache, so dependency hardlinks cannot write through via a writable alia
 
 Build outputs are physically staged inside the snapshot and exposed at the
 requested output path only inside bubblewrap. After success, trusted orchestration
-rejects symlink artifacts and promotes the directory to the production build root.
+accepts only real directories and regular files, rejecting symlinks and special
+files before promoting the directory to the production build root.
 Candidate commands cannot write production state or activate Devnet. Control-plane
 Git/GitHub, admission, receipt checks, publication and retention remain outside.
+
+Host Python steps use `-I` and the trusted launcher's working directory, ignoring
+candidate module discovery and Python environment overrides. Trusted sibling
+imports explicitly insert only the launcher's script directory. Receipt, HTML,
+launch-script and dependency-input reads use no-follow, nonblocking opens and
+verify regular descriptors before reading; candidate output is inert data here.
+Integration signature version 10 prevents reuse of earlier publication results.
+
+| Host step | Working directory / input | Boundary |
+| --- | --- | --- |
+| Sandbox CLI, cache population, dependency preparation, receipt validation and logging | Trusted launcher script directory; absolute candidate paths as data | Isolated Python; no candidate imports. Snapshot directory cleanup never changes hardlinked file modes. |
+| Git selection, checkout, merge, add and snapshot removal | Trusted launcher directory; explicit source clone | `host-git.py` ignores ambient config, disables hooks/fsmonitor/external protocol, and refuses local executable filter/merge/diff drivers and includes. Source Git metadata is launcher-owned and read-only in candidate children; candidate attributes cannot introduce a driver. |
+| Overlay/member/dependency copies | Trusted Python; confined source/destination paths | Existing destination-ancestor checks reject escapes; source aliases remain confined, overlay symlinks are preserved rather than dereferenced, special files fail closed. No host tar or candidate-directed shell copy. |
+| Nix tool realization and environment resolution | Trusted pinned checkout / private bootstrap home | Only pinned trusted flakes, clean environment; never candidate expressions. |
+| Node, pnpm, generators, hooks and license scripts | Candidate directory inside bubblewrap only | No host Node/package-loader discovery; child environment is explicit and credential-free. |
+| Output publication, chmod and pointer renames | Trusted launcher directory; validated promoted output | Regular-file/directory-only promotion and safe descriptor reads; no output code executes during admission/publication. |
 
 Genie and builds have a private network namespace. Member fetching, installation
 and license regeneration explicitly share the host network for dependency access.

@@ -11,14 +11,20 @@ name=${3:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
 [[ $name =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ && $name != . && $name != .. ]] || { echo 'Invalid deployment name' >&2; exit 2; }
 SOURCE=$(realpath "$SOURCE")
 # Validate the security boundary before creating build roots or worktrees.
-python3 "$script_dir/candidate_sandbox.py" --check-config
+python3 -I "$script_dir/candidate_sandbox.py" --check-config
 # A sandbox-policy namespace cannot reuse an immutable pre-sandbox layout.
-dependency_policy=$(python3 "$script_dir/candidate_sandbox.py" --print-policy)
+dependency_policy=$(python3 -I "$script_dir/candidate_sandbox.py" --print-policy)
 DEPCACHE=$DEPCACHE/$dependency_policy
 mkdir -p "$ROOT" "$SNAPSHOT_ROOT" "$DEPCACHE"
 ROOT=$(realpath -- "$ROOT")
 SNAPSHOT_ROOT=$(realpath -- "$SNAPSHOT_ROOT")
 DEPCACHE=$(realpath -- "$DEPCACHE")
+# Host tools never inherit candidate cwd/config discovery. Git metadata is
+# launcher-owned and read-only in candidate children; ignore ambient config.
+cd -- "$script_dir"
+git() {
+  python3 -I "$script_dir/host-git.py" "$@"
+}
 case "$DEPCACHE/" in
   "$SOURCE/"*) echo 'Dependency cache must be outside the mutable source clone' >&2; exit 2 ;;
 esac
@@ -35,7 +41,7 @@ activated=0
 cleanup_warnings=
 mkdir -p "$P/builds"
 log_run() {
-  TS=$(date -u +%FT%TZ) SHA=$sha OUTCOME=$outcome REASON=$reason MS=$(($(date +%s%3N)-started)) CLEANUP_WARNINGS=$cleanup_warnings python3 -c 'import json,os; print(json.dumps({"ts":os.environ["TS"],"sha":os.environ["SHA"],"outcome":os.environ["OUTCOME"],"reason":os.environ["REASON"],"ms":int(os.environ["MS"]),"cleanupWarnings":os.environ["CLEANUP_WARNINGS"].splitlines()}))' >> "$P/builds.jsonl"
+  TS=$(date -u +%FT%TZ) SHA=$sha OUTCOME=$outcome REASON=$reason MS=$(($(date +%s%3N)-started)) CLEANUP_WARNINGS=$cleanup_warnings python3 -I -c 'import json,os; print(json.dumps({"ts":os.environ["TS"],"sha":os.environ["SHA"],"outcome":os.environ["OUTCOME"],"reason":os.environ["REASON"],"ms":int(os.environ["MS"]),"cleanupWarnings":os.environ["CLEANUP_WARNINGS"].splitlines()}))' >> "$P/builds.jsonl"
 }
 cleanup_warning() {
   printf 'WARNING: cleanup: %s\n' "$1" >&2
@@ -48,7 +54,7 @@ finish() {
   set +e
   # Command wrappers may need getcwd even with absolute arguments. Leave the
   # snapshot before deleting it, including on failed/partial builds.
-  if ! cd -- "$ROOT" && ! cd /; then
+  if ! cd -- "$script_dir" && ! cd /; then
     printf 'ERROR: cleanup cannot enter a stable working directory\n' >&2
     exit 1
   fi
@@ -96,7 +102,7 @@ finish() {
   fi
   rm -f "$P/admitted-$$" "$P/overlay-manifest-$$" || cleanup_warning 'cannot remove temporary admission/overlay files'
   if [[ -n $snapshot ]]; then
-    if python3 "$script_dir/candidate_sandbox.py" --prepare-removal "$snapshot" --snapshot-root "$snapshot_root"; then
+    if python3 -I "$script_dir/candidate_sandbox.py" --prepare-removal "$snapshot" --snapshot-root "$snapshot_root"; then
       git -C "$SOURCE" worktree remove --force "$snapshot" ||
         { rm -rf -- "$snapshot" || cleanup_warning 'cannot remove snapshot worktree; later stale reclamation can retry'; }
     else
@@ -137,7 +143,7 @@ for stale in "$snapshot_root"/*; do
   (
     exec 7>"$stale.lock"
     if flock -n 7; then
-      if python3 "$script_dir/candidate_sandbox.py" --prepare-removal "$stale" --snapshot-root "$snapshot_root"; then
+      if python3 -I "$script_dir/candidate_sandbox.py" --prepare-removal "$stale" --snapshot-root "$snapshot_root"; then
         git -C "$SOURCE" worktree remove --force "$stale" || rm -rf -- "$stale"
       else
         cleanup_warning 'cannot safely unseal stale snapshot directories'
@@ -156,8 +162,8 @@ if [[ -e $build ]]; then build=; reason=immutable-build-already-exists; exit 1; 
 reason=dependency-cache-failed
 exec 6>"$DEPCACHE/.cache.lock"
 flock -x 6
-dependency_key=$(python3 "$script_dir/dependency_cache.py" key "$SOURCE")
-python3 "$script_dir/dependency_cache.py" populate "$SOURCE" "$DEPCACHE" "$dependency_key"
+dependency_key=$(python3 -I "$script_dir/dependency_cache.py" key "$SOURCE")
+python3 -I "$script_dir/dependency_cache.py" populate "$SOURCE" "$DEPCACHE" "$dependency_key"
 generation=$DEPCACHE/$dependency_key
 # Acquire the shared generation lease before releasing the publication/prune
 # lock. FD 5 stays open until after finish() removes this run's snapshot.
@@ -167,12 +173,11 @@ flock -u 6
 exec 6>&-
 reason='snapshot-failed'
 git -C "$SOURCE" worktree add --detach "$snapshot" "$sha"
-python3 "$script_dir/prepare-dependencies.py" "$SOURCE" "$snapshot" "$P/overlay-manifest-$$" "$generation" "$dependency_key"
-cd "$snapshot/apps/fractal-web"
+python3 -I "$script_dir/prepare-dependencies.py" "$SOURCE" "$snapshot" "$P/overlay-manifest-$$" "$generation" "$dependency_key"
 identity=$snapshot/apps/fractal-web/vendor/utils/src/node/cli-build-identity.js
 # Admission and activation stay on the host; the complete private builder and
 # its children run in the networkless sandbox, including resource fallbacks.
-sandbox_command=(python3 "$script_dir/candidate_sandbox.py"
+sandbox_command=(python3 -I "$script_dir/candidate_sandbox.py"
   --worktree "$snapshot" --shell web --output "$build" --readonly-dependencies
   --directory "$snapshot/apps/fractal-web"
   -- node private/build-live.mjs "$build" "$identity" "$sha")
@@ -195,24 +200,9 @@ else
     mode=fallback-nice-19
   else exit "$status"; fi
 fi
-cp "$P/overlay-manifest-$$" "$build/overlay-snapshot.json"
 reason=receipt-invalid
-python3 - "$build/build-receipt.json" "$sha" "$build/overlay-snapshot.json" "$script_dir" "$snapshot" <<'PY'
-import json,sys
-sys.path.insert(0, sys.argv[4])
-import candidate_sandbox
-r=json.load(open(sys.argv[1])); assert r['buildIdentity']['rev']==sys.argv[2] and r['buildIdentity']['dirty'] is False and r['stackHead']==sys.argv[2]
-manifest=json.load(open(sys.argv[3]))
-r.update(dependencyKey=manifest['dependencyKey'],dependencyFiles=manifest['dependencyFiles'])
-r['devShell'] = candidate_sandbox.shell_provenance(sys.argv[5])
-with open(sys.argv[1],'w') as f: f.write(json.dumps(r,indent=2)+'\n')
-PY
+python3 -I "$script_dir/validate-candidate-output.py" "$build" "$sha" "$P/overlay-manifest-$$" "$snapshot"
 chmod +x "$build/launch.sh"
-reason=bundle-invalid
-python3 - "$build/web/index.html" <<'PY'
-import re,sys
-s=open(sys.argv[1]).read(); assert '/@vite/client' not in s and re.search(r'/assets/[^"\s]+\.js',s)
-PY
 reason=activation-failed
 ln -s "$build" "$P/.current-$$"
 mv -Tf "$P/.current-$$" "$P/current"

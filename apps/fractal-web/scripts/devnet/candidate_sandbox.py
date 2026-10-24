@@ -30,6 +30,18 @@ def pnpm_install_command(*options):
             '--store-dir', PNPM_STORE_PATH, *options]
 
 
+def read_regular(path) -> bytes:
+    """Read a regular file without following its final symlink or blocking on a FIFO."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError(f'artifact must be a regular file: {path}')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            return stream.read()
+    finally:
+        os.close(fd)
+
+
 def shell_provenance(worktree):
     """Record toolchain drift without evaluating any candidate Nix expression."""
     files = {}
@@ -275,8 +287,17 @@ def run(args, *, worktree, shell=None, network=False, output=None,
             result = subprocess.run(command, **kwargs)
             if staged and result.returncode == 0:
                 artifact = staged / output.name
-                if not artifact.is_dir() or artifact.is_symlink() or any(p.is_symlink() for p in artifact.rglob('*')):
-                    raise RuntimeError('candidate output must be a directory without symlinks')
+                try:
+                    mode = artifact.lstat().st_mode
+                except FileNotFoundError as error:
+                    raise RuntimeError('candidate output must be a directory without symlinks or special files') from error
+                if not stat.S_ISDIR(mode):
+                    raise RuntimeError('candidate output must be a directory without symlinks or special files')
+                for path in artifact.rglob('*'):
+                    mode = path.lstat().st_mode
+                    if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                        raise RuntimeError(f'candidate output must contain only regular files and directories '
+                                           f'without symlinks or special files: {path}')
                 output.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(artifact), str(output))
             return result
