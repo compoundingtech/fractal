@@ -58,6 +58,14 @@ pub struct VerifyGoRequest {
     pub failure_restore: bool,
 }
 
+/// Authenticated origin timestamps too far ahead to contribute to the time ratchet.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClockDiagnostics {
+    pub future_dated_count: u64,
+    pub max_future_skew_ms: u64,
+}
+
 /// A verification observation, not a consumption record or authorization to execute an installer.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -71,6 +79,7 @@ pub struct VerifyGoReceipt {
     pub expires_at: String,
     /// A valid same-operation consumption was observed; this verification is a replay.
     pub consumed: bool,
+    pub diagnostics: ClockDiagnostics,
     pub policy_path: Option<String>,
     pub policy_hash: String,
 }

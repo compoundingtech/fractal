@@ -3,7 +3,7 @@ use super::*;
 use fractal_schema::deploy_policy::Policy;
 use smallclaims::principal::Verdict;
 
-use fractal_schema::deploy::{VerifyGoRequest, VerifyGoReceipt};
+use fractal_schema::deploy::{ClockDiagnostics, VerifyGoRequest, VerifyGoReceipt};
 
 type Checked<T> = std::result::Result<T, St3Error>;
 const UNREPAIRED_REPLICA: &str = "NOT EXISTS (SELECT 1 FROM replica_records WHERE replica_records.claim_id=claims.id AND replica_records.state='repaired')";
@@ -64,6 +64,11 @@ impl Store {
 
     fn deploy_go_record(&self, policy: &Policy, id: &str, now: Option<u128>) -> Checked<(ClaimRecord, BTreeMap<String, Value>)> {
         let (claim, go) = self.deploy_record(id, "deploy.go", &policy.go_signers)?;
+        self.deploy_validate_go(policy, &go, now)?;
+        Ok((claim, go))
+    }
+
+    fn deploy_validate_go(&self, policy: &Policy, go: &BTreeMap<String, Value>, now: Option<u128>) -> Checked<()> {
         if policy.refused_verifier_hosts.iter().any(|h| Some(h.as_str()) == go.get("host").and_then(Value::as_str))
             || !policy.consumption_signers.iter().any(|a| Some(a.as_str()) == go.get("actor").and_then(Value::as_str)) {
             return Err(refuse("deploy-policy-refused", "GO host or executor is refused by packaged policy"));
@@ -78,41 +83,49 @@ impl Store {
             || compat.get("newCommit") != go.get("new").and_then(|v| v.get("commit")) {
             return Err(refuse("deploy-compat-mismatch", "compatibility signoff does not bind GO train and commits"));
         }
-        Ok((claim, go))
+        Ok(())
     }
 
-    /// Principal signatures authenticate signed_at_unix_ms; local receipt times do not.
-    /// Use only accepted, active whole-record proofs from this GO's origin.
-    fn deploy_trusted_now(&self, go_id: &str, now: u128) -> Checked<u128> {
+    /// Signed history is a ratchet, not a clock oracle. Future origin facts are diagnostics.
+    fn deploy_trusted_now(&self, go: &ClaimRecord, fields: &BTreeMap<String, Value>, local_now: u128) -> Checked<(u128, ClockDiagnostics)> {
         let connection = self.readers.get();
-        let origin: String = connection.query_row(&format!(
-            "SELECT origin FROM claims WHERE id=?1 AND kind='deploy.go'
-             AND {UNREPAIRED_CLAIM} AND {UNREPAIRED_REPLICA}"), [go_id], |row| row.get(0))
-            .optional().map_err(internal)?
-            .ok_or_else(|| refuse("deploy-dangling-reference", "missing active deploy.go"))?;
         let mut query = connection.prepare_cached(&format!(
-            "SELECT id FROM claims WHERE origin=?1 AND {UNREPAIRED_CLAIM} AND {UNREPAIRED_REPLICA}"))
+            "SELECT id,origin FROM claims WHERE origin IN (?1,?2) AND {UNREPAIRED_CLAIM} AND {UNREPAIRED_REPLICA}"))
             .map_err(internal)?;
-        let records = query.query_map([&origin], |row| row.get::<_, String>(0)).map_err(internal)?;
-        let mut newest = None;
-        for id in records {
-            let auth = self.claim_authorization(&id.map_err(internal)?).map_err(internal)?;
+        let records = query.query_map([&go.origin, &self.origin], |row|
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(internal)?;
+        let cutoff = local_now.saturating_add(CLOCK_TOLERANCE_MS);
+        let mut origin_ref = 0;
+        let mut local_self_max = 0;
+        let mut go_signed_at = 0;
+        let mut diagnostics = ClockDiagnostics::default();
+        for row in records {
+            let (id, origin) = row.map_err(internal)?;
+            let auth = self.claim_authorization(&id).map_err(internal)?;
             if auth.verdict != Verdict::Verified { continue; }
             if let Some(signature) = auth.signature.filter(|signature|
                 signature.on_behalf.is_none() && signature.format.is_none() && signature.signed_fields.is_empty())
             {
                 let signed_at = u128::from(signature.signed_at_unix_ms);
-                newest = Some(newest.map_or(signed_at, |previous: u128| previous.max(signed_at)));
+                if id == go.id { go_signed_at = signed_at; }
+                if origin == self.origin { local_self_max = local_self_max.max(signed_at); }
+                if origin == go.origin {
+                    if signed_at <= cutoff { origin_ref = origin_ref.max(signed_at); }
+                    else {
+                        diagnostics.future_dated_count += 1;
+                        let skew = signature.signed_at_unix_ms.saturating_sub(u64::try_from(local_now).unwrap_or(u64::MAX));
+                        diagnostics.max_future_skew_ms = diagnostics.max_future_skew_ms.max(skew);
+                    }
+                }
             }
         }
-        let clock_error = |reason| refuse("deploy-clock-untrusted", "local clock is outside the signed origin window")
-            .with_detail("reason", reason);
-        let newest = newest.ok_or_else(|| clock_error("no-reference"))?;
-        if now < newest.saturating_sub(CLOCK_TOLERANCE_MS) { return Err(clock_error("behind")); }
-        if now > newest.saturating_add(ORIGIN_FRESHNESS_MS + CLOCK_TOLERANCE_MS) {
-            return Err(clock_error("ahead"));
+        if local_now < local_self_max.saturating_sub(CLOCK_TOLERANCE_MS)
+            || go_signed_at > cutoff || timestamp(fields, "issuedAt")? > cutoff
+        {
+            return Err(refuse("deploy-clock-untrusted", "local clock is behind signed own-node or GO evidence")
+                .with_detail("reason", "behind"));
         }
-        Ok(newest)
+        Ok((local_now.max(origin_ref), diagnostics))
     }
 
     fn verify_deploy_go_snapshot(&self, policy: &Policy, request: &VerifyGoRequest, now: u128) -> Checked<VerifyGoReceipt> {
@@ -120,12 +133,9 @@ impl Store {
         if request.host != self.origin || policy.refused_verifier_hosts.contains(&self.origin) {
             return Err(refuse("deploy-policy-refused", "verification is authorized only on the allowed executing host"));
         }
-        let signed_now = self.deploy_trusted_now(&request.go_id, now)?;
-        let (claim, go) = self.deploy_go_record(policy, &request.go_id, Some(now))?;
-        // Clock tolerance must not resurrect a GO already expired by signed evidence.
-        if timestamp(&go, "expiresAt")? <= signed_now {
-            return Err(refuse("deploy-invalid-time", "GO has expired according to signed origin evidence"));
-        }
+        let (claim, go) = self.deploy_record(&request.go_id, "deploy.go", &policy.go_signers)?;
+        let (now, diagnostics) = self.deploy_trusted_now(&claim, &go, now)?;
+        self.deploy_validate_go(policy, &go, Some(now))?;
         for (name, expected) in [
             ("host", json!(request.host)), ("actor", json!(request.actor)),
             ("operation", json!(request.operation)), ("trainId", json!(request.train_id)),
@@ -225,6 +235,7 @@ impl Store {
             go_id: claim.id, origin: claim.origin, actor: request.actor.clone(), host: request.host.clone(),
             operation: request.operation.clone(), train_id: request.train_id.clone(), expires_at: text(&go, "expiresAt")?.to_owned(),
             consumed,
+            diagnostics,
             policy_path: Policy::packaged_path().map(str::to_owned), policy_hash: policy.content_hash().to_owned(),
         })
     }

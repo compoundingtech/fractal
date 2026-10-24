@@ -120,76 +120,118 @@ fn forbidden_local_host_cannot_claim_an_allowed_host() {
 #[test]
 fn origin_receipt_requires_recent_nonfuture_success() {
     let fixture = Fixture::new();
-    for time in [None, Some(fixture.now - 11*60*1000), Some(fixture.now+1)] {
+    let (claim, go) = fixture.local.deploy_record(&fixture.request.go_id, "deploy.go", &fixture.policy.go_signers).unwrap();
+    let (trusted_now, _) = fixture.local.deploy_trusted_now(&claim, &go, fixture.now).unwrap();
+    for time in [None, Some(trusted_now - 11*60*1000), Some(trusted_now+1)] {
         fixture.receipt(time);
         assert!(fixture.verify().is_err());
     }
-    fixture.receipt(Some(fixture.now - 10*60*1000));
+    fixture.receipt(Some(trusted_now - 10*60*1000));
     fixture.verify().unwrap();
     fixture.local.connection.write().execute("DELETE FROM replication_peers WHERE peer='host-b'", []).unwrap();
     assert!(fixture.verify().is_err());
 }
 
 #[test]
-fn signed_origin_window_refuses_behind_and_ahead_local_clocks() {
+fn quiet_origin_accepts_repeated_unchanged_syncs_after_fifteen_minutes() {
     let fixture = Fixture::new();
-    for (now, reason) in [
-        (fixture.now - CLOCK_TOLERANCE_MS - 60_000, "behind"),
-        (fixture.now + ORIGIN_FRESHNESS_MS + CLOCK_TOLERANCE_MS + 60_000, "ahead"),
-    ] {
-        // Even a locally stamped "successful sync now" cannot establish clock trust.
-        fixture.receipt(Some(now));
-        let error = fixture.local.verify_deploy_go(&fixture.policy, &fixture.request, now).unwrap_err();
-        assert_eq!(error.code, "deploy-clock-untrusted");
-        assert_eq!(error.details["reason"], reason);
-    }
-}
-
-#[test]
-fn clock_without_verified_signed_origin_reference_is_untrusted() {
-    let fixture = Fixture::new();
-    let unsigned = Store::open_memory("host-a").unwrap();
-    let claim = publish(&unsigned, "deploy.go", MANAGER, fixture.go.clone());
-    let mut request = fixture.request.clone();
-    request.go_id = claim.id;
-    let error = unsigned.verify_deploy_go(&fixture.policy, &request, fixture.now).unwrap_err();
-    assert_eq!(error.code, "deploy-clock-untrusted");
-    assert_eq!(error.details["reason"], "no-reference");
-}
-
-#[test]
-fn clocks_within_signed_origin_tolerance_pass() {
-    let mut fixture = Fixture::new();
-    let mut go = fixture.go.clone();
-    go["issuedAt"] = json!(time(fixture.now - 5*60*1000));
-    fixture.replace_go(go);
-    for now in [fixture.now - CLOCK_TOLERANCE_MS + 1000, fixture.now + CLOCK_TOLERANCE_MS - 1000] {
+    let origin_count = || fixture.local.readers.get().query_row(
+        "SELECT COUNT(*) FROM claims WHERE origin='host-b'", [], |row| row.get::<_, u64>(0)).unwrap();
+    let before = origin_count();
+    for minutes in [12, 13, 15] {
+        sync(&fixture.issuer, &fixture.local);
+        let now = fixture.now + minutes*60*1000;
         fixture.receipt(Some(now));
         fixture.local.verify_deploy_go(&fixture.policy, &fixture.request, now).unwrap();
     }
+    assert_eq!(origin_count(), before, "unchanged sync needs no new signed origin fact");
 }
 
 #[test]
-fn moving_clock_back_cannot_resurrect_expired_go_even_within_tolerance() {
+fn local_clock_behind_own_signed_evidence_is_refused() {
+    let fixture = Fixture::new();
+    fixture.local.set_write_clock_at(fixture.now + 5*60*1000).unwrap();
+    publish(&fixture.local, "deploy.go-consumed", EXECUTOR, json!({
+        "version":1,"goId":fixture.request.go_id,"operation":"install","result":"example"
+    }));
+    let error = fixture.verify().unwrap_err();
+    assert_eq!(error.code, "deploy-clock-untrusted");
+    assert_eq!(error.details["reason"], "behind");
+}
+
+#[test]
+fn future_origin_facts_are_diagnostics_not_clock_authority() {
+    let fixture = Fixture::new();
+    fixture.issuer.set_write_clock_at(fixture.now + 30*60*1000).unwrap();
+    let future = publish(&fixture.issuer, "deploy.compat-signoff", COMPAT, json!({
+        "version":1,"trainId":"train/future","oldCommit":"a".repeat(40),"newCommit":"b".repeat(40)
+    }));
+    sync(&fixture.issuer, &fixture.local);
+    fixture.receipt(Some(fixture.now));
+    let signed_at = fixture.local.claim_authorization(&future.id).unwrap().signature.unwrap().signed_at_unix_ms;
+    let receipt = fixture.verify().unwrap();
+    assert_eq!(receipt.diagnostics.future_dated_count, 1);
+    assert_eq!(u128::from(receipt.diagnostics.max_future_skew_ms), u128::from(signed_at) - fixture.now);
+}
+
+#[test]
+fn missing_clock_reference_uses_local_time_without_authorizing_unsigned_go() {
+    let fixture = Fixture::new();
+    let unsigned = Store::open_memory("host-a").unwrap();
+    let claim = publish(&unsigned, "deploy.go", MANAGER, fixture.go.clone());
+    let fields = fields(&claim).unwrap();
+    let (trusted, diagnostics) = unsigned.deploy_trusted_now(&claim, &fields, fixture.now).unwrap();
+    assert_eq!(trusted, fixture.now);
+    assert_eq!(diagnostics, ClockDiagnostics::default());
+    let mut request = fixture.request.clone();
+    request.go_id = claim.id;
+    assert!(unsigned.verify_deploy_go(&fixture.policy, &request, fixture.now).is_err());
+}
+
+#[test]
+fn go_own_future_issue_or_signature_is_rollback_evidence() {
+    for future_signature in [false, true] {
+        let mut fixture = Fixture::new();
+        let mut go = fixture.go.clone();
+        if future_signature {
+            fixture.issuer.set_write_clock_at(fixture.now + 3*60*1000).unwrap();
+        } else {
+            go["issuedAt"] = json!(time(fixture.now + 3*60*1000));
+        }
+        fixture.replace_go(go);
+        let error = fixture.verify().unwrap_err();
+        assert_eq!(error.code, "deploy-clock-untrusted");
+        assert_eq!(error.details["reason"], "behind");
+    }
+}
+
+#[test]
+fn origin_reference_within_tolerance_ratchets_expiry_and_freshness() {
     let mut fixture = Fixture::new();
     let mut go = fixture.go.clone();
-    go["issuedAt"] = json!(time(fixture.now - 20*60*1000));
-    go["expiresAt"] = json!(time(fixture.now - 30_000));
+    go["expiresAt"] = json!(time(fixture.now + 30_000));
     fixture.replace_go(go);
-    for (now, expected) in [
-        (fixture.now - 15*60*1000, "deploy-clock-untrusted"),
-        (fixture.now - 60_000, "deploy-invalid-time"),
-    ] {
-        fixture.receipt(Some(now));
-        assert_eq!(fixture.local.verify_deploy_go(&fixture.policy, &fixture.request, now).unwrap_err().code, expected);
-    }
+    fixture.issuer.set_write_clock_at(fixture.now + 60_000).unwrap();
+    publish(&fixture.issuer, "deploy.compat-signoff", COMPAT, json!({
+        "version":1,"trainId":"train/newer","oldCommit":"a".repeat(40),"newCommit":"b".repeat(40)
+    }));
+    sync(&fixture.issuer, &fixture.local);
+    fixture.receipt(Some(fixture.now));
+    assert_eq!(fixture.verify().unwrap_err().code, "deploy-invalid-time",
+        "local rollback cannot revive a GO expired by an eligible signed reference");
+    let mut go = fixture.go.clone();
+    go["expiresAt"] = json!(time(fixture.now + 60*60*1000));
+    fixture.replace_go(go);
+    fixture.receipt(Some(fixture.now - ORIGIN_FRESHNESS_MS));
+    assert_eq!(fixture.verify().unwrap_err().code, "deploy-stale-replica",
+        "freshness must use the ratcheted time, not bare local time");
 }
 
 #[test]
 fn issue_expiry_and_four_hour_boundary() {
     let mut fixture = Fixture::new();
     for (issued, expires, approved) in [
-        (fixture.now+1,fixture.now+1000,false), (fixture.now-1000,fixture.now,false),
+        (fixture.now+30_000,fixture.now+60_000,false), (fixture.now-1000,fixture.now,false),
         (fixture.now,fixture.now+4*60*60*1000,true),
     ] {
         let mut go = fixture.go.clone(); go["issuedAt"] = json!(time(issued)); go["expiresAt"] = json!(time(expires));
