@@ -18,6 +18,14 @@ fn append(connection: &Transaction<'_>, origin: &str, subject: &str, kind: &str,
         .unwrap().id
 }
 
+// Historical wire shapes can carry fields the current public writer no longer admits.
+fn append_legacy(tx: &Transaction<'_>, origin: &str, subject: &str, kind: &str, fields: Value) -> String {
+    let id = append(tx, origin, subject, "observer.observed", json!({}));
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h8074b0d5efe1 owner=fractal_store::store::completion_state_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind=?2,body=?3 WHERE id=?1",
+        params![id, kind, json!({"fields":fields}).to_string()]).unwrap();
+    id
+}
+
 #[test]
 fn completion_state_converges_across_reversed_replication_arrival() {
     use super::super::tests::{exchange_from, receive_and_project};
@@ -65,7 +73,7 @@ fn completion_state_matches_append_carry_forward_transition_clearing_and_json_nu
     append(&tx, &store.origin, OBSERVER, "observer.state", json!({"state":"healthy"}));
     parity(&tx, OBSERVER);
     assert_eq!(actual(&tx, OBSERVER).unwrap().unwrap(), json!({"state":"healthy"}));
-    append(&tx, &store.origin, OBSERVER, "observer.observed", json!({"reason":null}));
+    append_legacy(&tx, &store.origin, OBSERVER, "observer.observed", json!({"reason":null}));
     parity(&tx, OBSERVER);
     assert!(actual(&tx, OBSERVER).unwrap().unwrap().get("reason").unwrap().is_null());
     append(&tx, &store.origin, SUBSCRIPTION, "subscription.state",
@@ -90,7 +98,7 @@ fn completion_state_repairs_and_out_of_order_claims_use_indexed_predecessors() {
     tx.execute(/* sqlite-large-value: allow-for-now lv-ha255f4d678bf owner=fractal_store::store::completion_state_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='30' WHERE id=?1", [&new]).unwrap();
     parity(&tx, OBSERVER);
     // Arrives last but sorts between the prior states. It must not resurrect a cleared reason.
-    let late = append(&tx, &store.origin, OBSERVER, "observer.observed",
+    let late = append_legacy(&tx, &store.origin, OBSERVER, "observer.observed",
         json!({"revision":"late","reason":"late-reason"}));
     tx.execute(/* sqlite-large-value: allow-for-now lv-hd3dd3521b2b8 owner=fractal_store::store::completion_state_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='25' WHERE id=?1", [&late]).unwrap();
     parity(&tx, OBSERVER);
@@ -176,6 +184,8 @@ fn completion_state_maintenance_and_reads_do_not_scale_with_observer_history() {
         BODIES_DECODED.with(|count| count.set(0));
         let work = smallclaims::sqlite::work::SqliteWorkScope::start();
         append(&tx, &store.origin, OBSERVER, "observer.observed", json!({"revision":"current","cursor":cursor}));
+        let append_work = work.finish();
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
         flush(&tx).unwrap();
         let maintenance = work.finish();
         assert_eq!(BODIES_DECODED.with(std::cell::Cell::get), 1);
@@ -187,14 +197,15 @@ fn completion_state_maintenance_and_reads_do_not_scale_with_observer_history() {
         assert_eq!(maintenance.sorts, 0);
         assert_eq!(read.fullscan_steps, 0);
         assert_eq!(read.sorts, 0);
-        costs.push((history, maintenance, read));
+        costs.push((history, maintenance, read, append_work));
     }
     eprintln!("completion health maintenance/read work: {costs:?}");
     assert!(costs[0].1.vm_steps > 0, "native work accounting must be active");
-    for (_, maintenance, read) in &costs {
+    for (_, maintenance, read, append_work) in &costs {
         assert!(maintenance.vm_steps <= costs[0].1.vm_steps * 2, "{costs:?}");
         assert_eq!(maintenance.statements, costs[0].1.statements, "{costs:?}");
         assert_eq!(read.vm_steps, costs[0].2.vm_steps, "{costs:?}");
+        assert!(append_work.vm_steps <= costs[0].3.vm_steps * 2, "{costs:?}");
     }
     tx.rollback().unwrap();
 }

@@ -86,12 +86,13 @@ fn tracking(connection: &Connection) -> Result<()> {
         for (event, row) in [("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD"),
             ("UPDATE", "OLD")] {
             connection.execute_batch(&format!(
-                /* sqlite-large-value: allow-for-now lv-h150acfa3e311 owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_{table}_{event}_{row}
+                /* sqlite-large-value: allow-for-now lv-hf1a64465123e owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_{table}_{event}_{row}
                  AFTER {event} ON {table} BEGIN
-                 INSERT OR IGNORE INTO local_completion_health_v1_pending(claim_id)
+                 INSERT INTO local_completion_health_v1_pending(claim_id)
                  SELECT {row}.{identity} WHERE {row}.{identity} IS NOT NULL AND (
                     EXISTS(SELECT 1 FROM claims WHERE id={row}.{identity} AND {RELEVANT})
-                    OR EXISTS(SELECT 1 FROM local_completion_health_v1_claims WHERE claim_id={row}.{identity}));
+                    OR EXISTS(SELECT 1 FROM local_completion_health_v1_claims WHERE claim_id={row}.{identity}))
+                 AND NOT EXISTS(SELECT 1 FROM local_completion_health_v1_pending WHERE claim_id={row}.{identity});
                  END;"))?;
         }
     }
@@ -100,10 +101,11 @@ fn tracking(connection: &Connection) -> Result<()> {
             " WHEN OLD.id IS NOT NEW.id OR OLD.origin IS NOT NEW.origin OR OLD.replica_sequence IS NOT NEW.replica_sequence"
         } else { "" };
         connection.execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-hbea0ab0b84e4 owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_batches_{event}_{row}
+            /* sqlite-large-value: allow-for-now lv-hfec67ebade42 owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_batches_{event}_{row}
              AFTER {event} ON batches{condition} BEGIN
-             INSERT OR IGNORE INTO local_completion_health_v1_pending(claim_id)
-             SELECT id FROM claims WHERE batch_id={row}.id AND {RELEVANT}; END;"))?;
+             INSERT INTO local_completion_health_v1_pending(claim_id)
+             SELECT id FROM claims WHERE batch_id={row}.id AND {RELEVANT}
+             AND NOT EXISTS(SELECT 1 FROM local_completion_health_v1_pending WHERE claim_id=claims.id); END;"))?;
     }
     // Only insertion/repositioning into an existing legacy batch changes sibling arrival ranks.
     // Ordinary append at the end queues no siblings; explicit positions need no renumbering.
@@ -114,12 +116,13 @@ fn tracking(connection: &Connection) -> Result<()> {
         ("DELETE", "OLD", ""),
     ] {
         connection.execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-hce71f55fad03 owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_siblings_{event}_{row}
+            /* sqlite-large-value: allow-for-now lv-hdd116b500e13 owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS completion_health_v1_siblings_{event}_{row}
              AFTER {event} ON claims{condition} BEGIN
-             INSERT OR IGNORE INTO local_completion_health_v1_pending(claim_id)
+             INSERT INTO local_completion_health_v1_pending(claim_id)
              SELECT id FROM claims WHERE batch_id={row}.batch_id AND store_index>{row}.store_index
                 AND NOT EXISTS(SELECT 1 FROM claim_positions WHERE claim_id=claims.id)
-                AND {RELEVANT}; END;"))?;
+                AND {RELEVANT}
+                AND NOT EXISTS(SELECT 1 FROM local_completion_health_v1_pending WHERE claim_id=claims.id); END;"))?;
     }
     Ok(())
 }
