@@ -112,6 +112,16 @@ refusing an otherwise valid GO. Verification streams only own-node and GO-origin
 active history inside the same read-only snapshot; it retains maxima and diagnostics,
 not a second copy of that history. It still authenticates each relevant candidate.
 
+Own-node evidence additionally requires an accepted claim copy in a validated envelope
+whose writer is this node and whose envelope signature verifies against this node's
+stored key using the existing fleet signature verifier. Principal signatures alone do
+not authenticate writer origin. Self-origin text without that envelope provenance is
+excluded from own-node rollback evidence; the independent GO-origin ratchet rule is
+unchanged.
+
+`VerifyGoReceipt` requires the `diagnostics` object. Receipts from earlier unpublished
+drafts without this field are not wire-compatible.
+
 Residual risk: setting the clock back without newer own-node or eligible origin
 evidence can go undetected. This is a cooperative same-user, auditable control, not a
 host-clock security boundary; maintaining host time synchronization is an operational

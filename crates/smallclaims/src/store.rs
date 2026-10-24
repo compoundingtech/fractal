@@ -2532,6 +2532,41 @@ impl Store {
         }
         Ok(signatures)
     }
+    /// Whether an accepted copy of this claim has envelope provenance signed by this node.
+    /// Origin text and principal attribution alone do not authenticate a writer.
+    pub fn claim_has_authenticated_self_writer(&self, claim_id: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        let Some(key) = fleet_meta(&connection, principals::OWN_NODE_KEY)? else {
+            return Ok(false);
+        };
+        let Some(fleet_id) = fleet_meta(&connection, "fleet_id")? else {
+            return Ok(false);
+        };
+        let mut statement = connection.prepare_cached(
+            "SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
+             FROM replica_records AS records
+             JOIN replica_envelopes AS envelopes
+               USING (writer, sequence, envelope_hash)
+             JOIN replica_envelope_signatures AS signatures
+               USING (writer, sequence, envelope_hash)
+             WHERE records.claim_id=?1 AND records.state='valid'
+               AND envelopes.receipt_state='validated'
+               AND records.writer=?2 AND signatures.member_key=?3",
+        )?;
+        let rows = statement.query_map(params![claim_id, self.origin, key], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        for row in rows {
+            let (sequence, hash, signature) = row?;
+            if VerifiedEnvelopeSignature::verify(
+                &fleet_id, &self.origin, sequence, &hash, &key, &signature,
+            ).is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
 
     /// Envelopes this node admitted before it knew that their writer is keyed or that their
     /// incarnation had ended. Admission decisions are not revisited, so these stay admitted;

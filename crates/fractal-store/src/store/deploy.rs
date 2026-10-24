@@ -108,7 +108,9 @@ impl Store {
             {
                 let signed_at = u128::from(signature.signed_at_unix_ms);
                 if id == go.id { go_signed_at = signed_at; }
-                if origin == self.origin { local_self_max = local_self_max.max(signed_at); }
+                if origin == self.origin && self.claim_has_authenticated_self_writer(&id).map_err(internal)? {
+                    local_self_max = local_self_max.max(signed_at);
+                }
                 if origin == go.origin {
                     if signed_at <= cutoff { origin_ref = origin_ref.max(signed_at); }
                     else {

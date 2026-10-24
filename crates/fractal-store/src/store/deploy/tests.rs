@@ -151,12 +151,29 @@ fn quiet_origin_accepts_repeated_unchanged_syncs_after_fifteen_minutes() {
 fn local_clock_behind_own_signed_evidence_is_refused() {
     let fixture = Fixture::new();
     fixture.local.set_write_clock_at(fixture.now + 5*60*1000).unwrap();
-    publish(&fixture.local, "deploy.go-consumed", EXECUTOR, json!({
+    let future = publish(&fixture.local, "deploy.go-consumed", EXECUTOR, json!({
         "version":1,"goId":fixture.request.go_id,"operation":"install","result":"example"
     }));
+    assert!(fixture.local.claim_has_authenticated_self_writer(&future.id).unwrap());
     let error = fixture.verify().unwrap_err();
     assert_eq!(error.code, "deploy-clock-untrusted");
     assert_eq!(error.details["reason"], "behind");
+}
+
+#[test]
+fn principal_signed_self_origin_without_authenticated_writer_is_not_rollback_evidence() {
+    let fixture = Fixture::new();
+    // Legacy writer history can be admitted without envelope signatures. Keep the node's
+    // principal key, but stop envelope signing before writing a genuine future principal proof.
+    fixture.local.set_member_key(None).unwrap();
+    fixture.local.set_write_clock_at(fixture.now + 5*60*1000).unwrap();
+    let future = publish(&fixture.local, "deploy.go-consumed", EXECUTOR, json!({
+        "version":1,"goId":fixture.request.go_id,"operation":"install","result":"example"
+    }));
+    assert_eq!(future.origin, "host-a");
+    assert_eq!(fixture.local.claim_authorization(&future.id).unwrap().verdict, Verdict::Verified);
+    assert!(!fixture.local.claim_has_authenticated_self_writer(&future.id).unwrap());
+    assert!(fixture.verify().unwrap().consumed);
 }
 
 #[test]
