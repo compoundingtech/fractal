@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No claim or replay behavior change."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No checkpoint or fleet coordination change."},
-  "compatibility": {"status": "changed", "detail": "The TypeScript dependency pin now records the effect-utils source narHash alongside its output hash. Nix consumers must resolve effect-utils to fractal's pin; a different source fails evaluation with an actionable diagnostic rather than an installation hash mismatch."},
+  "compatibility": {"status": "changed", "detail": "The TypeScript dependency pin now records the effect-utils source narHash alongside its output hash. Nix consumers must resolve effect-utils to fractal's pin; a different source fails evaluation with an actionable diagnostic rather than an installation hash mismatch. Buck root mirrors match the pinned producer. Runtime-input assertions are deferred until their check derivations are forced, so check-type discovery does not force the installation guard."},
   "downtime": {"status": "none", "detail": "No restart required."},
   "manual": {"status": "changed", "detail": "Align consumer effect-utils inputs with fractal's pin. After dependency inputs change, scripts/nix-typescript-client-deps-hash refreshes both the output hash and actual input narHash; it needs network and a builder for --system."},
   "recovery": {"status": "none", "detail": "Revert the input pins and dependency pin together to restore the previous packaging behavior."}

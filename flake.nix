@@ -1046,19 +1046,23 @@
         # wants them.
         checks.st2 = st2;
         checks.st3 = st3Check;
-        checks.st3-runtime-inputs =
+        # Keep derivation-path assertions lazy until the check's builder is evaluated:
+        # flake discovery must not force package inputs (including the installation hash guard).
+        checks.st3-runtime-inputs = pkgs.runCommand "st3-runtime-inputs" { } (
           assert import ./nix/st3-runtime-input-tests.nix {
             inherit self system;
             baseline = messagingCompat;
             inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
           };
-          pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
+          ''touch $out''
+        );
         checks.st3-help = st3Help;
-        checks.st3-check-input-isolation =
+        checks.st3-check-input-isolation = pkgs.runCommand "st3-check-input-isolation" { } (
           assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
           # Native check inputs must not contribute to the installed package identity.
           assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
-          pkgs.runCommand "st3-check-input-isolation" { } ''touch $out'';
+          ''touch $out''
+        );
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
