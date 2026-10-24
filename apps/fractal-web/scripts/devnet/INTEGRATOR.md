@@ -84,9 +84,11 @@ The helper takes `SOURCE_DIR SHA NAME` arguments and requires:
 | `FRACTAL_BUILD_SNAPSHOT_ROOT` | Deployment-owned snapshot parent, outside the source clone and on its filesystem |
 
 The helper creates detached worktrees at `<snapshot-root>/<name>/<sha>-<pid>`.
-Its per-name build lock protects stale snapshot reclamation; only matching
-revision/PID snapshot directories are reclaimed. Snapshot roots on another
-filesystem or inside the source clone fail loudly before worktree creation.
+Each run holds an exclusive `<snapshot>.lock` flock for its snapshot's lifetime.
+Reclamation removes a matching revision/PID snapshot only after acquiring that
+snapshot's lock non-blocking, so runs with different build roots can safely share
+the snapshot namespace. Snapshot roots on another filesystem or inside the source
+clone fail loudly before worktree creation.
 `prepare-dependencies.py SOURCE_DIR SNAPSHOT_DIR [MANIFEST_PATH]` copies the
 private/vendor overlay, hardlinks installed dependency files, and redirects
 workspace symlinks into the snapshot. It is resolved beside the shell helper.

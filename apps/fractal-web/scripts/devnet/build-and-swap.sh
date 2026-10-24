@@ -15,6 +15,7 @@ sha=$requested
 outcome=failed
 reason=unexpected-error
 snapshot=
+snapshot_lock=
 build=
 previous=
 activated=0
@@ -37,6 +38,7 @@ finish() {
   fi
   rm -f "$P/admitted-$$" "$P/overlay-manifest-$$"
   if [[ -n $snapshot ]]; then git -C "$SOURCE" worktree remove --force "$snapshot" || true; fi
+  [[ -z $snapshot_lock ]] || rm -f -- "$snapshot_lock"
   log_run
   [[ $outcome != failed ]]
 }
@@ -60,12 +62,22 @@ if [[ $(stat -c %d "$SOURCE") != $(stat -c %d "$snapshot_root") ]]; then
   echo 'Snapshot root must share the source clone filesystem' >&2
   exit 2
 fi
-# This purpose's build lock excludes live snapshots while reclaiming crash leftovers.
+# Snapshot leases are keyed by the shared namespace, not by the build root.
 for stale in "$snapshot_root"/*; do
   [[ -d $stale && ! -L $stale && ${stale##*/} =~ ^[0-9a-f]{40}-[0-9]+$ ]] || continue
-  git -C "$SOURCE" worktree remove --force "$stale" || rm -rf -- "$stale"
+  (
+    exec 7>"$stale.lock"
+    if flock -n 7; then
+      git -C "$SOURCE" worktree remove --force "$stale" || rm -rf -- "$stale"
+      rm -f -- "$stale.lock"
+    fi
+  )
 done
-snapshot=$snapshot_root/$sha-$$
+next_snapshot=$snapshot_root/$sha-$$
+exec 8>"$next_snapshot.lock"
+if ! flock -n 8; then outcome=skipped; reason='snapshot-lock-held'; exit 0; fi
+snapshot=$next_snapshot
+snapshot_lock=$snapshot.lock
 build=$P/builds/$sha
 if [[ -e $build ]]; then build=; reason=immutable-build-already-exists; exit 1; fi
 reason='snapshot-failed'
