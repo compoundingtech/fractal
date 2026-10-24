@@ -316,7 +316,7 @@ def run(args, cwd=None, capture=False, check=True, timeout=None):
                 'install' if 'pnpm' in args else 'regenerate' if 'genie' in args or 'scripts/ci-fractal-web-licenses' in args else
                 'build' if args[0]=='bash' or 'node' in args else 'selection')
     try:
-        log_capture=not capture and 'genie' in args
+        log_capture=not capture and ('genie' in args or ('pnpm' in args and '--frozen-lockfile' in args))
         result=subprocess.run([str(a) for a in args], cwd=cwd, text=True,
                               stdout=subprocess.PIPE if capture or log_capture else None,
                               stderr=subprocess.PIPE if capture or log_capture else None,

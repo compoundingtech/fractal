@@ -64,6 +64,13 @@ or changes to `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `megarepo.kdl`,
 nix develop .#web -c pnpm install --frozen-lockfile --prefer-offline
 ```
 
+Successful member and install input hashes persist beside the log as
+`<log>.members-key` and `<log>.install-key`. Member application also creates
+`<log>.install-pending` until installation succeeds. A failed apply or install
+therefore retries on later ticks even with unchanged HEAD or after restart;
+JSONL records each failure's output. Keep these deployment-owned state files
+alongside the log when restarting the follower.
+
 The deployment provides GitHub/Git access, Devnet and build credentials, and the
 `git`, `gh`, `nix`, `pnpm`, `node`, `curl`, Python and shell tooling needed by the
 integrator and its external build helper. The follower needs Git, Nix, Python
