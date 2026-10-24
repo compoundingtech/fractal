@@ -119,7 +119,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
   const agentsById = new Map(agents.map(agent => [agent.id, agent])), missionsById = new Map(data.missions.map(mission => [mission.id, mission]));
   const mark = (row: SidebarResource) => {
     const agent = agentsById.get(row.id), mission = missionsById.get(row.id);
-    return agent ? agentGlyph(agent.state) : mission ? wordStyle(missionWord(mission, data.attention, data.agents)) : { glyph: row.missing ? '?' : '·', color: theme.overlay0 };
+    return agent ? agentGlyph(agent.state) : mission ? wordStyle(missionWord(mission)) : { glyph: row.missing ? '?' : '·', color: theme.overlay0 };
   };
   const targets: DragTarget[] = [];
   for (const group of view.groups.filter(g => g.folder)) {
@@ -160,6 +160,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
     <StatusLine />
     <ListRow glyph="●" glyphColor={theme.idle} title="Agents" second="Search agents and conversations · list or tree" onPress={() => navigation.navigate('Agents')} />
     <ListRow glyph="◇" glyphColor={theme.waiting} title="Missions" second="Search missions · steps, progress and launches" onPress={() => navigation.navigate('Missions')} />
+    <ListRow glyph="▤" glyphColor={theme.lavender} title="Documents" second="Read documents · open one by name or follow its links" onPress={() => navigation.navigate('Documents')} />
     {issue ? <Note tone="warning">{issue}</Note> : null}
     {arrangementsIssue ? <Note tone="warning">{arrangementsIssue}</Note> : null}
     {sidebarResourcesIssue ? <Note tone="warning">{sidebarResourcesIssue}</Note> : null}

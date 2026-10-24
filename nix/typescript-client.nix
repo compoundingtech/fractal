@@ -6,14 +6,15 @@
 # uses the hoisted linker, so they are plain directories with relative links). The check restores them
 # over the source and runs the same script, unchanged.
 #
-# Refreshing the hash: the installation derivation is named after the lockfile's hash and the effect-utils revision, so a
-# changed `pnpm-lock.yaml` or effect-utils pin builds a new one, and that build fails with the new hash until it is entered in
-# `nix/typescript-client-deps.hash`. `scripts/nix-typescript-client-deps-hash` does the whole refresh.
+# Refreshing the hash: the installation name carries the lockfile hash and effect-utils source identity.
+# `nix/typescript-client-deps.hash` records both the output hash and the effect-utils narHash it was measured
+# with, so consumers overriding that input fail before building. `scripts/nix-typescript-client-deps-hash`
+# refreshes both values. pnpm-workspace.yaml installs the same supported architectures on every host.
 { effect-utils, system, self, version }:
 let
   pkgs = import effect-utils.inputs.nixpkgs { inherit system; };
   lib = pkgs.lib;
-  # pnpm 12.7.0 and Node 24 from effect-utils' own nixpkgs, as the web shell (`nix/web-shell.nix`) has them.
+  # pnpm and Node 24 from effect-utils' own nixpkgs, as the web shell (`nix/web-shell.nix`) has them.
   pnpm = effect-utils.lib.mkPnpm { inherit pkgs; };
   node = pkgs.nodejs_24;
   # A fixed-output path is named by its name and hash, not by its builder inputs. The lockfile records the staged
@@ -21,6 +22,7 @@ let
   # either builds a new installation instead of reusing a stale one from a store or cache.
   lockHash = builtins.substring 0 12 (builtins.hashFile "sha256" ../pnpm-lock.yaml);
   sourcesHash = builtins.substring 0 12 (builtins.hashString "sha256" effect-utils.narHash);
+  dependencyPin = builtins.fromJSON (builtins.readFile ./typescript-client-deps.hash);
   manifests = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
@@ -29,7 +31,7 @@ let
       ../pnpm-workspace.yaml
       ../pnpm-source-inputs.json
       ../apps/fractal-web/package.json
-      ../apps/fractal-web/packages/fractal-sdk/package.json
+      ../packages/fractal-sdk/package.json
       ../apps/ios/package.json
       ../clients/typescript/fractal-client/package.json
       ../clients/typescript/fractal-scenarios/package.json
@@ -40,7 +42,10 @@ let
   installation = pkgs.runCommand "typescript-client-installation-${lockHash}-${sourcesHash}" {
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = lib.removeSuffix "\n" (builtins.readFile ./typescript-client-deps.hash);
+    outputHash =
+      if effect-utils.narHash == dependencyPin.effectUtilsNarHash then dependencyPin.hash
+      else throw "fractal's effect-utils input is overridden or changed (got ${effect-utils.narHash}, hash measured with ${dependencyPin.effectUtilsNarHash}); consumers must resolve effect-utils to fractal's pin, or run scripts/nix-typescript-client-deps-hash";
+    passthru.effectUtilsNarHash = effect-utils.narHash;
     nativeBuildInputs = [ pnpm node pkgs.cacert ];
     SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   } ''
@@ -73,6 +78,7 @@ let
 in
 pkgs.runCommand "typescript-client-${version}" {
   nativeBuildInputs = [ pnpm node pkgs.bubblewrap pkgs.coreutils pkgs.bash ];
+  passthru = { inherit installation; };
 } ''
   export HOME=$(mktemp -d)
   cp -r ${self} source

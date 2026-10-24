@@ -4,11 +4,13 @@ pub mod arrangements;
 pub mod custom;
 pub mod accountable;
 pub mod directive_notes;
+pub mod full_value;
 pub mod glasses;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
 pub mod retention;
+pub mod slo_breaches;
 pub mod review;
 
 use std::collections::BTreeMap;
@@ -1846,6 +1848,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["gate"],
         ),
         (
+            slo_breaches::KIND,
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("slo-breaches"),
+            true,
+            &[],
+        ),
+        (
             "resource.observed",
             &["resource"],
             WritePolicy::OrdinaryClient,
@@ -2015,6 +2026,14 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("agents"),
             true,
             &[],
+        ),
+        (
+            "agent.renamed", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("agents"), true, &[],
+        ),
+        (
+            "mission.renamed", &["mission"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("missions"), true, &[],
         ),
         (
             "agent.presence",
@@ -2830,6 +2849,7 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
             ("launch_id", required_string()),
@@ -3275,6 +3295,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("anchor", reference_to(&["mission-run"])),
             ("reason", string()),
         ],
+        "agent.renamed" | "mission.renamed" => &[
+            ("from", required_reference_to(&["agent", "mission"])),
+            ("to", required_reference_to(&["agent", "mission"])),
+            ("reason", required_string()),
+            ("owner_host", required_string()),
+            ("declaration", required_string()),
+            ("previous_revision", string()),
+            ("preserved_incarnation", string()),
+            ("request", FieldSpec { required: true, ..object() }),
+        ],
         "agent.retired" => &[
             ("reason", required_string()),
             ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
@@ -3493,6 +3523,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("exit_code", integer()),
             ("exit_signal", integer()),
             ("incarnation_id", string()),
+            ("restarting_from", string()),
             ("adopted", boolean()),
             ("driver", string()),
             ("host", string()),
@@ -3851,8 +3882,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("transport", string()),
             ("runtime_id", string()),
         ],
-        "message.read" => &[("status", required_enum(&["read"]))],
-        "message.closed" => &[("status", required_enum(&["closed"]))],
+        "message.read" => &[("status", required_enum(&["read"])), ("acting_for", reference_to(&["agent"]))],
+        "message.closed" => &[("status", required_enum(&["closed"])), ("acting_for", reference_to(&["agent"]))],
         "planning-session.started" => &[
             ("mission", reference()),
             ("request", reference()),
@@ -3939,12 +3970,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
         ],
         "schedule.occurrence-scheduled" => &[
+            ("standby", object()),
+            ("reason", string()),
             ("occurrence", integer()),
             ("revision", string()),
             ("at_unix_ms", integer()),
             ("scheduled_at_unix_ms", string()),
         ],
         "schedule.occurrence-reached" => &[
+            ("standby", object()),
+            ("reason", string()),
             ("occurrence", integer()),
             ("revision", string()),
             ("at_unix_ms", integer()),
@@ -4080,7 +4115,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         fields.insert("assistant_owner".into(), reference_to(&["person"]));
         fields.insert("assistant_session_actor".into(), string());
     }
-    if matches!(kind, "work.person-done" | "gate.result" | "message.closed") {
+    if matches!(
+        kind,
+        "work.person-done" | "gate.result" | "message.closed" | "harness.diagnostic"
+    ) {
         fields.insert("acted_for".into(), reference_to(&["person"]));
         fields.insert("delegation".into(), object());
     }
@@ -4499,6 +4537,7 @@ mod tests {
     }
 
     #[test]
+
     fn registry_rejects_the_removed_plan_names() {
         let registry = registry();
         for subject in ["plan/example", "plan-run/example"] {

@@ -13,10 +13,15 @@ use fractal_missions::store::tests_shared_seats::{exchange_of, harness_state, ta
 // including columns the old graph digest did not cover. Local arrival cursors are tested through
 // the shared readers they accelerate rather than compared as if they were replicated identities.
 const SHARED_TABLES: &[(&str, &[&str])] = &[
+    ("slo_episode_events", &[]),
+    ("slo_episode_heads", &[]),
+    ("slo_pending", &[]),
     ("operations", &[]),
     ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
+    ("identity_heads", &[]),
+    ("identity_names", &[]),
     ("arrangements", &["changed_index"]),
     ("arrangement_registers", &[]),
     ("message_index", &["created_index"]),
@@ -121,11 +126,17 @@ fn every_persistent_table_has_a_projection_scope() {
         "account_limit_seats",
         "local_latest_slots",
         "local_resource_projection_pending",
+        // Member-local preparation state and queues, rebuildable from canonical claims.
+        "local_resource_preparation",
+        "local_resource_preparation_claims",
+        "local_resource_preparation_pending",
+        "local_resource_preparation_dirty",
         "local_glass_head_pending",
         "local_glass_head_dirty",
         "local_directive_note_pending",
         "local_directive_note_dirty",
         "local_custom_dirty",
+        "identity_dirty",
         "graph_generation",
         "fleet_generation",
         "projection_digest_state",
@@ -511,7 +522,7 @@ fn write_audit_history(source: &Store) {
     publish_takeover(
         source,
         &format!(
-            "{TAKEOVER_SOURCE}\nagent \"alder.worker\" {{ workspace \"/tmp/audit\"; command \"true\" }}"
+            "{TAKEOVER_SOURCE}\nagent \"alder.worker\" {{ workspace \"/tmp/audit\"; command \"true\" }}\nagent \"example-audit-identity/worker\" {{ host {:?}; workspace \"/tmp/audit-identity\"; command \"true\" }}", source.origin()
         ),
         "audit-desired",
     );
@@ -875,6 +886,21 @@ message "audit-declared" {
         )
         .unwrap();
     source.replay_replication_graph().unwrap();
+    fractal_store::store::identities::IdentityStore::rename_identity(
+        source,
+        fractal_store::store::identities::IdentityKind::Agent,
+        &fractal_store::store::identities::RenameRequest {
+            from: "agent/example-audit-identity/worker".into(),
+            to: "agent/example-audit-renamed/worker".into(),
+            actor: "person/robin".into(),
+            reason: "Exercise durable naming through shuffled replication and replay".into(),
+            expected_naming_revision: None,
+            expected_declaration: None,
+            idempotency_key: "audit-identity-rename".into(),
+        },
+        &[],
+    )
+    .unwrap();
 }
 
 fn trim_for_audit(store: &Store, cut: u128) {
@@ -1231,6 +1257,17 @@ fn reopening_a_legacy_json_subtype_digest_reseeds_and_replaces_its_triggers() {
 fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
     let store = Store::open_memory("alder").unwrap();
     write_audit_history(&store);
+    // The SLO breach tables hold projected rows; the digest covers each of their columns, so this
+    // control writes one row of each directly, apart from the reducer that normally fills them.
+    // It stays out of the shared history, whose peers rebuild these rows from claims.
+    store.connection.batched(|tx| -> Result<()> {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h96cc0d92ac25 owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO slo_episode_events(episode,event,member,fleet,objective,ordinal,claim_id,body,conflict,dispatched_at_ms,recorded_at_ms)
+            VALUES('episode-a','pending','alder','fleet-a','objective-a',1,'claim-a','{}',0,NULL,1)", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h043ea9e4de4e owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO slo_episode_heads(fleet,member,objective,episode,ordinal,conflict) VALUES('fleet-a','alder','objective-a','episode-a',1,0)", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h9d9bf03dc42a owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO slo_pending(episode,fleet,member,objective,ordinal,onset_end_ms,onset_claim,body,body_key,mission_run)
+            VALUES('episode-a','fleet-a','alder','objective-a',1,1,'claim-a','{}','key-a',NULL)", [])?;
+        Ok(())
+    }).unwrap().unwrap();
     let mut connection = store.connection.lock().unwrap();
     // Deliberate projection corruption checks coverage independently of reducer semantics.
     connection
@@ -1243,7 +1280,7 @@ fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
             .prepare(/* sqlite-large-value: allow-for-now lv-h94f59e44663f owner=fractal_seats::store::canonical_audit TODO=trace-statement-and-value-representation */ &format!("PRAGMA table_info({table})"))
             .unwrap()
             .query_map([], |row| {
-                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, u32>(5)?))
             })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -1256,13 +1293,14 @@ fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
                 > 0,
             "shuffle history must exercise {table}"
         );
+        // Primary-key tuples also address WITHOUT ROWID projections.
+        let primary_key = columns.iter().filter(|(_, _, pk)| *pk != 0)
+            .map(|(name, _, _)| name.as_str()).collect::<Vec<_>>().join(",");
+        let key = if primary_key.is_empty() { "rowid" } else { &primary_key };
         // Always cover the indexed agent membership, independent of other desired kinds.
-        let selected_row = if *table == "desired" {
-            "SELECT rowid FROM desired WHERE kind='agent' ORDER BY rowid LIMIT 1".to_owned()
-        } else {
-            format!("SELECT rowid FROM {table} ORDER BY rowid LIMIT 1")
-        };
-        for (column, kind) in columns {
+        let predicate = if *table == "desired" { " WHERE kind='agent'" } else { "" };
+        let selected_row = format!("SELECT {key} FROM {table}{predicate} ORDER BY {key} LIMIT 1");
+        for (column, kind, _) in columns {
             let before_generation = projection_digest::generation(&connection).unwrap();
             let transaction = connection.transaction().unwrap();
             let expression = if matches!(*table, "claims" | "custom_sources") && column == "body" {
@@ -1285,7 +1323,7 @@ fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
             };
             let changed = transaction
                 .execute(
-                    &format!(/* sqlite-large-value: allow-for-now lv-h45afc91844ec owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "UPDATE {table} SET {column}={expression} WHERE rowid=({selected_row})"),
+                    &format!(/* sqlite-large-value: allow-for-now lv-hf30a0d981c85 owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "UPDATE {table} SET {column}={expression} WHERE ({key})=({selected_row})"),
                     [],
                 )
                 .unwrap_or_else(|error| panic!("mutating {table}.{column}: {error}"));
@@ -1353,6 +1391,7 @@ fn comparable_peers_name_differing_tables_and_legacy_peers_keep_their_digest() {
     let source = Store::open_memory("alder").unwrap();
     write_audit_history(&source);
     let target = Store::open_memory("birch").unwrap();
+    target.capture_divergences(true);
     receive_and_project(
         &target,
         "alder",

@@ -21,10 +21,15 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
 use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
+use fractal_daemon::RuntimeStartsStore;
+use fractal_daemon::model::{ClaimInput, MemberSpec};
+use fractal_daemon::store::{RuntimeStartAdmission, RuntimeStartOperation, Store};
+use serde_json::json;
 use tokio::sync::Notify;
 
 /// A runtime in which every member the reconciler starts keeps running.
@@ -98,6 +103,246 @@ fn thread_cpu_ms() -> f64 {
     // SAFETY: time points to a valid timespec; the clock reads this thread only.
     unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
     time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
+}
+
+/// Native PTY rows may be ended even though native work-scope retirement is still required.
+#[derive(Default)]
+struct RevokedTerminalRuntime {
+    observations: Vec<RuntimeObservation>,
+    operations: BTreeMap<String, (String, String)>,
+    provenance_matches: bool,
+    snapshots: AtomicUsize,
+    provenance_reads: AtomicUsize,
+    closure_reads: AtomicUsize,
+    retirements: AtomicUsize,
+    signals: AtomicUsize,
+}
+
+impl RuntimeControl for RevokedTerminalRuntime {
+    fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
+        self.snapshots.fetch_add(1, Ordering::Relaxed);
+        Ok(self.observations.clone())
+    }
+    fn observe_exec(&self, _: &str) -> Result<Option<RuntimeObservation>> {
+        Ok(None)
+    }
+    fn start(&self, _: &MemberSpec) -> Result<()> {
+        anyhow::bail!("persisted revoked starts must not launch")
+    }
+    fn start_operation(&self, id: &str, terminal: bool, incarnation: &str) -> Result<Option<String>> {
+        self.provenance_reads.fetch_add(1, Ordering::Relaxed);
+        Ok(self.operations.get(id).and_then(|(expected, operation)| {
+            (terminal && expected == incarnation).then(|| operation.clone())
+        }))
+    }
+    fn start_operation_closed(&self, _: &MemberSpec) -> Result<bool> {
+        self.closure_reads.fetch_add(1, Ordering::Relaxed);
+        // NativeRuntime cannot certify producer closure just from an ended PTY row.
+        Ok(false)
+    }
+    fn stop_with_retirement_proof(
+        &self,
+        id: &str,
+        terminal: bool,
+        incarnation: &str,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            self.provenance_matches && terminal
+                && self.operations.get(id).is_some_and(|(expected, _)| expected == incarnation),
+            "retirement must target the exact operation-owned terminal incarnation"
+        );
+        self.retirements.fetch_add(1, Ordering::Relaxed);
+        Ok(false)
+    }
+    fn stop(&self, _: &str, _: bool, _: Option<&str>) -> Result<()> {
+        self.signals.fetch_add(1, Ordering::Relaxed);
+        anyhow::ensure!(self.provenance_matches, "must not stop a different operation");
+        // Successful signal submission cannot establish native retirement.
+        Ok(())
+    }
+    fn kill(&self, _: &str, _: bool, _: Option<&str>) -> Result<()> {
+        anyhow::bail!("the previous daemon already recorded its kill")
+    }
+    fn remove(&self, _: &str, _: bool) -> Result<()> {
+        Ok(())
+    }
+    fn screen(&self, _: &str) -> Result<String> {
+        Ok(String::new())
+    }
+    fn send_key(&self, _: &str, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn read_exec_log(&self, _: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+}
+
+fn seed_revoked_terminal_starts(store: &Store, count: usize) -> RevokedTerminalRuntime {
+    let mut runtime = RevokedTerminalRuntime::default();
+    for index in 0..count {
+        let subject = format!("agent/example-revoked-{index}");
+        let runtime_id = format!("example-revoked-{index}");
+        let incarnation = format!("{}:2026-10-01T00:00:00.000Z", 1000 + index);
+        let operation_id = format!("example-revoked-operation-{index}");
+        let member = json!({
+            "kind": "agent", "host": "test", "runtime_id": runtime_id,
+            "workspace": "/tmp", "cwd": "/tmp", "terminal": true,
+            "launch": {"type": "shell", "value": "true"},
+            "environment": {}, "tags": {}, "display_name": null,
+            "lifecycle": "service", "restart": "never",
+            "restart_intensity": {"attempts": 3, "interval_ms": 60000, "delay_ms": 0, "mode": "delay"},
+            "shutdown_timeout_ms": 0, "driver": null
+        });
+        // A retired declaration has no selected desired row. Admission supplies the genuine
+        // retained start request and receipt; no private SQL or live worker is needed.
+        let mut operation = RuntimeStartOperation {
+            id: operation_id.clone(),
+            subject: subject.clone(),
+            owner: "previous-daemon".into(),
+            body: json!({
+                "subject": {"subject": subject, "kind": "agent", "desired": null, "member": member},
+                "member": member, "launch_member": member,
+                "reason": "persisted revoked start", "request": null,
+                "desired_token": "previous-declaration", "selected_token": null,
+                "placement_evidence": [], "start_request": "",
+                "expected_incarnation": null, "resume_operation": null
+            }),
+            revoked_by: None,
+            finished: false,
+            result: None,
+            applied: false,
+            cleanup_verified: false,
+            dispatched: false,
+            receipted: false,
+        };
+        assert_eq!(
+            store.admit_runtime_start(&mut operation, count).unwrap(),
+            RuntimeStartAdmission::Admitted
+        );
+        assert!(store.dispatch_runtime_start(&operation_id, count).unwrap());
+        let append = |kind: &str, fields, evidence, key| {
+            store.append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: kind.into(),
+                actor: None,
+                fields,
+                evidence,
+                expected_subject: None,
+                idempotency_key: Some(key),
+            }).unwrap()
+        };
+        let request = append(
+            "runtime.action.requested",
+            serde_json::from_value(json!({
+                "action": "terminate", "runtime_id": runtime_id, "terminal": true,
+                "incarnation_id": incarnation, "deadline_unix_ms": "0"
+            })).unwrap(),
+            Vec::new(),
+            format!("terminate:{subject}:{incarnation}"),
+        );
+        let deadline_key = format!("stop-deadline:{subject}:{incarnation}");
+        let deadline = append(
+            "runtime.action.deadline-reached",
+            serde_json::from_value(json!({"action": "terminate", "incarnation_id": incarnation})).unwrap(),
+            vec![request.id.clone()],
+            deadline_key.clone(),
+        );
+        append(
+            "runtime.action.succeeded",
+            serde_json::from_value(json!({
+                "action": "kill", "incarnation_id": incarnation, "deadline_key": deadline_key
+            })).unwrap(),
+            vec![deadline.id],
+            format!("kill:{subject}:{incarnation}"),
+        );
+        store.revoke_runtime_start(&operation_id, &request.id).unwrap();
+        store.finish_runtime_start(
+            &operation_id,
+            &json!({"error": "launch owner ended before its result"}),
+        ).unwrap();
+        store.runtime_start_applied(&operation_id).unwrap();
+        runtime.operations.insert(runtime_id.clone(), (incarnation.clone(), operation_id));
+        runtime.observations.push(RuntimeObservation {
+            runtime_id,
+            terminal: true,
+            status: if index % 2 == 0 { "exited" } else { "vanished" }.into(),
+            exit_code: Some(0),
+            incarnation_id: Some(incarnation),
+        });
+    }
+    runtime
+}
+
+#[test]
+fn revoked_terminal_starts_preserve_safety_with_one_registry_snapshot_per_pass() {
+    let mut results = Vec::new();
+    for (count, provenance_matches) in [(7, false), (50, false), (7, true), (50, true)] {
+        let scenario = if provenance_matches { "matched" } else { "mismatched" };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        let store = Store::open(&path, "test").unwrap();
+        let mut runtime = seed_revoked_terminal_starts(&store, count);
+        runtime.provenance_matches = provenance_matches;
+        if !provenance_matches {
+            for (_, operation) in runtime.operations.values_mut() {
+                *operation = "example-different-operation".into();
+            }
+        }
+        let runtime = Arc::new(runtime);
+        drop(store);
+        // Reopen so this exercises the durable shape inherited from a previous daemon.
+        let store = Arc::new(Store::open(&path, "test").unwrap());
+        let seeded = store.pending_runtime_starts().unwrap();
+        assert_eq!(seeded.len(), count);
+        assert!(seeded.iter().all(|operation| operation.finished
+            && operation.applied && operation.dispatched
+            && operation.revoked_by.is_some() && !operation.cleanup_verified));
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "test".into(), Arc::new(Notify::new()),
+        );
+        let mut passes = Vec::new();
+        for pass in 1..=3 {
+            let snapshots = runtime.snapshots.load(Ordering::Relaxed);
+            let provenance = runtime.provenance_reads.load(Ordering::Relaxed);
+            let closure = runtime.closure_reads.load(Ordering::Relaxed);
+            let retirements = runtime.retirements.load(Ordering::Relaxed);
+            let cpu_started = thread_cpu_ms();
+            let result = reconciler.reconcile_once();
+            let cpu_ms = thread_cpu_ms() - cpu_started;
+            let snapshots = runtime.snapshots.load(Ordering::Relaxed) - snapshots;
+            let provenance = runtime.provenance_reads.load(Ordering::Relaxed) - provenance;
+            let closure = runtime.closure_reads.load(Ordering::Relaxed) - closure;
+            let retirements = runtime.retirements.load(Ordering::Relaxed) - retirements;
+            let pending = store.pending_runtime_starts().unwrap().len();
+            println!(
+                "revoked starts scenario={scenario} N={count} pass={pass}: pending={pending}, snapshots={snapshots}, provenance={provenance}, closure={closure}, retirements={retirements}, thread CPU={cpu_ms:.3} ms, result={result:?}"
+            );
+            passes.push((snapshots, pending, result));
+        }
+        results.push((
+            count, scenario, provenance_matches, passes,
+            runtime.retirements.load(Ordering::Relaxed),
+            runtime.signals.load(Ordering::Relaxed),
+        ));
+    }
+    // Report every size, scenario and pass before asserting, including on the baseline.
+    for (count, scenario, provenance_matches, passes, retirements, signals) in results {
+        for (snapshots, pending, result) in &passes {
+            assert!(result.is_ok(), "{scenario} N={count}: {result:?}");
+            assert!(
+                *snapshots <= 1,
+                "{scenario} N={count}: {snapshots} registry snapshots in one pass"
+            );
+            assert_eq!(
+                *pending, count,
+                "{scenario} N={count}: ended rows and accepted signals are not closure proof"
+            );
+        }
+        if !provenance_matches {
+            assert_eq!(retirements, 0, "N={count}: must not retire a different operation");
+            assert_eq!(signals, 0, "N={count}: must not signal a different operation");
+        }
+    }
 }
 
 #[test]

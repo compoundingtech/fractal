@@ -38,10 +38,11 @@ final-status-level = "flaky"
 # files. It leaves out st2-only code: st2's own unit tests (none of its remaining modules is
 # used by st3), its catalog, eval-run, resync, nomad-survival, event and resource-profile
 # supervisor tests, and st-drivers' catalog, resync and resource-profile supervisor modules.
-# `transport_isolation` needs real systemd user scopes; the isolation-vm job runs it in a
+# `transport_isolation` needs real systemd user scopes; the daily isolation-vm lane runs it in a
 # NixOS VM. The cost check and the load test (`daemon_cost`, `daemon_load`) run in their own
-# perf jobs (scripts/ci-perf). Only the in-memory targets-file linkage unit also runs here;
-# it starts no daemon or load. See docs/ci.md.
+# perf jobs (scripts/ci-perf). Only the in-memory targets-file linkage unit and the cost
+# check's route coverage and route-inventory units also run here: they start no daemon or load,
+# and a new route without a cost probe then fails in its own pull request. See docs/ci.md.
 # The outbound-only real-network timing check also runs once in perf-cost. Its strict
 # convergence and redundant-connection windows stay separate from required deterministic
 # backoff and inbound/route interruption controls.
@@ -58,7 +59,9 @@ not (
   or (package(=fractal-drivers) and kind(lib)
     and test(/^(catalog[^:]*|resync|resource_profile_supervisor)::/))
   or ((package(=fractal) or package(=fractal-daemon) or package(=fractal-api-client-v0) or package(=fractal-api-mailbox) or package(=fractal-attention) or package(=fractal-delivery) or package(=fractal-missions) or package(=fractal-seats) or package(=fractal-evidence) or package(=fractal-github) or package(=fractal-seats-base) or package(=fractal-delivery-base) or package(=fractal-missions-base) or package(=fractal-github-base) or package(=fractal-secrets) or package(=fractal-api-core) or package(=fractal-reconcile) or package(=fractal-peer) or package(=fractal-store)) and test(/^daemon_(cost|load)::/)
-    and not test(=daemon_load::targets_come_from_the_targets_file_and_describe_without_gating))
+    and not test(=daemon_load::targets_come_from_the_targets_file_and_describe_without_gating)
+    and not test(=daemon_cost::the_cost_check_covers_every_route)
+    and not test(/^daemon_cost::the_cost_route_inventory_/))
   or (package(=smallclaims) and test(/^sync::worker::tests::retry_tests::isolated_outbound_only_node_converges_after_two_minutes_and_four_hours$/))
 )
 '''
@@ -165,3 +168,10 @@ retries = 0
 [[profile.ci.overrides]]
 filter = 'package(=fractal) and binary(=integration) and kind(test) and (test(=daemon_restart::stop_escalation::claude_stop_escalation_records_ended_before_its_group_sigkill) or test(=daemon_restart::stop_escalation::opencode_stop_escalation_records_cover_before_its_group_sigkill) or test(=daemon_restart::stop_escalation::opencode_graceful_stop_rewrites_cover_with_the_reaped_signal))'
 retries = 0
+
+# SLO source controls retain the first adverse result. Measurement cases run in
+# nextest's isolated per-test process and print actual tuples on success.
+[[profile.ci.overrides]]
+filter = '(package(=fractal-store) and test(/^store::slo_breaches::tests::/)) or (package(=fractal-reconcile) and test(/^reconcile::tests::slo_breach_flow_tests::/))'
+retries = 0
+success-output = "immediate"

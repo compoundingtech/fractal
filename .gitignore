@@ -29,6 +29,7 @@ crates/fractal-drivers/hooks/typecheck/node_modules/
 clients/typescript/fractal-client/node_modules/
 clients/typescript/fractal-views/node_modules/
 clients/typescript/fractal-scenarios/node_modules/
+packages/fractal-sdk/node_modules/
 
 # Pinned megarepo members materialized by `mr apply`.
 /repos/

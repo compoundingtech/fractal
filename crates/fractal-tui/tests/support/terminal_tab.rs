@@ -4,17 +4,28 @@
 use super::*;
 use std::path::PathBuf;
 
+// One recorded protocol run, in three parts that start their own terminals and so run at once.
 #[test]
-fn terminal_tab_protocols() {
-    check_terminal_tab_probe("--check");
+fn terminal_tab_protocols_matrix() {
+    check_terminal_tab_probe(&["--check", "--part", "matrix"]);
+}
+
+#[test]
+fn terminal_tab_protocols_agent_guards() {
+    check_terminal_tab_probe(&["--check", "--part", "agent-guards"]);
+}
+
+#[test]
+fn terminal_tab_protocols_controls() {
+    check_terminal_tab_probe(&["--check", "--part", "controls"]);
 }
 
 #[test]
 fn terminal_tab_action_publication() {
-    check_terminal_tab_probe("--check-action-publication");
+    check_terminal_tab_probe(&["--check-action-publication"]);
 }
 
-fn check_terminal_tab_probe(check: &str) {
+fn check_terminal_tab_probe(check: &[&str]) {
     let output = std::process::Command::new("python3")
         .arg(test_env!(
             "CARGO_MANIFEST_DIR",
@@ -22,7 +33,7 @@ fn check_terminal_tab_probe(check: &str) {
         ))
         .arg("--worker")
         .arg(std::env::current_exe().unwrap())
-        .arg(check)
+        .args(check)
         .env_remove("ST_AGENT")
         .output()
         .expect("python3 is required by the PTY probe (provided by CI)");
@@ -50,7 +61,6 @@ fn terminal_tab_probe_worker() -> Result<()> {
         picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
         ui.picker = Some(picker);
     }
-    ui.glasses = Some(glass::Glasses::open(None, None));
     let agent = if std::env::var_os("STUI_PROBE_AGENT").is_some() {
         "agent/example/atlas/builder"
     } else {

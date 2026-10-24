@@ -974,3 +974,33 @@ test('phone observation command retries identical tagged intervals and accepts w
     assert.equal(calls[0].init.body,calls[1].init.body);
     assert.deepEqual(JSON.parse(calls[0].init.body),report);
 });
+
+
+test('schedules list preserves unknown rows and explicitly encodes one page; old server is unsupported', async () => {
+    const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../docs/st3/client-v0/fixtures/schedules-page.json'), 'utf8'));
+    const requests = [];
+    let old = false;
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async input => {
+        const url = String(input);
+        requests.push(url);
+        if (new URL(url).pathname === '/v1/client/capabilities') return response(capabilityFixture);
+        assert.equal(new URL(url).pathname, '/v1/client/schedules', 'no fallback route');
+        return old ? new Response(null, {status:404}) : Response.json(fixture);
+    }});
+    const page = await client.schedulesList({ cursor:'next&cursor', limit:1, unheard_after_ms:300000 });
+    assert.deepEqual(page, fixture);
+    assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/capabilities'), [
+        'https://example.test/v1/client/capabilities',
+    ]);
+    assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/schedules'), [
+        'https://example.test/v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000',
+    ]);
+    assert.equal(requests.length, 2, 'one capability discovery and exactly one schedules page');
+    old = true;
+    await assert.rejects(client.schedulesList(), error => error instanceof ClientError && error.response.code === 'unsupported-capability');
+    assert.deepEqual(requests, [
+        'https://example.test/v1/client/capabilities',
+        'https://example.test/v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000',
+        'https://example.test/v1/client/schedules',
+    ], 'cached capabilities, no unsupported fallback or automatic page traversal');
+});

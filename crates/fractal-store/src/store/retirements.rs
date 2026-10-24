@@ -2,11 +2,12 @@
 use super::*;
 use crate::model::{LifecycleUnavailableReason, MessageSendRefusal};
 
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3c637414d605 owner=fractal_store::store::retirements TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS st3_replica_lifecycle_unavailable
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3cc529e49cd3 owner=fractal_store::store::retirements TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS st3_replica_lifecycle_unavailable
     ON replica_records(subject_hint,kind_hint) WHERE state IN ('unknown','invalid');
-    CREATE INDEX IF NOT EXISTS st3_lifecycle_operation_index
+    DROP INDEX IF EXISTS st3_lifecycle_operation_index;
+    CREATE INDEX IF NOT EXISTS st3_lifecycle_operation_index_v2
     ON claims(subject,json_extract(body,'$._operation.id'))
-    WHERE kind IN ('agent.retired','intent.desired') AND json_extract(body,'$._operation.id') IS NOT NULL;";
+    WHERE kind IN ('agent.retired','intent.desired','agent.renamed') AND json_extract(body,'$._operation.id') IS NOT NULL;";
 
 pub const KIND: &str = "agent.retired";
 
@@ -125,8 +126,10 @@ pub fn admit_recipient(
     let Some(recipient) = recipient.filter(|to| to.starts_with("agent/")) else {
         return Ok(());
     };
+    let recipient_identity = identities::resolve_reference_conn(connection, recipient)?;
+    let recipient = recipient_identity.as_str();
     let pending: bool = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM replica_records INDEXED BY st3_replica_lifecycle_unavailable
-        WHERE subject_hint=?1 AND state IN ('unknown','invalid') AND (kind_hint IN ('agent.retired','intent.desired') OR kind_hint IS NULL))")
+        WHERE subject_hint=?1 AND state IN ('unknown','invalid') AND (kind_hint IN ('agent.retired','intent.desired','agent.renamed') OR kind_hint IS NULL))")
         .map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-h4eb2f4d0f48a owner=fractal_store::store::retirements TODO=trace-statement-and-value-representation */ [recipient], |row| row.get(0)).map_err(internal)?;
     if pending {
         return Err(unavailable(
@@ -134,9 +137,9 @@ pub fn admit_recipient(
             LifecycleUnavailableReason::Unavailable,
         ));
     }
-    let conflict: bool = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims INDEXED BY st3_lifecycle_operation_index
+    let conflict: bool = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims INDEXED BY st3_lifecycle_operation_index_v2
         CROSS JOIN operations ON operations.id=json_extract(claims.body,'$._operation.id')
-        WHERE claims.subject=?1 AND claims.kind IN ('agent.retired','intent.desired')
+        WHERE claims.subject=?1 AND claims.kind IN ('agent.retired','intent.desired','agent.renamed')
           AND json_extract(claims.body,'$._operation.id') IS NOT NULL AND operations.state='conflict'
           AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired'))")
         .map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hc6278276aa34 owner=fractal_store::store::retirements TODO=trace-statement-and-value-representation */ [recipient], |row| row.get(0)).map_err(internal)?;
@@ -164,6 +167,44 @@ pub fn admit_recipient(
             return Err(unavailable(recipient, LifecycleUnavailableReason::Conflict));
         }
         return Err(retired(recipient, &claim));
+    }
+    Ok(())
+}
+
+/// A read or close is admitted against the recipient's terminal claim in the same writer
+/// transaction that stores the signed lifecycle claim. A stale OLD process cannot race retire.
+pub fn admit_mail_claim(connection: &Connection, input: &ClaimInput) -> Result<(), St3Error> {
+    if !matches!(input.kind.as_str(), "message.staged" | "message.delivered" | "message.read" | "message.closed") {
+        return Ok(());
+    }
+    let created: Option<u64> = connection.query_row(
+        "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND kind='message.sent'",
+        [&input.subject], |row| row.get(0),
+    ).map_err(internal)?;
+    let Some(created) = created else { return Ok(()); };
+    let message = message_view_tx(connection, &input.subject, created).map_err(internal)?;
+    let actor = input.actor.as_deref().unwrap_or("");
+    let Some(retirement) = record(connection, &message.to, None)? else {
+        if input.fields.contains_key("acting_for") {
+            return Err(St3Error::new("wrong-message-recipient", "mail has no custody grant"));
+        }
+        return Ok(());
+    };
+    if !matches!(input.kind.as_str(), "message.read" | "message.closed") {
+        return Err(St3Error::new("wrong-message-recipient", format!(
+            "retired `{}` cannot acknowledge mail", message.to,
+        )));
+    }
+    let successor = retirement.body["fields"]["successor"].as_str();
+    if successor != Some(actor)
+        || input.fields.get("acting_for").and_then(Value::as_str) != Some(message.to.as_str())
+        || !input.evidence.iter().any(|id| id == &retirement.id)
+        || record(connection, actor, None)?.is_some()
+    {
+        return Err(St3Error::new("wrong-message-recipient", format!(
+            "message `{}` belongs to retired `{}`; `{actor}` has no current mail custody",
+            input.subject, message.to,
+        )));
     }
     Ok(())
 }

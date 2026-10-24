@@ -111,6 +111,7 @@ export type Agent = ResourceHeader & {
   kind: "agent";
   last_activity_at?: (Timestamp | null);
   lifecycle?: AgentLifecycle;
+  mail_custody?: AgentMailCustody;
   name: string;
   next_work?: (WorkLabel | null);
   next_work_id?: (Id | null);
@@ -198,6 +199,11 @@ export type AgentHandoff = {
 export type AgentId = string;
 
 export type AgentLifecycle = ("standing" | "owner" | "bounded" | string);
+
+export type AgentMailCustody = {
+  state: "pending";
+  successor: AgentId;
+};
 
 export type AgentMessageDay = {
   calibrated_messages: number;
@@ -310,6 +316,7 @@ export type AgentResumeParameters = {
 export type AgentRetireParameters = {
   agent: Id;
   reason: string;
+  successor?: Id;
 };
 
 export type AgentStartParameters = {
@@ -883,6 +890,7 @@ export type Attention = ResourceHeader & {
   mission_id?: Id;
   mission_run_id?: Id;
   person_id: Id;
+  presentation?: AttentionPresentation;
   preview?: (LaunchPreview | null);
   preview_token?: string | null;
   priority: "critical" | "high" | "normal" | "low";
@@ -902,6 +910,11 @@ export type Attention = ResourceHeader & {
   what?: string;
 };
 
+export type AttentionActor = {
+  id: Id;
+  label: string;
+};
+
 export type AttentionBlocked = {
   attempt: number;
   goal: string;
@@ -909,10 +922,34 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionPresentation = {
+  agent: (AttentionActor | null);
+  kind: 
+  "review"
+  | "feedback"
+  | "request"
+  | "update"
+  | "launch"
+  | "revision"
+  | "prompt"
+  | "login"
+  | "fault"
+  | null
+;
+  raised_by: (AttentionActor | null);
+  tier: "stopped" | "alert" | "today" | "later" | null;
+  waiting: (AttentionWaiting | null);
+};
+
 export type AttentionTargetState = {
   id: Id;
   since?: Timestamp;
   state: string;
+};
+
+export type AttentionWaiting = {
+  path: string;
+  step: StepRunId;
 };
 
 export type BlobChunk = {
@@ -1310,6 +1347,14 @@ export type DecisionResponse = ({
   value: Array<string>;
 });
 
+export type DelegationProof = {
+  episode: string;
+  message: string;
+  person: string;
+  policy: string;
+  quote: string;
+};
+
 export type Device = ResourceHeader & {
   expires_at: Timestamp;
   grant_expires_at?: Timestamp;
@@ -1417,13 +1462,20 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | DocumentContent | DocumentsPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
   "recipient-retired"
+  | "identity-cycle"
+  | "identity-occupied"
+  | "identity-retired-source"
+  | "identity-cross-kind"
+  | "identity-unknown"
   | "lifecycle-unavailable"
   | "retirement-upgrade-required"
+  | "invalid-custody-successor"
+  | "custody-pending"
   | "attention-migrated"
   | "arrangement-exists"
   | "arrangement-folder-exists"
@@ -2177,6 +2229,7 @@ export type PageInfo = {
   has_more: boolean;
   limit: number;
   next_cursor?: string | null;
+  omitted_items?: number | null;
 };
 
 export type PairedSession = (PersonPairedSession | AssistantPairedSession);
@@ -2349,6 +2402,7 @@ export type ProjectionEvent = Omit<{
 
 export type PromptRespondParameters = {
   answer: string;
+  delegation?: DelegationProof;
   episode: string;
   target_id: Id;
 };
@@ -2540,6 +2594,74 @@ export type ScgReadAuthorizationPayload = {
   policy_revision: number;
   projection: AssistantProjection;
   request_digest: string;
+};
+
+export type ScheduleCoverage = {
+  covered_host_count: number;
+  membership: ("unknown" | string);
+  omitted_configured_peer_count: number;
+  omitted_covered_host_count: number;
+  scope: "configured-peers-and-page-hosts";
+  truncated: boolean;
+  unheard_after_ms: number;
+  unheard_hosts: Array<ScheduleUnheardHost>;
+  [key: string]: unknown;
+};
+
+export type ScheduleDeclaration = {
+  declaration: unknown;
+  declaration_bytes: number;
+  declaration_claim_id: string;
+  declaration_origin_host_id: string | null;
+  id: string;
+  knowledge: ScheduleKnowledge;
+  next_declared_fire_at: string | null;
+  next_fire_basis: "declaration-only";
+  next_fire_state: ("future" | "stopped" | "past-one-shot" | "unknown" | string);
+  owner: ScheduleOwner;
+  primary_host_id: string | null;
+  read_problem: string | null;
+  revision: string;
+  standby_node: unknown;
+  standby_state: ("declared" | "not-declared" | "unknown" | string);
+  state: ("declared" | "stopped" | "unknown" | string);
+  [key: string]: unknown;
+};
+
+export type ScheduleKnowledge = {
+  age_ms: (number | null);
+  basis: ("local-read" | "last-direct-exchange" | "unknown" | string);
+  completeness: ("unknown" | string);
+  last_exchange_at: string | null;
+  origin_host_id: string | null;
+  [key: string]: unknown;
+};
+
+export type ScheduleOwner = {
+  generation_id: string | null;
+  run_id: string | null;
+  state: ("recorded" | "not-recorded" | "unknown" | string);
+  step_id: string | null;
+  [key: string]: unknown;
+};
+
+export type ScheduleUnheardHost = {
+  age_ms: (number | null);
+  host_id: string;
+  last_exchange_at: string | null;
+  reason: ("older-than-threshold" | "never-recorded" | "clock-unknown" | string);
+  [key: string]: unknown;
+};
+
+export type SchedulesPage = {
+  as_of: Timestamp;
+  basis: "local-replicated-declarations";
+  collection: "schedules";
+  coverage: ScheduleCoverage;
+  items: Array<ScheduleDeclaration>;
+  kind: "page";
+  page: PageInfo;
+  [key: string]: unknown;
 };
 
 export type SenderRef = string;

@@ -26,6 +26,237 @@ use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
 
+fn legacy_repair_fixture(store: &Store) -> Value {
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-haf973508711e owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "INSERT INTO local_runtime_starts(id,subject,owner,body,revoked_by,finished,result,applied,cleanup_verified,dispatched,receipted)
+         VALUES('legacy-op','agent/example-legacy','worker-owner',?1,'stop-request',1,?2,1,0,1,1)",
+        params![
+            json!({"member":{"host":"node","runtime_id":"legacy-runtime","terminal":true,
+                    "environment":{"PRIVATE_TOKEN":"private-launch-secret"}},
+                "launch_member":{"environment":{"PRIVATE_TOKEN":"private-launch-secret"}},
+                "desired_token":"legacy-desired","selected_token":"legacy-selected"}).to_string(),
+            json!({"error":"legacy start returned without closure proof",
+                "private_result":"private-result-secret"}).to_string(),
+        ],
+    ).unwrap();
+    // Internal-only fixture: the native layer owns the physical-fact schema.
+    json!({"operation_id":"legacy-op","runtime_id":"legacy-runtime","legacy":true,
+        "native_fixture":{"closed":true,"capture":"first"}})
+}
+
+#[test]
+fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "node").unwrap();
+    let evidence = legacy_repair_fixture(&store);
+    let plan = store.operational_repair_plan_with_legacy_starts(std::slice::from_ref(&evidence)).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].class, "revoked-legacy-runtime-start");
+    assert_eq!(plan.items[0].details["native_evidence"], evidence);
+    assert_eq!(plan.items[0].details["operation"]["revoked_by"], "stop-request");
+    assert!(plan.items[0].details["operation_fence"].is_string());
+    assert!(plan.items[0].details["operation"].get("body").is_none());
+    assert!(plan.items[0].details["operation"].get("result").is_none());
+    let public_plan = serde_json::to_string(&plan).unwrap();
+    for private in ["environment", "private-launch-secret", "private-result-secret"] {
+        assert!(!public_plan.contains(private), "repair plan exposed {private}");
+    }
+
+    let mut changed = evidence.clone();
+    changed["native_fixture"]["capture"] = json!("second");
+    for fresh in [vec![], vec![changed]] {
+        assert_eq!(
+            store.apply_operational_repair_with_legacy_starts(&plan.token, &fresh).unwrap_err().code,
+            "stale-repair-plan",
+        );
+    }
+    let wrong_token = format!("orpv0:{}", "0".repeat(64));
+    assert_eq!(
+        store.apply_operational_repair_with_legacy_starts(&wrong_token, std::slice::from_ref(&evidence))
+            .unwrap_err().code,
+        "stale-repair-plan",
+    );
+    let result = store.apply_operational_repair_with_legacy_starts(
+        &plan.token, std::slice::from_ref(&evidence),
+    ).unwrap();
+    assert_eq!(result.applied, 1);
+    assert_eq!(result.affected_subjects, vec!["agent/example-legacy"]);
+    let receipt_id = result.receipt_claim_id.unwrap();
+    drop(store);
+
+    let reopened = Store::open(&path, "node").unwrap();
+    let connection = reopened.readers.get();
+    let operation = connection.query_row(
+        "SELECT * FROM local_runtime_starts WHERE id='legacy-op'", [], runtime_starts::read,
+    ).unwrap();
+    assert!(operation.cleanup_verified);
+    let closed = operation.result.unwrap();
+    assert_eq!(closed["producer_closed"], true);
+    assert_eq!(closed["verification"], "producer-closed");
+    assert_eq!(closed["closure_proof"]["witness"]["native_evidence"], evidence);
+    assert_eq!(closed["closure_proof_id"], json!(format!(
+        "start-proof/{}", canonical_hash(&closed["closure_proof"]).unwrap(),
+    )));
+    let receipt: String = connection.query_row(
+        "SELECT body FROM claims WHERE id=?1 AND kind='repair.applied'",
+        [&receipt_id], |row| row.get(0),
+    ).unwrap();
+    let receipt: Value = serde_json::from_str(&receipt).unwrap();
+    assert!(receipt["fields"].get("legacy_runtime_start_closures").is_none());
+    let closures: Value = serde_json::from_str(
+        receipt["fields"]["reason"].as_str().unwrap().split_once("; legacy runtime start closures: ").unwrap().1,
+    ).unwrap();
+    assert_eq!(closures[0]["operation_id"], "legacy-op");
+    assert_eq!(closures[0]["native_evidence"], evidence);
+    assert_eq!(receipt["fields"].as_object().unwrap().len(), 4);
+    assert!(reopened.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty());
+    assert!(reopened.apply_operational_repair(&plan.token).unwrap().already_applied);
+}
+
+#[test]
+fn legacy_runtime_repair_rejects_ineligible_local_rows_and_evidence() {
+    for (column, value) in [
+        ("revoked_by", Value::Null),
+        ("finished", json!(0)),
+        ("cleanup_verified", json!(1)),
+        ("applied", json!(0)),
+        ("body", json!({"member":{"host":"node","runtime_id":"legacy-runtime","terminal":false}})),
+        ("body", json!({"member":{"host":"other","runtime_id":"legacy-runtime","terminal":true}})),
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let evidence = legacy_repair_fixture(&store);
+        let sql_value = match value {
+            Value::Null => rusqlite::types::Value::Null,
+            Value::Number(n) => rusqlite::types::Value::Integer(n.as_i64().unwrap()),
+            value => rusqlite::types::Value::Text(value.to_string()),
+        };
+        store.connection.write().execute(
+            &format!(/* sqlite-large-value: allow-for-now lv-h936ac0b978c0 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET {column}=?1 WHERE id='legacy-op'"),
+            [sql_value],
+        ).unwrap();
+        assert!(store.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty(),
+            "accepted ineligible {column}");
+    }
+    for (field, value) in [
+        ("operation_id", json!("wrong-operation")),
+        ("runtime_id", json!("wrong-runtime")),
+        ("legacy", json!(false)),
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let mut evidence = legacy_repair_fixture(&store);
+        evidence[field] = value;
+        assert!(store.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty());
+    }
+}
+
+#[test]
+fn legacy_runtime_repair_token_binds_every_local_operation_field() {
+    for update in [
+        /* sqlite-large-value: allow-for-now lv-hf155f0a6aecc owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET revoked_by='another-stop'",
+        /* sqlite-large-value: allow-for-now lv-hf8a0350b3acd owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET result='{\"error\":\"changed\"}'",
+        /* sqlite-large-value: allow-for-now lv-hc656b9055239 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET owner='another-owner'",
+        /* sqlite-large-value: allow-for-now lv-hb359d984f1b4 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET receipted=0",
+        /* sqlite-large-value: allow-for-now lv-h422c075ced29 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET dispatched=0",
+        /* sqlite-large-value: allow-for-now lv-hff01ab86b211 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET body=json_set(body,'$.desired_token','changed')",
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let evidence = legacy_repair_fixture(&store);
+        let plan = store.operational_repair_plan_with_legacy_starts(std::slice::from_ref(&evidence)).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb1926b4fb61f owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ update, []).unwrap();
+        assert_eq!(store.apply_operational_repair_with_legacy_starts(
+            &plan.token, &[evidence],
+        ).unwrap_err().code, "stale-repair-plan");
+    }
+}
+
+#[test]
+fn filtered_legacy_runtime_repair_token_never_applies_unselected_items() {
+    let store = Store::open_memory("node").unwrap();
+    let selected = legacy_repair_fixture(&store);
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hfe21be49c4b0 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "INSERT INTO local_runtime_starts
+         SELECT 'unselected-op','agent/example-unselected',owner,
+           json_set(body,'$.member.runtime_id','unselected-runtime'),
+           revoked_by,finished,result,applied,cleanup_verified,dispatched,receipted
+         FROM local_runtime_starts WHERE id='legacy-op'", [],
+    ).unwrap();
+    let mut unselected = selected.clone();
+    unselected["operation_id"] = json!("unselected-op");
+    unselected["runtime_id"] = json!("unselected-runtime");
+    let evidence = vec![selected, unselected];
+    let subjects = vec!["agent/example-legacy".to_owned()];
+    let classes = vec!["revoked-legacy-runtime-start".to_owned()];
+    let all = store.operational_repair_plan_with_legacy_starts(&evidence).unwrap();
+    assert_eq!(all.items.len(), 2);
+    let filtered = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &subjects, &classes,
+    ).unwrap();
+    assert_eq!(filtered.items.len(), 1);
+    assert_ne!(filtered.token, all.token);
+    assert_eq!(Store::operational_repair_token_filters(&filtered.token).unwrap(),
+        (subjects.clone(), classes.clone()));
+    let repeated = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &[subjects[0].clone(), subjects[0].clone()], &classes,
+    ).unwrap();
+    assert_eq!(filtered.token, repeated.token);
+
+    // Reusing the digest while widening/removing its embedded filter cannot
+    // turn the approval into an unfiltered mutation.
+    let digest = filtered.token.split(':').nth(1).unwrap();
+    let widened = OperationalRepairFilter::new(&[], &classes);
+    let tampered = format!("orpv0:{digest}:{}", hex::encode(serde_json::to_vec(&widened).unwrap()));
+    for token in [format!("orpv0:{digest}"), tampered] {
+        assert_eq!(store.apply_operational_repair_with_legacy_starts(&token, &evidence)
+            .unwrap_err().code, "stale-repair-plan");
+    }
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h316e34fd2d7a owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET result='{\"error\":\"unselected changed\"}' WHERE id='unselected-op'",
+        [],
+    ).unwrap();
+    let result = store.apply_operational_repair_with_legacy_starts(&filtered.token, &evidence).unwrap();
+    assert_eq!(result.applied, 1);
+    let connection = store.readers.get();
+    let closed: bool = connection.query_row(
+        "SELECT cleanup_verified FROM local_runtime_starts WHERE id='legacy-op'", [], |row| row.get(0),
+    ).unwrap();
+    let untouched: bool = connection.query_row(
+        "SELECT cleanup_verified FROM local_runtime_starts WHERE id='unselected-op'", [], |row| row.get(0),
+    ).unwrap();
+    assert!(closed);
+    assert!(!untouched);
+}
+
+#[test]
+fn filtered_legacy_runtime_repair_refuses_changed_selected_set_and_class() {
+    let store = Store::open_memory("node").unwrap();
+    let evidence = vec![legacy_repair_fixture(&store)];
+    let subjects = vec!["agent/example-legacy".to_owned()];
+    let classes = vec!["expired-claim".to_owned()];
+    let empty = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &subjects, &classes,
+    ).unwrap();
+    assert!(empty.items.is_empty());
+    let selected = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &subjects, &["revoked-legacy-runtime-start".into()],
+    ).unwrap();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h1dbcb8c5613a owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET revoked_by='changed-stop' WHERE id='legacy-op'", [],
+    ).unwrap();
+    assert_eq!(store.apply_operational_repair_with_legacy_starts(&selected.token, &evidence)
+        .unwrap_err().code, "stale-repair-plan");
+}
+
 mod resource_pending_receive_tests {
     
 }
@@ -124,6 +355,11 @@ mod actual_purity_tests {
 mod activity_purity_tests {
     use super::*;
     /* sqlite-large-value: allow-for-now lv-h2c081374795f owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("activity_purity_tests.rs");
+}
+
+mod subscription_state_full_value_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-haaf140af31b3 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("subscription_state_full_value_tests.rs");
 }
 
 mod limits_purity_tests {
@@ -2749,6 +2985,23 @@ fn the_actual_cache_follows_each_subjects_newest_claim() {
 }
 
 #[test]
+fn declaration_restart_observation_waits_on_an_older_registry() {
+    let store = Store::open_memory("node").unwrap();
+    let record = store.append_claim(&ClaimInput {
+        subject: "agent/example/relaunch".into(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(serde_json::json!({
+            "status":"running", "incarnation_id":"old", "restarting_from":"old"
+        })).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let mut older = fractal_schema::registry().clone();
+    older.claims.get_mut("runtime.observed").unwrap().fields.remove("restarting_from").unwrap();
+    assert!(matches!(classify_replicated_claim_with_registry(&record, &older).unwrap(),
+        ReplicatedClaimAdmission::UnknownField));
+    assert!(matches!(classify_replicated_claim_with_registry(&record, fractal_schema::registry()).unwrap(),
+        ReplicatedClaimAdmission::Valid));
+}
+
+#[test]
 fn a_subject_with_no_actual_or_desired_state_has_unknown_reachability() {
     let store = Store::open_memory("node").unwrap();
     let subject = "agent/diagnostic-run/sig.hub";
@@ -4258,9 +4511,11 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
     });
     let input = ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
+        shard_id: None,
         schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
@@ -4276,6 +4531,7 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         },
         envelopes: vec![candidate],
         signature_requests: Vec::new(),
@@ -4332,9 +4588,11 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
     });
     let make_exchange = |envelopes: Vec<ReplicaEnvelope>| ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
+        shard_id: None,
         schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
@@ -4353,6 +4611,7 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         },
         envelopes,
         signature_requests: Vec::new(),
@@ -4493,6 +4752,8 @@ fn nodes_that_received_the_same_claims_in_different_orders_agree() {
 fn the_same_envelopes_projecting_different_graphs_diverge() {
     let left = Store::open_memory("left").unwrap();
     let right = Store::open_memory("right").unwrap();
+    left.capture_divergences(true);
+    right.capture_divergences(true);
     let intent = simple("true");
     let preview = left
         .mission(
@@ -4878,59 +5139,61 @@ fn a_replicated_repair_replaces_a_record_that_the_source_had_accepted() {
     assert_eq!(source_status.graph_digest, target_status.graph_digest);
 }
 
-proptest! {
-    #[test]
-    fn envelope_sets_converge_after_sparse_duplicate_delivery(
-        reverse in any::<bool>(),
-        copies in 1usize..4,
-        split_seed in 0usize..8,
-    ) {
-        let source = Store::open_memory("source").unwrap();
-        for index in 0..4 {
-            source
-                .append_claim(&ClaimInput {
-                    subject: format!("host/source-{index}"),
-                    kind: "transport.observed".into(),
-                    actor: None,
-                    fields: BTreeMap::from([("status".into(), Value::String("up".into()))]),
-                    evidence: Vec::new(),
-                    expected_subject: None,
-                    idempotency_key: Some(format!("source-{index}")),
-                })
-                .unwrap();
-        }
-        let complete = exchange_from(&source, &ReplicationInventory::default());
-        let mut delivered = complete.envelopes.clone();
-        if reverse {
-            delivered.reverse();
-        }
-        let split = split_seed % (delivered.len() + 1);
-        let second = delivered.split_off(split);
-        let duplicate = |part: &[ReplicaEnvelope]| {
-            let mut envelopes = Vec::new();
-            for envelope in part {
-                envelopes.extend(std::iter::repeat_n(envelope.clone(), copies));
-            }
-            ReplicationExchange {
-                envelopes,
-                ..complete.clone()
-            }
-        };
-        let target = Store::open_memory("target").unwrap();
-        receive_and_project(&target, "source", &duplicate(&delivered));
-        receive_and_project(&target, "source", &duplicate(&second));
-        receive_and_project(&target, "source", &complete);
-        let source_status = source
-            .replication_status(true, Some(TEST_FLEET), &[])
+/// Every delivery of four envelopes: either order, each sent once to three times, split into two
+/// exchanges at every point, and then the complete exchange. Thirty cases, all of them.
+#[test]
+fn envelope_sets_converge_after_sparse_duplicate_delivery() {
+    let source = Store::open_memory("source").unwrap();
+    for index in 0..4 {
+        source
+            .append_claim(&ClaimInput {
+                subject: format!("host/source-{index}"),
+                kind: "transport.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([("status".into(), Value::String("up".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("source-{index}")),
+            })
             .unwrap();
-        let target_status = target
-            .replication_status(true, Some(TEST_FLEET), &[])
-            .unwrap();
-        prop_assert_eq!(source_status.authority_digest, target_status.authority_digest);
-        prop_assert_eq!(source_status.graph_digest, target_status.graph_digest);
-        prop_assert_eq!(target_status.pending_records, 0);
-        prop_assert_eq!(target_status.invalid_records, 0);
-        prop_assert_eq!(target_status.unknown_records, 0);
+    }
+    let complete = exchange_from(&source, &ReplicationInventory::default());
+    let source_status = source
+        .replication_status(true, Some(TEST_FLEET), &[])
+        .unwrap();
+    for reverse in [false, true] {
+        for copies in 1..4 {
+            for split in 0..=complete.envelopes.len() {
+                let mut delivered = complete.envelopes.clone();
+                if reverse {
+                    delivered.reverse();
+                }
+                let second = delivered.split_off(split);
+                let duplicate = |part: &[ReplicaEnvelope]| {
+                    let mut envelopes = Vec::new();
+                    for envelope in part {
+                        envelopes.extend(std::iter::repeat_n(envelope.clone(), copies));
+                    }
+                    ReplicationExchange {
+                        envelopes,
+                        ..complete.clone()
+                    }
+                };
+                let target = Store::open_memory("target").unwrap();
+                receive_and_project(&target, "source", &duplicate(&delivered));
+                receive_and_project(&target, "source", &duplicate(&second));
+                receive_and_project(&target, "source", &complete);
+                let target_status = target
+                    .replication_status(true, Some(TEST_FLEET), &[])
+                    .unwrap();
+                let case = (reverse, copies, split);
+                assert_eq!(source_status.authority_digest, target_status.authority_digest, "{case:?}");
+                assert_eq!(source_status.graph_digest, target_status.graph_digest, "{case:?}");
+                assert_eq!(target_status.pending_records, 0, "{case:?}");
+                assert_eq!(target_status.invalid_records, 0, "{case:?}");
+                assert_eq!(target_status.unknown_records, 0, "{case:?}");
+            }
+        }
     }
 }
 
@@ -5073,9 +5336,11 @@ fn a_node_that_rejected_insertion_order_hashes_admits_them_once_upgraded() {
                 FLEET,
                 &ReplicationExchange {
                     build: None,
+                    claim_ranges: None,
                     projection_digests: Default::default(),
                     peer: "source".into(),
                     fleet_id: FLEET.into(),
+                    shard_id: None,
                     schema_digest: String::new(),
                     projection_registry_digest: None,
                     projection_versions: Default::default(),
@@ -8778,11 +9043,23 @@ fn claude_native_human_release_is_episode_fenced_durable_and_shared_with_sender_
         let store = Store::open_memory("node").unwrap();
         let seat = "agent/node.worker";
         let append = |kind: &str, fields: Value, key: Option<String>| {
-            store.append_claim(&ClaimInput {
-                subject: seat.into(), kind: kind.into(), actor: Some(seat.into()),
-                fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
-                expected_subject: None, idempotency_key: key,
-            }).unwrap()
+            store
+                .append_claim(&ClaimInput {
+                    // The fixture's answer is a person's request, while driver observations
+                    // remain authored by the seat. An agent answer needs delegation.
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(if fields["code"] == "native-prompt-answered" {
+                        "person/avery".into()
+                    } else {
+                        seat.into()
+                    }),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: key,
+                })
+                .unwrap()
         };
         append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}), None);
         let blocked = |transition| json!({
@@ -9588,6 +9865,61 @@ fn a_codex_permission_prompt_is_answered_and_records_its_driver() {
             .code,
         "stale-fence"
     );
+}
+
+#[test]
+fn runtime_status_generation_includes_authored_work_activity() {
+    for kind in ["work.claimed", "work.progress"] {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/node.worker";
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running", "runtime_id":"node.worker",
+                "terminal":true, "incarnation_id":"current"})),
+            ("harness.observed", json!({"state":"idle", "driver":"codex",
+                "incarnation_id":"current"})),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let before_cut = store.index().unwrap();
+        let before = store.status_for_claim_kind_at(
+            "runtime.observed", Some(before_cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        assert_eq!(before.subjects[0].harness.as_ref().unwrap().state, "idle");
+        let work = {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            let work = append_claim_tx(
+                &tx, "node", "step-run/activity/work", kind, Some(subject),
+                &json!({"fields":{"status":"working", "attempt":1, "readiness_epoch":1,
+                    "claimant":subject, "claim_incarnation":"current",
+                    "claim_expires_at_unix_ms":now_ms().saturating_add(60_000)}}),
+                &[], None,
+            ).unwrap();
+            tx.commit().unwrap();
+            work
+        };
+        let cut = store.index().unwrap();
+        let warm = store.status_for_claim_kind_at(
+            "runtime.observed", Some(cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        *store.smalltalk.subject_cache.lock().unwrap_or_else(PoisonError::into_inner) = SubjectCache::default();
+        let cold = store.status_for_claim_kind_at(
+            "runtime.observed", Some(cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        let harness = cold.subjects[0].harness.as_ref().unwrap();
+        assert_eq!(harness.state, "working", "{kind}");
+        assert_eq!(harness.claim, work.id, "{kind}");
+        assert_eq!(serde_json::to_value(warm).unwrap(), serde_json::to_value(cold).unwrap(),
+            "a warm runtime reduction must observe authored {kind}");
+        let historical = store.status_for_claim_kind_at(
+            "runtime.observed", Some(before_cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        assert_eq!(serde_json::to_value(historical).unwrap(), serde_json::to_value(before).unwrap());
+    }
 }
 
 #[test]

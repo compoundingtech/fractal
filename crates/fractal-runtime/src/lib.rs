@@ -3,6 +3,13 @@
 //! This crate owns process identity and the `pty` session boundary: it starts a session with the
 //! `pty` binary and reads and controls it through `pty-client`. It has no catalog, graph, claim, or
 //! provider policy.
+//!
+//! Legacy revoked starts can be closed only through
+//! [`PtyRuntime::legacy_start_closure`]: Linux captures complete manager/proc
+//! evidence under the spawn lock. Keep the returned [`LegacyStartClosureProof`]
+//! alive through the state writer; serialized evidence alone does not hold the
+//! fence. Dry-run and apply each acquire a fresh proof and compare its stable
+//! evidence. This API observes only; it never stops a process or unloads a scope.
 
 mod environment;
 mod isolate;
@@ -31,5 +38,6 @@ pub use process::{
     ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token,
 };
 pub use pty::{
-    Launch, PtyObservation, PtyRuntime, PtySpawnTimeout, PtySpawnTimeoutPhase, TerminalSize,
+    Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, ProcfsHidesProcesses, PtyObservation, PtyRuntime,
+    PtySpawnTimeout, PtySpawnTimeoutPhase, TerminalSize,
 };

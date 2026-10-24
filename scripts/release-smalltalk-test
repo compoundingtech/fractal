@@ -94,3 +94,5 @@ with tempfile.TemporaryDirectory() as temporary:
     assert release_stamp().returncode != 0
 
 print('Native release build stamp tests passed')
+
+subprocess.run(['python3', str(repo / 'scripts/release-smalltalk-pty-test')], check=True)

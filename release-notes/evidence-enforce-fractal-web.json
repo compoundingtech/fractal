@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Pull requests now skip the fractal-web check when a trusted signed note already covers the tree (one run in five still runs it to compare); the merge queue keeps running it",
+  "replay": {
+    "status": "none",
+    "detail": "No graph, claim or storage change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change. fractal-web is enforced in the skip policy for pull_request only."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Required check names and results are unchanged: a skipped fractal-web job still ends in success. Merge-group runs are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Set enforce back to false for fractal-web in .st/evidence-skip-policy.json (the policy is read from the base, so it takes effect for runs after the revert merges)."
+  }
+}

@@ -12,6 +12,7 @@ mod ci_test_paths;
 
 pub use fractal_kernel::accounts;
 pub mod api;
+pub mod web;
 pub use fractal_kernel::archive;
 pub mod attach_image;
 pub use fractal_store::backup;
@@ -68,6 +69,7 @@ pub use fractal_store::native_resume;
 /// Durable seat-scoped first native launch outcomes.
 pub use fractal_reconcile::native_seed;
 pub use fractal_store::node_identity;
+pub use fractal_api_mailbox::objective_faults;
 pub use fractal_api_mailbox::objectives;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
@@ -83,6 +85,7 @@ pub use smallclaims::{performance, profile};
 pub use fractal_kernel::projection;
 pub use fractal_store::provenance;
 pub use fractal_reconcile::reconcile;
+pub use fractal_reconcile::schedule_standby;
 pub use fractal_kernel::rules;
 #[cfg(test)]
 pub(crate) use fractal_kernel::publication;

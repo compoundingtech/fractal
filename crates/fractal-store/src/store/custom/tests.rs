@@ -9,6 +9,125 @@ pub use crate::store::custom::tests_shared_delivery::{DECIDER, FLEET, RAW_KINDS,
 pub use crate::store::custom::tests_shared_delivery::{request, signed_pair, signed_sync, tree_claim, tree_document, tree_status};
 use super::*;
 
+fn audit_custom_dirty(store: &Store) {
+    store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h4094ac3a489b owner=fractal_store::store::custom::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE custom_dirty_audit(subject TEXT);
+         CREATE TRIGGER custom_dirty_audit_insert AFTER INSERT ON local_custom_dirty BEGIN
+         INSERT INTO custom_dirty_audit VALUES(NEW.subject); END;",
+    ).unwrap();
+}
+
+#[test]
+fn custom_ordinary_claim_append_and_seal_never_enqueue_dirty_subjects() {
+    let store = Store::open_memory("example").unwrap();
+    audit_custom_dirty(&store);
+    for subject in ["agent/example-a", "agent/example-b"] {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            ..empty_input()
+        }).unwrap();
+    }
+    store.seal_local_batches().unwrap();
+    let count: i64 = store.connection.write().query_row(
+        "SELECT count(*) FROM custom_dirty_audit", [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 0, "flush clearing the queue must not hide transient inserts");
+}
+
+#[test]
+fn custom_non_custom_dependency_canonical_change_refreshes_consumer() {
+    let store = Store::open_memory("example").unwrap();
+    let mut manifest = example();
+    let reference: schema::Field =
+        serde_json::from_value(json!({"value_type":"string","claim":true})).unwrap();
+    manifest.claims.get_mut(&manifest.creation_kind.clone()).unwrap()
+        .fields.insert("input".into(), reference);
+    store.register_custom_kind(&RegistrationRequest {
+        manifest: manifest.clone(), actor: "agent/example-a".into(),
+    }).unwrap();
+    let dependency = "agent/example-a";
+    let input = store.append_claim(&ClaimInput {
+        subject: dependency.into(), kind: "runtime.observed".into(), ..empty_input()
+    }).unwrap();
+    let consumer = "custom/garden/review/v1/example";
+    store.append_claim(&ClaimInput {
+        subject: consumer.into(), kind: manifest.creation_kind,
+        actor: Some("agent/example-a".into()),
+        fields: serde_json::from_value(json!({
+            "title":"Review", "detail":"Evidence", "recipient":"person/robin", "input": &input.id
+        })).unwrap(), ..empty_input()
+    }).unwrap();
+    assert_eq!(store.custom_subject(consumer).unwrap().unwrap()["state"], "ready");
+    store.seal_local_batches().unwrap();
+    audit_custom_dirty(&store);
+    // Synthetic canonical repair isolates record invalidation from claim insertion.
+    store.connection.batched(|tx| -> Result<()> {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h7ddc25a3b2d6 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [&input.id])?;
+        let queued: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
+            [consumer], |row| row.get(0),
+        )?;
+        assert!(queued);
+        flush(tx)
+    }).unwrap().unwrap();
+    // Claim references remain available after canonical repair; the queue assertion
+    // above proves invalidation without relying on a basis restricted to custom kinds.
+    assert_eq!(store.custom_subject(consumer).unwrap().unwrap()["state"], "ready");
+}
+
+#[test]
+fn custom_noop_updates_preserve_dirty_queue_and_schema_reopen_is_stable() {
+    let store = Store::open_memory("example").unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "custom/example/fact".into(), kind: "custom.example.recorded".into(),
+        ..empty_input()
+    }).unwrap();
+    store.put_document_as(
+        "doc/example-a", b"example", &None, "example-document", Some("agent/example-a"),
+    ).unwrap();
+    store.seal_local_batches().unwrap();
+    audit_custom_dirty(&store);
+    let connection = store.connection.write();
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h77cbd3b06e97 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE claims SET subject=subject,body=body;
+         UPDATE documents SET name=name,hash=hash;
+         UPDATE batches SET origin=origin,replica_sequence=replica_sequence;
+         UPDATE replica_records SET position=position,claim_id=claim_id,state=state;",
+    ).unwrap();
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM custom_dirty_audit", [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 0);
+    let cookie: i64 = connection.query_row("PRAGMA schema_version", [], |row| row.get(0)).unwrap();
+    create_schema(&connection).unwrap();
+    assert_eq!(connection.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), cookie);
+}
+
+#[test]
+fn custom_registration_document_record_change_reaches_registry_expansion() {
+    let store = Store::open_memory("example").unwrap();
+    store.register_custom_kind(&RegistrationRequest {
+        manifest: example(), actor: "agent/example-a".into(),
+    }).unwrap();
+    store.seal_local_batches().unwrap();
+    store.connection.batched(|tx| -> Result<()> {
+        let (binding, registry): (String, String) = tx.query_row(
+            "SELECT binding.id,registration.subject FROM claims AS binding
+             JOIN claims AS registration ON registration.kind='custom.st3-kinds.registered'
+             AND substr(json_extract(registration.body,'$.fields.document'),1,length(binding.subject)+1)=binding.subject||'@'
+             WHERE binding.kind='doc.bound' LIMIT 1", [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h59a9d79d4e2d owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [binding])?;
+        assert!(tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
+            [registry], |row| row.get::<_, bool>(0),
+        )?);
+        flush(tx)
+    }).unwrap().unwrap();
+}
+
 #[test]
 fn custom_bad_projection_isolated_from_other_sources_and_core_reads() {
     let s = Store::open_memory("alder").unwrap();

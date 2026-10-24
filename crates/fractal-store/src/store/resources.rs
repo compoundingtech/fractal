@@ -1,6 +1,18 @@
 //! Rebuildable latest observations. Dirty subjects are local work, never replicated identity.
 use super::*;
 
+#[path = "resources_preparation.rs"]
+mod preparation;
+pub use preparation::{PreparationObservation, preparation_observation, rebuild_preparation};
+
+pub(super) fn flush_preparation(transaction: &Transaction<'_>) -> Result<()> {
+    preparation::flush_if_pending(transaction)
+}
+
+#[cfg(test)]
+#[path = "resources_preparation_tests.rs"]
+mod preparation_tests;
+
 const VERSION: &str = "2";
 const PENDING_TRIGGER_VERSION: &str = "1";
 const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hdacd067611e1 owner=fractal_store::store::resources TODO=chunk-or-reference-variable-columns */ r#"
@@ -60,7 +72,8 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         .context("creating resource observation projection")?;
     connection
         .execute_batch(/* sqlite-large-value: allow-for-now lv-hdb152501a3ff owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ PENDING_TRIGGERS)
-        .context("creating resource observation pending triggers")
+        .context("creating resource observation pending triggers")?;
+    preparation::create_schema(connection)
 }
 
 fn replace_pending_triggers(transaction: &Transaction<'_>) -> Result<()> {
@@ -107,12 +120,14 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     } else {
         flush(transaction)?;
     }
+    preparation::open(transaction)?;
     Ok(())
 }
 
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h90834f2dfb3a owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_observations", [])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h50e1e155e04d owner=fractal_store::store::resources TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='resource.observed'", [])?;
+    rebuild_preparation(transaction)?;
     flush(transaction)
 }
 
@@ -124,6 +139,7 @@ pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
     for subject in subjects {
         refresh(transaction, &subject)?;
     }
+    preparation::flush(transaction)?;
     Ok(())
 }
 
@@ -251,7 +267,7 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         /* sqlite-large-value: allow-for-now lv-he57286e02c07 owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_projection_pending WHERE subject=?1",
         [subject],
     )?;
-    Ok(())
+    preparation::flush(transaction)
 }
 
 fn prefix_successor(prefix: &str) -> Option<String> {

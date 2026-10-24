@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "An exec that has exited no longer reads as running again for up to a minute. The `st3 driver exec` wrapper reports its command's exit before its own process ends, and a reconcile pass in that moment recorded the still-live wrapper as `running` over the exit; only the next full pass, up to 60 s later, put it back. Exit-code field gates waited and stuck-gate diagnostics stayed empty meanwhile. The reconciler now never records an exec incarnation as running or starting once that incarnation has ended. Ptys are unchanged: one a registry snapshot wrongly called vanished still reads running again at once.",
+  "replay": {"status": "none", "detail": "No claim kind, field or replay change; the reconciler writes one fewer stale observation."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing to do on upgrade."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit; an exited exec can then read as running until the next full reconcile pass again."}
+}

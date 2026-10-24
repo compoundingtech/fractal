@@ -102,6 +102,73 @@ it. Shutdown initialization, already-started pagehide transport and the native f
 share one absolute one-second deadline; the native flush receives only the time remaining
 after the manual transport drain. The independently demanded session-trace provider remains lazy.
 
+Configured browsers also export `fractal.input.next_frame` through this same tracer,
+under `service.name=fractal-web` (the TUI uses `fractal`). This is a span-based
+SLI for collector spanmetrics, not a browser histogram or a new metrics endpoint.
+Trusted inputs count only when an owned commit occurs during dispatch
+or its discrete React microtasks. Capture observes the initiating control, its
+`aria-controls`/`aria-owns` targets, and explicitly registered surface regions.
+Interactive sidebar rows (`role=row` with `data-sidebar-tree-key`) own only their
+row subtree and attributes. ArrowLeft/ArrowRight expansion therefore counts the
+row's `aria-expanded` change even when child rows mount as siblings; neither the
+treegrid nor its root is observed.
+The composer registers its own field and **only the final rendered transcript
+turn**. An optional kit `Transcript.tailRef` reports a newly mounted tail into
+the app-owned input window, so Send can count a new turn without observing the
+history container. Trusted field `input` events are native editing commits,
+including value-property changes. Existing overlay hosts are observed with
+`childList: true` only (no subtree, attributes, character data or old values).
+The document, React root and full transcript are never observed by this producer.
+Broad root/history targets are excluded even when referenced by ARIA.
+Effects outside these regions, including delayed async effects after the window,
+do not count; ingest closes ownership before its writes.
+Immediately after `createRoot`, the app registers that container
+with telemetry. The optional kit `PortalContainerRegistrationContext` registers
+every production portal container for its mounted lifetime. `App` owns the Aria
+provider above both the status bar and workspace, with a registered, unstyled
+app-root host. It adds no positioning or stacking context, preserving the
+status-bar changelog's explicit theme and z-index instead of inheriting the
+workspace host's z-index 20. Status overlays cannot fall back to document.body.
+The existing themed workspace host, nested `ThemePortal` hosts, workspace
+bodies, pane layers and error overlays are
+also registered. Shared containers are reference-counted; consumers without this
+context do nothing.
+Same-event completion listeners run after React's native delegated root/portal
+listeners: bubble handles stopped React bubble handlers; capture handles
+`cancelBubble` already set by React capture handlers. Native `stopPropagation`
+does not skip later same-node listeners. Their queued microtask drains after
+React's discrete flush and disconnects before timers or rendering. Window bubble
+provides the same completion for non-React targets. React 19.2.3's scheduling is in
+[ReactFiberRootScheduler.js:265-267,345-346,671-692](https://github.com/facebook/react/blob/v19.2.3/packages/react-reconciler/src/ReactFiberRootScheduler.js#L265-L267);
+the browser's [event-loop microtask checkpoint](https://html.spec.whatwg.org/multipage/webappapis.html#event-loop-processing-model)
+precedes rendering. An older dispatch's queued closure cannot close a newer capture.
+
+There is **no rAF attribution fallback**. A MessageChannel task is the last resort
+if native propagation stops below the root or uses `stopImmediatePropagation`.
+Those unsupported paths may include intervening task mutations; app/kit source
+contains no native instances of these paths (existing stops are React synthetic).
+`makeFrameIngest.flush` additionally drains and disconnects **before** batch writes,
+without reopening for their async React commits. No idle observation occurs.
+DOM-less React commits, native scrolling and value-only changes without a trusted
+editing event do not count.
+The start is the input event timestamp. Event Timing entries bind one-to-one by
+event type and exact timestamp before retaining their interactionId; ambiguous
+matches use the paint fallback rather than cross-matching concurrent inputs.
+The fallback end is rAF after commit followed by a posted task. A later input's commit before
+paint ends the previous committed input as `coalesced`. At page hiding, pagehide,
+unload or telemetry teardown, queued Event Timing entries are first drained through
+the same matching handler; a queued presentation remains `painted`. Only still
+unpainted committed inputs then end as `unacknowledged`.
+Only `painted` is latency-SLI eligible. There is no timer expiry.
+
+Attributes are bounded `input.kind`, `input.action`, `surface` and one final
+`outcome`. Surface is `agents|conversation|tabs|palette|missions|other`; pointer
+events use TUI kind `mouse`. No key text, element identifiers or accessible text
+are exported. Painted spans include `read_to_frame_ms` (event to paint) and
+`accepted_to_frame_ms` (capture-listener entry to paint). `queue_ms`, TUI `mode`
+and TUI `focus` are omitted because their TUI meanings have no equivalent here.
+These input spans are disabled entirely when the traces URL is unset.
+
 ## Connect, follow and send
 
 Rust local clients use `Client::unix` or `unix_as`. A paired Unix gateway uses `unix_gateway`;

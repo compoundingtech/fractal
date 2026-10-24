@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
+    let plan = OperationalRepairPlan {
+        api_version: "st3.operational-repair.v0".into(),
+        token: format!("orpv0:{}", "0".repeat(64)),
+        snapshot_index: 0,
+        status: "clean".into(),
+        items: Vec::new(),
+    };
+    assert!(validate_repair_plan_filters(&plan, &[], &[]).is_ok());
+    assert!(validate_repair_plan_filters(&plan, &["agent/example-first".into()], &[]).is_err());
+    assert!(validate_repair_plan_filters(&plan, &[], &["revoked-legacy-runtime-start".into()]).is_err());
+}
+
+#[test]
+fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
+    let cli = Cli::try_parse_from([
+        "st", "repair", "dry-run", "--subject", "agent/example-first",
+        "--subject", "agent/example-second", "--class", "revoked-legacy-runtime-start",
+    ]).unwrap();
+    let Command::Repair { command: RepairCommand::DryRun { subjects, classes } } = cli.command else {
+        panic!("expected filtered repair dry-run");
+    };
+    assert_eq!(subjects, ["agent/example-first", "agent/example-second"]);
+    assert_eq!(classes, ["revoked-legacy-runtime-start"]);
+    let path = repair_plan_path(&subjects, &classes).unwrap();
+    assert!(path.contains(&format!("subjects={}",
+        urlencoding::encode(r#"["agent/example-first","agent/example-second"]"#))));
+    assert!(path.contains(&format!("classes={}",
+        urlencoding::encode(r#"["revoked-legacy-runtime-start"]"#))));
+    assert_eq!(repair_plan_path(&[], &[]).unwrap(), "/v1/repair");
+}
+
+#[test]
 fn owner_index_preparation_is_explicit_and_only_in_maintenance_help() {
     assert!(Cli::try_parse_from(["st", "store", "prepare-indexes"]).is_err());
     let cli = Cli::try_parse_from([
@@ -951,10 +984,15 @@ fn conversations_ls_accepts_the_read_spelling_of_its_mailbox() {
         panic!("conversations ls")
     };
     assert_eq!(args.actor.as_deref(), Some("agent/run-1/worker"));
-    assert!(
-        Cli::try_parse_from(["st3", "conversations", "ls", "agent/a", "--as", "agent/b"])
-            .is_err()
-    );
+    let cli = Cli::try_parse_from([
+        "st3", "conversations", "ls", "agent/a", "--as", "agent/b",
+    ])
+    .expect("named successor may list the retired mailbox as itself");
+    let Command::Conversations { command: MessageCommand::Ls(args) } = cli.command else {
+        panic!("conversations ls")
+    };
+    assert_eq!(args.identity.as_deref(), Some("agent/a"));
+    assert_eq!(args.actor.as_deref(), Some("agent/b"));
 }
 
 #[test]
@@ -1048,6 +1086,7 @@ async fn message_pages_encode_filters_and_preserve_unfiltered_delivery_queries()
         from: Some("person/operator"),
         subject: Some("Review: café & ready?"),
         subject_prefix: None,
+        acting_as: None,
     };
     for cursor in [None, Some("opaque+/=&cursor")] {
         message_page_filtered(&client, Some("agent/reader"), true, cursor, None, filters)
@@ -1064,6 +1103,7 @@ async fn message_pages_encode_filters_and_preserve_unfiltered_delivery_queries()
             from: None,
             subject: None,
             subject_prefix: Some("Review_%/"),
+            acting_as: None,
         },
     )
     .await
@@ -1682,6 +1722,11 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             claude_attachment_reconciled: false,
             claude_attachment_terminal: None,
             claude_readiness_fallback: ClaudeReadinessFallback::default(),
+            claude_attachment_admissions: AdmissionBucket {
+                binding: Some(("incarnation".into(), 4, "token".into())),
+                tokens: 0,
+                refilled_at_ms: 1_234,
+            },
             settle: ResumeSettle::resumed(),
         },
     };
@@ -1693,6 +1738,13 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert_eq!(back.loop_state.delivery_episode, 2);
     assert_eq!(back.loop_state.claude_attachment_phase, "blocked");
     assert_eq!(back.loop_state.claude_attachment_episode, 3);
+    // An empty admission bucket survives re-exec: a re-exec grants no fresh burst.
+    let admissions = &back.loop_state.claude_attachment_admissions;
+    assert_eq!(
+        admissions.binding,
+        Some(("incarnation".into(), 4, "token".into()))
+    );
+    assert_eq!((admissions.tokens, admissions.refilled_at_ms), (0, 1_234));
     assert_eq!(
         back.loop_state.published_timeline,
         resume.loop_state.published_timeline
@@ -2379,6 +2431,21 @@ fn every_cli_command_has_a_valid_help_surface() {
             "{} has empty help",
             path.join(" ")
         );
+        for line in help.render_long_help().to_string().lines() {
+            // These describe real executable filenames, not the product identity.
+            if line.contains("Install st3, the st link")
+                || line.contains("Keep the installed st3, st,")
+            {
+                continue;
+            }
+            assert!(
+                !line.split_whitespace().any(|word| {
+                    matches!(word.trim_matches(['`', '.', ',', ';']), "st" | "st3")
+                }),
+                "{} contains legacy product wording: {line}",
+                path.join(" ")
+            );
+        }
         let subcommands = command.get_subcommands().cloned().collect::<Vec<_>>();
         for subcommand in subcommands {
             let mut child_path = path.to_vec();
@@ -2401,7 +2468,126 @@ fn every_cli_command_has_a_valid_help_surface() {
 
     let command = Cli::command();
     command.clone().debug_assert();
-    visit(&command, &["st".into()]);
+    visit(&command, &["fractal".into()]);
+}
+
+#[test]
+fn cli_branding_is_fractal_even_through_legacy_aliases() {
+    for program in ["fractal", "st", "st3"] {
+        let help = Cli::try_parse_from([program, "setup", "--help"]).err().unwrap().to_string();
+        assert!(help.contains("Usage: fractal setup"), "{help}");
+        assert!(help.contains("start fractal"), "{help}");
+        assert!(!help.contains("start st"), "{help}");
+        let version = Cli::try_parse_from([program, "--version"]).err().unwrap().to_string();
+        assert!(version.starts_with("fractal "), "{version}");
+    }
+}
+
+#[test]
+fn web_is_visible_in_root_help_and_parses_as_a_public_command() {
+    let help = cli_help::root_help(false);
+    assert!(help.lines().any(|line| line.starts_with("  web ")), "{help}");
+    let command = Cli::command();
+    assert!(!command.find_subcommand("web").unwrap().is_hide_set());
+    assert!(matches!(
+        Cli::try_parse_from(["fractal", "web", "--state-dir", "/tmp/example"]).unwrap().command,
+        Command::Web { state_dir: Some(_) }
+    ));
+}
+
+#[test]
+fn web_without_arguments_uses_the_configured_state_directory() {
+    for program in ["fractal", "st", "st3"] {
+        assert!(matches!(
+            Cli::try_parse_from([program, "web"]).unwrap().command,
+            Command::Web { state_dir: None }
+        ));
+    }
+}
+
+#[test]
+fn web_long_help_exits_successfully() {
+    let error = Cli::try_parse_from(["fractal", "web", "--help"]).err().unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert_eq!(error.exit_code(), 0);
+}
+
+#[test]
+fn web_short_help_exits_successfully() {
+    let error = Cli::try_parse_from(["fractal", "web", "-h"]).err().unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert_eq!(error.exit_code(), 0);
+}
+
+#[test]
+fn web_state_directory_preserves_every_legacy_value_form() {
+    // The previous positional parser accepted any OS string after --state-dir,
+    // including strings that otherwise name flags or delimit options.
+    for directory in ["/example/state", "relative", "", "-state", "--help", "-h", "--", "--state-dir"] {
+        let cli = Cli::try_parse_from(["fractal", "web", "--state-dir", directory]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new(directory)
+        ), "{directory:?}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let directory = std::ffi::OsString::from_vec(vec![b'-', 0xff]);
+        let cli = Cli::try_parse_from([
+            std::ffi::OsString::from("fractal"), "web".into(), "--state-dir".into(), directory.clone(),
+        ]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new(&directory)
+        ));
+    }
+}
+
+#[test]
+fn web_rejects_missing_values_repeats_positionals_and_unknown_flags_with_usage_status() {
+    for arguments in [
+        vec!["fractal", "web", "--state-dir"],
+        vec!["fractal", "web", "--state-dir", "one", "--state-dir", "two"],
+        vec!["fractal", "web", "unexpected"],
+        vec!["fractal", "web", "--unknown"],
+        vec!["fractal", "web", "--unknown", "value"],
+        vec!["fractal", "web", "--state-dir", "one", "extra"],
+        vec!["fractal", "web", "--", "unexpected"],
+    ] {
+        let error = Cli::try_parse_from(arguments.clone()).err().expect("invalid web arguments");
+        assert_eq!(error.exit_code(), 2, "{arguments:?}: {error}");
+    }
+}
+
+#[test]
+fn web_uses_clap_option_delimiters_and_equals_values() {
+    for arguments in [
+        vec!["fractal", "web", "--state-dir=relative"],
+        vec!["fractal", "web", "--state-dir", "relative", "--"],
+    ] {
+        assert!(matches!(
+            Cli::try_parse_from(arguments).unwrap().command,
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new("relative")
+        ));
+    }
+    assert!(matches!(
+        Cli::try_parse_from(["fractal", "web", "--"]).unwrap().command,
+        Command::Web { state_dir: None }
+    ));
+}
+
+#[test]
+fn web_global_rejection_covers_the_complete_inherited_inventory() {
+    let command = Cli::command();
+    let globals = command.get_arguments()
+        .filter(|argument| argument.is_global_set())
+        .map(|argument| argument.get_id().as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(globals, std::collections::BTreeSet::from([
+        "read_contract_inventory_json", "checkpoint_space_gate_capabilities",
+        "endpoint", "instance", "catalog", "json", "daemon_wait",
+    ]), "review each new global and add its real-binary web rejection case");
 }
 
 #[test]
@@ -2426,7 +2612,7 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
 
     let mut help = command.clone();
     let help = help.render_long_help().to_string();
-    assert!(help.contains("Usage: st ["), "{help}");
+    assert!(help.contains("Usage: fractal ["), "{help}");
     assert!(
         command
             .find_subcommand("claude-channel")
@@ -2466,6 +2652,8 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
 
 #[test]
 fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
+    #[cfg(test)]
+    const SCHEDULES_SOURCE: &str = include_str!("schedules_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -2479,6 +2667,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
+        ("schedules", SCHEDULES_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
         ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
@@ -2577,6 +2766,7 @@ fn fixture_product_page(kinds: &[&str], has_more: bool) -> ClientPage {
             has_more,
             next_cursor: has_more.then(|| "cursor/next".into()),
             cursor_expires_at: None,
+            omitted_items: None,
         },
         sync: None,
         replicated: None,
@@ -5271,6 +5461,56 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     server.abort();
 }
 
+#[tokio::test]
+async fn successor_who_sent_mail_still_signs_one_custody_read() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let store = Arc::new(Store::open_memory("custody-sender").unwrap());
+    use fractal_daemon::{RetirementsStore as _, SeatsStoreCore as _};
+    let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = fractal_daemon::parse_intent(source, store.origin()).unwrap();
+    store.apply_internal(&intent, "custody-sender-fixture").unwrap();
+    let message = store.append_claim(&ClaimInput {
+        subject: "message/custody-sender".into(), kind: "message.sent".into(),
+        actor: Some("agent/example/new".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("agent/example/new")),
+            ("to".into(), json!("agent/example/old")),
+            ("content".into(), json!("A note before retirement")),
+            ("status".into(), json!("sent")),
+        ]), evidence: vec![], expected_subject: None,
+        idempotency_key: Some("custody-sender-send".into()),
+    }).unwrap();
+    let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
+        &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
+    let state = AppState {
+        store: store.clone(), notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
+        state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
+        client_relay: None, native_session_home: None, owning_person: None,
+        planner_default: PlannerSpec::default(),
+    };
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(socket.exists());
+    let client = Client::unix(&socket);
+    assert_eq!(read_message(&client, &message.subject).await.unwrap().status, "sent");
+    let read = read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
+    let signed = store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap();
+    assert_eq!(signed.actor.as_deref(), Some("agent/example/new"));
+    assert_eq!(signed.body["fields"]["acting_for"], "agent/example/old");
+    assert_eq!(read.status, "read");
+    read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
+    assert_eq!(store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap().id, signed.id);
+    server.abort();
+}
+
 #[test]
 fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() {
     assert!(Cli::try_parse_from(["st3", "agents"]).is_err());
@@ -7824,4 +8064,53 @@ async fn reading_the_outbox_does_not_wake_an_idle_driver() {
         "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}, "truncated":false,
     })).unwrap();
     tokio::time::timeout(Duration::from_secs(1), observations.recv()).await.unwrap().unwrap();
+}
+
+#[test]
+fn native_identity_rename_commands_preserve_full_ids_and_fences() {
+    for kind in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "agent/example-old", "agent/example-new",
+            "--as", "person/robin", "--reason", "Clarify responsibility",
+            "--if-naming-revision", "claim/example", "--idempotency-key", "example-rename", "--json",
+        ]).unwrap();
+        assert!(cli.json);
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected identity rename"),
+        };
+        assert_eq!(args.from, "agent/example-old");
+        assert_eq!(args.to, "agent/example-new");
+        assert_eq!(args.actor, "person/robin");
+        assert_eq!(args.expected_naming_revision.as_deref(), Some("claim/example"));
+        assert_eq!(args.expected_declaration, None);
+        assert_eq!(args.idempotency_key.as_deref(), Some("example-rename"));
+    }
+}
+
+#[test]
+fn native_identity_rename_requires_actor_and_reason() {
+    for missing in ["--as", "--reason"] {
+        let mut arguments = vec!["st", "agents", "rename-id", "agent/example-old", "agent/example-new"];
+        for (flag, value) in [("--as", "person/robin"), ("--reason", "Clarify responsibility"),
+            ("--idempotency-key", "example-rename")] {
+            if flag != missing {
+                arguments.extend([flag, value]);
+            }
+        }
+        assert!(Cli::try_parse_from(arguments).is_err(), "{missing}");
+    }
+}
+
+#[test]
+fn native_identity_rename_allows_generated_idempotency_key() {
+    let cli = Cli::try_parse_from([
+        "st", "agents", "rename-id", "agent/example-old", "agent/example-new",
+        "--as", "person/robin", "--reason", "Clarify responsibility",
+    ]).unwrap();
+    let Command::Agents { command: AgentsCommand::RenameId(args) } = cli.command else {
+        panic!("expected identity rename");
+    };
+    assert_eq!(args.idempotency_key, None);
 }

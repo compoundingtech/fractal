@@ -77,7 +77,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v5.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v7.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -719,7 +719,7 @@ impl World {
         // well as the writer's. Pin both to this node's simulated time so omitted source
         // timestamps cannot put host wall time into a seeded claim.
         smallclaims::store::set_thread_clock(Some(self.clock(index) as u128));
-        let appended = self.nodes[index].store.append_claim(&input);
+        let appended = append_generated_claim(&self.nodes[index].store, &input);
         smallclaims::store::set_thread_clock(None);
         if let Ok(claim) = appended {
             *self.written.entry(claim.kind.clone()).or_default() += 1;
@@ -1531,6 +1531,60 @@ fn admit(store: &Store) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Publication claims carry a canonical MissionSpec at the top level, not the generic
+/// `fields` wrapper. Exercise the owning publication API rather than admitting an invalid
+/// mission body that only fails later when another node projects it.
+fn append_generated_claim(
+    store: &Store,
+    input: &ClaimInput,
+) -> Result<ClaimRecord, fractal_daemon::St3Error> {
+    if input.kind != "mission.published" {
+        return store.append_claim(input);
+    }
+    let id = input.subject.strip_prefix("mission/").unwrap();
+    let key = input.idempotency_key.as_deref().unwrap();
+    let source = format!(
+        "version 2\nmission \"{id}\" state=\"ready\" {{\n goal \"{key}\"\n step \"work\" {{ goal \"Converge the published mission.\" }}\n}}\n"
+    );
+    let intent = fractal_daemon::graph::parse_intent(&source, "convergence")
+        .expect("generated mission declaration");
+    let preview = store
+        .mission(
+            &intent,
+            fractal_daemon::model::IntentInput {
+                kdl: source,
+                source_name: None,
+            },
+        )
+        .expect("preview generated mission declaration");
+    let applied = store.apply_as(&intent, &preview.subject_tokens, key, input.actor.as_deref())?;
+    Ok(applied.claim_ids
+        .into_iter()
+        .filter_map(|id| store.claim_by_id(&id).expect("read generated publication claim"))
+        .find(|claim| {
+            claim.kind == input.kind
+                && claim.subject == input.subject
+                && claim.body["revision"] == intent.missions[id].revision
+        })
+        .expect("publication API wrote the generated mission"))
+}
+
+#[test]
+fn generated_mission_publications_replicate_as_canonical_missions() {
+    let mut world = World::new(1, Sabotage::None);
+    let mut input = world.claim_of(&corpus()["mission.published"], 0).unwrap();
+    input.actor = Some("person/robin".into());
+    let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+    let mission: fractal_daemon::model::MissionSpec =
+        serde_json::from_value(claim.body.clone()).unwrap();
+    assert_eq!(mission.subject, input.subject);
+    assert_eq!(mission.subject, format!("mission/{}", mission.id));
+    assert!(claim.body.get("fields").is_none());
+    world.tap(0);
+    assert!(claims(&world.oracle).contains_key(&claim.id));
+    assert!(world.failures.is_empty(), "{}", world.report());
+}
+
 fn claims(store: &Store) -> BTreeMap<String, ClaimRecord> {
     let mut all = BTreeMap::new();
     let mut after = 0;
@@ -1630,14 +1684,16 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v5, only seed 1597
-/// never reaches a trim; every other fixed seed must. This list is tied to the corpus because
-/// claim generation consumes the same RNG as the schedule.
-const NEVER_TRIMS: &[u64] = &[1597];
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v7 (v6 plus the SLO
+/// breach transition kind) and canonical mission publication inputs, seeds 2 and 34 never reach a
+/// trim; every other fixed seed must. Measured across all 17 fixed seeds; claim generation
+/// consumes the same RNG as the schedule.
+const NEVER_TRIMS: &[u64] = &[2, 34];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
+    eprintln!("convergence corpus v7 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -1707,10 +1763,17 @@ fn seed_1_converges_on_a_real_disk() {
 }
 
 /// The deliberate bug must fail the first runs it happens in, not just some run. Seeds run four
-/// at a time, in order, until two ran into the bug.
-fn the_checks_catch(sabotage: Sabotage) {
+/// at a time, in order, until two ran into the bug. `first` are seeds known to run into it, tried
+/// before the others: if a change moves the bug to other seeds, the later ones still run, so that
+/// costs time, not coverage.
+fn the_checks_catch(sabotage: Sabotage, first: &[u64]) {
+    let order = first
+        .iter()
+        .copied()
+        .chain(SEEDS.iter().copied().filter(|seed| !first.contains(seed)))
+        .collect::<Vec<_>>();
     let mut happened = 0;
-    for seeds in SEEDS.chunks(4) {
+    for seeds in order.chunks(4) {
         let outcomes = std::thread::scope(|scope| {
             let runs = seeds
                 .iter()
@@ -1738,12 +1801,13 @@ fn the_checks_catch(sabotage: Sabotage) {
 
 #[test]
 fn the_checks_catch_a_trim_that_forgets_its_tombstones() {
-    the_checks_catch(Sabotage::ForgetTombstones);
+    the_checks_catch(Sabotage::ForgetTombstones, &[]);
 }
 
 #[test]
 fn the_checks_catch_a_partial_adoption() {
-    the_checks_catch(Sabotage::PartialAdoption);
+    // Seeds 1 and 13 run into it, so both fit in the first four instead of two rounds of four.
+    the_checks_catch(Sabotage::PartialAdoption, &[1, 13]);
 }
 
 /// A seed runs the same however fast it runs, so the seed a failure prints reproduces it.
@@ -1843,7 +1907,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v5.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v7.json"
         }))
         .unwrap(),
     )

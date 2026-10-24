@@ -14,6 +14,10 @@ use pty_core::registry::SessionInfo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+mod legacy_start_closure;
+pub use legacy_start_closure::{LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, ProcfsHidesProcesses};
+mod producer;
+
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PTY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -288,13 +292,51 @@ impl PtyRuntime {
         cutover: Option<(&str, &str)>,
         guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
+        // The backend owns the physical boundary. Until the spawn lock and prior
+        // evidence are read, an earlier detached producer cannot be excluded.
+        let mut producer_entered = true;
+        self.spawn_guarded_inner(
+            id, launch, cwd, env, display_name, tags, size, cutover, guard,
+            &mut producer_entered,
+        ).map_err(|error| {
+            if !producer_entered
+                && let Some(operation) = env.get("ST3_START_OPERATION")
+            {
+                error.context(crate::StartRejected { operation: Some(operation.clone()) })
+            } else {
+                error
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_guarded_inner(
+        &self,
+        id: &str,
+        launch: &Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        display_name: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        size: Option<TerminalSize>,
+        cutover: Option<(&str, &str)>,
+        guard: Option<&dyn Fn() -> Result<()>>,
+        producer_entered: &mut bool,
+    ) -> Result<()> {
         let _spawn_lock = self.acquire_spawn_lock(id)?;
         let fence = self.spawn_state_path(id, "pending");
+        let prior_pending = fence.try_exists()?;
         let mut before = self
             .snapshot()?
             .into_iter()
             .find(|observation| observation.name == id);
-        if fence.is_file() {
+        // A pending fence is not operation-bound: even after its recovery window,
+        // it cannot prove an earlier producer closed. A same-operation row also
+        // disproves a claim that this operation never launched.
+        *producer_entered = prior_pending || env.get("ST3_START_OPERATION").is_some_and(|operation| {
+            before.as_ref().and_then(|row| row.tags.get("st3.start-operation")) == Some(operation)
+        });
+        if prior_pending {
             let previous = std::fs::read_to_string(&fence)
                 .with_context(|| format!("read PTY publication fence {}", fence.display()))?;
             // Give the unknown launch one recovery window to publish. If it still has not,
@@ -351,7 +393,16 @@ impl PtyRuntime {
                 "st3: WARN what the last incarnation of {id} left running did not end: {error:#}"
             );
         }
-        let unit = crate::scope_unit("st3", id);
+        let operation = env.get("ST3_START_OPERATION")
+            .filter(|operation| tags.get("st3.start-operation") == Some(*operation));
+        let scope_identity = operation.map_or_else(|| id.to_owned(), |operation| format!("{id}-{operation}"));
+        let unit = crate::scope_unit("st3", &scope_identity);
+        // An existing or unreadable ownership record may describe an earlier
+        // entered producer. Refusing its replay is not a never-started witness.
+        let previously_entered = *producer_entered;
+        *producer_entered = true;
+        let mut producer = self.prepare_producer(id, operation, &unit)?;
+        *producer_entered = previously_entered;
         if crate::isolation_mode() == crate::Isolation::Scope {
             // The session's record removes itself once its harness exits, so st keeps the name
             // of the scope to end what the harness leaves behind.
@@ -454,7 +505,7 @@ impl PtyRuntime {
             crate::pty_launch_environment::configure_pty_placement(&mut command, &self.root);
             // A later failed attempt cannot close a producer created by an earlier
             // attempt. Only failure to create the first launcher proves rejection.
-            let operation = (attempt == 0)
+            let operation = (!*producer_entered && attempt == 0)
                 .then(|| env.get("ST3_START_OPERATION").map(String::as_str))
                 .flatten();
             if let Some(guard) = guard
@@ -470,6 +521,8 @@ impl PtyRuntime {
                     None => error,
                 });
             }
+            *producer_entered = true;
+            self.acknowledge_launcher(&mut producer, false)?;
             let output = match output_for_start(command, self.command_timeout, operation) {
                 Ok(output) => output,
                 Err(error) => {
@@ -477,11 +530,12 @@ impl PtyRuntime {
                     return Err(error);
                 }
             };
+            self.acknowledge_launcher(&mut producer, true)?;
             if output.status.success() {
                 let published = self.wait_for_publication(id, previous_incarnation.as_deref())?;
                 std::fs::remove_file(&fence)
                     .with_context(|| format!("clear PTY publication fence {}", fence.display()))?;
-                crate::protect_servers(std::slice::from_ref(&published));
+                self.protect_servers(std::slice::from_ref(&published))?;
                 return Ok(());
             }
             // Classify captured output privately; only the closed kind and status
@@ -657,16 +711,14 @@ impl PtyRuntime {
     }
 
     pub fn kill_if(&self, id: &str, expected_incarnation: Option<&str>) -> Result<()> {
-        let session = self.require_incarnation(id, expected_incarnation)?;
-        // Everything else the harness started ends with it, but the server leaves the work scope
-        // first: it outlives the harness to record the exit.
-        let unit = work_scope(&session).filter(|unit| {
-            server_apart(
-                id,
-                unit,
-                session.pid.and_then(|pid| u32::try_from(pid).ok()),
-            )
-        });
+        let observed = observation(self.require_incarnation(id, expected_incarnation)?)?;
+        // The supporting server must be durably owned before it leaves the work
+        // scope, including when a kill races normal publication protection.
+        let unit = observed.tags.get("st3.scope-unit").map(String::as_str);
+        let unit = match unit {
+            Some(unit) if self.server_apart(id, unit, Some(&observed))? => Some(unit),
+            _ => None,
+        };
         self.signal_if(id, expected_incarnation, libc::SIGKILL)?;
         if let Some(unit) = unit {
             crate::end_scope(unit, Duration::ZERO)?;
@@ -808,10 +860,9 @@ impl PtyRuntime {
                 .cloned(),
         );
         // A server that wrote its exit record can still be shutting down.
-        let server = ended.and_then(|session| session.pid);
         let mut done = true;
         for unit in &units {
-            if server_apart(id, unit, server) {
+            if self.server_apart(id, unit, ended)? {
                 crate::end_scope(unit, crate::SCOPE_GRACE)?;
             } else {
                 done = false;
@@ -829,6 +880,15 @@ impl PtyRuntime {
         }
         Ok(())
     }
+    /// Every synchronous migration shares the publication path's durable ownership gate.
+    fn server_apart(&self, id: &str, unit: &str, observed: Option<&PtyObservation>) -> Result<bool> {
+        let server = observed.and_then(|observed| observed.pid)
+            .filter(|pid| process_runs(*pid));
+        let Some(server) = server else { return Ok(true); };
+        self.record_server_ownership(observed.context("live PTY server has no observation")?)?;
+        Ok(crate::priority::keep_server_apart(id, server, unit))
+    }
+
 
     pub fn remove(&self, id: &str) -> Result<()> {
         // The record is the last place that names the session's work scope.
@@ -1000,14 +1060,6 @@ fn work_scope(session: &SessionInfo) -> Option<&str> {
         .map(String::as_str)
 }
 
-/// Whether the PTY server `server` of `id`, if it still runs, is outside the work scope `unit`,
-/// moving it out first. Ending the scope then leaves the server, which answers attaches and
-/// records the exit.
-fn server_apart(id: &str, unit: &str, server: Option<u32>) -> bool {
-    server
-        .filter(|pid| process_runs(*pid))
-        .is_none_or(|server| crate::priority::keep_server_apart(id, server, unit))
-}
 
 /// Whether `pid` names a process that has not exited. A zombie has exited.
 fn process_runs(pid: u32) -> bool {
@@ -1235,6 +1287,84 @@ exit 0
                 .contains("source superseded")
         );
         assert!(!binary.with_extension("args").exists());
+    }
+
+    #[test]
+    fn guarded_foreign_live_row_is_an_exact_prelaunch_rejection() {
+        for (pending, earlier_operation) in [(false, "older-operation"), (true, "older-operation"), (false, "new-operation")] {
+            let root = tempfile::tempdir().unwrap();
+            let registry = root.path().join("registry");
+            let binary = fake_pty(root.path(), "foreign-prelaunch", "  publish replacement");
+            write_record(&registry, "work", serde_json::json!({
+                "createdAt": "older", "tags": {"st3.start-operation": earlier_operation}
+            }));
+            write_pid(&registry, "work", std::process::id());
+            let runtime = PtyRuntime::new(registry).with_binary(binary.to_string_lossy());
+            if pending {
+                fs::create_dir_all(runtime.spawn_state_directory()).unwrap();
+                fs::write(runtime.spawn_state_path("work", "pending"), "").unwrap();
+            }
+            let error = runtime.spawn_checked(
+                "work", &Launch::Argv(vec!["true".into()]), root.path(),
+                &BTreeMap::from([("ST3_START_OPERATION".into(), "new-operation".into())]),
+                None, &BTreeMap::new(), None, &|| Ok(()),
+            ).unwrap_err();
+            let proof = error.downcast_ref::<crate::StartRejected>();
+            if pending || earlier_operation == "new-operation" {
+                assert!(proof.is_none(), "an earlier producer may still publish: {error:#}");
+            } else {
+                assert_eq!(proof.and_then(|proof| proof.operation.as_deref()), Some("new-operation"),
+                    "a fresh guarded refusal never created a launcher: {error:#}");
+            }
+            assert!(!binary.with_extension("count").exists());
+            assert_eq!(runtime.snapshot().unwrap()[0].created_at.as_deref(), Some("older"));
+        }
+    }
+
+    #[test]
+    fn guarded_start_rejection_does_not_close_a_previous_launcher() {
+        for behavior in ["  exit 1", "  sleep 2", ""] {
+            let root = tempfile::tempdir().unwrap();
+            let binary = fake_pty(root.path(), "entered-prelaunch", behavior);
+            let runtime = PtyRuntime::new(root.path().join("registry"))
+                .with_binary(binary.to_string_lossy())
+                .with_spawn_timeout(Duration::from_millis(30))
+                .with_command_timeout(Duration::from_secs(1));
+            let error = runtime.spawn_checked(
+                "work", &Launch::Argv(vec!["true".into()]), root.path(),
+                &BTreeMap::from([("ST3_START_OPERATION".into(), "new-operation".into())]),
+                None, &BTreeMap::new(), None, &|| Ok(()),
+            ).unwrap_err();
+            assert!(error.downcast_ref::<crate::StartRejected>().is_none(), "{error:#}");
+            assert_eq!(fs::read_to_string(binary.with_extension("count")).unwrap().trim(), "1");
+        }
+    }
+
+    #[test]
+    fn a_guard_rejection_after_retry_or_pending_fence_is_not_nonlaunch_proof() {
+        for pending in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let binary = fake_pty(root.path(), "retry-prelaunch", "  echo 'already in use' >&2\n  exit 1");
+            let runtime = PtyRuntime::new(root.path().join("registry"))
+                .with_binary(binary.to_string_lossy())
+                .with_spawn_timeout(Duration::from_millis(30))
+                .with_command_timeout(Duration::from_secs(1));
+            if pending {
+                fs::create_dir_all(runtime.spawn_state_directory()).unwrap();
+                fs::write(runtime.spawn_state_path("work", "pending"), "").unwrap();
+            }
+            let calls = std::cell::Cell::new(0);
+            let error = runtime.spawn_checked(
+                "work", &Launch::Argv(vec!["true".into()]), root.path(),
+                &BTreeMap::from([("ST3_START_OPERATION".into(), "new-operation".into())]),
+                None, &BTreeMap::new(), None, &|| {
+                    calls.set(calls.get() + 1);
+                    anyhow::ensure!(!pending && calls.get() == 1, "request revoked");
+                    Ok(())
+                },
+            ).unwrap_err();
+            assert!(error.downcast_ref::<crate::StartRejected>().is_none(), "{error:#}");
+        }
     }
 
     /// A daemon socket for `name` that answers STATUS with `status` and PEEK with `screen`, and
@@ -2083,6 +2213,60 @@ exit 0
         assert_eq!(cgroup_leaf(harness), work_unit);
         assert_eq!(cgroup_file(server, "cpu.weight").trim(), "1000");
         assert_eq!(cgroup_file(harness, "cpu.weight").trim(), "100");
+    }
+
+    #[test]
+    fn synchronous_server_migrations_record_ownership_before_publication_protection() {
+        let Some(pty) = scoped_pty() else {
+            eprintln!("skipped: no systemd user scopes or no pty binary");
+            return;
+        };
+        for kill in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let registry = root.path().join("registry");
+            let runtime = PtyRuntime::new(registry.clone()).with_binary(pty.to_string_lossy());
+            let id = "example-migration";
+            let operation = "example-migration-operation".to_owned();
+            let unit = crate::scope_unit("st3", "example-migration-operation");
+            let mut owner = runtime.prepare_producer(id, Some(&operation), &unit).unwrap();
+            let pid_file = root.path().join("harness.pid");
+            let Launch::Argv(harness) = waiting_harness(&pid_file) else { unreachable!() };
+            let mut arguments = vec![
+                "run".to_owned(), "-d".into(), "--id".into(), id.into(),
+                "--tag".into(), format!("st3.scope-unit={unit}"),
+                "--tag".into(), format!("st3.start-operation={operation}"), "--".into(),
+            ];
+            arguments.extend(harness);
+            let arguments = arguments.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+            runtime.acknowledge_launcher(&mut owner, false).unwrap();
+            assert!(crate::wrap_isolated(&unit, pty.as_os_str(), &arguments)
+                .env("PTY_ROOT", &registry).status().unwrap().success());
+            runtime.acknowledge_launcher(&mut owner, true).unwrap();
+            struct StopOnDrop<'a>(&'a PtyRuntime, &'a str);
+            impl Drop for StopOnDrop<'_> {
+                fn drop(&mut self) { let _ = self.0.stop(self.1); }
+            }
+            let _cleanup = StopOnDrop(&runtime, id);
+            let harness = read_pid(&pid_file);
+            let observed = runtime.session(id).map(observation).unwrap().unwrap();
+            let server = observed.pid.unwrap();
+            assert_eq!(cgroup_leaf(server), unit);
+            assert_eq!(cgroup_leaf(harness), unit);
+            // Raw launch above deliberately bypasses normal publication protection.
+            // The synchronous stop/previous-scope path must itself record ownership.
+            if kill {
+                runtime.kill_if(id, observation_incarnation(&observed).as_deref()).unwrap();
+            } else {
+                let _lock = runtime.acquire_spawn_lock(id).unwrap();
+                runtime.end_previous_scopes(id, Some(&observed)).unwrap();
+            }
+            assert_eq!(cgroup_leaf(server), crate::server_unit(id, server));
+            assert!(process_runs(server), "the supporting server must still be live");
+            assert!(crate::isolate::observe_closed_scope(&unit).unwrap().is_some(),
+                "only the server scope should remain populated");
+            assert!(!runtime.start_operation_closed(id, &operation).unwrap(),
+                "an unrecorded live server would incorrectly certify closure");
+        }
     }
 
     #[test]

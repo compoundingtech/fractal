@@ -12,7 +12,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/8cb2135bd4a852b99ca3f677c0815d0268766ff5";
+      "github:overengineeringstudio/effect-utils/7971b79c7bfac4196e506db3d09bdb4944d580aa";
   };
 
   outputs =
@@ -311,6 +311,8 @@
           "--exclude"
           "fractal-schema"
           "--exclude"
+          "fractal-tiles-registry"
+          "--exclude"
           "fractal-tui"
         ];
 
@@ -456,6 +458,11 @@
           e: "(package(=${e.package}) & binary(=${e.binary}) & test(=${e.test}))"
         ) st3Exclusions;
 
+        fractalWeb = import ./nix/fractal-web.nix {
+          inherit effect-utils system version buildStamp;
+          source = self;
+        };
+
         st3Check = pkgs.rustPlatform.buildRustPackage {
           pname = "st3";
           inherit version;
@@ -550,6 +557,8 @@
             "-p"
             "fractal-schema"
             "-p"
+            "fractal-tiles-registry"
+            "-p"
             "fractal-tui"
             "-p"
             "fractal-chatgpt"
@@ -643,6 +652,8 @@
             pkgs.lsof
           ];
           postInstall = ''
+            mkdir -p "$out/share"
+            cp -r ${fractalWeb}/share/fractal-web "$out/share/fractal-web"
             # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
             ln -s st3 $out/bin/st
             # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
@@ -726,7 +737,7 @@
           ${st3}/bin/st3 --help > st3.help
           ${st3}/bin/st --help > st.help
           cmp st3.help st.help
-          grep -F "Usage: st [" st.help
+          grep -F "Usage: fractal [" st.help
           test -s ${st3}/share/bash-completion/completions/st.bash
           test -s ${st3}/share/zsh/site-functions/_st
           test -s ${st3}/share/fish/vendor_completions.d/st.fish
@@ -1009,6 +1020,7 @@
         # The release target still links through the pinned Zig/glibc-baseline wrapper.
         packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
+        packages.fractal-web = fractalWeb;
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
         packages.st-fabric-adapter = stFabricAdapter;
@@ -1034,19 +1046,23 @@
         # wants them.
         checks.st2 = st2;
         checks.st3 = st3Check;
-        checks.st3-runtime-inputs =
+        # Keep derivation-path assertions lazy until the check's builder is evaluated:
+        # flake discovery must not force package inputs (including the installation hash guard).
+        checks.st3-runtime-inputs = pkgs.runCommand "st3-runtime-inputs" { } (
           assert import ./nix/st3-runtime-input-tests.nix {
             inherit self system;
             baseline = messagingCompat;
             inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
           };
-          pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
+          ''touch $out''
+        );
         checks.st3-help = st3Help;
-        checks.st3-check-input-isolation =
+        checks.st3-check-input-isolation = pkgs.runCommand "st3-check-input-isolation" { } (
           assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
           # Native check inputs must not contribute to the installed package identity.
           assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
-          pkgs.runCommand "st3-check-input-isolation" { } ''touch $out'';
+          ''touch $out''
+        );
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
@@ -1074,6 +1090,19 @@
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/smalltalk-test.sock" args;
           assert pkgs.lib.hasInfix "--pty-binary" args;
+          assert rendered.services.smalltalk.webListen == "127.0.0.1:7410";
+          assert pkgs.lib.hasInfix "127.0.0.1:7410" args;
+          assert pkgs.lib.hasInfix "--web-dist" args;
+          assert pkgs.lib.hasInfix "${package}/share/fractal-web" args;
+          assert (
+            let
+              disabled = (mkHmModuleEval { webListen = null; }).config;
+              disabledArgs = if pkgs.stdenv.hostPlatform.isLinux then
+                disabled.systemd.user.services.smalltalk.Service.ExecStart
+              else
+                builtins.concatStringsSep " " disabled.launchd.agents.smalltalk.config.ProgramArguments;
+            in pkgs.lib.hasInfix (if pkgs.stdenv.hostPlatform.isLinux then ''"--web-listen" "off"'' else "--web-listen off") disabledArgs
+          );
           # service.rs passes the shared runtime gateway explicitly, even with --state-dir.
           # Assert the rendered command: %%t would be a literal path, not a systemd specifier.
           assert (if pkgs.stdenv.hostPlatform.isLinux then
