@@ -4,6 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { flushSync } from 'react-dom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as Atom from 'effect/reactivity/Atom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as PaneModule from './ConversationPane.tsx'
 import type * as WorkspaceModule from './LiveAgentWorkspace.tsx'
@@ -35,6 +36,7 @@ vi.mock('./ConversationPaneFallback.tsx', async importOriginal => {
 let gatewayObservation: FeedSyncObservation | undefined
 const reconnect = vi.fn()
 const askingAgents: ReadonlySet<string> = new Set()
+const waitingFeed = Atom.make({ _tag: 'Waiting' } as const)
 vi.mock('../data/react.tsx', () => ({
   useFleet: () => rosterFeed,
   // Rows read their own agent feed; serve it from the mocked roster.
@@ -46,7 +48,7 @@ vi.mock('../data/react.tsx', () => ({
   useNow: () => 0,
   useNowSnapshot: () => 0,
   useGatewaySync: () => gatewayObservation,
-  useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch }),
+  useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, missions: waitingFeed, attention: waitingFeed }),
   useFeedInterest: () => {},
   useAttention: () => ({ _tag: 'Waiting' }),
 }))

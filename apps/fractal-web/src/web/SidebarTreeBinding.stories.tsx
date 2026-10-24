@@ -71,7 +71,7 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await userEvent.click(canvas.getByRole('button', { name: 'Open deep thread' }))
   const tree = canvas.getByRole('treegrid', { name: 'Agents and folders' })
   const assertRevealed = () => {
-    const active = canvasElement.querySelector<HTMLElement>(`[data-wf-agent-ref="${deepRef}"]`)
+    const active = rowFor(canvasElement, deepRef)
     if (active === null) throw new Error('Active deep row was not revealed')
     const row = active.getBoundingClientRect(), viewport = tree.getBoundingClientRect()
     if (row.top < viewport.top || row.bottom > viewport.bottom) throw new Error('Active deep row was not revealed')
@@ -81,9 +81,9 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(getComputedStyle(rowFor(canvasElement, deepRef)!).backgroundColor).not.toBe(getComputedStyle(rowFor(canvasElement, agents.at(-2)!.ref)!).backgroundColor)
   // Negative control: scrolled away, the same assertion fails, so it measures the reveal rather than passing vacuously.
   const scroll = tree.scrollTop
+  tree.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
   tree.scrollTop = 0
-  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-  try { await expect(assertRevealed).toThrow('Active deep row was not revealed') } finally { tree.scrollTop = scroll }
+  try { await waitFor(() => expect(assertRevealed).toThrow('Active deep row was not revealed')) } finally { tree.scrollTop = scroll }
   await waitFor(assertRevealed)
 }
 export const Dark: Story = { play }

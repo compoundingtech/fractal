@@ -359,7 +359,12 @@ export const DrawersFlow: Story = { parameters: { scenario: { _tag: 'contract-fi
   await expect(agents.id).not.toBe('')
   await expect(chevron).toHaveAttribute('aria-controls', agents.id)
   await expect(within(agents).getByRole('button', { name: 'Close agents' })).toHaveFocus()
-  await expect(within(agents).getByRole('button', { name: 'Close agents' })).not.toHaveAttribute('aria-describedby')
+  // Phone hosts retain the kit's focus-visible policy, including autofocus after a keyboard open.
+  const initialClose = within(agents).getByRole('button', { name: 'Close agents' })
+  await expect(await tooltipFor(initialClose, 'Close agents')).toHaveTextContent('Close agents')
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(initialClose).not.toHaveAttribute('aria-describedby'))
+  await expect(agents).toBeVisible()
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
   await waitFor(() => expect(chevron).toHaveFocus())

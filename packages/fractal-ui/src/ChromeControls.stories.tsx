@@ -238,7 +238,7 @@ export const PhoneTapQuiet: Story = { args: { phone: true }, play: async ({ canv
   const sort = sidebar.getByRole('button', { name: 'Sort agents · Manual' })
   await userEvent.keyboard('a')
   sort.focus()
-  await expect(sort).toHaveAttribute('data-focus-visible', 'true')
+  await waitFor(() => expect(sort).toHaveAttribute('data-focus-visible', 'true'))
   await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent('Sort agents · Manual'))
   await userEvent.keyboard('{Escape}')
 } }
