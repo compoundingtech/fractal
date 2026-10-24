@@ -1104,6 +1104,8 @@ pub struct Reconciler<R = NativeRuntime> {
     /// The wake each running step has armed for its timeout or lease expiry, by step subject.
     step_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
+    /// Quiet standing-watch cadence by observer/revision; not part of the provider cache.
+    observer_intervals: Arc<Mutex<HashMap<String, u64>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
     delayed_restarts: Arc<Mutex<HashMap<String, RestartWake>>>,
     stop_observation_retries: Mutex<HashMap<String, StopObservationRetry>>,
@@ -1274,6 +1276,7 @@ impl Reconciler<NativeRuntime> {
             restart_prepare_deadline_ms: RESTART_PREPARE_DEADLINE_MS,
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
+            observer_intervals: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
@@ -1434,6 +1437,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             restart_prepare_deadline_ms: RESTART_PREPARE_DEADLINE_MS,
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
+            observer_intervals: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
@@ -15594,6 +15598,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .or_else(|| {
                         observer_actual
                             .as_ref()
+                            .filter(|actual| actual.get("revision").and_then(Value::as_str)
+                                == Some(revision.as_str()))
                             .and_then(|actual| actual.get("next_check_unix_ms"))
                             .and_then(Value::as_str)
                             .and_then(|value| value.parse().ok())
@@ -15635,6 +15641,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         #[cfg(any(test, feature = "test-support"))]
         let completion_fault = self.fault_injection.clone();
         let deadlines = self.observer_deadlines.clone();
+        let intervals = self.observer_intervals.clone();
+        let standing = crate::github_watch::is_standing_observer(&observer.subject, &spec);
+        let mut standing_interval = if refresh_attempt.is_some() {
+            None
+        } else {
+            intervals.lock().unwrap_or_else(PoisonError::into_inner).get(&deadline_key).copied()
+        };
         let cursors = self.observer_cursors.clone();
         let observer_subject = observer.subject.clone();
         let mut previous_facts = self
@@ -15748,15 +15761,28 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 &agent_workspaces,
                             );
                         }
-                        // A declared interval replaces the provider's own deadline, except a
-                        // provider that asks to continue at once, such as a listing longer than
-                        // one read.
-                        if let Some(every_ms) = spec.every_ms
-                            && observation.next_check_unix_ms
-                                > now_ms().saturating_add(crate::resource::PROVIDER_CONTINUE_MS)
-                        {
+                        let observed_at = now_ms();
+                        let continuing = observation.next_check_unix_ms
+                            <= observed_at.saturating_add(crate::resource::PROVIDER_CONTINUE_MS);
+                        // Existing standing declarations may still say 30s. Their identity,
+                        // not their authored interval, selects adaptive scheduling. Compare all
+                        // facts, not only the subset that wakes a particular subscription.
+                        let interval = if standing {
+                            Some(match standing_interval {
+                                _ if previous_facts.as_ref() != Some(&observation.facts) => 180_000,
+                                None => 180_000,
+                                Some(interval) if continuing => interval,
+                                Some(180_000) => 360_000,
+                                Some(_) => 600_000,
+                            })
+                        } else {
+                            spec.every_ms
+                        };
+                        // Pagination remains immediate. Provider errors, including rate limits,
+                        // never enter this successful-observation scheduling path.
+                        if !continuing && let Some(interval) = interval {
                             observation.next_check_unix_ms =
-                                now_ms().saturating_add(every_ms as u128);
+                                observed_at.saturating_add(u128::from(interval));
                         }
                         match store.record_resource_observation_outcome(
                             &observer_subject,
@@ -15770,6 +15796,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             Some(&current),
                         ) {
                             Ok((_, wrote)) => {
+                                if standing {
+                                    standing_interval = interval;
+                                }
                                 durable_changed = wrote;
                                 previous_facts = Some(observation.facts);
                                 completed_deadline = Some(observation.next_check_unix_ms);
@@ -15883,6 +15912,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         if let Some(next_check) = completed_deadline {
                             deadlines.lock().unwrap_or_else(PoisonError::into_inner)
                                 .insert(deadline_key.clone(), next_check);
+                            if let Some(interval) = standing_interval {
+                                intervals.lock().unwrap_or_else(PoisonError::into_inner)
+                                    .insert(deadline_key.clone(), interval);
+                            }
                         }
                         if let Some(next_cursor) = completed_cursor {
                             cursors.lock().unwrap_or_else(PoisonError::into_inner)
@@ -34431,6 +34464,36 @@ observer "repo" {
     }
 
     #[tokio::test]
+    async fn standing_watch_cadence_preserves_rate_limit_deadlines() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            &SCRIPTED_OBSERVER.replace("observer \"repo\"", "observer \"github/example/repo\""),
+            "standing-rate-limit",
+        );
+        let subject = "observer/github/example/repo";
+        let revision = store.selected_desired_revision(subject).unwrap().unwrap();
+        let key = format!("{subject}:{revision}");
+        let reset = now_ms() + 900_000;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (events, mut changed) = watch::channel(0_u64);
+        let reconciler = Reconciler::new(
+            store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).with_resource_provider(Arc::new(RateLimitedResourceProvider {
+            calls: calls.clone(), retry_at_unix_ms: reset,
+        })).with_event_notify(events);
+        reconciler.reconcile_once().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), changed.changed()).await.unwrap().unwrap();
+        assert_eq!(
+            reconciler.observer_deadlines.lock().unwrap_or_else(PoisonError::into_inner)[&key],
+            reset,
+        );
+        assert!(reconciler.observer_intervals.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn an_observer_unreachable_for_an_hour_requests_attention_once() {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("observer.sqlite");
@@ -34682,6 +34745,130 @@ observer "repo" {
   locator "example/repo"
   field "issues"
 }"#;
+
+    #[tokio::test]
+    async fn standing_watch_cadence_adapts_without_migrating_declarations() {
+        struct AdaptiveProvider {
+            calls: Arc<AtomicUsize>,
+            changed: Arc<AtomicUsize>,
+            continuation: Arc<AtomicBool>,
+        }
+        impl ResourceProvider for AdaptiveProvider {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                // Scheduling must keep passing the opaque provider cursor through.
+                if request.previous_facts.is_some() {
+                    assert_eq!(request.cursor.as_deref(), Some("etag-and-pagination-state"));
+                }
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let change = self.changed.load(Ordering::SeqCst);
+                let continuing = self.continuation.load(Ordering::SeqCst);
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts: serde_json::json!({"issues": [], "unsubscribed_fact": change}),
+                    cursor: Some("etag-and-pagination-state".into()),
+                    next_check_unix_ms: now_ms() + if continuing {
+                        crate::resource::PROVIDER_CONTINUE_MS
+                    } else {
+                        300_000
+                    },
+                }) })
+            }
+        }
+
+        async fn poll(
+            reconciler: &Reconciler<FakeRuntime>,
+            calls: &AtomicUsize,
+            subject: &str,
+            force: bool,
+            interval: u128,
+        ) {
+            let revision = reconciler.store.selected_desired_revision(subject).unwrap().unwrap();
+            let key = format!("{subject}:{revision}");
+            if force {
+                reconciler.armed_observers.lock().unwrap()
+                    .retain(|operation| !operation.starts_with(&format!("{subject}:")));
+                reconciler.observer_deadlines.lock().unwrap().insert(key.clone(), 0);
+            }
+            let old = reconciler.observer_deadlines.lock().unwrap().get(&key).copied();
+            let expected = calls.load(Ordering::SeqCst) + 1;
+            let before = now_ms();
+            reconciler.reconcile_once().unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let deadline = reconciler.observer_deadlines.lock().unwrap().get(&key).copied();
+                    if calls.load(Ordering::SeqCst) == expected
+                        && deadline.is_some() && deadline != old {
+                        let deadline = deadline.unwrap();
+                        assert!(deadline >= before + interval);
+                        assert!(deadline <= now_ms() + interval);
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("scheduled observation completes");
+        }
+
+        for subject in ["github/example/repo", "custom"] {
+            let standing = subject.starts_with("github/");
+            let subject_id = format!("observer/{subject}");
+            let source = format!(r#"version 2
+resource "repo" {{ kind "vcs.repository" }}
+observer "{subject}" {{
+  resource "resource/repo"
+  provider "github.repository"
+  locator "example/repo"
+  field "issues"
+  every "30s"
+}}"#);
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(&store, &source, "adaptive-watch");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let changed = Arc::new(AtomicUsize::new(0));
+            let continuation = Arc::new(AtomicBool::new(false));
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            ).with_resource_provider(Arc::new(AdaptiveProvider {
+                calls: calls.clone(), changed: changed.clone(), continuation: continuation.clone(),
+            }));
+            // Legacy standing every=30s adapts, while an explicitly faster custom observer
+            // stays at 30s through every quiet/change boundary.
+            for interval in [180_000, 360_000, 600_000, 600_000] {
+                poll(&reconciler, &calls, &subject_id, true,
+                    if standing { interval } else { 30_000 }).await;
+            }
+            changed.store(1, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 180_000 } else { 30_000 }).await;
+            continuation.store(true, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                crate::resource::PROVIDER_CONTINUE_MS).await;
+            continuation.store(false, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 360_000 } else { 30_000 }).await;
+
+            let revision = store.selected_desired_revision(&subject_id).unwrap().unwrap();
+            store.append_claim(&ClaimInput {
+                subject: subject_id.clone(),
+                kind: "observer.refresh-requested".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("revision".into(), Value::String(revision)),
+                    ("attempt".into(), Value::String("adaptive-refresh".into())),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            // No forced deadline: refresh must interrupt the existing sleeping arm.
+            poll(&reconciler, &calls, &subject_id, false,
+                if standing { 180_000 } else { 30_000 }).await;
+            assert!(store.pending_observer_refresh_attempt(&subject_id).unwrap().is_none());
+
+            // A new revision starts immediately at active cadence, not the old deadline.
+            apply_source(&store, &source.replace("30s", "31s"), "adaptive-watch-revision");
+            poll(&reconciler, &calls, &subject_id, false,
+                if standing { 180_000 } else { 31_000 }).await;
+        }
+    }
 
     /// Run one observation now and wait until it has recorded its outcome. An unchanged or
     /// backing-off poll keeps its arm sleeping toward its own deadline, so retire that arm, as
