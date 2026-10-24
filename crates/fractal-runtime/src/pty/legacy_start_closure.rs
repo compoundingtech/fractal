@@ -393,6 +393,36 @@ mod tests {
         const READER: &str = "FRACTAL_PROOF_UNPRIVILEGED_READER";
         const TEST: &str = "pty::legacy_start_closure::tests::non_dumpable_marked_owner_child_remains_a_typed_refusal";
         const OPERATION: &str = "legacy-proof-unreadable-producer";
+        const CONTROL: &str = "FRACTAL_PROOF_DUMPABLE_CONTROL";
+        const CONTROL_PID: &str = "FRACTAL_PROOF_CONTROL_PROCFS_PID";
+        fn reader_diagnostics() -> String {
+            let status = std::fs::read_to_string("/proc/self/status");
+            let fields = status.as_ref().map(|text| text.lines()
+                .filter(|line| line.starts_with("CapEff:") || line.starts_with("NSpid:"))
+                .collect::<Vec<_>>());
+            let mounts = std::fs::read_to_string("/proc/self/mountinfo");
+            let proc_mounts = mounts.as_ref().map(|text| text.lines()
+                .filter(|line| line.split_whitespace().nth(4) == Some("/proc"))
+                .collect::<Vec<_>>());
+            format!("reader_local_pid={} reader_procself={:?} reader_fields={fields:?} proc_mounts={proc_mounts:?}",
+                std::process::id(), std::fs::read_link("/proc/self"))
+        }
+        fn process_diagnostics(pid: u32) -> String {
+            let path = PathBuf::from(format!("/proc/{pid}"));
+            let status = std::fs::read_to_string(path.join("status"));
+            let fields = status.as_ref().map(|text| text.lines()
+                .filter(|line| line.starts_with("Uid:") || line.starts_with("NSpid:"))
+                .collect::<Vec<_>>());
+            format!("procfs_pid={pid} exists={:?} metadata={:?} fields={fields:?}",
+                path.try_exists(), std::fs::metadata(&path))
+        }
+        if std::env::var_os(CONTROL).is_some() {
+            println!("proof-control-ready {}", std::fs::read_link("/proc/self")
+                .expect("control readiness: /proc/self").display());
+            use std::io::Read as _;
+            std::io::stdin().read_exact(&mut [0]).expect("control hold: stdin");
+            return;
+        }
         if std::env::var_os(CHILD).is_some() {
             // SAFETY: these prctl operations affect only this dedicated child.
             unsafe {
@@ -407,7 +437,13 @@ mod tests {
             let proc_pid = std::fs::read_link("/proc/self").expect("producer readiness: readlink /proc/self");
             let proc_pid: u32 = proc_pid.to_str().expect("producer readiness: UTF-8 /proc/self")
                 .parse().expect("producer readiness: numeric /proc/self pid");
-            println!("proof-child-ready pid={} proc_pid={proc_pid} dumpable={dumpable}", std::process::id());
+            let status = std::fs::read_to_string("/proc/self/status").expect("producer readiness: status");
+            let nspid = status.lines().find_map(|line| line.strip_prefix("NSpid:"))
+                .unwrap_or("missing").split_whitespace().collect::<Vec<_>>().join(":");
+            println!("proof-child-ready pid={} proc_pid={proc_pid} dumpable={dumpable} NSpid={nspid}", std::process::id());
+            eprintln!("producer readiness diagnostics: proc_pid={proc_pid} {}; {}",
+                status.lines().find(|line| line.starts_with("NSpid:")).unwrap_or("NSpid: missing"),
+                reader_diagnostics());
             // Keep the producer alive until the parent completes its scan.
             // A fixed sleep can expire under a heavily loaded CI scheduler.
             use std::io::Read as _;
@@ -421,8 +457,12 @@ mod tests {
             let reader = std::fs::read_to_string("/proc/self/status").context("reader diagnostics: read /proc/self/status")?;
             let caps = reader.lines().find(|line| line.starts_with("CapEff:")).unwrap_or("CapEff: missing");
             let namespace = std::fs::read_link("/proc/self/ns/user").context("reader diagnostics: readlink /proc/self/ns/user")?;
+            let visibility = format!("{} producer=[{}] control=[{}]", reader_diagnostics(),
+                process_diagnostics(pid), std::env::var(CONTROL_PID)
+                    .ok().and_then(|value| value.parse().ok())
+                    .map(process_diagnostics).unwrap_or_else(|| "control pid unavailable".to_owned()));
             let producer = std::fs::read_to_string(path.join("status"))
-                .with_context(|| format!("owner inclusion: read /proc/{pid}/status"))?;
+                .with_context(|| format!("owner inclusion: read /proc/{pid}/status; {visibility}"))?;
             let uids = producer.lines().find_map(|line| line.strip_prefix("Uid:"))
                 .with_context(|| format!("owner inclusion: Uid field in /proc/{pid}/status missing"))?.split_whitespace()
                 .map(str::parse::<u32>).collect::<std::result::Result<Vec<_>, _>>()
@@ -477,15 +517,33 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped()).spawn()
             .with_context(|| format!("spawn producer test binary {}", executable.display())).unwrap();
+        let mut control = None;
+        let mut control_pid = None;
+        let mut readiness = String::new();
         let result = (|| -> Result<()> {
             use std::io::BufRead as _;
+            let mut sibling = Command::new(&executable).args(["--exact", TEST, "--nocapture"])
+                .env(CONTROL, "1").stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped()).spawn().context("spawn dumpable control child")?;
+            let output = sibling.stdout.take().context("control readiness: acquire stdout")?;
+            control = Some(sibling);
+            for line in std::io::BufReader::new(output).lines() {
+                let line = line.context("control readiness: read stdout")?;
+                if let Some(pid) = line.strip_prefix("proof-control-ready ") {
+                    control_pid = Some(pid.parse::<u32>().context("control readiness: parse procfs pid")?);
+                    break;
+                }
+            }
+            let sibling_pid = control_pid.context("control readiness: missing procfs pid")?;
             let output = child.stdout.take().context("producer readiness: acquire child stdout pipe")?;
             let mut producer_pid = None;
             for line in std::io::BufReader::new(output).lines() {
                 let line = line.context("producer readiness: read stdout pipe")?;
+                readiness.push_str(&line);
+                readiness.push('\n');
                 if let Some(fields) = line.strip_prefix("proof-child-ready ") {
                     let fields: Vec<_> = fields.split_whitespace().collect();
-                    anyhow::ensure!(fields.len() == 3 && fields[0] == format!("pid={}", child.id()) && fields[2] == "dumpable=0",
+                    anyhow::ensure!(fields.len() == 4 && fields[0] == format!("pid={}", child.id()) && fields[2] == "dumpable=0",
                         "producer readiness: mismatched pid/dumpable: {line}; spawned pid={}", child.id());
                     producer_pid = Some(fields[1].strip_prefix("proc_pid=").context("producer readiness: proc_pid field missing")?
                         .parse::<u32>().context("producer readiness: parse procfs pid")?);
@@ -494,7 +552,8 @@ mod tests {
             }
             let producer_pid = producer_pid.with_context(|| format!("producer readiness: expected pid={} dumpable=0 from {}", child.id(), executable.display()))?;
             if effective & (1 << CAP_SYS_PTRACE) == 0 {
-                assert_denied(producer_pid, child.id(), unsafe { libc::geteuid() })?;
+                assert_denied(producer_pid, child.id(), unsafe { libc::geteuid() })
+                    .with_context(|| format!("direct reader control: {}", process_diagnostics(sibling_pid)))?;
                 eprintln!("{TEST}: EACCES assertion exercised directly (CAP_SYS_PTRACE not effective)");
             } else {
                 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
@@ -504,7 +563,8 @@ mod tests {
                 let gid_map = format!("{gid} {gid} 1");
                 let mut command = Command::new(&executable);
                 command.args(["--exact", TEST, "--nocapture"])
-                    .env(READER, format!("{producer_pid}:{}:{uid}", child.id()));
+                    .env(READER, format!("{producer_pid}:{}:{uid}", child.id()))
+                    .env(CONTROL_PID, sibling_pid.to_string());
                 // SAFETY: pre_exec runs only in the isolated, single-threaded
                 // post-fork reader. User-namespace unshare in a libtest worker
                 // would fail EINVAL because its harness is multithreaded.
@@ -565,9 +625,15 @@ mod tests {
             }
             Ok(())
         })();
+        let final_diagnostics = format!("fixture failure diagnostics: {}; producer readiness={readiness:?}; control={:?}",
+            reader_diagnostics(), control_pid.map(process_diagnostics));
         child.kill().with_context(|| format!("cleanup: kill producer pid={}", child.id())).unwrap();
         child.wait().with_context(|| format!("cleanup: wait producer pid={}", child.id())).unwrap();
-        result.unwrap();
+        if let Some(mut sibling) = control {
+            sibling.kill().context("cleanup: kill dumpable control").unwrap();
+            sibling.wait().context("cleanup: wait dumpable control").unwrap();
+        }
+        result.context(final_diagnostics).unwrap();
     }
 
     #[cfg(target_os = "linux")]
