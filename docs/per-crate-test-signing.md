@@ -121,7 +121,7 @@ and a stale pass is reused. Four controls, in order of when they bite:
   fetches the per-crate index refs in one fetch, asks the verifier (`evidence-verify --crate-key CRATE=KEY`) for each crate, runs ONE
   `scripts/ci-local tests` for the missing crates (`CI_TEST_PACKAGES`, `CI_TEST_JUNIT`; the workspace build, so features unify as in CI), and
   signs each crate with `scripts/evidence-wrap --check rust-tests` over `scripts/ci-rust-test-result`, which reads that crate's part of the
-  JUnit report. The record signs `crate`, `source_inputs`, `tests_run`, `test_list_sha256` (the exact test list), `ignored_list_sha256`, `filterset` and `run_command_sha256`.
+  JUnit report. The record signs `crate`, `source_inputs`, `tests_run`, `test_list_sha256` (the exact test list), `ignored_list_sha256`, `filterset` (the expression, or the crate count and its sha256 when it is longer than the signer's 500-character input limit) and `run_command_sha256`.
   A run that did not complete (build failure, timeout, a nextest exit other than 0, 4 or 100, no report) signs nothing. A failing crate is
   signed as a failure and the others are still signed. `--status` names the crates it would run.
 - `evidence-wrap` also indexes a record that signs `source_inputs` under `refs/notes/evidence-input/<check>/<key>/<record>` and
