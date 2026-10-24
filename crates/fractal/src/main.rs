@@ -25,6 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use base64::Engine as _;
 use clap::{Args, CommandFactory as _, FromArgMatches as _, Parser, Subcommand, ValueEnum};
+use clap::builder::TypedValueParser as _;
 use kdl::{KdlDocument, KdlEntry, KdlNode};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -231,7 +232,13 @@ enum Command {
     /// the daemon rendezvous URL. This command does not start a server.
     Web {
         /// Read the web rendezvous URL from this daemon state directory.
-        #[arg(long, value_name = "DIR", allow_hyphen_values = true)]
+        // The original launcher accepted any OS string, including an empty path.
+        #[arg(
+            long,
+            value_name = "DIR",
+            allow_hyphen_values = true,
+            value_parser = clap::builder::OsStringValueParser::new().map(PathBuf::from)
+        )]
         state_dir: Option<PathBuf>,
     },
     /// Play a scripted demo of fractal in the terminal interface, in its own instance.
