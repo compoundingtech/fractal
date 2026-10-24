@@ -43,7 +43,7 @@ use crate::model::{
     LoopExhaustionSpec, LoopSpec, MemberKind, MemberLifecycle, MemberSpec, MessageView,
     MetricSource, MissionInputKind, MissionRunRequest, MissionRunView, MissionSpec, MissionState,
     RestartIntensity, RestartType, StepRunView, StepSpec, SubscriptionSpec, UsedMissionSpec,
-    WorkSelector,
+    WorkSelector, ObserverSpec,
 };
 use crate::resource::{
     ObservationRequest, ObserverCondition, ProviderRateLimit, RegisteredResourceProvider,
@@ -15358,11 +15358,60 @@ impl<R: RuntimeControl> Reconciler<R> {
         desired: &[DesiredSubject],
         agents: &[DesiredSubject],
     ) -> Result<()> {
+        // Repository locators can redirect after a rename. Elect one standing observer for
+        // each observed numeric repository ID across the complete fleet declaration union.
+        // Keep declarations and watch identities intact: only their effective read/fanout
+        // resource changes. Unknown identities must be observed before they can be grouped.
+        let mut repositories = BTreeMap::<u64, Vec<(&DesiredSubject, ObserverSpec)>>::new();
+        for item in desired.iter().filter(|item| item.kind == "observer") {
+            let Some(spec) = crate::graph::observer_spec(&item.desired).filter(|spec| {
+                !spec.stopped && crate::github_watch::is_standing_observer(&item.subject, spec)
+            }) else {
+                continue;
+            };
+            let Some(id) = self.store.latest_actual_value(&spec.resource)?
+                .and_then(|actual| actual["facts"]["repository_id"].as_u64())
+                .filter(|id| *id != 0)
+            else {
+                continue;
+            };
+            repositories.entry(id).or_default().push((item, spec));
+        }
+        let mut effective = HashMap::<String, ObserverSpec>::new();
+        let mut suppressed = BTreeSet::new();
+        for mut aliases in repositories.into_values().filter(|aliases| aliases.len() > 1) {
+            aliases.sort_by(|(left, _), (right, _)| left.subject.cmp(&right.subject));
+            let canonical = aliases[0].1.clone();
+            // A refresh addressed to an old alias still completes on that alias, using the
+            // same shared resource. Select it deterministically instead of starting a second
+            // poll or leaving its refresh request pending forever.
+            let mut selected = 0;
+            for (index, (item, _)) in aliases.iter().enumerate() {
+                if self.store.pending_observer_refresh_attempt(&item.subject)?.is_some() {
+                    selected = index;
+                    break;
+                }
+            }
+            let fields = aliases.iter().flat_map(|(_, spec)| spec.fields.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            let every_ms = aliases.iter().filter_map(|(_, spec)| spec.every_ms).min();
+            for (index, (item, mut spec)) in aliases.into_iter().enumerate() {
+                spec.resource.clone_from(&canonical.resource);
+                spec.locator.clone_from(&canonical.locator);
+                spec.fields = fields.iter().cloned().collect();
+                spec.every_ms = every_ms;
+                effective.insert(item.subject.clone(), spec);
+                if index != selected {
+                    suppressed.insert(item.subject.clone());
+                }
+            }
+        }
         let observer_resources = desired
             .iter()
             .filter(|item| item.kind == "observer")
             .filter_map(|item| {
-                crate::graph::observer_spec(&item.desired)
+                effective.get(&item.subject).cloned()
+                    .or_else(|| crate::graph::observer_spec(&item.desired))
                     .filter(|spec| !spec.stopped)
                     .map(|spec| (item.subject.clone(), spec.resource))
             })
@@ -15404,9 +15453,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .collect::<Vec<_>>(),
         );
         for observer in desired.iter().filter(|item| item.kind == "observer") {
+            if suppressed.contains(&observer.subject) {
+                let prefix = format!("{}:", observer.subject);
+                self.armed_observers.lock().unwrap_or_else(PoisonError::into_inner)
+                    .retain(|operation| !operation.starts_with(&prefix));
+                continue;
+            }
             self.isolate("observer", &observer.subject, || {
                 self.reconcile_resource_observer(
                     observer,
+                    effective.get(&observer.subject),
                     &subscriptions_by_resource,
                     &agent_workspaces,
                 )
@@ -15419,10 +15475,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_resource_observer(
         &self,
         observer: &DesiredSubject,
+        effective: Option<&ObserverSpec>,
         subscriptions_by_resource: &HashMap<String, Vec<(String, SubscriptionSpec)>>,
         agent_workspaces: &Arc<Vec<crate::resource::AgentWorkspace>>,
     ) -> Result<()> {
-        let Some(mut spec) = crate::graph::observer_spec(&observer.desired) else {
+        let Some(mut spec) = effective.cloned()
+            .or_else(|| crate::graph::observer_spec(&observer.desired)) else {
             return Ok(());
         };
         let selected = subscriptions_by_resource
@@ -15471,7 +15529,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         spec.fields.extend(
             selected
                 .iter()
-                .filter(|(_, subscription)| subscription.observer == observer.subject)
+                // All subscriptions grouped on this resource, including renamed aliases,
+                // need their fields read by the one elected observer.
                 .flat_map(|(_, subscription)| subscription.fields.iter().cloned()),
         );
         spec.fields.sort();

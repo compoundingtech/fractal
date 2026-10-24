@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Share standing GitHub observer polls across repository aliases by numeric repository ID and distinguish non-304 responses from conditional hits in telemetry.",
+  "replay": { "status": "none", "detail": "No replay or declaration migration. Existing watches keep their subjects, deadlines and recipients." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes. Repository identity uses existing observed repository_id facts." },
+  "rules": { "status": "none", "detail": "No checkpoint or coordinated upgrade rules change." },
+  "compatibility": { "status": "changed", "detail": "Standing observers for the same known repository ID elect one poll across the fleet declaration union and fan out to all alias subscriptions. Unknown IDs still require discovery reads. Custom non-standing observers remain independent. The st.github.responses counter splits charged (completed non-304) and not_modified responses by repository and rate-limit resource, with the daemon host resource attribute." },
+  "downtime": { "status": "none", "detail": "No restart or live-state migration is performed by this change." },
+  "manual": { "status": "none", "detail": "No operator action required. Compare response rates, not durable admission reservations, against provider quota observations." },
+  "recovery": { "status": "none", "detail": "Rollback resumes independent alias polling without removing or rewriting any existing watch." }
+}

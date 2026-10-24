@@ -312,3 +312,91 @@ fn a_clean_watch_stage_retains_fault_but_a_failed_safety_pass_retries() {
     );
     assert!(!reconciler.incremental.needs(ITEM, now_ms()));
 }
+
+#[tokio::test]
+async fn repository_aliases_share_one_request_and_fan_out_without_rewriting_watches() {
+    struct Capture {
+        requests: Arc<tokio::sync::Mutex<Vec<ObservationRequest>>>,
+        facts: Value,
+    }
+    impl ResourceProvider for Capture {
+        fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+            dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+        >> {
+            Box::pin(async move {
+                self.requests.lock().await.push(request);
+                Ok(crate::resource::ProviderObservation {
+                    facts: self.facts.clone(),
+                    cursor: Some("shared-alias-cursor".into()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                })
+            })
+        }
+    }
+    let fixture = WatchFixture::new();
+    let planner = "agent/example.planner";
+    let reviewer = "agent/example.reviewer";
+    let original = fixture.watch("acme/garden#12", planner);
+    let renamed = fixture.watch("acme/orchid#12", reviewer);
+    let other = WatchFixture {
+        store: fixture.store.clone(),
+        observer: "observer/github/acme/orchid".into(),
+        resource: "resource/github/acme/orchid".into(),
+    };
+    for source in [&fixture, &other] {
+        source.observe(json!({"repository_id": 1310762902, "pull_requests": [
+            watched_pull(12, json!({"recent_comments": []}))
+        ]}));
+    }
+    let declarations = [original.clone(), renamed.clone()].map(|subject| {
+        fixture.store.desired_subjects_named(&[subject]).unwrap().remove(0).desired
+    });
+    let at = chrono::Utc::now().to_rfc3339();
+    let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let reconciler = Reconciler::new(
+        fixture.store.clone(), Arc::new(FakeRuntime::default()), "node".into(),
+        Arc::new(Notify::new()),
+    ).with_resource_provider(Arc::new(Capture {
+        requests: requests.clone(),
+        facts: json!({"repository_id": 1310762902, "pull_requests": [
+            watched_pull(12, json!({"recent_comments": [{
+                "kind": "comment", "id": 912, "author": "fern", "at": at,
+                "url": "https://github.com/acme/orchid/pull/12#issuecomment-912"
+            }]}))
+        ]}),
+    }));
+    for source in [&fixture, &other] {
+        let revision = fixture.store.selected_desired_revision(&source.observer).unwrap().unwrap();
+        reconciler.observer_deadlines.lock().unwrap()
+            .insert(format!("{}:{revision}", source.observer), 0);
+    }
+    reconciler.reconcile_resource_observers(&fixture.store.desired_subjects().unwrap(), &[]).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.wakes(planner).is_empty() || fixture.wakes(reviewer).is_empty() {
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("one observation wakes both original alias subscribers");
+    let requests = requests.lock().await;
+    assert_eq!(requests.len(), 1, "aliases must not start independent provider requests");
+    assert_eq!(requests[0].locator, "acme/garden");
+    assert!(requests[0].fields.contains("comments"));
+    assert!(requests[0].fields.contains("pull_requests"));
+    assert_eq!(fixture.wakes(planner).len(), 1);
+    assert_eq!(fixture.wakes(reviewer).len(), 1);
+    for (index, subject) in [original, renamed].into_iter().enumerate() {
+        assert_eq!(fixture.store.desired_subjects_named(&[subject]).unwrap()[0].desired,
+            declarations[index], "deduplication must not migrate declarations or watch deadlines");
+    }
+}
+
+#[test]
+fn ending_the_last_watch_stops_only_the_unsubscribed_repository() {
+    let _clock = Clock::at(START);
+    let (fixture, reconciler) = fixture();
+    let first = fixture.watch("acme/garden#12", "agent/example.planner");
+    fixture.watch("acme/orchid#12", "agent/example.reviewer");
+    fixture.store.end_watch(&first, "unwatched", None).unwrap();
+    reconciler.reconcile_github_watches(&fixture.store.github_watch_declarations().unwrap()).unwrap();
+    assert!(!fixture.running(&fixture.observer));
+    assert!(fixture.running("observer/github/acme/orchid"));
+}

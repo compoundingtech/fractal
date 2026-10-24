@@ -712,6 +712,15 @@ fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header
         .unwrap_or_default()
         .as_millis();
     let spender = github_spender().unwrap_or_else(|| GITHUB_UNATTRIBUTED.to_owned());
+    if crate::otel::metrics_enabled()
+        && let Some(repository) = spender.strip_prefix("observer/github/")
+    {
+        crate::otel::github_response(
+            repository,
+            github_budget_resource(headers),
+            status == reqwest::StatusCode::NOT_MODIFIED,
+        );
+    }
     github_usage()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1447,6 +1456,52 @@ mod tests {
         assert!(!requests[0].contains("if-none-match"));
         assert!(requests[1].contains("if-none-match: \"head-one\""));
         assert!(requests[2].contains("if-none-match: \"head-one\""));
+    }
+
+    #[tokio::test]
+    async fn conditional_listing_keeps_cached_page_links_and_authenticates_304_reads() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let next = format!("{base}/items?page=2");
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..size]);
+                    if size == 0 || request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8(request).unwrap().to_lowercase());
+                let page = index % 2 + 1;
+                let body = if index < 2 { format!("[{{\"id\":{page}}}]") } else { String::new() };
+                let status = if index < 2 { "200 OK" } else { "304 Not Modified" };
+                // The 304 deliberately omits Link. Cached pagination must still read page two.
+                let link = if index == 0 { format!("Link: <{next}>; rel=\"next\"\r\n") } else { String::new() };
+                stream.write_all(format!(
+                    "HTTP/1.1 {status}\r\nETag: \"page-{page}\"\r\n{link}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                ).as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let auth = GithubAuth::test("fixture-conditional-auth");
+        let first = github_array(&github_client(), format!("{base}/items"), &auth, Duration::ZERO).await.unwrap();
+        let second = github_array(&github_client(), format!("{base}/items"), &auth, Duration::ZERO).await.unwrap();
+        assert_eq!(first, vec![json!({"id": 1}), json!({"id": 2})]);
+        assert_eq!(second, first);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 4);
+        for (index, request) in requests.iter().enumerate() {
+            assert!(request.contains("authorization: bearer fixture-conditional-auth"));
+            assert_eq!(request.contains("if-none-match:"), index >= 2);
+        }
+        assert!(requests[2].contains("if-none-match: \"page-1\""));
+        assert!(requests[3].contains("if-none-match: \"page-2\""));
+        assert!(requests[3].starts_with("get /items?page=2 "));
     }
 
     #[tokio::test]

@@ -68,3 +68,33 @@ module parses with rustfmt and the diff passes whitespace checks. Existing
 resource tests cover shared lists and200/304/head-change behavior. Exact-head
 Intake review, ordinary hosted qualification and later deployment evidence are
 required; no live admission or savings claim is made here.
+
+## Repository aliases and response accounting
+
+Standing repository observers with the same observed numeric `repository_id`
+share one poll across the fleet declaration union. The lexicographically first
+observer supplies the shared locator and resource; a pending explicit refresh
+temporarily selects the addressed alias to complete that refresh on the same
+resource. Each alias keeps its existing watch subjects, deadlines and recipients.
+The elected observation reads the union of their fields and fans out to every
+subscription, including those on a different spelling of the repository.
+Custom non-standing observers are not coalesced. An unknown identity must first
+be observed, so startup discovery can still read both aliases before their IDs
+are known and replicated. Deduplication is not a distributed admission lock.
+
+`st.github.responses` is a monotonic OpenTelemetry counter with
+`github.repository`, `github.resource` (`core`, `graphql` or the provider's
+reported resource) and `github.response.kind` (`charged`, `not_modified`).
+The daemon's `host.name` resource attribute supplies the host dimension.
+`charged` means a completed non-304 response, including refused responses; it
+is not proof of an exact provider debit and never represents GraphQL points.
+`not_modified` counts completed conditional 304 responses. Failed sends appear
+only in admission reservations, not this response counter. Requests satisfied
+entirely by the local cache appear in neither counter. Compare rates of the
+two response kinds with the account's provider rate-limit observations rather
+than treating `github-admission.json` reservations as charged requests.
+
+The existing conditional cache retains JSON and pagination links on a 304 and
+authenticates every revalidation. Standing observers with no live watch or
+mission subscription stop; stopping a seat's runtime alone does not end its
+watches. These behaviors have dedicated regression coverage.
