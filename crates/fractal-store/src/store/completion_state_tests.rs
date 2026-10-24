@@ -387,7 +387,8 @@ fn completion_state_cold_backfill_twenty_thousand_large_cursors() {
 
 #[tokio::test]
 async fn completion_state_background_worker_hydrates_and_releases_store() {
-    let store = Arc::new(Store::open_memory("example-worker").unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&directory.path().join("claims.db"), "example-worker").unwrap());
     {
         let mut writer = store.connection.write();
         let tx = writer.transaction().unwrap();
