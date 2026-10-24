@@ -3,7 +3,7 @@
 
 Version 7: preserve main's derived changelog registry after every merge; retain PR entry files.
 """
-import datetime, fcntl, hashlib, json, os, pathlib, shutil, subprocess, time
+import datetime, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, time
 def required_input(name):
     value = os.environ.get(name)
     if not value:
@@ -343,7 +343,11 @@ def digest(root):
 def stamp(private_hash):
     git('commit','--allow-empty','-m','live-r3: production integration','-m',f'Public client/private server; private overlay SHA256: {private_hash}')
 def install():
-    lockhash=hashlib.sha256((C/'pnpm-lock.yaml').read_bytes()).hexdigest()
+    inputs=hashlib.sha256()
+    for path in ('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'megarepo.kdl',
+                 'megarepo.lock', 'pnpm-source-inputs.json'):
+        inputs.update(path.encode()); inputs.update((C/path).read_bytes())
+    lockhash=inputs.hexdigest()
     state=L/f'{C.name}-lockhash'
     if not (C/'node_modules').exists() or not state.exists() or state.read_text()!=lockhash:
         run(['nice','-n','19','nix','develop','.#web','--option','builders','','-c','pnpm','install','--prefer-offline','--frozen-lockfile'],cwd=C,timeout=900); state.write_text(lockhash)
@@ -397,6 +401,28 @@ def activate(previous):
     subprocess.run(['devnet','url',purpose,'--remote','--wait'],cwd=C/'apps/fractal-web',env=cleanenv,check=True,timeout=120)
     status=subprocess.run(['devnet','status',purpose],cwd=C/'apps/fractal-web',env=cleanenv,text=True,capture_output=True,check=True)
     return json.loads(status.stdout)['tags']['run.url.edge']
+def observe_served(row):
+    """Compare the candidate with the running server's machine-readable identity."""
+    row['servedSha']=None
+    cleanenv={k:v for k,v in os.environ.items() if k not in ('PTY_SESSION','ST_AGENT')}
+    cleanenv['PWD']=str(C/'apps/fractal-web')
+    try:
+        local=subprocess.run(['devnet','url',purpose,'--local'],cwd=C/'apps/fractal-web',
+                             env=cleanenv,text=True,capture_output=True,timeout=30,check=True)
+        url=local.stdout.strip()
+        if not url.startswith(('http://','https://')):
+            raise ValueError('devnet returned no HTTP local URL')
+        response=subprocess.run(['curl','-fsS','--max-time','15','--',url.rstrip('/')+'/build-identity.json'],
+                                env=cleanenv,text=True,capture_output=True,timeout=20,check=True)
+        revision=json.loads(response.stdout)['rev']
+        if not isinstance(revision,str) or not re.fullmatch(r'[0-9a-f]{40}',revision):
+            raise ValueError('served build identity has no full revision')
+        row['servedSha']=revision
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        row['servedError']=str(error)[:240]
+    row['current']=('error' not in row and row.get('sha') is not None
+                    and row['sha']==row['servedSha'])
+
 def tick():
     global TIMINGS, REGISTRY_BASE
     start=time.monotonic(); row={'ts':datetime.datetime.now(datetime.timezone.utc).isoformat(),'sha':None,'main':None,'included':[],'skipped':[],'selection':[],'build':'failed','ms':0}
@@ -541,12 +567,7 @@ def tick():
             row['detail']=((e.stdout or '') + '\n' + (e.stderr or '')).strip()[-4000:]
         print('tick failed:',row['error'],row.get('detail',''),flush=True)
     finally:
-        try:
-            current_sha=(P/'current-sha').read_text().strip()
-        except FileNotFoundError:
-            current_sha=None
-        row['current']=('error' not in row and row.get('sha') is not None
-                        and row['sha']==current_sha)
+        observe_served(row)
         row['ms']=round((time.monotonic()-start)*1000)
         row['timingsMs']['other']=max(0,row['ms']-sum(row['timingsMs'].values()))
         publish_skips(row)

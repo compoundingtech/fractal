@@ -44,8 +44,9 @@ for the separate launcher scripts.
 
 ## Tick observability
 
-Every tick records `current`: no `error`, a non-null `sha`, and equality with the
-stripped production `current-sha` file; a missing file or lock-held tick is false.
+Every tick reads `servedSha` from `/build-identity.json` (`rev`) at `devnet url <purpose> --local`.
+`current` requires no `error`, a non-null `sha`, and equality with `servedSha`, not a disk build.
+A failed lookup/fetch/identity decode sets `servedSha=null`, `current=false`, and a short `servedError`; lock-held ticks are false.
 `build` is `built`, `skipped`, `failed`, or `dry-run`; it is not a freshness signal.
 Skipped `reason` is `unchanged`, `lock-held`, or `known-built-tree`/`known-failed-tree`.
 Dry-run `reason` is `merged-and-regenerated-no-build-no-swap`; errors retain `build=failed`.
@@ -70,6 +71,8 @@ Successful member and install input hashes persist beside the log as
 therefore retries on later ticks even with unchanged HEAD or after restart;
 JSONL records each failure's output. Keep these deployment-owned state files
 alongside the log when restarting the follower.
+The integrator's installed-input key covers the same five files and retains its
+existing `<clone-name>-lockhash` state filename; old lockfile-only keys invalidate.
 
 The deployment provides GitHub/Git access, Devnet and build credentials, and the
 `git`, `gh`, `nix`, `pnpm`, `node`, `curl`, Python and shell tooling needed by the
