@@ -15642,7 +15642,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         let completion_fault = self.fault_injection.clone();
         let deadlines = self.observer_deadlines.clone();
         let intervals = self.observer_intervals.clone();
-        let standing = crate::github_watch::is_standing_observer(&observer.subject, &spec);
+        let standing = crate::graph::observer_spec(&observer.desired).is_some_and(|authored|
+            crate::github_watch::is_standing_observer(&observer.subject, &authored));
         let mut standing_interval = if refresh_attempt.is_some() {
             None
         } else {
@@ -15764,20 +15765,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         let observed_at = now_ms();
                         let continuing = observation.next_check_unix_ms
                             <= observed_at.saturating_add(crate::resource::PROVIDER_CONTINUE_MS);
-                        // Existing standing declarations may still say 30s. Their identity,
-                        // not their authored interval, selects adaptive scheduling. Compare all
-                        // facts, not only the subset that wakes a particular subscription.
-                        let interval = if standing {
-                            Some(match standing_interval {
-                                _ if previous_facts.as_ref() != Some(&observation.facts) => 180_000,
-                                None => 180_000,
-                                Some(interval) if continuing => interval,
-                                Some(180_000) => 360_000,
-                                Some(_) => 600_000,
-                            })
-                        } else {
-                            spec.every_ms
-                        };
+                        // Standing identity, not the authored interval, selects scheduling.
+                        // Persist the active restart bound; quiet backoff is local scheduling
+                        // state computed from the writer's canonical merge outcome below.
+                        let interval = if standing { Some(180_000) } else { spec.every_ms };
                         // Pagination remains immediate. Provider errors, including rate limits,
                         // never enter this successful-observation scheduling path.
                         if !continuing && let Some(interval) = interval {
@@ -15795,9 +15786,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                             &selected,
                             Some(&current),
                         ) {
-                            Ok((_, wrote)) => {
+                            Ok((outcome, wrote)) => {
                                 if standing {
-                                    standing_interval = interval;
+                                    let interval = match standing_interval {
+                                        _ if outcome.baseline || !outcome.changed_fields.is_empty() => 180_000,
+                                        None => 180_000,
+                                        Some(interval) if continuing => interval,
+                                        Some(180_000) => 360_000,
+                                        Some(_) => 600_000,
+                                    };
+                                    standing_interval = Some(interval);
+                                    if !continuing {
+                                        observation.next_check_unix_ms =
+                                            observed_at.saturating_add(u128::from(interval));
+                                    }
                                 }
                                 durable_changed = wrote;
                                 previous_facts = Some(observation.facts);
@@ -34764,8 +34766,15 @@ observer "repo" {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 let change = self.changed.load(Ordering::SeqCst);
                 let continuing = self.continuation.load(Ordering::SeqCst);
+                let mut facts = serde_json::json!({"repository_id": 7});
+                if change != 2 {
+                    facts["issues"] = serde_json::json!([{
+                        "id": 11, "number": 1, "state": "open",
+                        "title": if change == 0 { "before" } else { "after" },
+                    }]);
+                }
                 Box::pin(async move { Ok(crate::resource::ProviderObservation {
-                    facts: serde_json::json!({"issues": [], "unsubscribed_fact": change}),
+                    facts,
                     cursor: Some("etag-and-pagination-state".into()),
                     next_check_unix_ms: now_ms() + if continuing {
                         crate::resource::PROVIDER_CONTINUE_MS
@@ -34840,12 +34849,20 @@ observer "{subject}" {{
             changed.store(1, Ordering::SeqCst);
             poll(&reconciler, &calls, &subject_id, true,
                 if standing { 180_000 } else { 30_000 }).await;
+            // Real repository observations are item deltas. An identity-only quiet poll
+            // after a changed item, and re-emitting the identical item, are both quiet.
+            changed.store(2, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 360_000 } else { 30_000 }).await;
+            changed.store(3, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 600_000 } else { 30_000 }).await;
             continuation.store(true, Ordering::SeqCst);
             poll(&reconciler, &calls, &subject_id, true,
                 crate::resource::PROVIDER_CONTINUE_MS).await;
             continuation.store(false, Ordering::SeqCst);
             poll(&reconciler, &calls, &subject_id, true,
-                if standing { 360_000 } else { 30_000 }).await;
+                if standing { 600_000 } else { 30_000 }).await;
 
             let revision = store.selected_desired_revision(&subject_id).unwrap().unwrap();
             store.append_claim(&ClaimInput {
