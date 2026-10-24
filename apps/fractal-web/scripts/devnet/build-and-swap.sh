@@ -3,15 +3,20 @@
 set -Eeuo pipefail
 ROOT=${FRACTAL_BUILD_ROOT:?missing required input: FRACTAL_BUILD_ROOT}
 SNAPSHOT_ROOT=${FRACTAL_BUILD_SNAPSHOT_ROOT:?missing required input: FRACTAL_BUILD_SNAPSHOT_ROOT}
+DEPCACHE=${FRACTAL_DEP_CACHE:?missing required input: FRACTAL_DEP_CACHE}
 script_dir=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
 SOURCE=${1:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
 requested=${2:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
 name=${3:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
 [[ $name =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ && $name != . && $name != .. ]] || { echo 'Invalid deployment name' >&2; exit 2; }
 SOURCE=$(realpath "$SOURCE")
-mkdir -p "$ROOT" "$SNAPSHOT_ROOT"
+mkdir -p "$ROOT" "$SNAPSHOT_ROOT" "$DEPCACHE"
 ROOT=$(realpath -- "$ROOT")
 SNAPSHOT_ROOT=$(realpath -- "$SNAPSHOT_ROOT")
+DEPCACHE=$(realpath -- "$DEPCACHE")
+case "$DEPCACHE/" in
+  "$SOURCE/"*) echo 'Dependency cache must be outside the mutable source clone' >&2; exit 2 ;;
+esac
 P=$ROOT/$name
 started=$(date +%s%3N)
 sha=$requested
@@ -53,16 +58,17 @@ sha=$(git -C "$SOURCE" rev-parse --verify "$requested^{commit}")
 if [[ -f $P/current-sha && $(<"$P/current-sha") == "$sha" && -f $P/current/build-receipt.json ]]; then outcome=skipped; reason=already-current; exit 0; fi
 previous=$(readlink -f "$P/current" || true)
 [[ -d $previous ]] || previous=
-# Transient service snapshots share the clone's dataset so dependencies can hardlink.
+# Snapshots stay in the repository store's worktrees tree; the dependency cache
+# shares their filesystem, independently of the mutable integration clone.
 snapshot_root=$SNAPSHOT_ROOT/$name
 mkdir -p "$snapshot_root"
 snapshot_root=$(realpath -- "$snapshot_root")
 case "$snapshot_root/" in
   "$SOURCE/"*) reason=recursive-snapshot-root; echo 'Snapshot root must be outside the source clone' >&2; exit 2 ;;
 esac
-if [[ $(stat -c %d "$SOURCE") != $(stat -c %d "$snapshot_root") ]]; then
-  reason=cross-device-snapshot-root
-  echo 'Snapshot root must share the source clone filesystem' >&2
+if [[ $(stat -c %d "$DEPCACHE") != $(stat -c %d "$snapshot_root") ]]; then
+  reason=cross-device-dependency-cache
+  echo 'Snapshot root must share the immutable dependency cache filesystem' >&2
   exit 2
 fi
 # Snapshot leases are keyed by the shared namespace, not by the build root.
@@ -83,9 +89,21 @@ snapshot=$next_snapshot
 snapshot_lock=$snapshot.lock
 build=$P/builds/$sha
 if [[ -e $build ]]; then build=; reason=immutable-build-already-exists; exit 1; fi
+reason=dependency-cache-failed
+exec 6>"$DEPCACHE/.cache.lock"
+flock -x 6
+dependency_key=$(python3 "$script_dir/dependency_cache.py" key "$SOURCE")
+python3 "$script_dir/dependency_cache.py" populate "$SOURCE" "$DEPCACHE" "$dependency_key"
+generation=$DEPCACHE/$dependency_key
+# Acquire the shared generation lease before releasing the publication/prune
+# lock. FD 5 stays open until after finish() removes this run's snapshot.
+exec 5<"$generation/.lease"
+flock -s 5
+flock -u 6
+exec 6>&-
 reason='snapshot-failed'
 git -C "$SOURCE" worktree add --detach "$snapshot" "$sha"
-python3 "$script_dir/prepare-dependencies.py" "$SOURCE" "$snapshot" "$P/overlay-manifest-$$"
+python3 "$script_dir/prepare-dependencies.py" "$SOURCE" "$snapshot" "$P/overlay-manifest-$$" "$generation" "$dependency_key"
 cd "$snapshot/apps/fractal-web"
 identity=$snapshot/apps/fractal-web/vendor/utils/src/node/cli-build-identity.js
 reason='build-failed'
@@ -112,7 +130,8 @@ reason=receipt-invalid
 python3 - "$build/build-receipt.json" "$sha" "$build/overlay-snapshot.json" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1])); assert r['buildIdentity']['rev']==sys.argv[2] and r['buildIdentity']['dirty'] is False and r['stackHead']==sys.argv[2]
-r['dependencyFiles']=json.load(open(sys.argv[3]))['dependencyFiles']
+manifest=json.load(open(sys.argv[3]))
+r.update(dependencyKey=manifest['dependencyKey'],dependencyFiles=manifest['dependencyFiles'])
 with open(sys.argv[1],'w') as f: f.write(json.dumps(r,indent=2)+'\n')
 PY
 chmod +x "$build/launch.sh"

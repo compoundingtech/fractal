@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import unittest
 
+from dependency_cache import INSTALL_INPUTS, install_key
+
 
 HELPER = Path(__file__).with_name('build-and-swap.sh').resolve()
 ROOT = Path(__file__).resolve().parents[4]
@@ -23,6 +25,7 @@ class SnapshotLeaseTest(unittest.TestCase):
             fixture = Path(temporary)
             source = fixture / 'source'
             snapshot_root = fixture / 'snapshots'
+            cache = fixture / 'dependency-cache'
             binary = fixture / 'bin'
             binary.mkdir()
             for relative in ('apps/fractal-web/private/build-live.mjs',
@@ -31,6 +34,8 @@ class SnapshotLeaseTest(unittest.TestCase):
                 path = source / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('// synthetic fixture\n')
+            for name in INSTALL_INPUTS:
+                (source / name).write_text(name + '\n')
             git = binary / 'git'
             git.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, shutil, sys
@@ -73,6 +78,7 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
                 'SNAPSHOT_LEASE_FIXTURE': str(fixture),
                 'SNAPSHOT_LEASE_RELEASE': str(release),
                 'FRACTAL_BUILD_SNAPSHOT_ROOT': str(snapshot_root),
+                'FRACTAL_DEP_CACHE': str(cache),
                 'FRACTAL_BUILD_ADMISSION': 'fallback',
             }
             first_sha, second_sha = 'a' * 40, 'b' * 40
@@ -91,12 +97,28 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
                 with Path(str(live_snapshot) + '.lock').open() as lease:
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                key = install_key(source)
+                generation = cache / key
+                dependency = generation / 'node_modules/fixture/index.js'
+                original_stat = dependency.stat()
+                self.assertNotEqual(original_stat.st_ino, (source / 'node_modules/fixture/index.js').stat().st_ino)
+                self.assertEqual((live_snapshot / 'node_modules/fixture/index.js').stat().st_ino, original_stat.st_ino)
+                with (generation / '.lease').open() as lease:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                (source / 'node_modules/fixture/index.js').write_text('mutable source changed\n')
                 second_env = {**base_env, 'FRACTAL_BUILD_ROOT': str(fixture / 'build-root-b'),
                               'SNAPSHOT_LEASE_SHA': second_sha, 'SNAPSHOT_LEASE_HOLD': '0'}
                 second = subprocess.run(['bash', str(HELPER), str(source), second_sha, 'shared'],
                                         env=second_env, capture_output=True, text=True, timeout=15)
                 self.assertEqual(second.returncode, 0, second.stderr)
                 self.assertTrue(live_snapshot.is_dir(), 'second build reclaimed the live first snapshot')
+                self.assertEqual(dependency.read_text(), '// synthetic fixture\n')
+                self.assertEqual(dependency.stat().st_ino, original_stat.st_ino)
+                self.assertEqual(dependency.stat().st_mtime_ns, original_stat.st_mtime_ns)
+                receipt = json.loads((fixture / 'build-root-b/shared/builds' / second_sha / 'build-receipt.json').read_text())
+                self.assertEqual(receipt['dependencyKey'], key)
+                self.assertEqual(receipt['dependencyFiles'], {'linked': 1, 'copied': 0})
                 calls = [json.loads(line) for line in (fixture / 'git-calls.jsonl').read_text().splitlines()]
                 self.assertFalse(any(args[:2] == ['worktree', 'remove'] and args[3] == str(live_snapshot)
                                      for args in calls))
@@ -110,6 +132,7 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
                 relative_sha = 'c' * 40
                 relative_env = {**base_env, 'FRACTAL_BUILD_ROOT': 'relative-build-root',
                                 'FRACTAL_BUILD_SNAPSHOT_ROOT': 'relative-snapshot-root',
+                                'FRACTAL_DEP_CACHE': 'dependency-cache',
                                 'SNAPSHOT_LEASE_SHA': relative_sha, 'SNAPSHOT_LEASE_HOLD': '0'}
                 relative = subprocess.run(['bash', str(HELPER), str(source), relative_sha, 'shared'],
                                           cwd=fixture, env=relative_env, capture_output=True,
@@ -119,6 +142,7 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
                 self.assertEqual((fixture / 'relative-build-root/shared/current').resolve(), relative_build)
                 receipt = json.loads((relative_build / 'build-receipt.json').read_text())
                 self.assertEqual(receipt['buildIdentity']['rev'], relative_sha)
+                self.assertEqual(receipt['dependencyKey'], key)
                 self.assertTrue((fixture / 'relative-build-root/shared/builds.jsonl').is_file())
                 self.assertEqual(list((fixture / 'relative-snapshot-root/shared').iterdir()), [])
             finally:

@@ -81,23 +81,47 @@ The helper takes `SOURCE_DIR SHA NAME` arguments and requires:
 | Environment variable | Value |
 | --- | --- |
 | `FRACTAL_BUILD_ROOT` | Deployment-owned parent of per-name production directories (`<root>/<name>/builds/<sha>`) |
-| `FRACTAL_BUILD_SNAPSHOT_ROOT` | Deployment-owned snapshot parent, outside the source clone and on its filesystem |
+| `FRACTAL_BUILD_SNAPSHOT_ROOT` | Deployment-owned snapshot parent under the repository store's `worktrees/` directory, outside the source clone |
+| `FRACTAL_DEP_CACHE` | Dedicated immutable dependency cache outside the mutable source clone, on the snapshot filesystem |
 
-Both root inputs are canonicalized against the caller's directory before the helper
+All three root inputs are canonicalized against the caller's directory before the helper
 changes into a snapshot, so relative roots retain their original meaning.
 
 The helper creates detached worktrees at `<snapshot-root>/<name>/<sha>-<pid>`.
 Each run holds an exclusive `<snapshot>.lock` flock for its snapshot's lifetime.
 Reclamation removes a matching revision/PID snapshot only after acquiring that
 snapshot's lock non-blocking, so runs with different build roots can safely share
-the snapshot namespace. Snapshot roots on another filesystem or inside the source
-clone fail loudly before worktree creation.
-`prepare-dependencies.py SOURCE_DIR SNAPSHOT_DIR [MANIFEST_PATH]` copies the
-private/vendor overlay, hardlinks installed dependency files, and redirects
-workspace symlinks into the snapshot. It is resolved beside the shell helper.
-An `EXDEV` hardlink failure emits an immediate warning before copying;
-the final warning and `dependencyFiles.linked` / `dependencyFiles.copied`
-manifest/receipt fields count the actual hardlinks and fallback copies.
+the snapshot namespace. Host Git remains the deployment's PATH Git, including its
+worktree-location policy. The source clone need not share the snapshot filesystem;
+the immutable dependency cache must share it.
+
+`dependency_cache.py` hashes the path and bytes of these inputs, in this exact order:
+`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `megarepo.kdl`, `megarepo.lock`,
+`pnpm-source-inputs.json`. This five-file key names `<cache>/<key>`.
+Under an exclusive `<cache>/.cache.lock`, initial population copies installed
+dependency trees from the mutable clone into a staging directory and atomically
+renames it into place. Source-to-cache copying never hardlinks mutable source files.
+Published generations are never rewritten. `.fractal-dep-key` and
+`.node-modules.json` inside each generation identify its key and safe source-relative
+dependency directories; mismatched markers or escaping inventories fail closed.
+
+`.selection.json` outside the generations records the selected current and previous
+generation. Reusing an older generation updates selection lineage without mutating it.
+The helper takes a shared generation `.lease` before releasing the cache lock and
+holds that lease through preparation, build and snapshot cleanup. Before publishing
+a new generation, pruning holds the cache lock and waits for an exclusive lease on
+each obsolete generation; running builds release leases without reacquiring the
+cache lock. This preserves current plus the previously selected generation and never
+deletes one in use. A new dependency selection can therefore wait for an older build.
+
+`prepare-dependencies.py SOURCE_DIR SNAPSHOT_DIR MANIFEST_PATH GENERATION KEY`
+checks the source's five-file key and generation marker before linking. It copies
+the private/vendor overlay, hardlinks installed files from the immutable generation,
+and redirects workspace symlinks using their original clone-relative locations,
+not the cache parent. An `EXDEV` hardlink failure emits an immediate warning before
+copying; the final warning and `dependencyFiles.linked` / `dependencyFiles.copied`
+manifest/receipt fields count actual hardlinks and fallback copies.
+`dependencyKey` in the manifest and receipt identifies the selected generation.
 Production state, manifests, snapshots, private overlay and credentials remain
 deployment-owned. The helper stages `current`; it never prunes immutable builds
 or publishes Devnet. The integrator alone prunes current plus one rollback build
@@ -107,6 +131,11 @@ The helper uses `gate-slot` admission by default; `FRACTAL_BUILD_ADMISSION=fallb
 explicitly reuses a caller's admission timeout and builds with `nice -n 19`.
 The deployment supplies Git, GNU coreutils, `flock`, Python, Node and the private
 build entry point. These scripts do not provision the private build code.
+
+During an operator-approved cache rollout, any `snapshot-failed` or `build-failed`
+tick, or a first built tick above 400 MB of process `write_bytes`, requires reverting
+to the deployment's copy-mode helpers. This is an operator rollback criterion,
+not an automatic fallback that hides a failed immutable-cache build.
 
 ## Tick observability
 
