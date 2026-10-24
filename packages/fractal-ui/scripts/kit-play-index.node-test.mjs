@@ -112,7 +112,7 @@ test('the per-commit set rejects a listed story that is not critical, so a renam
 
 const benchmarkId = 'fractal-ui-sidebar-tree--filter-keystroke-to-paint'
 const functionalId = 'fractal-ui-sidebar-tree--filter-behavior'
-const freezeId = 'fractal-narrow-layout--changes-range-freeze-cleanup'
+const freezeId = 'fractal-narrow-layout--sidebar-drag-unmount-cleanup'
 const aliasIds = [
   'fractal-ui-transcript--no-green-all-states-light',
   'fractal-ui-composer--footer-width-budget-light',

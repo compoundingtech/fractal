@@ -97,15 +97,18 @@ Below the drawer breakpoint the agent sidebar becomes a modal navigation drawer
 opener); at and above it the sidebar is a non-modal docked region with its split.
 The **Expand sidebar** button keeps its accessible name and exposes the Cmd/Ctrl+B
 shortcut through the kit tooltip. `wf/Sidebar/Responsive navigation` covers light
-and dark surfaces at 440px and 1440px, with both themes included in `AllStates`.
+and dark surfaces at 440px, 700px, 900px and 1440px in separate named stories.
 The sidebar's **Collapse agents** and **Close agents** buttons use the same shared
 chrome control and named kit tooltip; opening the drawer focuses **Close agents**.
 Below 900px the phone drawer owns its open state and retains the same roster while
 hidden, so opening it does not render the conversation. Its controls use the kit's
 44px narrow-layout targets and safe-area insets. The phone tab panel and portal
 host remain at the same reconciliation position across the breakpoint, preserving
-composer drafts and scroll state. The dock and phone drawer share the same tree,
-reported occupancy/spend metrics and stale/unavailable-state presentations.
+composer drafts and scroll state. The dock and phone drawer share main's
+`MilestoneAgentRow`, the same tree, popover context and stale/unavailable-state presentations.
+Desktop chrome tooltips follow hover or user-moved keyboard focus, not restored focus;
+window blur clears their open state and navigation intent. Phone and coarse-pointer
+hosts retain the kit's touch policy.
 
 ## Observation and unavailable states
 
@@ -224,7 +227,8 @@ facts. Elapsed freezes at the managed session's end and is wall time, not active
 work. Session age continues from `Session.started_at`, with that provenance in its
 label. Native incarnation launch age is unreported: it is not inferred from the
 managed session start. Context uses the same reported occupancy projection as the
-sidebar; cumulative tokens are not a context numerator. Main-session money carries
+sidebar popover; cumulative tokens are not a context numerator. Context information is
+not painted around the row status icon. Main-session money carries
 its returned native usage interval. Cumulative tokens come from `Agent.usage.total_tokens`,
 span the agent's observed incarnations and have an explicitly unreported accumulation
 window; they remain visible without a proven current native root. Descendant money

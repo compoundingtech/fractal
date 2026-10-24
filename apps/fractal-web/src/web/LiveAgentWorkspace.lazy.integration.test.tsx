@@ -11,8 +11,8 @@ import type * as FallbackModule from './ConversationPaneFallback.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import type { Feed, Fleet } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import { openAgent } from '@st3/sdk/effect'
+import { Agent, decodeUnknownSync } from '@fractal/client/schema'
+import { openAgent } from '@fractal/sdk/effect'
 import { fleetFromAgents } from '../data/projections.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))

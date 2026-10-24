@@ -61,7 +61,7 @@ const trackFocusNavigation = (document: Document): FocusNavigation => {
   document.addEventListener('keyup', () => { navigation.pending = false }, true)
   document.addEventListener('pointerdown', () => { navigation.pending = false }, true)
   // Tab can leave an iframe: its keyup then belongs to another document.
-  document.defaultView?.addEventListener('blur', () => { navigation.pending = false })
+  document.defaultView?.addEventListener('blur', () => { navigation.pending = false; navigation.target = null; navigation.userMoved = false })
   document.addEventListener('focusin', event => {
     navigation.target = event.target
     navigation.userMoved = navigation.pending
@@ -89,6 +89,19 @@ export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, is
     const active = scope.current?.ownerDocument.activeElement
     return active != null && scope.current!.contains(active) && active.matches(':focus-visible')
   }
+  React.useEffect(() => {
+    if (!navigationFocusOnly) return
+    const view = scope.current?.ownerDocument.defaultView
+    const onBlur = () => {
+      focusFromNavigation.current = false
+      reopenRequest.current++
+      lastScroll.current = Number.NEGATIVE_INFINITY
+      setSettling(false)
+      setOpen(false)
+    }
+    view?.addEventListener('blur', onBlur)
+    return () => view?.removeEventListener('blur', onBlur)
+  }, [navigationFocusOnly])
   React.useEffect(() => {
     if (!isOpen && !settling) return
     let timer: number | undefined

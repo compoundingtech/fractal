@@ -3,7 +3,7 @@ import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { SidebarAgentRow, ThreadHeader, assistantDarkTheme, compositionLightTheme, type SidebarAgentRowData } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, ThreadHeader, assistantDarkTheme, compositionLightTheme, type SidebarAgentRowData } from '@fractal/ui/assistant-ui/shell'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { AgentFolders } from '../shell/AgentFolders.tsx'
 import type { SidebarNode } from '../folders/sidebarContract.ts'
@@ -282,7 +282,7 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   } finally { observer.disconnect() }
 }
 
-const meta = { title: 'wf/Sidebar/Responsive navigation', component: ResponsiveSidebarSurface, args: { viewport: 440 }, parameters: { layout: 'fullscreen', docs: { description: { component: 'Navigation has a 240px floor. Below 900px it is a closed-by-default React Aria modal drawer: aria-modal=true and the background workspace is inert or hidden from assistive technology until dismissal. The thread keeps its full width. Escape or selection closes it and restores opener focus. Cmd/Ctrl+B opens navigation outside editable/terminal input. Opening the drawer must produce zero raw thread layout shift, including input-associated entries. Play tests reject injected non-modal and unmasked-background regressions.' } } } } satisfies Meta<typeof ResponsiveSidebarSurface>
+const meta = { title: 'wf/Sidebar/Responsive navigation', component: ResponsiveSidebarSurface, args: { viewport: 440 }, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Two fixed rows in the production sidebar frame, tree and thread header pin drawer modality, resize ranges and layout stability.' }, layout: 'fullscreen', docs: { description: { component: 'Navigation has a 240px floor. Below 900px it is a closed-by-default React Aria modal drawer: aria-modal=true and the background workspace is inert or hidden from assistive technology until dismissal. The thread keeps its full width. Escape or selection closes it and restores opener focus. Cmd/Ctrl+B opens navigation outside editable/terminal input. Opening the drawer must produce zero raw thread layout shift, including input-associated entries. Play tests reject injected non-modal and unmasked-background regressions.' } } } } satisfies Meta<typeof ResponsiveSidebarSurface>
 export default meta
 type Story = StoryObj<typeof meta>
 export const At440: Story = { args: { viewport: 440 }, play: drawerPlay }

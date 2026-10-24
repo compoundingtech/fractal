@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { ChromeControl, NarrowLayoutContext } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { ChromeControl, NarrowLayoutContext } from '@fractal/ui/assistant-ui/shell'
 import { spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** View controls only: the workspace band under the thread header owns connection state and reconnect. */

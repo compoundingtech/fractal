@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "No additional API, protocol or extension compatibility change. The original sidebar topic's required useSidebarSpend extension export remains documented in its own release note."
+    "detail": "No additional API, protocol or extension compatibility change. The sidebar refresh retains main's public extension APIs."
   },
   "downtime": {
     "status": "none",

@@ -7,7 +7,7 @@ import { within } from 'storybook/test'
 import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
 import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
 import { SidebarToolbar } from '../shell/sidebar/Toolbar.tsx'
-import { NarrowLayoutContext, ResizableSplit } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { NarrowLayoutContext, ResizableSplit } from '@fractal/ui/assistant-ui/shell'
 import { defaultFilters } from '../shell/sidebar/state.ts'
 
 // Node cannot compile StyleX. Keep its authored scalar CSS, with RAC and chrome real.

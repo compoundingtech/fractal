@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
-import { ResizableSplit } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { ResizableSplit } from '@fractal/ui/assistant-ui/shell'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
@@ -20,6 +20,7 @@ export type ResponsiveAgentSidebarProps = {
   readonly onWidthChange: (width: number) => void
   readonly onWidthCommit: (width: number) => void
   readonly onWidthReset: () => void
+  readonly headerActions?: React.ReactNode
   readonly children: React.ReactNode
 }
 
@@ -27,7 +28,7 @@ export type ResponsiveAgentSidebarProps = {
 const renderModalDialog = (props: React.ComponentPropsWithRef<'section'>) => <section {...props} aria-modal="true" />
 
 /** The dock consumes layout space; the modal drawer never resizes the thread. */
-export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, drawerOpen, drawerId, onDrawerOpenChange, onToggleCollapsed, onWidthChange, onWidthCommit, onWidthReset, children }: ResponsiveAgentSidebarProps) => {
+export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, drawerOpen, drawerId, onDrawerOpenChange, onToggleCollapsed, onWidthChange, onWidthCommit, onWidthReset, headerActions, children }: ResponsiveAgentSidebarProps) => {
   const portalContainer = React.useRef<HTMLDivElement>(null)
   const narrow = viewport < sidebarDrawerBreakpoint
   const focusDrawerClose = React.useCallback((button: HTMLButtonElement | null) => {
@@ -37,6 +38,7 @@ export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, d
     <header {...stylex.props(styles.brand)}>
       <ChromeControl ref={focusDrawerClose} icon="chevrons-left" label={narrow ? 'Close agents' : 'Collapse agents'} onPress={() => narrow ? onDrawerOpenChange(false) : onToggleCollapsed()} />
       <strong {...stylex.props(styles.wordmark)}>Fractal</strong>
+      {headerActions}
     </header>
     {children}
   </aside>

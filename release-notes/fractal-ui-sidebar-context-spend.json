@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "fractal-ui sidebar rows show reported context occupancy and windowed spend, with a Layout C metric option",
+  "summary": "fractal-ui agent row popovers disclose reported main-session context without changing the production row layout",
   "replay": {
     "status": "none",
     "detail": "No replay or rebuild."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Only packages/fractal-ui changes. `SidebarAgentRowData` gains optional `context` and `spend`, and `SidebarAgentRow` gains optional `metricLayout`; `SidebarContext` and `SidebarWindowSpend` are new exported types. Hosts that pass none of them render as before."
+    "detail": "`SidebarAgentRowData` gains optional `context`, and `SidebarContext` is an exported type. Main's MilestoneAgentRow production layout and public extension APIs are unchanged. Context is shown only in the shared row popovers."
   },
   "downtime": {
     "status": "none",

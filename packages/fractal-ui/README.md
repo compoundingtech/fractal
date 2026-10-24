@@ -32,18 +32,12 @@ Pure `nextDurationChange`, `nextRelativeChange`, `nextCountdownChange` and
 the sync line's displayed-second thresholds, so a host can re-render a snapshot view
 only when its text can next change. Run `pnpm test:clock` and `pnpm test:human-time` here.
 
-Sidebar rows accept a separate `context` Known/Unknown occupancy observation: used tokens,
-window tokens, percentage and observation time. A known reading renders `Context N%`;
-the row's accessible description preserves the full main-session numerator, window and as-of time.
-Unknown occupancy is omitted, never derived from cumulative tokens or descendant-inclusive
+Sidebar row popovers accept a separate `context` Known/Unknown observation: used tokens,
+window tokens, percentage and observation time. Context is disclosed only in the hover
+card and reported-details popover, never as a status-icon ring or an inline row metric.
+Unknown context is omitted, never derived from cumulative tokens or descendant-inclusive
 spend. Hosts clear the current claim at an incarnation change and restore it only from a
 newer occupancy observation. Retained stale readings are labelled last observed.
-
-Rows also accept `spend.last24h` / `spend.last7d` windowed API-equivalent spend (root plus
-subagents, not billed spend). `metricLayout` selects Layout C: `compact` puts 24h spend and
-last activity in the time column of a one-line row; `expanded` replaces line two with 24h and
-7d spend, context and last activity. Both draw a decorative context ring behind the status
-glyph. Unreported windows and occupancy are omitted; the description carries every reported value.
 
 ## Run
 
@@ -88,7 +82,7 @@ browser stylesheet refresh timer, so Vitest can close its middleware server clea
 ## Strict play gate
 
 Every `ci-fractal-web` proof discovers every story from the built `index.json` and normally runs its play at 440×900 and 1440×900, each with dark and light browser color schemes. The full strict case set is defined by `fullCases` in `scripts/kit-play-commit-set.mjs`; its explicit overrides omit the scheme-only `NoGreenAllStatesLight` and `FooterWidthBudgetLight` aliases, because the base stories already run both schemes, and run `FilterKeystrokeToPaint` only at 1440px dark. Receipts report those overrides, the intended case count and omissions; shard aggregation requires that exact case set. Each isolated page must report successful `storyFinished` evidence without play exceptions, page errors or unexpected console errors. Only the strict guard's two exact missing development/favicon resources are allowed; missing story assets still fail. The Nix web shell supplies Playwright and Chromium without npm dependencies. The gate serves the static build on an ephemeral localhost port and prints the complete JSON receipt (case evidence, failures and elapsed seconds) into the CI log, failing the proof if any case fails.
-`ChangesRangeFreezeCleanup` instead runs at a real 1100×900 viewport in both schemes, in both the full and per-commit case policies. Its first assertion rejects any other viewport: the app's media queries and Changes width budget depend on the window, not a story container. `DecodeStaleSidebarHosts` checks that decode evidence remains between the roster and footer in both the docked sidebar and narrow drawer.
+`SidebarDragUnmountCleanup` runs at a real 1100×900 viewport in both schemes, in both the full and per-commit case policies. Its first assertion rejects any other viewport: the production sidebar dock must be mounted when its held drag is collapsed, so the kit's callback-ref cleanup is exercised on the real host. `DecodeStaleSidebarHosts` checks that decode evidence remains between the roster and footer in both the docked sidebar and narrow drawer.
 The runner uses one Chromium with up to six concurrent isolated pages, bounded by the available CPU allowance. The receipt records the actual worker count; every indexed case is still required.
 Before selecting stories, the gate validates every index entry: its type must be `story` or `docs`, and both `id` and `importPath` must be nonempty strings. Unknown or malformed entries fail the gate instead of silently shrinking its required matrix. The CI index-contract test includes a malformed built-index fixture that must exit nonzero before browser execution.
 The gate also validates every strict case override against the complete story index before selecting cases: unknown story IDs fail closed, and a zero-case exclusion must be a `-light` scheme alias with a kept base story from the same source file. Policy tests pin the allowed IDs and benchmark omissions independently of the policy map.

@@ -41,8 +41,8 @@ export const FULL_CASE_OVERRIDES = new Map([
   ['fractal-ui-transcript--no-green-all-states-light', []],
   ['fractal-ui-composer--footer-width-budget-light', []],
   ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
-  // The workspace uses viewport media queries and freezes Changes only at this intermediate width.
-  ['fractal-narrow-layout--changes-range-freeze-cleanup', [['dark', 1100], ['light', 1100]]],
+  // Collapse removes the production sidebar separator while a drag is held at this measured viewport.
+  ['fractal-narrow-layout--sidebar-drag-unmount-cleanup', [['dark', 1100], ['light', 1100]]],
 ])
 
 // Validate against the complete index before selecting tags or shards, so stale policy cannot
