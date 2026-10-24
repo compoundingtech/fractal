@@ -463,6 +463,16 @@ pub fn loss_if_current(
     fractal_drivers::harness_state::with_current_ownership(&agent_dir, &owner.session, owner.sequence, || {
         current_provider(state, fence, &agent_dir, &owner)?;
         if !state.store.owns_mailbox_lease(fence, &owner)? { return Ok(()); }
+        // A drop while this incarnation's own requested restart is still open is that restart's
+        // planned stop, not a lost channel: the restart replaces the incarnation, and the fault
+        // would only send someone to restart a seat that is already being restarted.
+        if let Some(request) = crate::restart::latest_request(&state.store, &fence.subject).map_err(internal)?
+            && request.body["fields"]["action"] == "restart"
+            && request.body["fields"]["incarnation_id"].as_str() == Some(fence.incarnation.as_str())
+            && state.store.operation_claim(&format!("agent-restart-completed:{}", request.id)).map_err(internal)?.is_none()
+        {
+            return Ok(());
+        }
         let reviewer = state.store.agent_person(&fence.subject).map_err(internal)?
             .or_else(|| state.store.desired_subject_with_writer(&fence.subject).ok().flatten().and_then(|(_, writer)| writer))
             .unwrap_or_else(|| fence.subject.clone());
