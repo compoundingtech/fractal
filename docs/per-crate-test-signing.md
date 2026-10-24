@@ -170,3 +170,7 @@ repository when it is missing) and the rest `ST_TEST_SIGN_JOBS` (default 8) at a
 Each record's content and signature are as before. Fifty-two signatures from a saved report took 74.7 s on this host, before the push.
 The four workspace crates that ran no test in that run (demo-resolver-wasm, fractal-build-stamp, fractal-github-issue-component,
 fractal-github-pr-component) are listed under `no_tests` in `.st/rust-test-inputs.json`.
+A full run once sat 30 minutes in the megarepo member step (`mr apply`, whose `git fetch --tags --prune` was blocked writing to its parent while
+the network was fine). The step now has a limit (`ST_TEST_MEMBERS_LIMIT`, default 1200 s), writes its output to a file, and is killed with
+everything it started when the limit passes; the run then reports "NOT RUN" with the reason. The `ST_TEST_*` settings are read before the seat
+environment scrub, which would otherwise remove them.
