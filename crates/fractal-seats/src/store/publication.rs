@@ -58,6 +58,32 @@ pub use crate::store::publication_tests_shared::{declaration, observe, publish};
     }
 
     #[test]
+    fn apply_preview_grouping_only_is_publish_only() {
+        for launch in ["harness \"claude\" {}", "exec \"one\" { command \"true\"; }"] {
+            let original = format!("version 2\nagent \"example-preview\" {{ workspace \"/tmp\"; {launch}; }}");
+            let proposed = original.replace("workspace", "under \"agent/example-parent\"; workspace");
+            let preview = preview_change(&original, &proposed);
+            assert_eq!(preview.changes.len(), 1);
+            assert_eq!(preview.predicted_actions.len(), 1);
+            assert_eq!(preview.predicted_actions[0].action, "publish-only");
+        }
+    }
+
+    #[test]
+    fn apply_preview_operational_changes_are_not_metadata_only() {
+        let original = "version 2\nagent \"example-preview\" { workspace \"/tmp\"; command \"true\"; restart \"always\"; }";
+        for proposed in [
+            original.replace("/tmp", "/workspace"),
+            original.replace("always", "never"),
+            original.replace("command", "env { EXAMPLE \"changed\"; }; command"),
+        ] {
+            let preview = preview_change(original, &proposed);
+            assert_eq!(preview.predicted_actions.len(), 1);
+            assert_eq!(preview.predicted_actions[0].action, "observe-or-start");
+        }
+    }
+
+    #[test]
     fn publication_check_uses_launch_not_selected_declaration() {
         let store = Store::open_memory("node").unwrap();
         let original = declaration("true");
