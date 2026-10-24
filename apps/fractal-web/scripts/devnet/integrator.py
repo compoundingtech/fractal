@@ -465,7 +465,7 @@ def recovery_retain_builds(previous):
     old=json.loads(state.read_text()) if state.exists() else {}
     rollback=pathlib.Path(previous).resolve() if previous else None
     if rollback==current or rollback is None:
-        prior=old.get('previous') if old.get('current')==current.name else None
+        prior=old.get('previous') if old.get('current')==current.name else old.get('current')
         rollback=(P/'builds'/prior).resolve() if prior else None
     if rollback is not None and not rollback.is_dir():
         rollback=None
