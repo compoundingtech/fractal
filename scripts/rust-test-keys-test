@@ -216,6 +216,19 @@ class Keys(unittest.TestCase):
         self.assertRegex(out.stdout, r'^base\t[0-9a-f]{40,64}\n$')
 
 
+class NoTests(unittest.TestCase):
+    def test_the_no_tests_list_must_be_an_array_of_crate_names(self):
+        ws = workspace(self)
+        for bad in ('"a"', '[1]', '{"a": 1}'):
+            ws.write('.st/rust-test-inputs.json', '{"global": [], "crates": {}, "no_tests": %s}' % bad)
+            ws.commit()
+            with self.assertRaises(keys.Failure, msg=bad):
+                keys.read_inputs(str(ws.dir), 'HEAD')
+        ws.write('.st/rust-test-inputs.json', '{"global": [], "crates": {}, "no_tests": ["a"]}')
+        ws.commit()
+        self.assertEqual(keys.read_inputs(str(ws.dir), 'HEAD')['no_tests'], ['a'])
+
+
 class Repository(unittest.TestCase):
     """This repository's own tree and its committed .st/rust-test-inputs.json."""
 
@@ -236,6 +249,18 @@ class Repository(unittest.TestCase):
         for name, entry in self.inputs['crates'].items():
             for path in entry['extra']:
                 self.assertTrue(path == '.' or path in files or any(f.startswith(path.rstrip('/') + '/') for f in files), f'{name} declares {path}, which does not exist')
+
+    def test_the_member_set_is_the_one_cargo_metadata_gives(self):
+        # A parsing gap in the manifest reader would drop a crate silently; this compares it with cargo's own view (a test, not run in the gate).
+        if not shutil.which('cargo'):
+            self.skipTest('no cargo')
+        done = subprocess.run(['cargo', 'metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], cwd=ROOT, capture_output=True, text=True)
+        if done.returncode != 0:
+            self.skipTest('cargo metadata unavailable: ' + done.stderr.strip()[-120:])
+        metadata = json.loads(done.stdout)
+        ours = set(self.members)
+        theirs = {package['name'] for package in metadata['packages'] if package['id'] in set(metadata['workspace_members'])}
+        self.assertEqual(sorted(ours ^ theirs), [])
 
     def test_the_closure_is_the_one_cargo_metadata_gives(self):
         if not shutil.which('cargo'):

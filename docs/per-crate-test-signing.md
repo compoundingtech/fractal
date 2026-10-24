@@ -127,10 +127,35 @@ and a stale pass is reused. Four controls, in order of when they bite:
 - `evidence-wrap` also indexes a record that signs `source_inputs` under `refs/notes/evidence-input/<check>/<key>/<record>` and
   `refs/tags/evidence/input/<check>/<key>/<record>` and pushes them with `--push`. Until now only CI's signer made those. Whether an agent
   seat's identity may create them on the remote is a repository rule that has not been confirmed (as for `refs/tags/evidence/*`).
-- Not in this step: the skip-policy entry, the lane definition and the gate job (step 3, with skip-ci-sigs-2 and skip-ci-lead-2): adding the
-  check to `.st/evidence-skip-policy.json` makes `evidence-verify-test` and `ci-evidence-gate-test` expect a gate job and lane for it. Until
+- Not in this step: the skip-policy entry, the lane definition and the gate job (step 3, with skip-ci-sigs-2 and skip-ci-lead-2). Until
   the policy names the check at the base, `st-test` judges coverage by signature, crate and key alone (a local convenience), and the notes
   carry no lane digest, so step 3's notes are signed again.
+
+## 8. As built in step 3 (policy, lane, verifier)
+
+- `.st/evidence-skip-policy.json`: `rust-tests` (shadow: `enforce` false, `pull_request` only, `sample_one_in` 5, no `inputs`: the keys are
+  per crate). Fleet level: the wrapper command; host and agent levels: `python3 scripts/ci-rust-test-result`, lane-bound, requiring `crate`,
+  `source_inputs`, `tests_run`, `tests_ignored`, `test_list_sha256`, `ignored_list_sha256`, `filterset` and `run_command_sha256`.
+- `.st/required-lanes.json`: the `rust-tests` lane (the test-stage scripts through `scripts`, `.config/nextest.toml`, the filterset, the
+  flake files, and `.st`, which holds `rust-test-inputs.json`), so a tree that edits how keys are computed never skips on a local note. `Cargo.toml` and `Cargo.lock` are deliberately not definition paths: they are in every crate's key, so a change re-runs every crate, and as definition paths they would make every lockfile change an unsignable lane edit. `tree_inputs` is informational (the policy consistency test and the lane trace read it); nothing indexes or verifies rust-tests notes by it.
+- `scripts/evidence-verify --check rust-tests --members --policy-from BASE --repository R ...`: the member list and each key come from the
+  tree's manifests with the `rust-test-keys` that sits next to the verifier and `.st/rust-test-inputs.json` at the base; the check is satisfied
+  only when EVERY member has a satisfying note for its own key (the usual rules per note, with the crate and key), else `crate_uncovered` with
+  a `missing` map of crate to reason. A satisfied result carries the oldest note's time, the weakest signer level, the sampling seed (a hash of
+  the member keys), and `crates` (crate to record). `--members --project` prints `{crates: {name: key}}` for the gate's one batched fetch.
+  The gate must copy the base's `evidence-verify` and `rust-test-keys` side by side.
+- `PROTECTED` in the gate now includes `scripts/rust-test-keys`, `.st/rust-test-inputs.json` and `scripts/ci-rust-test-result`.
+- A note counts for a crate only when its run ran at least one test (`tests_run` > 0) once a policy judges it: a run whose selection matched
+  nothing (nextest exit 4, or a filter that no longer names the crate) signs `tests_run=0` and passes, and that must not stand for a crate.
+  A crate that really has no test is listed under `no_tests` in `.st/rust-test-inputs.json` at the accepted base (reviewed; a tree cannot list
+  its own crate, and a list that is not an array of names is a verifier `error`, never an empty allowance). `st-test` names the crates that
+  ran no test so the list can be reviewed. The same rule applies to `--crate-key` when `--policy-from` is given; without a policy a note
+  counts by signature, crate and key alone, as before.
+- The verifier keys a tree only with the accepted base's `rust-test-keys` and `.st/rust-test-inputs.json`: a base without them is an `error`
+  (`--members` refuses; the gate reports it unavailable), never the tree's own copy. `st-test` falls back to the tree's own tool only while
+  the base's policy does not name `rust-tests` (the change that introduces them is judged by itself); once it does, a base without them is a
+  refusal there too.
+- The gate job itself (skip the test stage on `evidence-gate-rust-tests`, pull_request only) is skip-ci-lead-2's part of step 3.
 
 Measured with the committed extras over the last 57 first-parent merges of main (2026-10-23): the median merge changes the key of 5 of 52
 crates; 29 merges change at most 5, 5 change 6 to 20, 14 change 21 to 49, and 9 change 50 or more (global paths: a manifest, the lock, the

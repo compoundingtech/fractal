@@ -384,5 +384,6 @@
   "smallclaims": {
    "extra": []
   }
- }
+ },
+ "no_tests": []
 }
