@@ -42,13 +42,20 @@ fn web_early_parser_uses_the_public_clap_help_and_usage_statuses() {
         assert!(String::from_utf8(output.stdout).unwrap().contains("Usage: fractal web"));
         assert!(output.stderr.is_empty());
     }
-    for arguments in [
-        vec!["web", "--state-dir"],
-        vec!["web", "--unknown"],
-        vec!["web", "--state-dir", "one", "--state-dir", "two"],
+    for (arguments, diagnostic) in [
+        (vec!["web", "--state-dir"], "a value is required for '--state-dir <DIR>'"),
+        (vec!["web", "--unknown"], "unexpected argument '--unknown'"),
+        (
+            vec!["web", "--state-dir", "one", "--state-dir", "two"],
+            "cannot be used multiple times",
+        ),
     ] {
         let output = web(&arguments);
         assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
-        assert!(String::from_utf8(output.stderr).unwrap().contains("Usage: fractal web"));
+        assert!(output.stdout.is_empty(), "{arguments:?}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "{arguments:?}: {output:?}"
+        );
     }
 }
