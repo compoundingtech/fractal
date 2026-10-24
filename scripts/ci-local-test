@@ -251,6 +251,28 @@ class CiLocal(unittest.TestCase):
         self.assertEqual((done.returncode, calls), (2, []), done.stderr)
         self.assertIn('no cargo executable of the dev shell', done.stderr)
 
+    def test_clippy_and_fleet_compat_run_alongside_the_tests_and_report_in_the_given_order(self):
+        logs = Path(self.tmp.name) / 'logs'
+        # The tests stage waits until both lane stages have started: they really run alongside it.
+        said = ('#!/usr/bin/env bash\necho "out of $1"\n'
+                'if [ "$1" = tests ]; then for i in $(seq 100); do [ -e "$CI_LOCAL_TEST_LOG.clippy" ] && break; sleep 0.05; done; '
+                '[ -e "$CI_LOCAL_TEST_LOG.clippy" ] || exit 9; fi\n'
+                '[ "$1" = clippy ] && touch "$CI_LOCAL_TEST_LOG.clippy"\n'
+                '[ "$1" = fleet-compat ] && exit 4\n[ "$1" = clippy ] && exit 6\nexit 0\n')
+        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', ci_linux=said, CI_LOCAL_LOG_DIR=str(logs), CLIPPY_BASE_SHA='f' * 40)
+        self.assertEqual(done.returncode, 6, done.stdout + done.stderr)  # the first failure in the given order: clippy's, not fleet-compat's
+        self.assertIn('ci-local: clippy fleet-compat run alongside the other stages', done.stdout)
+        # The lane's output follows the foreground's, whole, never interleaved.
+        out = done.stdout
+        self.assertLess(out.index('ci-local: tests exit 0'), out.index('----- ci-local: clippy output -----'))
+        self.assertLess(out.index('----- ci-local: clippy output -----'), out.index('out of clippy'))
+        self.assertIn('ci-local: clippy exit 6', out)
+        self.assertIn('ci-local: fleet-compat exit 4', out)
+        table = [line.split()[1] for line in out.splitlines() if line.startswith('ci-local:   ')]
+        self.assertEqual(table, ['setup', 'tests', 'clippy', 'fleet-compat'])
+        run, = logs.glob('run-*')
+        self.assertEqual(sorted(path.name for path in run.glob('*.log')), ['clippy.log', 'fleet-compat.log', 'tests.log'])
+
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
         self.stage_exits = [0, 3, 5]
         done, calls = self.run_local('mail-redelivery-canaries', 'mail-redelivery-canaries', 'mail-redelivery-canaries')
@@ -284,10 +306,18 @@ class CiLocal(unittest.TestCase):
         git('remote', 'add', 'origin', str(origin))
         git('commit', '-q', '--allow-empty', '-m', 'local only')
         git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD'))  # a local ref that is not the remote's main
-        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries')
+        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries', CI_LOCAL_SERIAL='1')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([call['argv'] for call in calls][2:], [['tests'], ['clippy'], ['fleet-compat'], ['mail-redelivery-canaries']])
         self.assertEqual(calls[-1]['env']['CLIPPY_BASE_SHA'], fetched_tip, 'main as fetched now, not the local origin/main')
+        # By default clippy and fleet compatibility run alongside the others, one after the other: every stage once, clippy first of the two.
+        self.log.unlink()
+        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        ran = [' '.join(call['argv']) for call in calls][2:]
+        self.assertEqual(sorted(ran), ['clippy', 'fleet-compat', 'mail-redelivery-canaries', 'tests'])
+        self.assertLess(ran.index('clippy'), ran.index('fleet-compat'))
+        self.assertEqual({call['env']['CLIPPY_BASE_SHA'] for call in calls[2:]}, {fetched_tip})
         self.log.unlink()
         done, calls = self.run_local('clippy', CLIPPY_BASE_SHA='f' * 40)
         self.assertEqual(calls[-1]['env']['CLIPPY_BASE_SHA'], 'f' * 40, 'a given base wins and nothing is fetched')

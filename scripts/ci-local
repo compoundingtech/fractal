@@ -193,24 +193,66 @@ export CI_TEST_THREADS=${CI_TEST_THREADS:-12}
 low=()
 if command -v ionice >/dev/null 2>&1; then low+=(ionice -c 3); fi
 if command -v nice >/dev/null 2>&1; then low+=(nice -n 10); fi
-status=0
-table=()
-for stage in "$@"; do
-  code=0
+# One stage: its output stamped and tallied (queue_times), kept in its log and, for a stage in the foreground, passed on to this terminal.
+# Its exit code and its row of the closing table go to files, so a stage run in the background lane reports the same way.
+run_stage() {
+  local n=$1 stage=$2 shown=$3 started began code seconds queued waited
   started=$(stamp); began=$SECONDS
-  # Both streams into one pipe: stamped and tallied, kept in the stage's log, and passed on. PIPESTATUS[0] is the stage's own status.
+  # Both streams into one pipe. PIPESTATUS[0] is the stage's own status.
   set +e
   if [ "$stage" = isolation-vm ]; then
-    { "${low[@]}" bash scripts/ci-local-isolation-vm; } 2>&1 | queue_times "$stage" | tee "$log_dir/$stage.log"
+    { "${low[@]}" bash scripts/ci-local-isolation-vm; } 2>&1 | queue_times "$stage" | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
   else
-    { "${low[@]}" bash scripts/ci-linux "$stage"; } 2>&1 | queue_times "$stage" | tee "$log_dir/$stage.log"
+    { "${low[@]}" bash scripts/ci-linux "$stage"; } 2>&1 | queue_times "$stage" | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
   fi
   code=${PIPESTATUS[0]}
   set -e
   seconds=$((SECONDS - began))
   read -r queued waited < "$log_dir/$stage.queue" 2>/dev/null || { queued=0; waited=0; }
-  echo "ci-local: $stage exit $code"
-  table+=("$(printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss' "$stage" "$started" "$(stamp)" "$seconds" "$code" "${queued:-0}" "${waited:-0}")")
+  # By position: a stage may be given twice.
+  echo "$code" > "$log_dir/.$n.code"
+  printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss\n' "$stage" "$started" "$(stamp)" "$seconds" "$code" "${queued:-0}" "${waited:-0}" \
+    > "$log_dir/.$n.row"
+  if [ "$shown" = shown ]; then echo "ci-local: $stage exit $code"; fi
+}
+# clippy and fleet compatibility run alongside the tests stage, one after the other in a lane of their own, as their CI jobs run on runners
+# of their own: the tests stage builds first (cargo's lock on the build directory holds the lane's build until then) and then spends most
+# of its time running tests, which is when the lane compiles and runs. Their output is kept and printed once the foreground stages are
+# done, so the two never interleave. CI_LOCAL_SERIAL=1 runs every stage one after another, as before.
+stages=("$@")
+lane=()  # positions
+if [ "${CI_LOCAL_SERIAL:-}" != 1 ] && [[ " $* " == *" tests "* ]]; then
+  for n in "${!stages[@]}"; do
+    case "${stages[$n]}" in clippy|fleet-compat) lane+=("$n") ;; esac
+  done
+fi
+in_lane() { local n; for n in "${lane[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
+lane_pid=
+if [ "${#lane[@]}" -gt 0 ]; then
+  echo "ci-local: $(for n in "${lane[@]}"; do printf '%s ' "${stages[$n]}"; done)run alongside the other stages; their output follows when they are done"
+  ( for n in "${lane[@]}"; do run_stage "$n" "${stages[$n]}" quiet; done ) &
+  lane_pid=$!
+  # Stopped, the run takes its lane with it before the scratch it uses is removed.
+  # (|| true: under set -e a lane that already ended would make the trap's own exit status the run's.)
+  trap 'kill "$lane_pid" 2>/dev/null || true; wait "$lane_pid" 2>/dev/null || true; rm -rf "$scratch" "$tmp"' EXIT
+fi
+for n in "${!stages[@]}"; do
+  in_lane "$n" || run_stage "$n" "${stages[$n]}" shown
+done
+if [ -n "$lane_pid" ]; then
+  wait "$lane_pid" || true
+  for n in "${lane[@]}"; do
+    echo "----- ci-local: ${stages[$n]} output -----"
+    cat "$log_dir/${stages[$n]}.log" 2>/dev/null || echo "(no output)"
+    echo "ci-local: ${stages[$n]} exit $(cat "$log_dir/.$n.code" 2>/dev/null || echo 1)"
+  done
+fi
+# The exit status is the first failure's in the order the stages were given; a stage that left no code failed.
+status=0
+table=()
+for n in "${!stages[@]}"; do
+  code=$(cat "$log_dir/.$n.code" 2>/dev/null || echo 1)
+  table+=("$(cat "$log_dir/.$n.row" 2>/dev/null || printf '%-26s (no result)' "${stages[$n]}")")
   if [ "$status" -eq 0 ]; then status=$code; fi
 done
 echo "ci-local: timing (UTC)"
