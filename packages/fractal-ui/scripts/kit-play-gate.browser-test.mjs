@@ -96,6 +96,7 @@ test('full set with a11y requires one passed a11y report per case', { timeout: 6
   assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 7, 17])
   assert.ok(receipt.cpu.count > 0 && receipt.cpu.busyCoreMinutes >= 0 && receipt.cpu.loadavgEnd.length === 3)
   for (const row of receipt.rows) {
+    assert.equal(row.storyFile, './Kit.stories.tsx', 'receipt paths join entry.id, not the index key')
     assert.ok(row.timings.playMilliseconds > 0)
     assert.ok(row.timings.a11yMilliseconds > 0)
     const sum = ['bootstrapMilliseconds', 'playMilliseconds', 'a11yMilliseconds', 'lifecycleMilliseconds', 'completionObservationMilliseconds'].reduce((sum, name) => sum + row.timings[name], 0)
@@ -104,6 +105,10 @@ test('full set with a11y requires one passed a11y report per case', { timeout: 6
   assert.equal(receipt.phaseMilliseconds.a11yMilliseconds.samples, receipt.cases)
   assert.equal(receipt.topCases.length, 17)
   assert.equal(receipt.storyFamilies.reduce((sum, family) => sum + family.cases, 0), receipt.cases)
+  assert.equal(receipt.storyFiles.length, 1)
+  assert.equal(receipt.storyFiles[0].storyFile, './Kit.stories.tsx')
+  assert.equal(receipt.storyFiles[0].cases, receipt.cases)
+  assert.ok(Math.abs(receipt.storyFiles[0].elapsedSeconds - receipt.rows.reduce((sum, row) => sum + row.elapsedSeconds, 0)) < 1e-9)
 })
 
 test('fixture code can inject its policy through the runner parameter, not process environment', { timeout: 60000 }, async () => {
