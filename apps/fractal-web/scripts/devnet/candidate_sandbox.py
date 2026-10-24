@@ -127,6 +127,11 @@ def run(args, *, worktree, shell=None, network=False, output=None,
                     '--dir', '/sandbox', '--ro-bind', str(script), '/sandbox/environment.sh',
                     '--bind', str(worktree), str(worktree),
                     '--ro-bind' if readonly_dependencies else '--bind', str(store), str(store)]
+        # Node/pnpm lifecycle scripts use /bin/sh, and workspace scripts commonly
+        # use /usr/bin/env shebangs. Both resolve only to trusted pinned tools.
+        command += ['--dir', '/bin', '--dir', '/usr/bin',
+                    '--symlink', binaries['bash'], '/bin/sh',
+                    '--symlink', binaries['env'], '/usr/bin/env']
         # Resolver and CA material only: no user directories, /run, or daemon socket.
         for name in ('/etc/resolv.conf', '/etc/ssl/certs'):
             if Path(name).exists():

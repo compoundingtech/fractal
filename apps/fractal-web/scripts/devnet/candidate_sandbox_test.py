@@ -137,6 +137,9 @@ class IsolationTest(unittest.TestCase):
             dependency = modules / 'dependency'
             os.link(cached, dependency)
             self.assertTrue(cached.samefile(dependency))
+            lifecycle = worktree / 'lifecycle'
+            lifecycle.write_text('#!/usr/bin/env bash\n/bin/sh -c \'printf lifecycle-ok\'\n')
+            lifecycle.chmod(0o755)
             env = {'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
                    'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(root / 'state'),
                    'FRACTAL_INTEGRATOR_PNPM_STORE': str(store),
@@ -152,6 +155,7 @@ class IsolationTest(unittest.TestCase):
                          'if printf changed > "$3/dependency" 2>/dev/null; then exit 9; fi\n'
                          'if printf changed > "$4/dependency" 2>/dev/null; then exit 10; fi\n'
                          'if printf new > "$4/new-entry" 2>/dev/null; then exit 11; fi\n'
+                         '[[ $("$1/lifecycle") == lifecycle-ok ]]\n'
                          'printf allowed > "$1/sandbox-write"\n'
                          'env\n')
                 result = sandbox.run([binaries['bash'], '-euc', probe, 'probe', str(worktree), str(private), str(modules), str(store)],
