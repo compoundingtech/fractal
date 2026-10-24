@@ -10,6 +10,8 @@ import subprocess
 import tarfile
 import tempfile
 
+from release_notes import FIELDS
+
 repo = Path(__file__).resolve().parent.parent
 TARGETS = ('x86_64-unknown-linux-gnu', 'aarch64-apple-darwin')
 TOKEN = 'ghs_' + 'A1b2C3d4' * 5
@@ -46,12 +48,15 @@ STUB_NOTES = '''class ImpactError(ValueError):
     pass
 
 import os
+import json
 from pathlib import Path
 
 
 def render(repo, previous, source, tag, repository='x/y', since=None):
-    return Path(os.environ['FAKE_NOTES']).read_text(), {'stub': True}
+    return (Path(os.environ['FAKE_NOTES']).read_text(),
+            json.loads(Path(os.environ['FAKE_IMPACT']).read_text()))
 '''
+STUB_NOTES += '\nFIELDS = ' + repr(FIELDS) + '\n'
 
 
 def sh(*cmd, cwd):
@@ -120,12 +125,14 @@ with tempfile.TemporaryDirectory() as temporary:
 
     receipt = root / 'receipt.json'
 
-    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False):
+    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None):
         receipt.unlink(missing_ok=True)
         (root / 'notes.md').write_text(notes)
+        (root / 'impact.json').write_text(json.dumps(impact or {'fragments': [], 'change_links': {}}))
         env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', GH_TOKEN=token, GH_REPO='example/project',
                    FAKE_SHA=shas[1], FAKE_DIST=str(root / 'dist'), FAKE_FAILURE=failure,
-                   FAKE_NOTES=str(root / 'notes.md'), FAKE_RECEIPT=str(receipt))
+                   FAKE_NOTES=str(root / 'notes.md'), FAKE_RECEIPT=str(receipt),
+                   FAKE_IMPACT=str(root / 'impact.json'))
         args = ['python3', 'scripts/release-smalltalk-daily']
         return subprocess.run(args + (['--dry-run'] if dry_run else []), cwd=checkout, env=env,
                               text=True, capture_output=True, timeout=60)
@@ -161,35 +168,48 @@ with tempfile.TemporaryDirectory() as temporary:
     assert done.returncode == 0 and 'release body unchanged: 6 characters' in done.stdout, done
     assert 'including RELEASE-NOTES.md' in done.stdout, done
 
-    essential = ('Fractal v0.3.18 headline\n\n## Upgrade impact\n\n### Breaking changes\n'
-                 '- Keep this [operator action](https://example.invalid/upgrade).\n\n'
-                 '### Action required\n- Back up before upgrading.\n\n')
-    guide = '\n---\n\n## Upgrade procedure\nRestart safely.\n'
-    large = essential + '## Changes since v0.3.17\n\n' + (
-        '- [A merged PR with a long title](https://example.invalid/pull/123)\n' * 2000) + guide
+    # A realistic large interval has huge impact sections as well as a long PR list and guide.
+    fragments = []
+    for index in range(2000):
+        fragment = {'path': f'release-notes/{index}.json', 'summary': f'Change {index} [literal link](url)'}
+        fragment.update({field: {'status': 'none', 'detail': 'No impact.'} for field in FIELDS})
+        fragment['compatibility'] = {'status': 'changed', 'detail': 'Client changes. ' * 50}
+        fragments.append(fragment)
+    fragments[-1]['manual'] = {'status': 'changed', 'detail': 'Back up before upgrading.'}
+    fragments[-1]['summary'] = 'ACTION REQUIRED'
+    fragments[-2]['schema'] = {'status': 'changed', 'detail': 'Breaking schema change.', 'transitions': [[1, 2]]}
+    fragments[-2]['summary'] = 'BREAKING CHANGE'
+    impact = {'fragments': fragments, 'change_links': {
+        f['path']: f'https://example.invalid/pull/{index}' for index, f in enumerate(fragments)}}
+    large = 'Fractal v0.3.18 headline\n\n## Upgrade impact\n\n'
+    for field, label in FIELDS.items():
+        large += f'### {label}\n\n'
+        for fragment in fragments:
+            if fragment[field]['status'] != 'none':
+                large += f'- {fragment[field]["detail"]} [{fragment["summary"]}](https://example.invalid/fragment)\n'
+    large += '\n## Changes since v0.3.17\n\n' + '- [PR](https://example.invalid/pull/1)\n' * 2000
+    large += '\n---\n\n## Upgrade procedure\n' + 'Full guide instructions.\n' * 6000
     assert len(large) > 125000
-    done = daily(notes=large)
+    done = daily(notes=large, impact=impact)
     published = json.loads(receipt.read_text())
-    assert len(published['body']) <= 120000, len(published['body'])
-    assert published['body'].startswith(essential), published['body']
-    assert guide.strip() in published['body'], published['body']
-    assert published['body'].endswith(
-        'The complete notes are attached as the `RELEASE-NOTES.md` asset.\n'), published['body']
-    assert 'A merged PR' not in published['body'], published['body']
+    body = published['body']
+    assert len(body) <= 120000, len(body)
+    assert body.startswith('Fractal v0.3.18 headline\n'), body
+    assert body.index('ACTION REQUIRED') < body.index('BREAKING CHANGE') < body.index('Change 0')
+    assert '2000 changed, 0 unknown, 0 none' in body, body
+    assert 'more upgrade items' in body and 'UPGRADE-IMPACT.json' in body
+    assert '([PR/source](https://example.invalid/pull/1999))' in body
+    assert 'Full guide instructions.' not in body
     assert published['assets']['RELEASE-NOTES.md'] == large
-    done = daily(notes=large, dry_run=True)
+    done = daily(notes=large, impact=impact, dry_run=True)
     assert done.returncode == 0 and 'release body shortened:' in done.stdout, done
-    assert f'{len(published["body"])} characters' in done.stdout, done
+    assert f'{len(body)} characters' in done.stdout, done
     assert f'full notes: {len(large)}' in done.stdout, done
-
-    # Never discard essential guidance or submit an oversized body to GitHub.
-    too_large = essential + 'x' * 120000 + '\n## Changes since v0.3.17\n\n- PR\n' + guide
-    done = daily(notes=too_large)
-    assert done.returncode == 1 and 'essential release notes require' in done.stdout, done
-    assert 'shorten the upgrade guidance before publishing' in done.stdout, done
-    assert not receipt.exists(), 'must fail before creating a release'
     done = daily(notes='x' * 120001)
-    assert done.returncode == 1 and 'cannot shorten release notes' in done.stdout, done
+    assert done.returncode == 1 and 'cannot build bounded release body' in done.stdout, done
+    assert not receipt.exists()
+    done = daily(notes='x' * 120000 + '\n## Upgrade impact\n', impact=impact)
+    assert done.returncode == 1 and 'headline and classification counts exceed limit' in done.stdout, done
     assert not receipt.exists()
 
 # run() still returns a successful command's output unchanged.
@@ -197,13 +217,13 @@ from importlib.machinery import SourceFileLoader
 module = SourceFileLoader('daily', str(repo / 'scripts/release-smalltalk-daily')).load_module()
 assert module.run('printf', 'ok\n') == 'ok'
 
-# Pure body sizing retains complete operator sections and never cuts a Markdown link.
-assert module.release_body('x' * module.RELEASE_BODY_LIMIT, 'v0.3.17') == 'x' * module.RELEASE_BODY_LIMIT
-shortened = module.release_body(large, 'v0.3.17')
+# Pure sizing never cuts a generated Markdown link and leaves small bodies unchanged.
+assert module.release_body('x' * module.RELEASE_BODY_LIMIT, {}) == 'x' * module.RELEASE_BODY_LIMIT
+shortened = module.release_body(large, impact)
 assert len(shortened) <= module.RELEASE_BODY_LIMIT
-assert shortened.startswith(essential) and guide.strip() in shortened
+assert shortened.index('ACTION REQUIRED') < shortened.index('BREAKING CHANGE') < shortened.index('Change 0')
 assert shortened.endswith(module.FULL_NOTES_POINTER + '\n')
-assert module.release_body('notes\n', 'v0.3.17') == 'notes\n'
+assert module.release_body('notes\n', {}) == 'notes\n'
 try:
     module.run('sh', '-c', 'echo reason >&2; exit 3')
 except module.CommandFailed as error:

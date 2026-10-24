@@ -19,13 +19,14 @@ import subprocess
 import sys
 import tempfile
 
-from release_notes import ImpactError, render
+from release_notes import FIELDS, ImpactError, render
 
 WORKFLOW = 'release-smalltalk.yml'
 SEMVER = re.compile(r'v(\d+)\.(\d+)\.(\d+)')
 # Stay below GitHub's 125000-character release-body limit.
 RELEASE_BODY_LIMIT = 120000
-FULL_NOTES_POINTER = 'The complete notes are attached as the `RELEASE-NOTES.md` asset.'
+FULL_NOTES_POINTER = ('The complete notes and upgrade guide are attached as the `RELEASE-NOTES.md` asset; '
+                      'complete classifications are attached as `UPGRADE-IMPACT.json`.')
 
 
 DIAGNOSTIC_LIMIT = 2000
@@ -84,19 +85,64 @@ def next_tag():
     return f'v{major}.{minor}.{patch + 1}'
 
 
-def release_body(rendered, previous):
-    """Keep all upgrade guidance, dropping only the per-change list when oversized."""
+def release_body(rendered, impact):
+    """Summarize oversized intervals from classifications, never from sliced Markdown."""
     if len(rendered) <= RELEASE_BODY_LIMIT:
         return rendered
-    headline, changes, remainder = rendered.partition(f'## Changes since {previous}\n')
-    _, separator, guide = remainder.partition('\n---\n')
-    if not changes or not separator:
-        raise ImpactError('cannot shorten release notes: expected Changes section and upgrade guide separator')
-    body = headline.rstrip() + '\n\n---\n' + guide.rstrip() + '\n\n' + FULL_NOTES_POINTER + '\n'
-    if len(body) > RELEASE_BODY_LIMIT:
-        raise ImpactError(f'essential release notes require {len(body)} characters, exceeding the '
-                          f'{RELEASE_BODY_LIMIT}-character body limit; shorten the upgrade guidance before publishing')
-    return body
+    headline, marker, _ = rendered.partition('\n## Upgrade impact\n')
+    if not marker:
+        raise ImpactError('cannot build bounded release body: missing release headline')
+    fragments = impact['fragments']
+    lines = [headline.rstrip(), '', '## Upgrade impact', '',
+             'Summary only: review the attached complete notes before upgrading.', '']
+    for field, label in FIELDS.items():
+        counts = {status: sum(f[field]['status'] == status for f in fragments)
+                  for status in ('changed', 'unknown', 'none')}
+        lines.append(f'- **{label}:** {counts["changed"]} changed, {counts["unknown"]} unknown, '
+                     f'{counts["none"]} none.')
+    lines.extend(['', '## Priority upgrade items', '',
+                  'Action-required and breaking changes first; details and the full upgrade guide are attached.', ''])
+
+    def priority(fragment):
+        if fragment['manual']['status'] != 'none':
+            return 0
+        if (any(fragment[field].get('transitions') for field in ('schema', 'rules'))
+                or any(re.search(r'\bbreaking\b', fragment[field]['detail'], re.I) for field in FIELDS)):
+            return 1
+        return 2
+
+    def plain(text, limit):
+        text = ' '.join(text.split())
+        if len(text) > limit:
+            text = text[:limit].rstrip() + '…'
+        return re.sub(r'([\\`*_{}\[\]()<>])', r'\\\1', text)
+
+    items = []
+    for fragment in sorted(fragments, key=priority):
+        active = [field for field in FIELDS if fragment[field]['status'] != 'none']
+        if not active:
+            continue
+        active.sort(key=lambda field: field != 'manual')
+        classification = '; '.join(f'{FIELDS[field]}: {fragment[field]["status"]}' for field in active)
+        detail = fragment[active[0]]['detail']
+        link = impact['change_links'][fragment['path']]
+        items.append(f'- **{classification}.** {plain(fragment["summary"], 240)} — '
+                     f'{plain(detail, 360)} ([PR/source]({link}))\n')
+    body = '\n'.join(lines)
+    # Reserve the largest possible omission count before accepting any complete entry.
+    reserve = f'\n{len(items)} more upgrade items; see the attached complete notes.\n\n{FULL_NOTES_POINTER}\n'
+    if len(body) + len(reserve) > RELEASE_BODY_LIMIT:
+        raise ImpactError('cannot build bounded release body: headline and classification counts exceed limit')
+    included = 0
+    for item in items:
+        if len(body) + len(item) + len(reserve) > RELEASE_BODY_LIMIT:
+            break
+        body += item
+        included += 1
+    omitted = len(items) - included
+    if omitted:
+        body += f'\n{omitted} more upgrade items; see the attached complete notes.\n'
+    return body + '\n' + FULL_NOTES_POINTER + '\n'
 
 
 def main():
@@ -130,7 +176,7 @@ def main():
         return 1
     try:
         rendered, impact = render(repo, previous, sha, tag, os.environ.get('GH_REPO', 'compoundingtech/smalltalk'), since)
-        body = release_body(rendered, previous)
+        body = release_body(rendered, impact)
     except ImpactError as error:
         say(str(error))
         return 1
