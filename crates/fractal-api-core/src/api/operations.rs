@@ -707,7 +707,7 @@ mod legacy_proof_refusal_tests {
             let error = legacy_start_proof_error(fractal_runtime::ProcfsHidesProcesses {
                 detail: reason, mount_options: options.clone(),
             }.into());
-            let error = ApiError::internal(error.into());
+            let error = ApiError::internal(error);
             assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
             assert_eq!(error.code, "legacy-start-proof-unavailable");
             assert_eq!(error.details.get("stage"), Some(&json!("procfs-visibility")));
