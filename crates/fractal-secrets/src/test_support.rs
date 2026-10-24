@@ -22,6 +22,18 @@ pub fn canonical_tempdir() -> tempfile::TempDir {
         .expect("temporary directory")
 }
 
+/// A temporary directory on a memory filesystem where there is one, for a test that checks what
+/// its stores hold rather than what reaches a disk: on a disk, most of such a test's time goes to
+/// fsync. Elsewhere it is [`canonical_tempdir`]. A test about durability or disk cost keeps a disk.
+pub fn memory_tempdir() -> tempfile::TempDir {
+    match Path::new("/dev/shm") {
+        shm if shm.is_dir() => tempfile::Builder::new()
+            .tempdir_in(shm)
+            .expect("temporary directory"),
+        _ => canonical_tempdir(),
+    }
+}
+
 fn canonical_temp_base() -> PathBuf {
     let base = if cfg!(target_os = "macos") {
         PathBuf::from("/tmp")
