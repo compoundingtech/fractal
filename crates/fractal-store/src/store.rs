@@ -1501,9 +1501,10 @@ fn runtime_subject(subject: &str) -> bool {
 }
 
 /// Status reductions kept per subject between snapshots. `through` is the newest snapshot whose
-/// arrivals were applied: a subject that gained a claim, acted in one, or whose owning run or
-/// generation gained one since an answer was read loses it. `conflicts` counts conflicting
-/// operations, which change a subject's status without a claim of its own.
+/// arrivals were applied. Runtime statuses and membership follow the input generation of the
+/// subject and its owning run/generation; runtime harnesses also follow authored work activity.
+/// Other modes invalidate on every authored claim.
+/// `conflicts` counts conflicting operations, which change status without a claim of its own.
 #[derive(Default)]
 pub struct SubjectCache {
     through: u64,
@@ -4458,13 +4459,23 @@ impl Store {
                 || !cache.card_statuses.is_empty() {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
-                    "SELECT subject, actor FROM claims WHERE store_index>?1 AND store_index<=?2",
+                    "SELECT subject, actor, kind IN ('work.claimed','work.progress')
+                     FROM claims WHERE store_index>?1 AND store_index<=?2",
                 )?;
                 let mut changed = HashSet::new();
+                // Membership reads only subject/owner claims. Runtime statuses also
+                // read authored work activity in the harness fold, but not other
+                // authored claims. Keep those input generations distinct.
+                let mut changed_subjects = HashSet::new();
+                let mut runtime_work_actors = HashSet::new();
                 for row in statement.query_map(params![cache.through, store_index], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?))
                 })? {
-                    let (subject, actor) = row?;
+                    let (subject, actor, work_activity) = row?;
+                    if work_activity && let Some(actor) = &actor {
+                        runtime_work_actors.insert(actor.clone());
+                    }
+                    changed_subjects.insert(subject.clone());
                     changed.insert(subject);
                     changed.extend(actor);
                 }
@@ -4472,14 +4483,20 @@ impl Store {
                 let stale = |subject: &String, owners: &[String]| {
                     changed.contains(subject) || owners.iter().any(|owner| changed.contains(owner))
                 };
+                let runtime_stale = |subject: &String, owners: &[String]| {
+                    changed_subjects.contains(subject)
+                        || owners.iter().any(|owner| changed_subjects.contains(owner))
+                };
                 cache
                     .views
-                    .retain(|subject, entry| !stale(subject, &entry.owners));
+                    .retain(|subject, entry| !runtime_stale(subject, &entry.owners));
                 cache
                     .statuses
                     .retain(|subject, entry| !stale(subject, &entry.owners));
                 cache.summary_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
-                cache.runtime_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
+                cache.runtime_statuses.retain(|subject, entry| {
+                    !runtime_stale(subject, &entry.owners) && !runtime_work_actors.contains(subject)
+                });
                 cache.card_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
             }
             cache.through = store_index;
