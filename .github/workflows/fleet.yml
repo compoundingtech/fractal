@@ -939,7 +939,7 @@ jobs:
           from urllib.parse import quote
           from urllib.request import Request, urlopen
 
-          REQUIRED = {"linux-gate", "typescript-client", "genie-freshness", "fractal-web"}
+          REQUIRED = {"linux-gate", "typescript-client", "genie-freshness", "ci-script-tests", "fractal-web"}
 
 
           def decision(jobs, ref_status, ref, sha):
