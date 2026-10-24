@@ -602,20 +602,20 @@ def log_view(repo, log_keys, tree, check, input_key, chosen, now=None, max_age=L
 
 
 def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
-           trust_levels=None, now=None, rules=None, lane=None, level_lane=None, log_keys=None, run_inputs=None):
+           trust_levels=None, now=None, rules=None, lane=None, level_lane=None, log_keys=None, run_inputs=None, crate_key=None):
     """verified(...) and, with log_keys, the evidence log's shadow view of the same decision (docs/st3/gate-evidence.md)."""
     if not log_keys:
         return verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane,
-                        run_inputs)
-    input_key = None
-    if rules is not None and rules.get('inputs') is not None:
+                        run_inputs, crate_key)
+    input_key = crate_key[1] if crate_key else None
+    if crate_key is None and rules is not None and rules.get('inputs') is not None:
         try:
             input_key = project(repo, tree, rules['inputs'])
         except Failure:
             input_key = None
     try:
         result = verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane,
-                        run_inputs)
+                        run_inputs, crate_key)
     except Failure as failure:
         failure.extra.update(log_view(repo, log_keys, tree, check, input_key, None, now))
         raise
@@ -623,10 +623,19 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
     return result
 
 
+def signed_for_crate(statement, crate, key):
+    inputs = statement['predicate']['observed'].get('inputs', {})
+    return inputs.get('crate') == crate and inputs.get('source_inputs') == key
+
+
 def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
-             trust_levels=None, now=None, rules=None, lane=None, level_lane=None, run_inputs=None):
+             trust_levels=None, now=None, rules=None, lane=None, level_lane=None, run_inputs=None, crate_key=None):
     """`level_lane`, when given, is a callable returning the lane check at the policy's base; it is used only for a signer level
-    whose by_level rule says `lane: true`, so the cost and any lane-file error fall on those records alone."""
+    whose by_level rule says `lane: true`, so the cost and any lane-file error fall on those records alone.
+
+    `crate_key` is (crate, key) for a per-crate check (docs/per-crate-test-signing.md): the key is the crate's own input key rather than a
+    projection of the policy's declared paths, and a record counts only if it signed that crate AND that key, whichever tree it is for
+    (the several records of one tree, one per crate, are told apart by the signed `crate`)."""
     with tempfile.NamedTemporaryFile() as revocations:
         everything = legacy_refs(repo, len(tree))  # the first layout, until the GC has removed it
         hits = with_note_for(repo, list(dict.fromkeys(tree_refs(repo, tree) + everything)), tree)  # commits that carry a note named by the tree
@@ -638,7 +647,10 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
         # A check that declares inputs also accepts a record of ANOTHER tree whose signed key equals this tree's
         # projection onto the declared paths. Every other rule applies to it exactly as to a record of this tree.
         input_key = None
-        if rules is not None and rules.get('inputs') is not None:
+        if crate_key is not None:
+            input_key = crate_key[1]
+            mine = [(commit, statement) for commit, statement in mine if signed_for_crate(statement, *crate_key)]
+        elif rules is not None and rules.get('inputs') is not None:
             input_key = project(repo, tree, rules['inputs'])
         if input_key is not None:
             have = {commit for commit, _ in mine}
@@ -646,7 +658,8 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
                 if commit in have:
                     continue
                 statement = load(repo, commit)
-                if statement is not None and statement['predicate']['observed'].get('inputs', {}).get('source_inputs') == input_key:
+                if statement is not None and statement['predicate']['observed'].get('inputs', {}).get('source_inputs') == input_key \
+                        and (crate_key is None or signed_for_crate(statement, *crate_key)):
                     mine.append((commit, statement))
         trusted, untrusted, degraded = [], [], []
         for commit, statement in mine:
@@ -930,6 +943,9 @@ def main(argv):
     parser.add_argument('--project', action='store_true',
                         help='print the input key of the tree for the check\'s declared paths and exit (needs no keys)')
     parser.add_argument('--paths', metavar='PATH[,PATH...]', help='with --project: declared paths instead of the policy\'s')
+    parser.add_argument('--crate-key', metavar='CRATE=KEY',
+                        help='a per-crate check (docs/per-crate-test-signing.md): only records that signed this crate and this input key count, '
+                             'whichever tree they are for (scripts/rust-test-keys prints the keys)')
     source = parser.add_mutually_exclusive_group(required=False)
     source.add_argument('--keys', help='allowed-signers file')
     source.add_argument('--keys-from', help=f'read {KEYS_PATH} from this commit (the accepted base)')
@@ -1074,8 +1090,14 @@ def main(argv):
                 log_keys = logfile.name
         # A level held to its lane (by_level lane: true) is judged against the lane file of the same base as the policy.
         policy_base = args.policy_from
+        crate_key = None
+        if args.crate_key:
+            crate, sep, key = args.crate_key.partition('=')
+            if not sep or not crate or not OID.match(key):
+                raise Failure('error', f'--crate-key must be CRATE=KEY with a git tree id, not {args.crate_key!r}')
+            crate_key = (crate, key)
         result = verify(args.repo, tree, args.check, keys, command, kinds, bind, args.max_age, args.runner_prefix,
-                        trust_levels, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check, args.lane_base),
+                        trust_levels, crate_key=crate_key, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check, args.lane_base),
                         level_lane=(lambda: lane_for(args.repo, tree, (read_lanes(args.repo, policy_base), policy_base), args.check,
                                                      args.lane_base))
                         if policy_base else None, log_keys=log_keys, run_inputs=run_inputs)
