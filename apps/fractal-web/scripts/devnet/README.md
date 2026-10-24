@@ -13,8 +13,9 @@ devnet up <purpose> --ready-path / -- scripts/devnet/launch.sh <purpose> <build-
 - Both require `DEV_EDGE_URL`, `PORT`, and `WF_ST_CREDENTIAL_FILE`. The credential
   file holds the paired gateway's raw bearer token, not an authorization header.
   Keep it readable only by the deployment user. Use an absolute credential path.
-- Both export `WF_EDGE_HOST` from the edge URL's hostname. `WF_ST_GATEWAY` defaults
-  to `unix:/run/user/$(id -u)/st3-client.sock`; set it for a different gateway.
+- Both export `WF_EDGE_HOST` from the edge URL's hostname. Both also require
+  `WF_ST_GATEWAY`, the deployment-owned paired gateway Unix socket address
+  (for example `unix:/runtime/fractal/st3-client.sock`). No host path is assumed.
 - Preview exports `WF_ALLOWED_HOSTS=127.0.0.1,localhost,<edge-host>` and reads the
   credential into `WF_ST_AUTHORIZATION` with a `Bearer ` prefix, as required by the
   public Vite gateway plugin. Preview requires `WF_VITE_CONFIG`: a deployment-owned
