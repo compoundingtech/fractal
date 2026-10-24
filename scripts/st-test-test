@@ -1174,6 +1174,37 @@ class PerCrate(StTest):
         code, result = self.members()
         self.assertEqual((code, result['reason']), (1, 'error'), result)
 
+    def run_seed(self, *args, **env):
+        extra = dict({'FAKE_CALLS': str(self.calls), 'ST_EVIDENCE_GOVERN': 'off', 'ST_EVIDENCE_TARGET': 'off'}, **env)
+        return self.run_st_test('--seed', *args, extra_env=extra)
+
+    def test_seed_signs_the_per_crate_notes_of_the_base_not_of_head_and_pushes_them(self):
+        main_tree = git(self.work, 'rev-parse', 'origin/main^{tree}')
+        self.commit('crates/top/src/lib.rs', '// a branch change\n')
+        self.assertNotEqual(git(self.work, 'rev-parse', 'HEAD^{tree}'), main_tree)
+        code, out, err = self.run_seed()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['base,top'])
+        trees = {s['subject'][0]['digest']['gitTree'] for s in self.statements()}
+        self.assertEqual(trees, {main_tree}, "the base's tree was signed, not HEAD's")
+        self.assertEqual(self.crate_records(), [('base', 0), ('top', 0)])
+        pushed = subprocess.run(['git', '-C', str(Path(self.tmp.name) / 'origin.git'), 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/input/'],
+                                capture_output=True, text=True).stdout.split()
+        self.assertEqual(len(pushed), 2, 'seed pushes to origin without being asked')
+        code, out, err = self.run_seed()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('all 2 crates already have a passing note', out)
+        self.assertEqual(self.ran(), ['base,top'])
+
+    def test_seed_takes_a_ref_and_refuses_other_checks_and_a_ref_that_is_not_a_commit(self):
+        code, out, err = self.run_seed('--check', 'demo')
+        self.assertIn('--seed signs rust-tests only', str(code) + out + err)
+        code, out, err = self.run_seed('nope-ref')
+        self.assertIn('is not a commit', str(code) + out + err)
+        code, out, err = self.run_seed('main', '--crate', 'base')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['base'])
+
     def test_status_names_the_crates_to_run(self):
         code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
         self.assertEqual(code, 3, out + err)
