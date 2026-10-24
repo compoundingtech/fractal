@@ -118,6 +118,11 @@ a new generation, pruning holds the cache lock and waits for an exclusive lease 
 each obsolete generation; running builds release leases without reacquiring the
 cache lock. This preserves current plus the previously selected generation and never
 deletes one in use. A new dependency selection can therefore wait for an older build.
+Under that exclusive lease, pruning removes selection references and atomically
+renames the obsolete directory into `<cache>/.garbage/` before recursive deletion.
+Garbage is never a selectable or verified generation and does not count toward
+retention. Each root-lock owner opportunistically removes leftover garbage without
+reading its markers; interrupted or partial deletion cannot poison later selection.
 
 `prepare-dependencies.py SOURCE_DIR SNAPSHOT_DIR MANIFEST_PATH GENERATION KEY`
 checks the source's five-file key and generation marker before linking. It copies

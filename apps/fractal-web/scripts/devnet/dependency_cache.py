@@ -140,6 +140,20 @@ def _previous_selection(cache, current):
             raise ValueError('duplicate dependency selection identities')
     except ValueError as error:
         raise ValueError('invalid dependency selection identities') from error
+    # A process may stop after retiring a generation but before recording its
+    # replacement. Selection metadata must never retain a missing public key.
+    def present(key):
+        return key is not None and (cache / key).is_dir() and not (cache / key).is_symlink()
+    if not present(selection['current']):
+        if present(selection['previous']):
+            selection = {'current': selection['previous'], 'previous': None}
+            _record_selection(cache, **selection)
+        else:
+            path.unlink()
+            return None
+    elif selection['previous'] is not None and not present(selection['previous']):
+        selection['previous'] = None
+        _record_selection(cache, **selection)
     # A repeated selection retains its predecessor; selecting an older generation
     # makes the generation we just left the predecessor (A -> B -> A -> C).
     return (selection['previous'] if selection['current'] == current
@@ -158,6 +172,42 @@ def _record_selection(cache, current, previous):
         temporary.unlink(missing_ok=True)
 
 
+def _forget_selection(cache, key):
+    path = cache / '.selection.json'
+    if not path.exists():
+        return
+    selection = json.loads(path.read_text())
+    if selection['current'] == key:
+        if selection['previous'] is None:
+            path.unlink()
+        else:
+            _record_selection(cache, selection['previous'], None)
+    elif selection['previous'] == key:
+        _record_selection(cache, selection['current'], None)
+
+
+def _delete_garbage(path):
+    try:
+        if path.is_symlink() or not path.is_dir():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
+    except OSError as error:
+        # Garbage has no public identity and cannot prevent a usable generation
+        # from being selected. A later root-lock owner retries its removal.
+        print(f'WARNING: dependency-cache garbage cleanup failed: {path.name}: {error}',
+              file=sys.stderr, flush=True)
+
+
+def _cleanup_garbage(cache):
+    garbage = cache / '.garbage'
+    if garbage.is_symlink() or (garbage.exists() and not garbage.is_dir()):
+        raise ValueError('dependency garbage namespace must be a directory')
+    if garbage.exists():
+        for path in garbage.iterdir():
+            _delete_garbage(path)
+
+
 def _prune(cache, current, previous):
     """Caller owns root lock; a live build only needs to release its lease."""
     for old in cache.iterdir():
@@ -167,7 +217,14 @@ def _prune(cache, current, previous):
         verify_generation(old, old.name)
         with (old / '.lease').open('r') as lease:
             fcntl.flock(lease, fcntl.LOCK_EX)
-            shutil.rmtree(old)
+            garbage = cache / '.garbage'
+            garbage.mkdir(exist_ok=True)
+            # Remove lineage references before the atomic retirement. After the
+            # rename, a killed rmtree can leave only unselectable garbage.
+            _forget_selection(cache, old.name)
+            retired = Path(tempfile.mkdtemp(prefix=f'{old.name}-{os.getpid()}-', dir=garbage))
+            old.rename(retired)
+            _delete_garbage(retired)
 
 
 def populate(source, cache, expected):
@@ -178,6 +235,7 @@ def populate(source, cache, expected):
         raise ValueError('dependency cache must be outside source clone')
     if install_key(source) != expected:
         raise ValueError('source install key changed before cache publication')
+    _cleanup_garbage(cache)
     generation = cache / expected
     previous = _previous_selection(cache, expected)
     if generation.exists() or generation.is_symlink():
@@ -215,8 +273,8 @@ def populate(source, cache, expected):
         (staging / '.node-modules.json').write_text(json.dumps(inventory) + '\n')
         (staging / '.lease').touch()
         # Free the old slot before atomic publication: at most two generations.
-        # Selection identities may outlive a pruned slot after an interrupted run;
-        # they are lineage, not a promise that every old generation still exists.
+        # Selection references are removed before a generation is retired into
+        # garbage; interrupted cleanup never leaves a damaged public key.
         _prune(cache, expected, previous)
         staging.rename(generation)
         _record_selection(cache, expected, previous)

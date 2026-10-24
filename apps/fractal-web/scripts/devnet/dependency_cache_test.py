@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import dependency_cache
 
@@ -322,6 +323,64 @@ class DependencyCacheTest(unittest.TestCase):
         c = self.populate()
         self.assertEqual(self.selection(), {'current': c, 'previous': a})
         self.assertEqual(self.generations(), {a, c})
+
+    def _assert_interrupted_prune_recovers(self, partial):
+        a = self.populate()
+        self.change_key('B')
+        b = self.populate()
+        c = self.change_key('C')
+        garbage = self.cache / '.garbage'
+        original_rmtree = shutil.rmtree
+
+        def interrupted_rmtree(path, *args, **kwargs):
+            path = Path(path)
+            if path.parent == garbage:
+                # Removal has already left the public generation namespace.
+                self.assertFalse((self.cache / a).exists())
+                self.assertNotIn(a, self.selection().values())
+                if partial:
+                    (path / '.fractal-dep-key').unlink()
+                    (path / 'node_modules/package/index.js').unlink()
+                raise RuntimeError('simulated interrupted garbage deletion')
+            return original_rmtree(path, *args, **kwargs)
+
+        with mock.patch.object(dependency_cache.shutil, 'rmtree', side_effect=interrupted_rmtree):
+            with self.assertRaisesRegex(RuntimeError, 'simulated interrupted'):
+                self.populate()
+        self.assertEqual(self.generations(), {b})
+        self.assertEqual(self.selection(), {'current': b, 'previous': None})
+        self.assertEqual(len(list(garbage.iterdir())), 1)
+        # Reuse must clean even marker-less garbage without verifying it.
+        self.change_key('B')
+        with mock.patch.object(dependency_cache, 'verify_generation',
+                               wraps=dependency_cache.verify_generation) as verify:
+            self.assertEqual(self.populate(), b)
+        self.assertTrue(all(Path(call.args[0]).parent == self.cache for call in verify.call_args_list))
+        self.assertEqual(list(garbage.iterdir()), [])
+        self.change_key('C')
+        self.assertEqual(self.populate(), c)
+        self.assertEqual(self.generations(), {b, c})
+        self.assertEqual(self.selection(), {'current': c, 'previous': b})
+
+    def test_interruption_after_retirement_before_rmtree_recovers(self):
+        self._assert_interrupted_prune_recovers(partial=False)
+
+    def test_interruption_mid_rmtree_recovers(self):
+        self._assert_interrupted_prune_recovers(partial=True)
+
+    def test_missing_selection_references_are_removed(self):
+        a = self.populate()
+        self.change_key('B')
+        b = self.populate()
+        garbage = self.cache / '.garbage'
+        garbage.mkdir()
+        (self.cache / a).rename(garbage / 'previous')
+        self.assertEqual(self.populate(), b)
+        self.assertEqual(self.selection(), {'current': b, 'previous': None})
+        (self.cache / b).rename(garbage / 'current')
+        self.assertEqual(self.populate(), b)
+        self.assertEqual(self.selection(), {'current': b, 'previous': None})
+        self.assertEqual(list(garbage.iterdir()), [])
 
     def test_invalid_selection_identities_fail_without_publication(self):
         key = dependency_cache.install_key(self.source)
