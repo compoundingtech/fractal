@@ -46,6 +46,11 @@ class RunnerTest(unittest.TestCase):
         self.assertIn(str(self.worktree / '.devenv/candidate-members'), argv)
         self.assertIn('--remount-ro', argv)
         self.assertIn('--chmod', argv)
+        certificate = Path('/etc/ssl/certs/ca-certificates.crt')
+        if certificate.exists():
+            self.assertIn(str(certificate.resolve()), argv)
+        self.assertNotIn('/etc/ssl/certs', argv)
+        self.assertIn('SSL_CERT_FILE="$SSL_CERT_FILE"', ' '.join(argv))
 
     def test_shell_definition_is_not_executed_on_host(self):
         responses = [subprocess.CompletedProcess([], 0, 'export SHELL_HOOK_MARKER=1\n'),

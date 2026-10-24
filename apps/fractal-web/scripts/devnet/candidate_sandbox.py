@@ -174,7 +174,7 @@ def run(args, *, worktree, shell=None, network=False, output=None,
                     '--symlink', binaries['bash'], '/bin/sh',
                     '--symlink', binaries['env'], '/usr/bin/env']
         # Resolver and CA material only: no user directories, /run, or daemon socket.
-        for name in ('/etc/resolv.conf', '/etc/ssl/certs'):
+        for name in ('/etc/resolv.conf', '/etc/ssl/certs/ca-certificates.crt'):
             if Path(name).exists():
                 command += ['--ro-bind', str(Path(name).resolve()), name]
         git = worktree / '.git'
@@ -216,7 +216,9 @@ def run(args, *, worktree, shell=None, network=False, output=None,
                        'PNPM_STORE_DIR': str(store), 'npm_config_store_dir': str(store),
                        'MEGAREPO_STORE': str(worktree / '.devenv' / 'candidate-members'),
                        'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_SYSTEM': '/dev/null',
-                       'GIT_OPTIONAL_LOCKS': '0'}
+                       'GIT_OPTIONAL_LOCKS': '0',
+                       'SSL_CERT_FILE': '/etc/ssl/certs/ca-certificates.crt',
+                       'GIT_SSL_CAINFO': '/etc/ssl/certs/ca-certificates.crt'}
         command += ['--chmod', '0111', str(host_home), '--remount-ro', str(host_home)]
         command += ['--clearenv']
         for key, value in environment.items():
@@ -233,7 +235,8 @@ def run(args, *, worktree, shell=None, network=False, output=None,
                   'exec "$1" -i HOME=/tmp/home TMPDIR=/tmp/work LANG=C.UTF-8 CI=1 '
                   'PATH="$PATH" PNPM_STORE_DIR="$PNPM_STORE_DIR" '
                   'npm_config_store_dir="$npm_config_store_dir" MEGAREPO_STORE="$MEGAREPO_STORE" '
-                  'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 "${@:3}"')
+                  'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 '
+                  'SSL_CERT_FILE="$SSL_CERT_FILE" GIT_SSL_CAINFO="$GIT_SSL_CAINFO" "${@:3}"')
         command += [binaries['bash'], '--noprofile', '--norc', '-euc', launch, 'sandbox', binaries['env'], str(cwd), *map(str, args)]
         try:
             result = subprocess.run(command, **kwargs)

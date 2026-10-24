@@ -297,8 +297,10 @@ sandbox failure stops the tick/build without an unsandboxed retry.
 Candidate genie/regeneration, member application, pnpm install/lifecycle scripts,
 license regeneration, Vite/SSR builds and precompression run in bubblewrap.
 The initial environment is an explicit allowlist: PATH, scratch HOME/TMPDIR,
-locale, CI, dedicated pnpm cache, candidate-local `MEGAREPO_STORE` and disabled
-global/system Git configuration. Dev-shell definitions and hooks execute inside
+locale, CI, dedicated pnpm cache, candidate-local `MEGAREPO_STORE`, explicit
+`SSL_CERT_FILE`/`GIT_SSL_CAINFO`, and disabled global/system Git configuration.
+The CA bundle is bound from its resolved file, not a directory whose certificate
+symlinks can point outside the sandbox. Dev-shell definitions and hooks execute inside
 the boundary; the final command receives the same runtime allowlist plus the
 dev-shell PATH. Agent credentials and agent-policy variables are not inherited.
 
