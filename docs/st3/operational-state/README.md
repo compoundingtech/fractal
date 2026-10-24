@@ -186,6 +186,13 @@ producer metadata. The owner daemon must positively enumerate no matching seat/w
 systemd units and no live owner-user process carrying the exact start-operation label.
 Unreadable or incomplete evidence refuses repair. A null PID or an older operation tag alone
 never authorizes cleanup.
+Dry-run, apply, and doctor return HTTP 422 `legacy-start-proof-unavailable` when native
+capture cannot establish that proof. Process-read refusals expose only `stage`, `pid`,
+and the numeric OS `errno` when available; they never expose environment contents or
+native error paths. Other capture refusals report `stage: native-capture`. A live process
+whose environment is inaccessible remains an unknown producer, even if its name resembles
+a host service or its current parent is root-owned. It is not skipped or reported as a
+successful empty plan.
 
 Dry-run includes the physical evidence in the item and token. Apply captures fresh evidence,
 keeps the runtime spawn lock through the normal writer transaction, and refuses a changed token
