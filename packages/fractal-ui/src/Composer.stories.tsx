@@ -121,7 +121,7 @@ function SingleComposer(args: ComposerArgs) {
 const meta = {
   title: 'Fractal UI/Composer',
   component: SingleComposer,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Decided composer C2 · R3 · M2 · K1 over assistant-ui native composer state and React Aria TokenField. Native queue, structured mention/command serialization, image attachments, durable local drafts and explicit local fixture send outcomes; no network transport is claimed.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'editable composer and outbox state are host-owned local contracts that no world slice models' }, layout: 'fullscreen', docs: { description: { component: 'Decided composer C2 · R3 · M2 · K1 over assistant-ui native composer state and React Aria TokenField. Native queue, structured mention/command serialization, image attachments, durable local drafts and explicit local fixture send outcomes; no network transport is claimed.' } } },
   args: { scheme: 'dark', state: 'idle', ...decided, effort: 'supported' },
   argTypes: {
     scheme: { options: ['dark', 'light'], control: 'radio' },
