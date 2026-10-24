@@ -26,6 +26,20 @@ fractal --version
 
 The installer downloads the latest release and checks its SHA256 sidecar. The archive and checksum come from the same release endpoint; this is an integrity check, not an independent signature. `--no-run` installs the commands without launching a client.
 
+The download installer records the selected release tag and the verified binary's
+commit in `RELEASE.json` beside the Linux executable. On macOS the receipt is
+beside the signed application bundle, named `SmallTalk.app.RELEASE.json`; it does
+not change the app's signature. `fractal --version` displays, for example,
+`fractal v0.3.18 (abcdef123)` only when the receipt matches the executable's
+embedded commit. Missing, unreadable, corrupt, or stale receipts fall back to the
+baked crate version and commit. `fractal --version --json` always reports the
+unchanged machine version, not the installed release tag.
+
+Nix flake packages and Home Manager install the built package directly, without
+running the download installer or writing a release receipt. They therefore
+display the baked version and commit, not a daily release tag. Copying a binary
+without its receipt has the same fallback behavior.
+
 ## Set up your machine
 
 Run `fractal setup` in your terminal. Choose your person name, a persistent machine name, which installed harnesses to integrate, and whether to keep the daemon running as a user service. The machine name `local` is reserved. Native harness login and workspace trust may need your interaction.

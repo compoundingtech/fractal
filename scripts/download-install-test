@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise download integrity, quiet installation, platform selection and launch."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -15,7 +16,7 @@ with tempfile.TemporaryDirectory() as d:
     payload = root / 'fractal-x86_64-unknown-linux-gnu'; (payload / 'bin').mkdir(parents=True)
     for name in ['st3', 'pty']:
         p = payload / 'bin' / name
-        p.write_text('#!/bin/sh\nprintf "' + name + '-fixture\\n"\n'); p.chmod(0o755)
+        p.write_text('#!/bin/sh\nif [ "${1:-}" = --version ]; then printf \'{"machine_version":"0.3.17+abcdef123"}\\n\'; else printf "' + name + '-fixture\\n"; fi\n'); p.chmod(0o755)
     (payload / 'bin/st').symlink_to('st3')
     (payload / 'bin/fractal').symlink_to('st3')
     (payload / 'share/fractal-web').mkdir(parents=True)
@@ -30,10 +31,11 @@ with tempfile.TemporaryDirectory() as d:
     curl.write_text('''#!/bin/sh
 set -eu
 printf '%s\\n' "$*" >> "$RECEIPTS"
-url= out= status=false
+url= out= status=false effective=false
 while [ "$#" -gt 0 ]; do
- case "$1" in --output) out=$2;shift 2;; --write-out) status=true;shift 2;; https://*) url=$1;shift;; *) shift;; esac
+ case "$1" in --output) out=$2;shift 2;; --write-out) case "$2" in *url_effective*) effective=true;; *) status=true;; esac;shift 2;; https://*) url=$1;shift;; *) shift;; esac
 done
+if "$effective"; then printf '%s' "${url%/latest}/tag/v0.3.18"; exit 0; fi
 if "$status"; then
     if [ "${DOWNLOAD_STATUS:-}" ]; then printf '%s' "$DOWNLOAD_STATUS"; exit 0; fi
     if [ ! -f "$FIXTURES/${url##*/}" ]; then printf '404'; exit 0; fi
@@ -55,10 +57,14 @@ fi
     installed = root / 'home/.local/bin'
     assert (installed / 'st').readlink() == Path('st3')
     assert (installed / 'fractal').readlink() == Path('st3')
-    assert sorted(p.name for p in installed.iterdir()) == ['fractal', 'pty', 'st', 'st3']
+    assert sorted(p.name for p in installed.iterdir()) == ['RELEASE.json', 'fractal', 'pty', 'st', 'st3']
+    receipt = json.loads((installed / 'RELEASE.json').read_text())
+    assert receipt['tag'] == 'v0.3.18' and receipt['commit'] == 'abcdef123', receipt
+    assert receipt['target'] == 'x86_64-unknown-linux-gnu' and receipt['installed_at'].endswith('Z'), receipt
     assert (installed.parent / 'share/fractal-web/index.html').read_text() == '<!doctype html><title>Fractal</title>'
     result = install('--tag', 'v0.3.18')
     assert result.returncode == 0 and result.stdout == 'st3-fixture\n' and result.stderr == '', result
+    assert json.loads((installed / 'RELEASE.json').read_text())['tag'] == 'v0.3.18'
     (installed / 'fractal').unlink()
     (installed / 'fractal').write_text('foreign command')
     result = install('--no-run')
@@ -75,19 +81,22 @@ fi
     assert not (installed / 'fractal').exists() and not (installed / 'fractal').is_symlink()
     assert (foreign_path / 'fractal').read_text() == 'foreign PATH command'
     requests = (root / 'requests').read_text()
-    assert '/latest/download/' in requests and '/download/v0.3.18/' in requests
-    assert '/latest/download/fractal-x86_64-unknown-linux-gnu.tar.gz' in requests
+    assert '/latest' in requests and '/download/v0.3.18/' in requests
+    assert '/download/v0.3.18/fractal-x86_64-unknown-linux-gnu.tar.gz' in requests
     assert 'smalltalk-x86_64-unknown-linux-gnu.tar.gz' not in requests
     result = install('--edge', '--no-run')
     assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
     assert (root / 'requests').read_text().count('/download/edge/') == 2
+    assert json.loads((installed / 'RELEASE.json').read_text())['tag'] == 'edge'
     result = install('--edge', '--tag', 'v0.3.18', '--no-run')
     assert result.returncode == 2 and 'either --edge or --tag' in result.stderr, result
     original = (installed / 'st3').read_bytes()
+    original_receipt = (installed / 'RELEASE.json').read_bytes()
     checksum.write_text('0' * 64 + '  ' + archive.name + '\n')
     result = install('--no-run')
     assert result.returncode != 0 and 'checksum mismatch' in result.stderr, result
     assert (installed / 'st3').read_bytes() == original
+    assert (installed / 'RELEASE.json').read_bytes() == original_receipt
     checksum.write_text(correct.replace(archive.name, 'other.tar.gz'))
     result = install('--no-run')
     assert result.returncode != 0 and 'invalid archive checksum' in result.stderr, result
@@ -121,6 +130,6 @@ fi
     legacy_bin = root / 'legacy-bin'
     result = install('--tag', 'v0.3.17', '--bin-dir', str(legacy_bin), '--no-run')
     assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
-    assert sorted(p.name for p in legacy_bin.iterdir()) == ['pty', 'st', 'st3', 'st3-migrate', 'stui']
+    assert sorted(p.name for p in legacy_bin.iterdir()) == ['RELEASE.json', 'pty', 'st', 'st3', 'st3-migrate', 'stui']
     assert '/download/v0.3.17/smalltalk-x86_64-unknown-linux-gnu.tar.gz' in (root / 'requests').read_text()
 print('Download installer integrity, quiet install, launch and platform controls passed')

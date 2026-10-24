@@ -71,8 +71,8 @@ fn version_is_baked_and_available_without_a_daemon() {
         assert_eq!(output.lines().count(), 1);
     }
     let human = version(root.path(), &["--version"]);
-    assert!(human.starts_with("st "));
-    assert_ne!(human.trim(), format!("st {}", env!("CARGO_PKG_VERSION")));
+    assert!(human.starts_with("fractal "));
+    assert_ne!(human.trim(), format!("fractal {}", env!("CARGO_PKG_VERSION")));
     assert!(!human.contains("decaf00"));
     assert_eq!(human.lines().count(), 1);
     assert_eq!(version(root.path(), &["-V"]), human);

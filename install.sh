@@ -33,7 +33,15 @@ case "$base" in
     http://127.0.0.1:*|http://localhost:*) protocol=https,http ;;
     *) printf 'install: release downloads need HTTPS\n' >&2; exit 2 ;;
 esac
-if [ -n "$tag" ]; then channel=download/$tag; else channel=latest/download; fi
+# Pin latest before downloading either asset, so the receipt and checksum name
+# the same release even when a new daily release is published during installation.
+if [ -z "$tag" ]; then
+    release_url=$(curl --fail --silent --show-error --location --proto "=$protocol" --proto-redir "=$protocol" \
+        --write-out '%{url_effective}' --output /dev/null "$base/latest")
+    tag=${release_url##*/tag/}
+    case "$tag" in ''|*[!A-Za-z0-9._-]*) printf 'install: cannot resolve latest release tag\n' >&2; exit 1 ;; esac
+fi
+channel=download/$tag
 package=fractal-$target
 archive=$package.tar.gz
 work=$(mktemp -d)
@@ -84,6 +92,33 @@ tar -xzf "$work/$archive" -C "$work"
 # PATH contains a foreign fractal command; keep their collision guidance on stderr.
 "$work/$package/install.sh" --bin-dir "$bin_dir" >/dev/null
 bin_dir=$(cd "$bin_dir" && pwd)
+# Read the verified binary's stable machine identity, never the build host's git
+# checkout. Retained archives may not provide this output; they simply get no receipt.
+version=$("$work/$package/bin/st3" --version --json 2>/dev/null) || version=
+version=${version#'{"machine_version":"'}
+version=${version%'"}'}
+commit=${version##*+}
+case "$commit" in ''|*[!0-9a-f]*) commit= ;; esac
+if [ "${#commit}" -ge 7 ]; then
+    receipt="$bin_dir/RELEASE.json"
+    if [ "$(uname -s)" = Darwin ]; then
+        # The executable lives in a signed app. Keep its receipt outside the
+        # bundle, so recording an installation does not invalidate its signature.
+        receipt=$(python3 - "$bin_dir/st3" <<'PY'
+from pathlib import Path
+import sys
+binary = Path(sys.argv[1]).resolve()
+print(str(binary.parents[2]) + '.RELEASE.json')
+PY
+)
+    fi
+    printf '{"tag":"%s","commit":"%s","target":"%s","installed_at":"%s"}\n' \
+        "$tag" "$commit" "$target" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$work/RELEASE.json"
+    # Stage on the destination filesystem for atomic replacement.
+    receipt_stage=$(mktemp "$receipt.XXXXXX")
+    cat "$work/RELEASE.json" > "$receipt_stage"
+    mv -f "$receipt_stage" "$receipt"
+fi
 rm -rf "$work"
 trap - EXIT HUP INT TERM
 if "$run"; then
