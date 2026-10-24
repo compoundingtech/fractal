@@ -12558,7 +12558,7 @@ pub fn operational_repair_plan_tx(
     items.sort_by(|left, right| {
         (&left.class, &left.subject, &left.id).cmp(&(&right.class, &right.subject, &right.id))
     });
-    let digest = canonical_hash(&("st3.operational-repair.v0", &items))?;
+    let digest = canonical_hash(&("st3.operational-repair.v0", RepairItemsFingerprint(&items)))?;
     Ok(OperationalRepairPlan {
         api_version: "st3.operational-repair.v0".into(),
         token: format!("orpv0:{digest}"),
@@ -12570,6 +12570,77 @@ pub fn operational_repair_plan_tx(
         },
         items,
     })
+}
+
+// Excluded processes explain a complete native scan but are not physical closure
+// evidence. Omit only this top-level diagnostic field from approval identities;
+// the original evidence remains intact in plans, closure proofs and receipts.
+struct NativeEvidenceFingerprint<'a>(&'a Value);
+
+impl Serialize for NativeEvidenceFingerprint<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let Some(object) = self.0.as_object() else {
+            return self.0.serialize(serializer);
+        };
+        let mut map = serializer.serialize_map(Some(
+            object.len() - usize::from(object.contains_key("excluded_processes")),
+        ))?;
+        for (key, value) in object {
+            if key != "excluded_processes" {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
+    }
+}
+
+struct RepairDetailsFingerprint<'a>(&'a BTreeMap<String, Value>);
+
+impl Serialize for RepairDetailsFingerprint<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (key, value) in self.0 {
+            if key == "native_evidence" {
+                map.serialize_entry(key, &NativeEvidenceFingerprint(value))?;
+            } else {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
+    }
+}
+
+struct RepairItemsFingerprint<'a>(&'a [OperationalRepairItem]);
+
+impl Serialize for RepairItemsFingerprint<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        struct Item<'a>(&'a OperationalRepairItem);
+        impl Serialize for Item<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let item = self.0;
+                let mut map = serializer.serialize_map(Some(
+                    5 + usize::from(!item.details.is_empty()),
+                ))?;
+                map.serialize_entry("id", &item.id)?;
+                map.serialize_entry("class", &item.class)?;
+                map.serialize_entry("subject", &item.subject)?;
+                map.serialize_entry("affected_subjects", &item.affected_subjects)?;
+                map.serialize_entry("reason", &item.reason)?;
+                if !item.details.is_empty() {
+                    map.serialize_entry("details", &RepairDetailsFingerprint(&item.details))?;
+                }
+                map.end()
+            }
+        }
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for item in self.0 {
+            sequence.serialize_element(&Item(item))?;
+        }
+        sequence.end()
+    }
 }
 
 #[derive(Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -12620,7 +12691,7 @@ fn filter_repair_plan(mut plan: OperationalRepairPlan, filter: &OperationalRepai
         (filter.subjects.is_empty() || filter.subjects.binary_search(&item.subject).is_ok())
             && (filter.classes.is_empty() || filter.classes.binary_search(&item.class).is_ok())
     });
-    let digest = canonical_hash(&("st3.operational-repair-filter.v0", filter, &plan.items))?;
+    let digest = canonical_hash(&("st3.operational-repair-filter.v0", filter, RepairItemsFingerprint(&plan.items)))?;
     plan.token = format!("orpv0:{digest}:{}", hex::encode(serde_json::to_vec(filter)?));
     plan.status = if plan.items.is_empty() { "clean" } else { "changes" }.into();
     Ok(plan)
@@ -12656,9 +12727,9 @@ fn operational_repair_plan_with_legacy_starts_tx(
         {
             continue;
         }
-        // Duplicate identical internal captures are harmless; conflicting captures
-        // remain token-bound rather than selecting an arbitrary physical witness.
-        if !seen.insert((operation_id.to_owned(), canonical_hash(evidence)?)) {
+        // Captures differing only in diagnostic exclusions are also duplicates;
+        // conflicting physical witnesses remain token-bound.
+        if !seen.insert((operation_id.to_owned(), canonical_hash(&NativeEvidenceFingerprint(evidence))?)) {
             continue;
         }
         push_operational_repair_item(
@@ -12690,7 +12761,7 @@ fn operational_repair_plan_with_legacy_starts_tx(
     plan.items.sort_by(|left, right| {
         (&left.class, &left.subject, &left.id).cmp(&(&right.class, &right.subject, &right.id))
     });
-    plan.token = format!("orpv0:{}", canonical_hash(&("st3.operational-repair.v0", &plan.items))?);
+    plan.token = format!("orpv0:{}", canonical_hash(&("st3.operational-repair.v0", RepairItemsFingerprint(&plan.items)))?);
     plan.status = if plan.items.is_empty() { "clean" } else { "changes" }.into();
     Ok(plan)
 }
@@ -12711,7 +12782,7 @@ fn push_operational_repair_item(
         subject,
         &affected_subjects,
         reason,
-        &details,
+        RepairDetailsFingerprint(&details),
     ))?;
     items.push(OperationalRepairItem {
         id: format!("repair-item/{digest}"),

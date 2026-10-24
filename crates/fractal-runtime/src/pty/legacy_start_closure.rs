@@ -26,6 +26,17 @@ pub struct LegacyStartClosureEvidence {
     pub recorded_scopes_not_loaded: bool,
     pub process_enumeration_complete: bool,
     pub operation_pids: Vec<u32>,
+    #[serde(default)]
+    pub excluded_processes: Vec<ExcludedProcess>,
+}
+
+/// Diagnostic-only exclusions; process/session churn must not change repair approval.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExcludedProcess {
+    pub pid: u32,
+    pub comm: String,
+    pub cgroup: String,
+    pub reason: String,
 }
 
 /// The private file owns the flock until the Store writer has consumed the evidence.
@@ -109,7 +120,7 @@ impl PtyRuntime {
             let runtime_root = self.root.canonicalize().context("resolve legacy PTY root")?;
             ensure!(std::fs::metadata(&runtime_root)?.uid() == owner_uid,
                 "legacy PTY root is owned by another host user");
-            let operation_pids = operation_processes(owner_uid, operation)?;
+            let (operation_pids, excluded_processes) = operation_processes(owner_uid, operation)?;
             let evidence = LegacyStartClosureEvidence {
                 version: 1,
                 runtime_id: id.into(),
@@ -129,6 +140,7 @@ impl PtyRuntime {
                 recorded_scopes_not_loaded: true,
                 process_enumeration_complete: true,
                 operation_pids,
+                excluded_processes,
             };
             Ok(positive(&evidence).then_some(LegacyStartClosureProof {
                 evidence,
@@ -199,14 +211,15 @@ fn scope_not_loaded(scope: &str) -> Result<bool> {
 }
 
 #[cfg(target_os = "linux")]
-fn operation_processes(owner_uid: u32, operation: &str) -> Result<Vec<u32>> {
+fn operation_processes(owner_uid: u32, operation: &str) -> Result<(Vec<u32>, Vec<ExcludedProcess>)> {
     operation_processes_in(Path::new("/proc"), owner_uid, operation)
 }
 
 #[cfg(target_os = "linux")]
-fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str) -> Result<Vec<u32>> {
+fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str) -> Result<(Vec<u32>, Vec<ExcludedProcess>)> {
     use std::os::unix::fs::MetadataExt as _;
     let mut matching = BTreeSet::new();
+    let mut excluded = Vec::new();
     for entry in std::fs::read_dir(proc_root).context("enumerate legacy operation processes")? {
         let entry = entry?;
         let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
@@ -232,11 +245,74 @@ fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str) -> 
         if !uids.contains(&owner_uid) && directory.metadata()?.uid() != owner_uid {
             continue;
         }
-        if owner_process_has_operation(&path, operation)? {
-            matching.insert(pid);
+        match owner_process_has_operation(&path, operation) {
+            Ok(true) => { matching.insert(pid); }
+            Ok(false) => {}
+            Err(error) if error.downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied) => {
+                excluded.push(exclude_unreadable_process(&path, proc_root, owner_uid, operation, pid)?);
+            }
+            Err(error) => return Err(error),
         }
     }
-    Ok(matching.into_iter().collect())
+    excluded.sort_by_key(|process| process.pid);
+    Ok((matching.into_iter().collect(), excluded))
+}
+
+#[cfg(target_os = "linux")]
+fn operation_created_ms(operation: &str) -> Option<u64> {
+    let bytes = operation.as_bytes();
+    if bytes.len() != 36 || bytes[14] != b'7'
+        || !matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
+        || bytes.iter().enumerate().any(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) { *byte != b'-' } else { !byte.is_ascii_hexdigit() }
+        })
+    {
+        return None;
+    }
+    Some((u64::from_str_radix(&operation[..8], 16).ok()? << 16)
+        | u64::from_str_radix(&operation[9..13], 16).ok()?)
+}
+
+#[cfg(target_os = "linux")]
+fn outside_runtime_cgroup(cgroup: &str, uid: u32) -> bool {
+    let user = format!("/user.slice/user-{uid}.slice/");
+    let Some(relative) = cgroup.strip_prefix(&user) else { return false };
+    relative == format!("user@{uid}.service/init.scope")
+        || relative.strip_prefix("session-").and_then(|session| session.strip_suffix(".scope"))
+            .is_some_and(|session| !session.is_empty() && session.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+#[cfg(target_os = "linux")]
+fn exclude_unreadable_process(
+    path: &Path, proc_root: &Path, uid: u32, operation: &str, pid: u32,
+) -> Result<ExcludedProcess> {
+    let stat = std::fs::read_to_string(path.join("stat")).context("read unreadable process starttime")?;
+    let (_, tail) = stat.rsplit_once(") ").context("malformed unreadable process stat")?;
+    let start_ticks: u64 = tail.split_whitespace().nth(19).context("missing process starttime")?.parse()?;
+    let cgroups = std::fs::read_to_string(path.join("cgroup")).context("read unreadable process cgroup")?;
+    let mut unified = cgroups.lines().filter_map(|line| line.strip_prefix("0::"));
+    let cgroup = unified.next().context("missing unified process cgroup")?;
+    ensure!(unified.next().is_none() && cgroup.starts_with('/'), "ambiguous unified process cgroup");
+    let reason = if outside_runtime_cgroup(cgroup, uid) {
+        "outside-runtime-cgroup"
+    } else {
+        let created_ms = operation_created_ms(operation).context("unreadable process needs UUIDv7 operation time")?;
+        let boot = std::fs::read_to_string(proc_root.join("stat")).context("read boot time for process exclusion")?;
+        let boot_seconds: u64 = boot.lines().find_map(|line| line.strip_prefix("btime "))
+            .context("missing boot time")?.trim().parse()?;
+        let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        ensure!(ticks_per_second > 0, "process clock tick rate unavailable");
+        // btime has whole-second precision. Include its entire uncertainty
+        // interval and round ticks up; near-boundary processes stay held.
+        let latest_start_ms = u128::from(boot_seconds) * 1000 + 1000
+            + (u128::from(start_ticks) * 1000).div_ceil(ticks_per_second as u128);
+        ensure!(latest_start_ms < u128::from(created_ms),
+            "read owner process environment: unreadable live process may belong to operation");
+        "predates-operation"
+    };
+    let comm = std::fs::read_to_string(path.join("comm")).context("read excluded process comm")?;
+    Ok(ExcludedProcess { pid, comm: comm.trim_end_matches('\n').into(), cgroup: cgroup.into(), reason: reason.into() })
 }
 
 #[cfg(target_os = "linux")]
@@ -290,6 +366,7 @@ mod tests {
             matching_units: vec![], recorded_scopes: vec!["st3-work-1.scope".into()],
             recorded_scopes_not_loaded: true, process_enumeration_complete: true,
             operation_pids: vec![],
+            excluded_processes: vec![],
         }
     }
 
@@ -348,7 +425,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let result = loop {
             match operation_processes_in(proc_root.path(), unsafe { libc::geteuid() }, operation) {
-                Ok(pids) if !pids.contains(&child.id()) && Instant::now() < deadline => {
+                Ok((pids, _)) if !pids.contains(&child.id()) && Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 result => break result,
@@ -356,7 +433,7 @@ mod tests {
         };
         let _ = child.kill();
         let _ = child.wait();
-        assert!(result.unwrap().contains(&child.id()));
+        assert!(result.unwrap().0.contains(&child.id()));
     }
 
     #[cfg(target_os = "linux")]
@@ -371,6 +448,50 @@ mod tests {
         assert!(owner_process_has_operation(proc.path(), "op").is_err());
         std::fs::remove_file(proc.path().join("stat")).unwrap();
         assert!(!owner_process_has_operation(proc.path(), "op").unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreadable_process_exclusions_require_exact_cgroup_or_positive_age() {
+        let root = tempfile::tempdir().unwrap();
+        let process = root.path().join("123");
+        std::fs::create_dir(&process).unwrap();
+        std::fs::write(root.path().join("stat"), "btime 1000\n").unwrap();
+        std::fs::write(process.join("comm"), "example-process\n").unwrap();
+        // Fields 3..21 precede starttime (field 22).
+        let stat = |ticks: u64| format!("123 (example-process) S {} {ticks}", "0 ".repeat(18));
+        std::fs::write(process.join("stat"), stat(u64::MAX)).unwrap();
+        let operation = "0000001e-8480-7000-8000-000000000000";
+        assert_eq!(operation_created_ms(operation), Some(2_000_000));
+        for group in [
+            "/user.slice/user-1000.slice/user@1000.service/init.scope",
+            "/user.slice/user-1000.slice/session-7.scope",
+        ] {
+            std::fs::write(process.join("cgroup"), format!("0::{group}\n")).unwrap();
+            let evidence = exclude_unreadable_process(&process, root.path(), 1000, operation, 123).unwrap();
+            assert_eq!(evidence.reason, "outside-runtime-cgroup");
+            assert_eq!(evidence.cgroup, group);
+            assert_eq!(evidence.comm, "example-process");
+            assert_eq!(evidence.pid, 123);
+        }
+        for group in [
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/st3-work-example.scope",
+            "/user.slice/user-1000.slice/user@1000.service/session-7.scope",
+            "/user.slice/user-1000.slice/session-7.scope/child",
+            "/user.slice/user-1001.slice/user@1001.service/init.scope",
+        ] {
+            std::fs::write(process.join("cgroup"), format!("0::{group}\n")).unwrap();
+            assert!(exclude_unreadable_process(&process, root.path(), 1000, operation, 123).is_err());
+        }
+        std::fs::write(process.join("stat"), stat(0)).unwrap();
+        let old = exclude_unreadable_process(&process, root.path(), 1000, operation, 123).unwrap();
+        assert_eq!(old.reason, "predates-operation");
+        assert!(exclude_unreadable_process(&process, root.path(), 1000, "not-a-uuid", 123).is_err());
+        // btime truncation uncertainty must keep a process near the operation held.
+        let boundary = "0000000f-443f-7000-8000-000000000000"; // 1_000_511 ms
+        assert!(exclude_unreadable_process(&process, root.path(), 1000, boundary, 123).is_err());
+        std::fs::write(process.join("cgroup"), "0::/unknown\n0::/other\n").unwrap();
+        assert!(exclude_unreadable_process(&process, root.path(), 1000, operation, 123).is_err());
     }
 
     #[cfg(target_os = "linux")]

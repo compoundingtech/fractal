@@ -184,8 +184,12 @@ launch retirement. The returned revoked start must be unresolved and already adm
 applied; its retained PTY must be `vanished` with no PID, and it must lack operation-owned native
 producer metadata. The owner daemon must positively enumerate no matching seat/work/server
 systemd units and no live owner-user process carrying the exact start-operation label.
-Unreadable or incomplete evidence refuses repair. A null PID or an older operation tag alone
-never authorizes cleanup.
+Unreadable or incomplete evidence refuses repair, except a live permission-denied process can
+be excluded by its exact user-manager `init.scope` or direct logind session cgroup, or by a
+starttime positively before the UUIDv7 operation creation time. Boot-time uncertainty is
+rounded conservatively. Excluded PID/comm/cgroup/reason records are reported in native evidence
+but not hashed into the approval token, so unrelated SSH-session churn cannot stale approval.
+A null PID or an older operation tag alone never authorizes cleanup.
 
 Dry-run includes the physical evidence in the item and token. Apply captures fresh evidence,
 keeps the runtime spawn lock through the normal writer transaction, and refuses a changed token
