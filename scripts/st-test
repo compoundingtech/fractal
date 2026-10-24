@@ -39,6 +39,8 @@ could not start (a refusal: dirty tree, bad argument); 3 from --status when the 
 was not signed because the tree edits that check's lane (evidence-wrap would refuse it; CI runs it).
 """
 import argparse
+import base64
+import concurrent.futures
 import fcntl
 import hashlib
 import importlib.machinery
@@ -70,12 +72,27 @@ LOCAL = {
     'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat'],
     # The web lane as ONE shard that covers every kit play and app test (scripts/ci-local-web); it runs only when a web input changed.
     'fractal-web': ['nix', 'develop', '.#web', '-c', 'bash', 'scripts/ci-local-web'],
+    # One signature per workspace crate (docs/per-crate-test-signing.md): the recorded command is the small script that reads one crate's
+    # result out of the run's JUnit report; the run itself is RUN_TESTS, for the crates that have no passing note for their key.
+    'rust-tests': ['python3', 'scripts/ci-rust-test-result'],
 }
+RUST_TESTS = 'rust-tests'
+RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]
+# The tests stage, run as CI runs it with the crates to test in CI_TEST_PACKAGES and the report in CI_TEST_JUNIT.
+RUN_TESTS = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']
+# nextest: 0 every test passed, 100 some test failed (the report is complete either way), 4 the selection matched no test.
+RUN_COMPLETED = frozenset({0, 4, 100})
+# The signer refuses an input longer than 500 characters (scripts/evidence-sign); a full run's filterset is longer than that.
+FILTERSET_LIMIT = 400
 # Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
 # (a builds.slice scope, the kept target below), which nobody has to ask for.
-BUILDS = frozenset({'linux-gate', 'fractal-web'})
+BUILDS = frozenset({'linux-gate', 'fractal-web', RUST_TESTS})
+# Named with --check only, temporarily: --all and the default run linux-gate, whose tests stage rust-tests splits per crate, so running
+# both would test twice. It joins the default when the gate accepts per-crate notes and linux-gate stops running the tests stage
+# (docs/per-crate-test-signing.md, step 5).
+OPT_IN = frozenset({RUST_TESTS})
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
-BASE_BOUND = frozenset({'linux-gate'})
+BASE_BOUND = frozenset({'linux-gate'})  # rust-tests is not: a test's result does not depend on the base
 # What the fractal-web note records about the run, as CI's aggregate note does (scripts/ci-evidence-signing): one shard, every kit
 # play and app test, for a pull request. The verifier's shard-count and input-order rules read these.
 WEB = 'fractal-web'
@@ -420,8 +437,10 @@ def reap_stale():
     git('worktree', 'prune', check=False)
 
 
-def covered(verifier, directory, tree, check, base, repository, lane_base=None):
+def covered(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
     command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--keys-from', base]
+    if crate_key:
+        command += ['--crate-key', crate_key]
     if repository:
         command += ['--policy-from', base, '--repository', repository]
         if lane_base and b'--lane-base' in Path(verifier).read_bytes():
@@ -477,6 +496,217 @@ def repository_of(remote):
     return None
 
 
+RUST_TEST_KEYS = 'scripts/rust-test-keys'
+RUST_TEST_INPUTS = '.st/rust-test-inputs.json'
+
+
+def only_crates(keys, names):
+    """(keys narrowed to `names`, or None and why a name is not a workspace crate of this tree)."""
+    unknown = [name for name in names if name not in keys]
+    if unknown:
+        return None, f'not a workspace crate of this tree: {", ".join(unknown)}'
+    return ({name: keys[name] for name in names} if names else keys), None
+
+
+def judged_by_policy(base):
+    """Whether the accepted base's skip policy names rust-tests; until it does (docs/per-crate-test-signing.md, step 3) a note counts by its
+    signature, crate and key alone, which is all this machine's own skip decision needs."""
+    return 'rust-tests' in policy_checks(base)
+
+
+def crate_keys(base, directory, tree, scratch):
+    """{crate: key} for `tree`, from the accepted base's scripts/rust-test-keys and inputs file (a verifier must use the base's). Only
+    while the base's policy does not name rust-tests, so nothing judges a note yet, are the tree's own used: the change that introduces them
+    is judged by itself. Once the base's policy names it, a base without them is an error, never a fallback. Returns (keys, error)."""
+    tool = Path(scratch) / 'rust-test-keys'
+    shown = git('show', f'{base}:{RUST_TEST_KEYS}', check=False)
+    inputs_at = base
+    if shown.returncode == 0 and git('cat-file', '-e', f'{base}:{RUST_TEST_INPUTS}', check=False).returncode == 0:
+        tool.write_bytes(shown.stdout)
+    elif judged_by_policy(base):
+        return None, f'the accepted base judges rust-tests but has no {RUST_TEST_KEYS} and {RUST_TEST_INPUTS}: only the base\'s tool and inputs may key a note'
+    else:
+        tool.write_bytes((Path(directory) / RUST_TEST_KEYS).read_bytes())
+        inputs_at = tree
+    verifier = Path(scratch) / 'evidence-verify'
+    verifier.write_bytes(git('show', f'{base}:scripts/evidence-verify').stdout)
+    done = subprocess.run([sys.executable, str(tool), '--repo', str(directory), '--tree', tree, '--inputs-from', inputs_at,
+                           '--verifier', str(verifier), '--json'], capture_output=True, text=True)
+    if done.returncode != 0:
+        return None, done.stderr.strip()[-300:] or 'rust-test-keys failed'
+    return json.loads(done.stdout), None
+
+
+def fetch_crate_notes(remote, keys):
+    """The per-crate records indexed under these keys, from the remote in one fetch (best effort: a remote without them is no error)."""
+    if not remote:
+        return
+    refspecs = []
+    for key in keys.values():
+        if key:
+            refspecs += [f'+refs/notes/evidence-input/rust-tests/{key}/*:refs/notes/evidence-input/rust-tests/{key}/*',
+                         f'+refs/tags/evidence/input/rust-tests/{key}/*:refs/tags/evidence/input/rust-tests/{key}/*']
+    for start in range(0, len(refspecs), 200):
+        git('fetch', '-q', '--no-tags', remote, *refspecs[start:start + 200], check=False)
+
+
+def uncovered_crates(verifier, directory, tree, base, repository, lane_base, keys):
+    """[(crate, reason)] for the crates with no passing note for their key, and the number of covered ones."""
+    missing, have = [], 0
+    for crate, key in sorted(keys.items()):
+        if not key:
+            missing.append((crate, 'no declared path exists in this tree'))
+            continue
+        ok, why = covered(verifier, directory, tree, 'rust-tests', base, repository, lane_base, crate_key=f'{crate}={key}')
+        if ok:
+            have += 1
+        else:
+            missing.append((crate, why))
+    return missing, have
+
+
+def push_records(directory, remote, refs):
+    """One push of every record's refs (the same refs evidence-wrap --push sends for one record, many at once). Returns an error text or None."""
+    token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
+    environment = dict(os.environ)
+    if token:  # the same header evidence-wrap sets; it travels in the environment, never in an argument
+        header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+        environment.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.extraheader', GIT_CONFIG_VALUE_0=f'Authorization: Basic {header}')
+    done = subprocess.run(['git', '-C', str(directory), 'push', '--quiet', remote, *(f'{ref}:{ref}' for ref in refs)], capture_output=True, text=True,
+                          env=environment)
+    if done.returncode == 0:
+        return None
+    text = done.stderr.replace(token, '***') if token else done.stderr
+    return f'push of {len(refs)} refs failed: {text.strip()[-300:]}'
+
+
+def sign_jobs():
+    """How many crate signatures run at once (ST_TEST_SIGN_JOBS; default 8)."""
+    try:
+        return max(1, int(os.environ.get('ST_TEST_SIGN_JOBS', '8')))
+    except ValueError:
+        return 8
+
+
+def shared_toolchain(wrap_path):
+    """The dev shell digest evidence-wrap would compute for every signature, once; None when it cannot (each wrap then computes its own)."""
+    try:
+        loader = importlib.machinery.SourceFileLoader('evidence_wrap_for_st_test', wrap_path)
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        return module.toolchain_digest(None)
+    except Exception:  # an unreadable script, or nix cannot name the shell: the wrapper reports it for itself
+        return None
+
+
+def filterset_input(selected):
+    """The expression scripts/ci-linux builds from CI_TEST_PACKAGES, as the record's `filterset` input: the whole expression while the signer
+    takes it (an input is at most 500 characters), else the count and the sha256 of the expression, which still pins the exact crate list."""
+    expression = ' or '.join(f'package(={crate})' for crate in selected)
+    if len(expression) <= FILTERSET_LIMIT:
+        return expression
+    return f'{len(selected)} packages sha256:{hashlib.sha256(expression.encode()).hexdigest()}'
+
+
+def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes, target):
+    """The `rust-tests` check: one nextest run of the crates that have no passing note for their key, on the workspace build CI makes,
+    then one signature per crate over that crate's part of the run. Returns the summary rows."""
+    keys, error = crate_keys(args.base, directory, tree, scratch)
+    if not error:
+        keys, error = only_crates(keys, args.crate)
+    if error:
+        return [('rust-tests', 'NOT RUN', 0, f'cannot compute the per-crate keys: {error}')], True
+    fetch_crate_notes(args.push or 'origin', keys)
+    missing, have = uncovered_crates(tools['evidence-verify'], directory, tree, args.base, repository if judged_by_policy(args.base) else None,
+                                     lane_base, keys)
+    if not missing:
+        return [('rust-tests', 'covered', 0, f'all {len(keys)} crates already have a passing note for their key')], False
+    selected = [crate for crate, _ in missing]
+    junit = Path(scratch) / 'nextest-junit.xml'
+    environment = dict(os.environ, CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit))
+    if target:
+        environment['CARGO_TARGET_DIR'] = str(target)
+    started = time.monotonic()
+    try:
+        done = subprocess.run(governed(RUN_TESTS, 'rust-tests'), cwd=directory, timeout=args.time_limit, env=environment)
+        code = done.returncode
+    except subprocess.TimeoutExpired:
+        code = 124
+    ran_seconds = round(time.monotonic() - started)
+    if code not in RUN_COMPLETED or not junit.exists():
+        return [('rust-tests', 'timed out' if code == 124 else 'NOT SIGNED', ran_seconds,
+                 f'the run did not complete (exit {code}{"" if junit.exists() else ", no report"}): no crate was signed')], True
+    # The expression scripts/ci-linux builds from CI_TEST_PACKAGES: the record says which crates the run was filtered to.
+    filterset = filterset_input(selected)
+    run_sha = hashlib.sha256(json.dumps([RUN_TESTS, selected]).encode()).hexdigest()
+    rows, failed, signed_count, empty = [], False, 0, []
+    # The dev shell's digest is the same for every crate: name it once (a nix evaluation of seconds) rather than once per signature.
+    toolchain = args.toolchain_sha256 or shared_toolchain(tools['evidence-wrap'])
+
+    def sign(crate):
+        """(row, refspecs): a summary row when the crate was not signed, else None and the refs of its record, which are pushed together
+        afterwards: its facts out of the report, then one wrapped, signed and locally verified record."""
+        facts = json.loads(subprocess.run([sys.executable, str(directory / 'scripts/ci-rust-test-result'), '--summary'], capture_output=True,
+                                          text=True, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate)).stdout or 'null')
+        if not facts:
+            return (f'rust-tests:{crate}', 'NOT SIGNED', 0, 'cannot read its result from the report'), []
+        wrap = [sys.executable, tools['evidence-wrap'], '--check', 'rust-tests', '--attempt', args.attempt,
+                '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base,
+                '--input', f'crate={crate}', '--input', f'source_inputs={keys[crate]}', '--input', f'tests_run={facts["tests_run"]}',
+                '--input', f'tests_ignored={facts["tests_ignored"]}', '--input', f'test_list_sha256={facts["test_list_sha256"]}',
+                '--input', f'ignored_list_sha256={facts["ignored_list_sha256"]}',
+                '--input', f'filterset={filterset}', '--input', f'run_command_sha256={run_sha}']
+        if RUST_TESTS in lanes:
+            wrap += ['--lanes-from', lane_base]
+        if toolchain:
+            wrap += ['--toolchain-sha256', toolchain]
+        started = time.monotonic()
+        signed = subprocess.run(wrap + ['--'] + RUST_TESTS_COMMAND, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if signed.returncode != 0:
+            detail = (signed.stderr.strip().splitlines() or ['failed'])[-1][:160]
+            return (f'rust-tests:{crate}', f'FAILED ({signed.returncode})', round(time.monotonic() - started), detail), None
+        try:
+            record = json.loads(signed.stderr[signed.stderr.index('{'):])
+            if not record.get('verified'):
+                raise ValueError('the record did not verify locally')
+            key = keys[crate]
+            refs = [record['tag'], record['ref'], f'refs/tags/evidence/input/rust-tests/{key}/{record["record"]}',
+                    f'refs/notes/evidence-input/rust-tests/{key}/{record["record"]}']
+        except (ValueError, KeyError) as error:
+            return (f'rust-tests:{crate}', 'FAILED (record)', round(time.monotonic() - started), f'cannot read the signed record: {error}'[:160]), None
+        return None, (refs, facts)
+
+    # Each signature is a verifier run, a signer run and a push of refs of its own, a dozen seconds on a repository with many records:
+    # serial, 52 crates took as long as the tests. They are independent (distinct refs), so they run side by side.
+    # The first goes alone: the signer creates its scratch repository when it is missing, and two signers racing to create it fail one.
+    outcomes = [sign(selected[0])]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=sign_jobs()) as pool:
+        outcomes += list(pool.map(sign, selected[1:]))
+    pushable = []
+    for crate, (row, signed) in zip(selected, outcomes):
+        if row:
+            rows.append(row)
+            failed = True
+        else:
+            refs, facts = signed
+            signed_count += 1
+            pushable += refs
+            if not int(facts['tests_run']):
+                empty.append(crate)
+    if args.push and pushable:
+        pushed = push_records(directory, args.push, pushable)
+        if pushed:
+            rows.append(('rust-tests:push', 'FAILED', 0, pushed))
+            failed = True
+    detail = f'{signed_count} of {len(selected)} crates run and signed ({have} of {len(keys)} already had a passing note); one nextest run on the workspace build'
+    if empty:
+        # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).
+        detail += f'; {len(empty)} ran no test (list under no_tests if they have none): {", ".join(empty[:8])}' + (' ...' if len(empty) > 8 else '')
+    rows.insert(0, ('rust-tests', 'passed' if not failed else 'FAILED', ran_seconds, detail))
+    return rows, failed
+
+
 def main(argv):
     POOL_SETTINGS.clear()
     POOL_SETTINGS.update({name: os.environ[name] for name in ('ST_TEST_TREES', 'ST_TEST_POOL') if name in os.environ})
@@ -487,6 +717,7 @@ def main(argv):
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
     parser.add_argument('--push', metavar='REMOTE', help='push the signed notes here after they verify')
     parser.add_argument('--repository', metavar='OWNER/NAME', help='default: from the remote\'s GitHub URL; without it the policy is not applied')
+    parser.add_argument('--crate', action='append', default=[], metavar='NAME', help='with --check rust-tests: only these crates (repeatable)')
     parser.add_argument('--attempt', default='1')
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
@@ -500,7 +731,7 @@ def main(argv):
     unknown = [name for name in args.check if name not in LOCAL]
     if unknown:
         raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join(LOCAL)}')
-    checks = args.check or list(LOCAL)
+    checks = args.check or [name for name in LOCAL if name not in OPT_IN]
     if args.list:
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')
@@ -525,6 +756,19 @@ def main(argv):
                 unchanged = web_unchanged(args.base) if name == WEB else None
                 if edits:
                     rows.append((name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})'))
+                elif name == RUST_TESTS:
+                    keys, error = crate_keys(args.base, Path('.'), tree, scratch)
+                    if not error:
+                        keys, error = only_crates(keys, args.crate)
+                    if error:
+                        rows.append((name, False, 'not covered', f'cannot compute the per-crate keys: {error}'))
+                    else:
+                        fetch_crate_notes(args.push or 'origin', keys)
+                        missing, have = uncovered_crates(str(verifier), Path('.'), tree, args.base,
+                                                         repository if judged_by_policy(args.base) else None, lane_base, keys)
+                        rows.append((name, not missing, 'covered' if not missing else f'{len(missing)} crates to run',
+                                     f'{have} of {len(keys)} crates covered' + (f'; to run: {", ".join(c for c, _ in missing[:6])}'
+                                                                                 + (' ...' if len(missing) > 6 else '') if missing else '')))
                 elif unchanged:
                     rows.append((name, True, 'not relevant', unchanged))
                 else:
@@ -575,6 +819,11 @@ def main(argv):
                 edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in lanes else []
                 if edits:
                     return (name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'), False, True
+                if name == RUST_TESTS:
+                    # One run, one row for the run and one for each crate that did not sign (a list: the collector below takes either).
+                    new_rows, bad = run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes,
+                                                   target)
+                    return new_rows, bad, False
                 unchanged = web_unchanged(args.base) if name == WEB else None
                 if unchanged:
                     return (name, 'not relevant', 0, unchanged), False, False  # nothing to run, nothing to sign: not a failure
@@ -642,7 +891,7 @@ def main(argv):
                     results[name] = run_one(name)
             for name in checks:
                 row, check_failed, check_unsigned = results[name]
-                rows.append(row)
+                rows += row if isinstance(row, list) else [row]
                 failed = failed or check_failed
                 unsigned = unsigned or check_unsigned
             print(f'\nst-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')

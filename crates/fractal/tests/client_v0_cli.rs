@@ -3635,11 +3635,11 @@ fn help_starts_with_examples_and_keeps_plumbing_reachable() {
     };
     let default = help(&["--help"]);
     assert_eq!(default, help(&["help"]));
-    assert!(default.starts_with("See what needs you:\n  st now\n"));
-    assert!(default.contains("st agents new NAME --harness claude --attach"));
+    assert!(default.starts_with("See what needs you:\n  fractal now\n"));
+    assert!(default.contains("fractal agents new NAME --harness claude --attach"));
     assert!(default.contains("Everyday use:"));
     assert!(default.contains("Inside an agent seat:"));
-    assert!(default.contains("Running st on a machine or fleet:"));
+    assert!(default.contains("Running fractal on a machine or fleet:"));
     assert!(!default.contains("Plumbing:"));
     assert!(help(&["help", "--all"]).contains("Plumbing:"));
     assert_eq!(

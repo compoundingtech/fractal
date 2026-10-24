@@ -38,7 +38,7 @@ parallel_tests \
   ci-local-web-test evidence-prepush-test evidence-presign-worker-test evidence-queue-signer-test evidence-wrap-test \
   ci-evidence-signing-test evidence-publish-test ci-evidence-shadow-test nix-check-facts-test ci-evidence-gate-test \
   evidence-flip-ready-test ci-evidence-presign-notice-test evidence-sign-hardening-test ci-daily-long-report-test ci-nextest-flaky-test \
-  nix-typescript-client-test nix-evidence-job-test ci-nextest-test
+  nix-typescript-client-test nix-evidence-job-test ci-nextest-test rust-test-keys-test
 python3 scripts/check-sqlite-large-values-test
 python3 scripts/check-sqlite-large-values
 # Whole-tree lints live here, not in the Linux gate: this check's evidence key is the whole tree, while the Linux gate
