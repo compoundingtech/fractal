@@ -13170,9 +13170,9 @@ one `request_changes` answer, each naming what happens next. A `choice` names 2 
 and `"custom": true` also takes the person's own words. `feedback` asks for text and has no
 answers. `why_person` says why no runtime fact or standing instruction settles it. Omit
 `recommendation` to make none. An `update` asks nothing: it names `about`, the person's own
-run or step or their message to you, and clears once read (`st work update` builds one). Subject kinds: pull_request, issue, document, mission, run,
+run or step or their message to you, and clears once read (`fractal work update` builds one). Subject kinds: pull_request, issue, document, mission, run,
 step, agent, host, commit, link; `revision` pins what was reviewed. `--attach FILE` shows the
-person an image with the request (up to 4), as `st conversations send --attach` does.
+person an image with the request (up to 4), as `fractal conversations send --attach` does.
 
   {"version": 1, "type": "decision",
    "question": "Land #11 then #12?",
@@ -13189,9 +13189,9 @@ person an image with the request (up to 4), as `st conversations send --attach` 
      {"id": "revise", "label": "Request changes", "outcome": "request_changes",
       "consequence": "I make the changes and ask again."}]}
 
-The person answers with `st work done STEP --answer ID [--text TEXT]`; requesting changes,
+The person answers with `fractal work done STEP --answer ID [--text TEXT]`; requesting changes,
 feedback and a custom choice need text. The resumed step's `person_answers` carries the answer
-as {"type", "outcome", "id", "label", "text"}: read it with `st work show STEP --json` and
+as {"type", "outcome", "id", "label", "text"}: read it with `fractal work show STEP --json` and
 act on `id` and `outcome`, not on the words."##;
 
 fn render_client_work_detail(work: &fractal_client::Work) -> String {

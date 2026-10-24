@@ -2431,6 +2431,21 @@ fn every_cli_command_has_a_valid_help_surface() {
             "{} has empty help",
             path.join(" ")
         );
+        for line in help.render_long_help().to_string().lines() {
+            // These describe real executable filenames, not the product identity.
+            if line.contains("Install st3, the st link")
+                || line.contains("Keep the installed st3, st,")
+            {
+                continue;
+            }
+            assert!(
+                !line.split_whitespace().any(|word| {
+                    matches!(word.trim_matches(['`', '.', ',', ';']), "st" | "st3")
+                }),
+                "{} contains legacy product wording: {line}",
+                path.join(" ")
+            );
+        }
         let subcommands = command.get_subcommands().cloned().collect::<Vec<_>>();
         for subcommand in subcommands {
             let mut child_path = path.to_vec();
