@@ -225,14 +225,21 @@ def run(args, *, worktree, shell=None, network=False, output=None,
         git = worktree / '.git'
         if git.is_symlink():
             raise RuntimeError('candidate Git metadata must not be a symlink')
+        # Mount the whole metadata tree, not individual files: this denies new
+        # hooks/config directories as well as edits, renames and removals. A
+        # linked snapshot also needs its pointer sealed and the clone's common
+        # tree (including worktrees/<name>) mounted read-only at its real path.
+        git_metadata = []
         if git.is_dir():
-            command += ['--ro-bind', str(git), str(git)]
+            git_metadata = [git]
         elif git.is_file():
             clone = directory('FRACTAL_INTEGRATOR_CLONE')
             metadata = clone / '.git'
             if not metadata.is_dir() or metadata.is_symlink():
                 raise RuntimeError('snapshot requires a clone with a real .git directory')
-            command += ['--ro-bind', str(metadata), str(metadata), '--ro-bind', str(git), str(git)]
+            git_metadata = [metadata, git]
+        for path in git_metadata:
+            command += ['--ro-bind', str(path), str(path)]
         if readonly_dependencies:
             protected = list(worktree.rglob('node_modules'))
             members = worktree / '.devenv' / 'candidate-members'
@@ -253,6 +260,10 @@ def run(args, *, worktree, shell=None, network=False, output=None,
             stage_parent = worktree / '.devenv' / 'candidate-sandbox-output'
             if not stage_parent.resolve().is_relative_to(worktree):
                 raise RuntimeError('candidate output staging escapes the worktree')
+            # A candidate symlink into .git would otherwise let the later writable
+            # output bind expose a subtree of the read-only metadata mount.
+            if any(stage_parent.resolve().is_relative_to(path) for path in git_metadata):
+                raise RuntimeError('candidate output staging overlaps Git metadata')
             stage_parent.mkdir(parents=True, exist_ok=True)
             staged = Path(tempfile.mkdtemp(dir=stage_parent))
             command += ['--bind', str(staged), str(output.parent)]

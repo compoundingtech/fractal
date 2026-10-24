@@ -2,13 +2,39 @@
 """Git orchestration over launcher-owned metadata, without executable configuration."""
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
 TRUSTED_CWD = Path(__file__).resolve().parent
 POLICY = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
           '-c', 'core.attributesFile=/dev/null', '-c', 'protocol.ext.allow=never']
-DRIVERS = r'^(filter\..*\.(clean|smudge|process)|merge\..*\.driver|diff\..*\.(command|textconv)|include.*\.path)$'
+sys.path.insert(0, str(TRUSTED_CWD))
+from candidate_sandbox import read_regular
+
+# Only inert repository shape, identity and the launcher's own bookkeeping.
+# Unknown keys fail closed, including future executable Git configuration.
+LOCAL_KEYS = frozenset((
+    'core.repositoryformatversion', 'core.bare', 'core.filemode', 'core.logallrefupdates',
+    'remote.origin.url', 'remote.origin.fetch', 'user.name', 'user.email',
+    'extensions.worktreeconfig', 'extensions.objectformat',
+    'rerere.enabled', 'rerere.autoupdate', 'maintenance.autodetach', 'gc.autodetach',
+))
+
+
+def validate_config(path, env):
+    content = read_regular(path)
+    # No repository discovery and no includes: parse only the safe-opened bytes.
+    check = subprocess.run(['git', 'config', '--file', '-', '--no-includes', '--list', '--null'],
+                           input=content, cwd=TRUSTED_CWD, env=env, capture_output=True)
+    if check.returncode:
+        raise RuntimeError('host Git cannot parse repository-local configuration')
+    for entry in check.stdout.split(b'\0'):
+        if not entry:
+            continue
+        key = entry.split(b'\n', 1)[0].decode('utf-8')
+        if key not in LOCAL_KEYS and not re.fullmatch(r'branch\.[^\n]+\.(remote|merge)', key):
+            raise RuntimeError('host Git refuses non-allowlisted repository-local configuration')
 
 
 def run(args):
@@ -26,11 +52,10 @@ def run(args):
         metadata = repo / '.git'
         if metadata.is_symlink() or not metadata.is_dir():
             raise RuntimeError('host Git requires launcher-owned directory metadata')
-        check = subprocess.run(['git', *POLICY, '-C', str(repo), 'config', '--local',
-                                '--no-includes', '--get-regexp', DRIVERS],
-                               cwd=TRUSTED_CWD, env=env, capture_output=True)
-        if check.returncode != 1:
-            raise RuntimeError('host Git forbids repository-local executable drivers/includes')
+        validate_config(metadata / 'config', env)
+        worktree_config = metadata / 'config.worktree'
+        if worktree_config.exists() or worktree_config.is_symlink():
+            validate_config(worktree_config, env)
     return subprocess.run(['git', *POLICY, *args], cwd=TRUSTED_CWD, env=env).returncode
 
 

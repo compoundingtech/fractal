@@ -38,7 +38,7 @@ class HostBoundaryTest(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertEqual(json.loads((build / 'build-receipt.json').read_text())['dependencyKey'], 'fixture')
 
-    def test_host_git_disables_hooks_fsmonitor_and_ambient_filter_config(self):
+    def test_host_git_ignores_ambient_configuration(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             repo = root / 'repo'
@@ -47,8 +47,6 @@ class HostBoundaryTest(unittest.TestCase):
             attack = root / 'attack'
             attack.write_text(f'#!/bin/sh\ntouch "{marker}"\n')
             attack.chmod(0o755)
-            subprocess.run(['git', '-C', str(repo), 'config', 'core.fsmonitor', str(attack)], check=True)
-            subprocess.run(['git', '-C', str(repo), 'config', 'core.hooksPath', str(root)], check=True)
             (root / 'pre-commit').symlink_to(attack)
             (repo / '.gitattributes').write_text('*.dat filter=fixture\n')
             (repo / 'input.dat').write_text('candidate bytes')
@@ -60,14 +58,46 @@ class HostBoundaryTest(unittest.TestCase):
                                          '-C', str(repo), *args], cwd=repo, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(marker.exists())
-            for key in ('filter.fixture.clean', 'diff.fixture.textconv'):
+
+    def test_host_git_refuses_every_non_allowlisted_local_key(self):
+        keys = (
+            'remote.origin.uploadpack', 'remote.origin.receivepack', 'uploadpack.packObjectsHook',
+            'uploadpack.allowFilter', 'receive.advertisePushOptions',
+            'core.sshCommand', 'core.gitProxy', 'core.alternateRefsCommand', 'core.askPass',
+            'credential.helper', 'gpg.program', 'gpg.ssh.program', 'gpg.openpgp.program',
+            'core.pager', 'pager.log', 'core.editor', 'sequence.editor',
+            'protocol.ext.allow', 'url.fixture.insteadOf', 'http.proxy', 'http.proxyAuthMethod',
+            'include.path', 'includeIf.gitdir:fixture.path', 'alias.fixture',
+            'filter.fixture.clean', 'merge.fixture.driver', 'diff.fixture.command', 'diff.fixture.textconv',
+            'core.hooksPath', 'core.fsmonitor', 'future.unknown',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / 'repo'
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            config = repo / '.git/config'
+            original = config.read_bytes()
+            marker = root / 'executed'
+            attack = root / 'attack'
+            attack.write_text(f'#!/bin/sh\ntouch "{marker}"\n')
+            attack.chmod(0o755)
+            for key in keys:
                 with self.subTest(key=key):
-                    subprocess.run(['git', '-C', str(repo), 'config', key, str(attack)], check=True)
+                    config.write_bytes(original)
+                    subprocess.run(['git', 'config', '--file', str(config), key, str(attack)], check=True)
                     result = subprocess.run([sys.executable, '-I', str(SCRIPTS / 'host-git.py'),
-                                             '-C', str(repo), 'add', '.'], capture_output=True, text=True)
+                                             '-C', str(repo), 'status', '--porcelain'],
+                                            capture_output=True, text=True, timeout=10)
                     self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('non-allowlisted', result.stderr)
                     self.assertFalse(marker.exists())
-                    subprocess.run(['git', '-C', str(repo), 'config', '--unset', key], check=True)
+            # Per-worktree config is validated before Git can activate it too.
+            config.write_bytes(original)
+            (repo / '.git/config.worktree').write_text('[credential]\n helper = forbidden\n')
+            result = subprocess.run([sys.executable, '-I', str(SCRIPTS / 'host-git.py'),
+                                     '-C', str(repo), 'status', '--porcelain'], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('non-allowlisted', result.stderr)
 
 
 if __name__ == '__main__':

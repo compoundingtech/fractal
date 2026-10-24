@@ -200,6 +200,17 @@ class RunnerTest(unittest.TestCase):
             sandbox.run(['node'], worktree=self.worktree, output=output)
         self.assertEqual((output / 'receipt').read_text(), 'ok')
 
+    def test_output_staging_cannot_alias_readonly_git_metadata(self):
+        metadata = self.worktree / '.git'
+        metadata.mkdir()
+        (self.worktree / '.devenv').mkdir()
+        (self.worktree / '.devenv/candidate-sandbox-output').symlink_to(metadata)
+        with patch.object(sandbox.subprocess, 'run') as execute, \
+                self.assertRaisesRegex(RuntimeError, 'staging overlaps Git metadata'):
+            sandbox.run(['true'], worktree=self.worktree, output=self.root / 'builds/revision')
+        execute.assert_not_called()
+        self.assertEqual(list(metadata.iterdir()), [])
+
     def test_output_symlink_is_rejected(self):
         output = self.root / 'production/builds/revision'
         def complete(argv, **kwargs):
@@ -297,6 +308,118 @@ class ConfigurationTest(unittest.TestCase):
 
 @unittest.skipUnless(REAL, 'use --real for pinned bubblewrap isolation smoke')
 class IsolationTest(unittest.TestCase):
+    def test_clone_git_metadata_is_readonly(self):
+        self._assert_git_metadata_is_readonly(linked=False)
+
+    def test_linked_snapshot_git_metadata_is_readonly(self):
+        self._assert_git_metadata_is_readonly(linked=True)
+
+    def _assert_git_metadata_is_readonly(self, *, linked):
+        with tempfile.TemporaryDirectory(prefix='git-metadata-fixture-') as fixture:
+            root = Path(fixture)
+            clone = root / 'clone'
+            clone.mkdir()
+            sandbox.tools.cache_clear()
+            self.addCleanup(sandbox.tools.cache_clear)
+            with patch.dict(os.environ, {
+                    'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                    'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(root / 'state'),
+                    'FRACTAL_INTEGRATOR_PNPM_STORE': str(root / 'pnpm'),
+                    'FRACTAL_INTEGRATOR_CLONE': str(clone)}):
+                binaries, _, _ = sandbox.tools()
+                git_env = {'PATH': str(Path(binaries['git']).parent), 'HOME': str(root),
+                           'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_SYSTEM': '/dev/null'}
+
+                def git(*args):
+                    return subprocess.run([binaries['git'], '-C', str(clone), *args],
+                                          env=git_env, check=True, capture_output=True, text=True)
+
+                git('init', '--initial-branch=fixture')
+                (clone / 'payload').write_text('fixture payload\n')
+                git('add', 'payload')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                    'commit', '-m', 'fixture')
+                metadata = clone / '.git'
+                (metadata / 'hooks/pre-commit').write_text('#!/bin/sh\nexit 0\n')
+                (metadata / 'info/attributes').write_text('payload -diff\n')
+                (metadata / 'empty-directory').mkdir()
+                worktree = clone
+                files = [metadata / name for name in
+                         ('config', 'HEAD', 'index', 'hooks/pre-commit', 'info/attributes')]
+                directories = [metadata, metadata / 'hooks', metadata / 'info']
+                empty_directories = [metadata / 'empty-directory']
+                if linked:
+                    worktree = root / 'snapshot'
+                    git('worktree', 'add', '--detach', str(worktree), 'HEAD')
+                    pointer = worktree / '.git'
+                    gitdir = Path(pointer.read_text().removeprefix('gitdir: ').strip())
+                    self.assertTrue(gitdir.is_relative_to(metadata / 'worktrees'))
+                    (gitdir / 'config.worktree').write_text('[fixture]\n\tvalue = original\n')
+                    (gitdir / 'empty-directory').mkdir()
+                    files += [pointer, *(gitdir / name for name in
+                                         ('HEAD', 'index', 'gitdir', 'commondir', 'config.worktree'))]
+                    directories.append(gitdir)
+                    empty_directories.append(gitdir / 'empty-directory')
+
+                def contents():
+                    paths = [metadata, *metadata.rglob('*')]
+                    if linked:
+                        paths.append(worktree / '.git')
+                    return {str(path): (stat.S_IMODE(path.stat().st_mode),
+                                        path.read_bytes() if path.is_file() else None)
+                            for path in paths}
+
+                before = contents()
+                attempts = []
+                for path in files:
+                    attempts += [(operation, str(path))
+                                 for operation in ('write', 'rename', 'unlink', 'replace', 'chmod')]
+                for path in directories:
+                    attempts += [('mkdir', str(path / 'new-directory')),
+                                 ('create', str(path / 'new-file')),
+                                 ('rename', str(path))]
+                attempts += [('rmdir', str(path)) for path in empty_directories]
+                probe = '''
+import json, os, pathlib, sys
+attempts = json.loads(sys.argv[1])
+replacement = pathlib.Path("replacement")
+results = []
+for operation, name in attempts:
+    path = pathlib.Path(name)
+    try:
+        if operation in ("write", "create"):
+            path.write_text("changed")
+        elif operation == "mkdir":
+            path.mkdir()
+        elif operation == "rename":
+            path.rename(str(path) + ".moved")
+        elif operation == "unlink":
+            path.unlink()
+        elif operation == "replace":
+            replacement.write_text("replacement")
+            os.replace(replacement, path)
+        elif operation == "chmod":
+            path.chmod(0o777)
+        elif operation == "rmdir":
+            path.rmdir()
+    except OSError as error:
+        results.append([operation, name, error.errno])
+    else:
+        results.append([operation, name, None])
+pathlib.Path("sandbox-write").write_text("allowed")
+print(json.dumps(results))
+'''
+                result = sandbox.run(['python3', '-c', probe, sandbox.json.dumps(attempts)],
+                                     worktree=worktree, check=True, capture_output=True, text=True)
+                self.assertEqual(contents(), before, 'host Git metadata changed inside sandbox')
+                results = sandbox.json.loads(result.stdout)
+                self.assertEqual([(operation, name) for operation, name, _ in results], attempts)
+                for operation, name, error in results:
+                    with self.subTest(linked=linked, operation=operation, path=name):
+                        self.assertIn(error, (errno.EROFS, errno.EBUSY, errno.EACCES, errno.EPERM),
+                                      'metadata mutation succeeded or failed for a non-protection reason')
+                self.assertEqual((worktree / 'sandbox-write').read_text(), 'allowed')
+
     def test_install_uses_external_store_and_generation_has_no_local_store(self):
         import io
         import tarfile

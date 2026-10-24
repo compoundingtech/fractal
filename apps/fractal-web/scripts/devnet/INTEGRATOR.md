@@ -388,16 +388,30 @@ candidate module discovery and Python environment overrides. Trusted sibling
 imports explicitly insert only the launcher's script directory. Receipt, HTML,
 launch-script and dependency-input reads use no-follow, nonblocking opens and
 verify regular descriptors before reading; candidate output is inert data here.
-Integration signature version 10 prevents reuse of earlier publication results.
+Integration signature version 10 invalidates earlier tick-state signatures.
 
 | Host step | Working directory / input | Boundary |
 | --- | --- | --- |
 | Sandbox CLI, cache population, dependency preparation, receipt validation and logging | Trusted launcher script directory; absolute candidate paths as data | Isolated Python; no candidate imports. Snapshot directory cleanup never changes hardlinked file modes. |
-| Git selection, checkout, merge, add and snapshot removal | Trusted launcher directory; explicit source clone | `host-git.py` ignores ambient config, disables hooks/fsmonitor/external protocol, and refuses local executable filter/merge/diff drivers and includes. Source Git metadata is launcher-owned and read-only in candidate children; candidate attributes cannot introduce a driver. |
+| Git selection, checkout, merge, add and snapshot removal | Trusted launcher directory; explicit source clone | `host-git.py` ignores ambient config, disables hooks/fsmonitor/external protocol, and accepts only allowlisted inert local keys parsed without includes. Source Git metadata is launcher-owned and read-only in candidate children; candidate attributes cannot introduce a driver. |
 | Overlay/member/dependency copies | Trusted Python; confined source/destination paths | Existing destination-ancestor checks reject escapes; source aliases remain confined, overlay symlinks are preserved rather than dereferenced, special files fail closed. No host tar or candidate-directed shell copy. |
 | Nix tool realization and environment resolution | Trusted pinned checkout / private bootstrap home | Only pinned trusted flakes, clean environment; never candidate expressions. |
 | Node, pnpm, generators, hooks and license scripts | Candidate directory inside bubblewrap only | No host Node/package-loader discovery; child environment is explicit and credential-free. |
 | Output publication, chmod and pointer renames | Trusted launcher directory; validated promoted output | Regular-file/directory-only promotion and safe descriptor reads; no output code executes during admission/publication. |
+
+Local Git configuration is safe-opened and parsed as bytes from stdin with
+includes disabled, before any repository operation. The allowlist contains only
+repository-format/shape flags, origin URL/fetch, branch remote/merge, user identity,
+object-format/worktree-config flags, and the integrator's rerere/GC bookkeeping.
+Unknown keys fail closed, including executable helpers, URL rewrites, aliases and
+protocol/proxy settings. Both common and per-worktree configuration are checked.
+
+The clone's entire `.git` directory is read-only inside bubblewrap. Linked
+snapshots additionally bind their `.git` pointer read-only; the clone mount covers
+the actual worktree gitdir and common config, hooks and attributes. Output staging
+cannot resolve inside this protected metadata. Real clone and linked-worktree
+tests verify overwrite, creation, rename, removal and permission changes fail,
+while ordinary candidate writes remain possible.
 
 Genie and builds have a private network namespace. Member fetching, installation
 and license regeneration explicitly share the host network for dependency access.

@@ -65,6 +65,7 @@ if args and pathlib.Path(args[0]).name == 'candidate_sandbox.py':
 '''+ f'\nos.execv({sys.executable!r}, [{sys.executable!r}, "-I", *args])\n')
             python.chmod(0o755)
             (source / '.git').mkdir(parents=True)
+            (source / '.git/config').write_text('')
             for relative in ('apps/fractal-web/private/build-live.mjs',
                              'apps/fractal-web/vendor/utils/src/node/cli-build-identity.js',
                              'node_modules/fixture/index.js'):
@@ -81,6 +82,8 @@ root = pathlib.Path(os.environ['SNAPSHOT_LEASE_FIXTURE'])
 args = sys.argv[1:]
 while args[:1] == ['-c']:
     args = args[2:]
+if args[:1] == ['config'] and '--file' in args:
+    os.execv(os.environ['SNAPSHOT_LEASE_REAL_GIT'], ['git', *args])
 args = args[2:]
 with (root / 'git-calls.jsonl').open('a') as stream:
     stream.write(json.dumps(args) + '\\n')
@@ -157,6 +160,7 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                 'SNAPSHOT_LEASE_FIXTURE': str(fixture),
                 'SNAPSHOT_LEASE_RELEASE': str(release),
                 'SNAPSHOT_LEASE_POLICY': DEPENDENCY_POLICY,
+                'SNAPSHOT_LEASE_REAL_GIT': shutil.which('git'),
                 'FRACTAL_BUILD_SNAPSHOT_ROOT': str(snapshot_root),
                 'FRACTAL_DEP_CACHE': str(cache),
                 'FRACTAL_BUILD_ADMISSION': 'fallback',
