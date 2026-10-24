@@ -193,6 +193,13 @@ native error paths. Other capture refusals report `stage: native-capture`. A liv
 whose environment is inaccessible remains an unknown producer, even if its name resembles
 a host service or its current parent is root-owned. It is not skipped or reported as a
 successful empty plan.
+Before checking process ownership or enumerating processes, repair verifies the actual opened
+`/proc` mount by its fdinfo mount ID and mountinfo options. Any `hidepid` value other than `0`
+or `off` (including `1`, `2`, `invisible`, `noaccess`, and `ptraceable`), or `subset=pid`,
+refuses with the same HTTP 422 code and `stage: procfs-visibility`, `reason: procfs-hides-processes`,
+and the mount options. Unreadable, malformed, or missing mount evidence also refuses with
+that stage and a distinct reason. This prevents a hidden live producer being mistaken for an
+exited process or a silently partial process inventory being accepted.
 
 Dry-run includes the physical evidence in the item and token. Apply captures fresh evidence,
 keeps the runtime spawn lock through the normal writer transaction, and refuses a changed token

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 mod legacy_start_closure;
-pub use legacy_start_closure::{LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable};
+pub use legacy_start_closure::{LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, ProcfsHidesProcesses};
 mod producer;
 
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);

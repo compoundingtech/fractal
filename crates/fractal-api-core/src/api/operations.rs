@@ -263,6 +263,14 @@ fn legacy_start_proof_error(error: anyhow::Error) -> St3Error {
         "legacy-start-proof-unavailable",
         "could not prove the legacy runtime start is closed",
     );
+    if let Some(procfs) = error.downcast_ref::<fractal_runtime::ProcfsHidesProcesses>() {
+        refusal = refusal.with_detail("stage", "procfs-visibility")
+            .with_detail("reason", procfs.detail);
+        if let Some(options) = &procfs.mount_options {
+            refusal = refusal.with_detail("mount_options", options);
+        }
+        return refusal;
+    }
     if let Some(process) = error.downcast_ref::<fractal_runtime::LegacyStartProofUnavailable>() {
         refusal = refusal.with_detail("stage", process.stage).with_detail("pid", process.pid);
         if let Some(errno) = process.errno {
@@ -688,6 +696,26 @@ pub async fn events(
 #[cfg(test)]
 mod legacy_proof_refusal_tests {
     use super::*;
+    #[test]
+    fn hidden_or_unknown_procfs_is_a_typed_422_refusal() {
+        for (reason, options) in [
+            ("procfs-hides-processes", Some("rw;rw,hidepid=invisible".to_owned())),
+            ("mountinfo-unreadable", None),
+            ("mountinfo-invalid", None),
+            ("procfs-mount-not-found", None),
+        ] {
+            let error = legacy_start_proof_error(fractal_runtime::ProcfsHidesProcesses {
+                detail: reason, mount_options: options.clone(),
+            }.into());
+            let error = ApiError::internal(error.into());
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error.code, "legacy-start-proof-unavailable");
+            assert_eq!(error.details.get("stage"), Some(&json!("procfs-visibility")));
+            assert_eq!(error.details.get("reason"), Some(&json!(reason)));
+            assert_eq!(error.details.get("mount_options"), options.as_ref().map(|options| json!(options)).as_ref());
+        }
+    }
+
 
     fn capture_error() -> St3Error {
         legacy_start_proof_error(anyhow::Error::new(

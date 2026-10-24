@@ -45,6 +45,73 @@ impl std::fmt::Display for LegacyStartProofUnavailable {
 
 impl std::error::Error for LegacyStartProofUnavailable {}
 
+/// A complete process inventory cannot be established from this procfs mount.
+#[derive(Debug)]
+pub struct ProcfsHidesProcesses {
+    pub detail: &'static str,
+    pub mount_options: Option<String>,
+}
+
+impl std::fmt::Display for ProcfsHidesProcesses {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "procfs visibility unavailable: {} ({:?})", self.detail, self.mount_options)
+    }
+}
+
+impl std::error::Error for ProcfsHidesProcesses {}
+
+#[cfg(target_os = "linux")]
+fn procfs_visibility_error(detail: &'static str) -> ProcfsHidesProcesses {
+    ProcfsHidesProcesses { detail, mount_options: None }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_procfs_mount(mountinfo: std::io::Result<String>, mount_id: u64) -> std::result::Result<(), ProcfsHidesProcesses> {
+    let mountinfo = mountinfo.map_err(|_| procfs_visibility_error("mountinfo-unreadable"))?;
+    let mut selected = None;
+    for line in mountinfo.lines() {
+        let (mount, filesystem) = line.split_once(" - ")
+            .ok_or_else(|| procfs_visibility_error("mountinfo-invalid"))?;
+        let mut fields = mount.split_whitespace();
+        let id = fields.next().and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| procfs_visibility_error("mountinfo-invalid"))?;
+        let options = fields.nth(4).ok_or_else(|| procfs_visibility_error("mountinfo-invalid"))?;
+        let mut filesystem = filesystem.split_whitespace();
+        let kind = filesystem.next().ok_or_else(|| procfs_visibility_error("mountinfo-invalid"))?;
+        filesystem.next().ok_or_else(|| procfs_visibility_error("mountinfo-invalid"))?;
+        let super_options = filesystem.next().ok_or_else(|| procfs_visibility_error("mountinfo-invalid"))?;
+        if id == mount_id && selected.replace((kind, options, super_options)).is_some() {
+            return Err(procfs_visibility_error("mountinfo-invalid"));
+        }
+    }
+    let (kind, options, super_options) = selected
+        .ok_or_else(|| procfs_visibility_error("procfs-mount-not-found"))?;
+    if kind != "proc" { return Err(procfs_visibility_error("procfs-mount-not-found")); }
+    if options.split(',').chain(super_options.split(',')).any(|option| {
+        option.strip_prefix("hidepid=").is_some_and(|value| !matches!(value, "0" | "off"))
+            || option == "subset=pid"
+    }) {
+        return Err(ProcfsHidesProcesses {
+            detail: "procfs-hides-processes",
+            mount_options: Some(format!("{options};{super_options}")),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_complete_procfs() -> std::result::Result<(), ProcfsHidesProcesses> {
+    // Match the opened /proc directory's mount ID, not an arbitrary mountinfo
+    // line named /proc: stacked or bind mounts can have the same mount point.
+    let directory = File::open("/proc").map_err(|_| procfs_visibility_error("procfs-root-unreadable"))?;
+    let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", directory.as_raw_fd()))
+        .map_err(|_| procfs_visibility_error("procfs-mount-identity-unreadable"))?;
+    let mount_id = fdinfo.lines().find_map(|line| line.strip_prefix("mnt_id:"))
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .ok_or_else(|| procfs_visibility_error("procfs-mount-identity-invalid"))?;
+    validate_procfs_mount(std::fs::read_to_string("/proc/self/mountinfo"), mount_id)
+}
+
 #[cfg(target_os = "linux")]
 fn process_proof_error(stage: &'static str, pid: u32, error: anyhow::Error) -> anyhow::Error {
     LegacyStartProofUnavailable {
@@ -232,6 +299,7 @@ fn operation_processes(owner_uid: u32, operation: &str) -> Result<Vec<u32>> {
 #[cfg(target_os = "linux")]
 fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str) -> Result<Vec<u32>> {
     use std::os::unix::fs::MetadataExt as _;
+    require_complete_procfs()?;
     let mut matching = BTreeSet::new();
     for entry in std::fs::read_dir(proc_root).context("enumerate legacy operation processes")? {
         let entry = entry?;
@@ -258,15 +326,21 @@ fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str) -> 
         if !uids.contains(&owner_uid) && directory.metadata()?.uid() != owner_uid {
             continue;
         }
-        if owner_process_has_operation(&path, operation, pid)? {
+        if owner_process_has_operation_in_complete_procfs(&path, operation, pid)? {
             matching.insert(pid);
         }
     }
     Ok(matching.into_iter().collect())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn owner_process_has_operation(path: &Path, operation: &str, pid: u32) -> Result<bool> {
+    require_complete_procfs()?;
+    owner_process_has_operation_in_complete_procfs(path, operation, pid)
+}
+
+#[cfg(target_os = "linux")]
+fn owner_process_has_operation_in_complete_procfs(path: &Path, operation: &str, pid: u32) -> Result<bool> {
     match std::fs::read(path.join("environ")) {
         Ok(environment) => Ok(has_operation(&environment, operation)
             && !process_exited(path).map_err(|error| process_proof_error("proc-stat", pid, error))?),
@@ -304,6 +378,47 @@ fn has_operation(environment: &[u8], operation: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn procfs_mount_visibility_refuses_every_hiding_option() {
+        for option in ["hidepid=1", "hidepid=2", "hidepid=invisible", "hidepid=noaccess",
+            "hidepid=ptraceable", "hidepid=unknown", "hidepid=", "subset=pid"]
+        {
+            for (mount, super_options) in [(format!("rw,{option}"), "rw".to_owned()),
+                ("rw".to_owned(), format!("rw,{option}"))]
+            {
+                let error = validate_procfs_mount(Ok(format!(
+                    "42 1 0:1 / /proc {mount} - proc proc {super_options}\n")), 42).unwrap_err();
+                assert_eq!(error.detail, "procfs-hides-processes", "{option}");
+                assert_eq!(error.mount_options, Some(format!("{mount};{super_options}")));
+            }
+        }
+        for options in ["rw", "rw,hidepid=0", "rw,hidepid=off", "rw,subset=all"] {
+            validate_procfs_mount(Ok(format!("42 1 0:1 / /proc rw - proc proc {options}\n")), 42).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn procfs_mount_visibility_refuses_unknown_mountinfo_and_matches_the_open_mount() {
+        let unreadable = validate_procfs_mount(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)), 42)
+            .unwrap_err();
+        assert_eq!(unreadable.detail, "mountinfo-unreadable");
+        for (text, detail) in [
+            ("not mountinfo", "mountinfo-invalid"),
+            ("42 1 0:1 / /proc rw - proc", "mountinfo-invalid"),
+            ("41 1 0:1 / /proc rw - proc proc rw", "procfs-mount-not-found"),
+            ("42 1 0:1 / /proc rw - tmpfs tmpfs rw", "procfs-mount-not-found"),
+        ] {
+            let error = validate_procfs_mount(Ok(text.to_owned()), 42).unwrap_err();
+            assert_eq!(error.detail, detail);
+            assert!(error.mount_options.is_none());
+        }
+        let stacked = "41 1 0:1 / /proc rw - proc proc rw\n42 41 0:2 / /proc rw - proc proc rw,hidepid=invisible\n";
+        validate_procfs_mount(Ok(stacked.into()), 41).unwrap();
+        assert_eq!(validate_procfs_mount(Ok(stacked.into()), 42).unwrap_err().detail, "procfs-hides-processes");
+    }
 
     fn closed() -> LegacyStartClosureEvidence {
         LegacyStartClosureEvidence {
@@ -464,6 +579,21 @@ mod tests {
         fn assert_denied(pid: u32, reported_pid: u32, owner_uid: u32) -> Result<()> {
             use std::os::unix::fs::MetadataExt as _;
             let path = PathBuf::from(format!("/proc/{pid}"));
+            if let Err(expected) = require_complete_procfs() {
+                let error = owner_process_has_operation(&path, OPERATION, pid).unwrap_err();
+                let refusal = error.downcast_ref::<ProcfsHidesProcesses>()
+                    .context("hidden procfs producer must return a typed refusal")?;
+                assert_eq!(refusal.detail, expected.detail);
+                assert_eq!(refusal.mount_options, expected.mount_options);
+                let enumeration = operation_processes(owner_uid, OPERATION).unwrap_err();
+                let enumeration = enumeration.downcast_ref::<ProcfsHidesProcesses>()
+                    .context("hidden procfs enumeration must refuse, not return a partial inventory")?;
+                assert_eq!(enumeration.detail, refusal.detail);
+                assert_eq!(enumeration.mount_options, refusal.mount_options);
+                eprintln!("{TEST}: typed ProcfsHidesProcesses refusal asserted for owner lookup AND enumeration: {refusal:?}; {}; producer=[{}]",
+                    reader_diagnostics(), process_diagnostics(pid));
+                return Ok(());
+            }
             let reader = std::fs::read_to_string("/proc/self/status").context("reader diagnostics: read /proc/self/status")?;
             let caps = reader.lines().find(|line| line.starts_with("CapEff:")).unwrap_or("CapEff: missing");
             let namespace = std::fs::read_link("/proc/self/ns/user").context("reader diagnostics: readlink /proc/self/ns/user")?;
@@ -562,6 +692,12 @@ mod tests {
                 }
             }
             let producer_pid = producer_pid.with_context(|| format!("producer readiness: expected pid={} dumpable=0 from {}", child.id(), executable.display()))?;
+            if require_complete_procfs().is_err() {
+                anyhow::ensure!(child.try_wait().context("verify hidden producer wait status")?.is_none(),
+                    "hidden producer exited before its refusal assertion");
+                assert_denied(producer_pid, child.id(), unsafe { libc::geteuid() })?;
+                return Ok(());
+            }
             if effective & (1 << CAP_SYS_PTRACE) == 0 {
                 assert_denied(producer_pid, child.id(), unsafe { libc::geteuid() })
                     .with_context(|| format!("direct reader control: {}", process_diagnostics(sibling_pid)))?;
