@@ -13,6 +13,13 @@ The client uses standard `fetch`, so callers can supply a fetch implementation a
 
 The default transport binds `globalThis.fetch` to `globalThis`, preserving the receiver required by browser implementations. Supplying `fetchImpl` overrides that default without rebinding the custom implementation.
 
+HTTP rejections with a non-JSON body (for example, a middleware body-limit 413) throw
+`ClientError` with code `http-error`, the HTTP status and status text, and
+`retryable: false`. `Retry-After` remains available as `retryAfterMs`. Valid JSON
+error envelopes retain the server's code, message and details regardless of the
+response content type. Malformed JSON in a successful response and response-body
+read failures are not converted to HTTP errors.
+
 Every HTTP method accepts a final optional `RequestOptions` argument (`{ signal?: AbortSignal }`).
 Existing query options and optional defaults keep their positions: for example,
 `runtimesGet(id, { signal })`, `messageSend(input, { signal })`, and

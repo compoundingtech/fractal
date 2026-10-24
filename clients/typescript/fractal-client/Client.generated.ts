@@ -314,14 +314,23 @@ export class FractalClient {
                 retryable: false, details: {} }, 404);
         }
         let payload: unknown;
-        if (readAuthorization) {
-            const bytes = new Uint8Array(await response.arrayBuffer());
+        try {
+            if (readAuthorization) {
+                const bytes = new Uint8Array(await response.arrayBuffer());
+                options.signal?.throwIfAborted();
+                if (bytes.byteLength > readAuthorization.budget) throw new AssistantReadRejected('assistant response exceeded max_response_bytes');
+                payload = JSON.parse(new TextDecoder().decode(bytes));
+            } else {
+                payload = await response.json();
+                options.signal?.throwIfAborted();
+            }
+        } catch (error) {
             options.signal?.throwIfAborted();
-            if (bytes.byteLength > readAuthorization.budget) throw new AssistantReadRejected('assistant response exceeded max_response_bytes');
-            payload = JSON.parse(new TextDecoder().decode(bytes));
-        } else {
-            payload = await response.json();
-            options.signal?.throwIfAborted();
+            // HTTP middleware can reject a request before the client API writes a JSON envelope.
+            if (response.ok || !(error instanceof SyntaxError)) throw error;
+            throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
+                request_id: '', code: 'http-error', message: `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`,
+                retryable: false, details: {} }, response.status, response.headers.get('Retry-After'));
         }
         if (!payload || typeof payload !== 'object' || !acceptsApiVersion((payload as { api_version?: unknown }).api_version)) {
             throw new Error('Unexpected st client API response');
