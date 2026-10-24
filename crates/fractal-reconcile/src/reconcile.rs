@@ -15380,12 +15380,29 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(id) = actual["facts"]["repository_id"].as_u64().filter(|id| *id != 0) else {
                 continue;
             };
-            if let Some(target) = actual["facts"]["moved_to"].as_str()
-                && target.starts_with("resource/github/")
-                && self.store.latest_actual_value(target)?
-                    .is_some_and(|target| target["facts"]["repository_id"].as_u64() == Some(id))
-            {
-                renamed_resources.insert(id, target.to_owned());
+            let mut target = actual["facts"]["moved_to"].as_str().map(str::to_owned);
+            let mut terminal = spec.resource.clone();
+            let mut visited = BTreeSet::from([terminal.clone()]);
+            while let Some(next) = target {
+                if !next.starts_with("resource/github/") {
+                    break;
+                }
+                let Some(actual) = self.store.latest_actual_value(&next)?
+                    .filter(|actual| actual["facts"]["repository_id"].as_u64() == Some(id))
+                else {
+                    break;
+                };
+                if !visited.insert(next.clone()) {
+                    // Historical rename-back facts can form a cycle. Select the same
+                    // resource from either direction rather than looping or oscillating.
+                    terminal = visited.first().expect("the original resource is visited").clone();
+                    break;
+                }
+                terminal = next;
+                target = actual["facts"]["moved_to"].as_str().map(str::to_owned);
+            }
+            if terminal != spec.resource {
+                renamed_resources.insert(id, terminal);
             }
             repositories.entry(id).or_default().push((item, spec));
         }
