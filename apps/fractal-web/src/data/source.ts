@@ -320,6 +320,8 @@ export interface DataSource {
   readonly conversationInterest?: (agentRef: string) => Atom.Atom<void>
   /** Explicit pointer/focus intent; live admits it only after a visible thread's first-page frame. */
   readonly prefetchConversation?: (agentRef: string) => void
+  /** Explicit terminal-toggle pointer/focus intent; live retains a read-only viewer. */
+  readonly prefetchTerminal?: (terminalRef: string) => void
   /** Explicit recovery: re-acquire a failed or ended conversation follow; a healthy follow is untouched. */
   readonly retryConversation?: (agentRef: string) => void
   /** Keyed by terminal ref; live attaches a read-only viewer. */
