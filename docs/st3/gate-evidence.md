@@ -1576,7 +1576,7 @@ how many ticks did not start (for disk or load) and how many runs were stopped, 
 
 **The shadow merge-queue signer (`scripts/evidence-queue-signer`).** It measures whether a signer could keep the merge queue from
 rebuilding what is already built, without changing anything: a host note never covers a `merge_group` run, so it skips, waits for and
-blocks nothing. Two systemd user timers run it through `scripts/evidence-queue-timer`, which reads it (and the pre-sign worker, whose host
+blocks nothing (`seed`, below, is the exception: its notes are the per-crate ones pull requests reuse). Three systemd user timers run it through `scripts/evidence-queue-timer`, which reads it (and the pre-sign worker, whose host
 rules it uses) from `origin/main` of a clone per command. `observe` (every minute, seconds) reads the merge queue, fetches each group
 commit while its `gh-readonly-queue` branch exists (so a dropped entry is measured too), and records the group tree, whether `git
 merge-tree` of the pull request head onto the entry's base gives the same tree, and, depth 1, the tree predicted for the next pull
@@ -1595,8 +1595,15 @@ points under the stop), at least 165 GiB free and 20 GiB of available memory, wi
 (`~/.config/evidence-queue-signer/start.json` overrides them, agreed with operations). Each
 run appends a line to `attempts.jsonl` (wait from first seen to start, seconds per check, and each note's time, read back from the
 pushed notes' `observed_at`, or estimated from the start and the per-check seconds when none can be read, as `signed_at_source`
-says). A tree is run once whatever the outcome, so a tree stopped for load is not retried. `evidence-queue-signer report` sums a window, and
-`~/.config/evidence-queue-signer/off` stops both.
+says). A tree is run once whatever the outcome, so a tree stopped for load is not retried. `seed` (every minute, one run at a time)
+runs `st-test --seed COMMIT` on each new tip of main, which signs and pushes the per-crate `rust-tests` notes of that tree for the crates
+whose key has none yet, so a pull request branched from main reuses them; most merges move a handful of crates, one that moves the lane
+all of them. Main's code is merged code, the code every run on the host already builds under a pull request, so no author rule applies.
+It starts on the same terms as `sign`, and not while another `st-test --seed` runs on the host (that tick is skipped; the next tries
+again); its nextest takes the build slots through the admission shim like any `st-test` build. A tip is seeded once whatever the outcome
+(the next merge's seed covers what one left missing), and each appends a line to `seeds.jsonl` (wait from the merge to the start,
+seconds, and the crates that did not sign). `evidence-queue-signer report` sums a window, and `~/.config/evidence-queue-signer/off` stops
+all three.
 
 ### When the gate says skip
 
