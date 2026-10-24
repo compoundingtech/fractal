@@ -56,7 +56,7 @@ def entrypoint_case(binary: str) -> None:
             while select.select([master], [], [], 0)[0]:
                 output += os.read(master, 65536)
             assert result.returncode == 2, f"bare st help returned {result.returncode}"
-            assert b"Usage: st" in output, "bare st did not show help"
+            assert b"Usage: fractal" in output, "bare st did not show help"
             assert b"\x1b[?1049h" not in output, "bare st entered the alternate screen"
         finally:
             os.close(master)

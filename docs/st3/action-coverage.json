@@ -2344,6 +2344,19 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st web",
+      "description": "Open the web interface for this machine's local daemon",
+      "tests": [
+        "crates/fractal/tests/web_cli.rs::web_early_parser_uses_the_public_clap_help_and_usage_statuses",
+        "crates/fractal/tests/web_cli.rs::web_state_path_that_looks_like_an_instance_flag_is_not_activated",
+        "crates/fractal/tests/web_cli.rs::web_state_path_that_looks_like_an_inventory_flag_is_not_scanned",
+        "crates/fractal/tests/web_cli.rs::web_refuses_instance_selection_instead_of_opening_the_default_installation",
+        "crates/fractal/tests/web_cli.rs::web_refuses_every_other_explicit_global_instead_of_silently_dropping_it",
+        "crates/fractal/tests/web_cli.rs::web_accepts_global_flag_text_as_a_state_path_value_not_as_a_flag"
+      ],
+      "verification": "real CLI with isolated HOME and no browser opener; public help, argument refusals, and printed browser URL"
+    },
+    {
       "command": "st work acknowledge",
       "description": "Record the recipient read receipt and acknowledge an exact handoff note",
       "tests": [
