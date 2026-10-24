@@ -152,6 +152,15 @@ runs. A stop ends that scope.
    incarnation. An exec task's record names its scope, and the same three moments end it. Each
    launch has a scope of its own, so ending an old one never reaches the next incarnation.
 
+Linux exec identity is pinned with a pidfd. Its kernel `Pid`/`NSpid` evidence resolves the
+caller's PID to the PID visible in the mounted procfs before reading the start token, and is
+checked again after that read. Records retain the caller's PID for signals and waits; process
+group observations use the caller's namespace too. This also works when a container inherits
+an ancestor namespace's procfs. Missing or inconsistent namespace evidence returns the typed
+`ProcessIdentityUnavailable` refusal rather than borrowing another process's start token.
+A refused post-spawn identity kills and reaps the created exec group and ends its work scope;
+it is not a `StartRejected` witness that no producer was created.
+
 A stop or a retirement of an agent root also stops every exec and PTY task declared under it
 (`exec/ROOT/TASK`), each through its own stop above, whether or not the root has a process of its
 own. Those tasks are not started or restarted while the root is stopped, whatever their restart

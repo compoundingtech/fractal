@@ -13,6 +13,13 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+#[cfg(target_os = "linux")]
+mod identity;
+#[cfg(target_os = "linux")]
+pub use identity::ProcessIdentityUnavailable;
+#[cfg(all(test, target_os = "linux"))]
+mod namespace_tests;
+
 const SCHEMA: &str = "st.runtime.exec-generation.v1";
 
 /// Positive producer evidence: this exact attempt returned before creating any child.
@@ -195,10 +202,24 @@ impl ExecRuntime {
         if let Some(guard) = guard {
             guard()?;
         }
-        let child = command.spawn().context("spawn detached exec")?;
+        let mut child = command.spawn().context("spawn detached exec")?;
         *child_created = true;
         let pid = child.id();
-        let start_token = process_start_token(pid)?;
+        let start_token = match process_start_token(pid) {
+            Ok(token) => token,
+            Err(error) => {
+                // This is a created producer, never a StartRejected witness.
+                // Its namespace-local PID remains the signal/wait authority.
+                let cleanup = signal_group(id, pid, libc::SIGKILL)
+                    .and_then(|()| child.wait().context("reap identity-refused exec").map(|_| ()));
+                let scope_cleanup = if crate::isolation_mode() == crate::Isolation::Scope {
+                    crate::end_scope(&unit, Duration::ZERO).map(|_| ())
+                } else { Ok(()) };
+                return Err(error.context(format!(
+                    "exec child identity refused; group cleanup={cleanup:?}; scope cleanup={scope_cleanup:?}"
+                )));
+            }
+        };
         let created_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -528,36 +549,15 @@ fn process_group_is_live(group: u32) -> Result<bool> {
     }
     #[cfg(target_os = "linux")]
     {
-        // kill(0) includes zombies. Orphaned descendants may await reaping by the host's
-        // init process; they can no longer execute work and must not hold cleanup open.
-        for entry in fs::read_dir("/proc")? {
-            let entry = entry?;
-            if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
-                continue;
-            }
-            let stat = match fs::read_to_string(entry.path().join("stat")) {
-                Ok(stat) => stat,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let Some((_, tail)) = stat.rsplit_once(") ") else {
-                continue;
-            };
-            let mut fields = tail.split_whitespace();
-            let state = fields.next();
-            let process_group = fields.nth(1).and_then(|field| field.parse::<u32>().ok());
-            if process_group == Some(group) && state != Some("Z") {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        identity::group_has_live_member(group)
     }
     #[cfg(not(target_os = "linux"))]
     Ok(true)
 }
 
 fn process_is_absent(error: &anyhow::Error) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Some(absent) = identity::is_absent(error) { return absent; }
     error.downcast_ref::<std::io::Error>().is_some_and(|error| {
         error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
     })
@@ -600,19 +600,7 @@ pub fn process_start_token(pid: u32) -> Result<u64> {
 
 #[cfg(target_os = "linux")]
 fn process_identity(pid: u32) -> Result<(char, u64)> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let end = stat.rfind(')').context("malformed process stat")?;
-    let tail = stat.get(end + 2..).context("malformed process stat tail")?;
-    let mut fields = tail.split_whitespace();
-    let state = fields
-        .next()
-        .and_then(|value| value.chars().next())
-        .context("process stat lacks a state")?;
-    let token = fields
-        .nth(18)
-        .context("process stat lacks a start token")?
-        .parse()?;
-    Ok((state, token))
+    identity::process_identity(pid)
 }
 
 #[cfg(not(target_os = "linux"))]

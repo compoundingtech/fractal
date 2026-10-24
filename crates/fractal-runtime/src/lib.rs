@@ -34,6 +34,8 @@ pub use priority::{
     protect_server, protect_servers, report as priority_report, server_unit,
     set_configured as set_configured_seat_priority, work_prefix,
 };
+#[cfg(target_os = "linux")]
+pub use process::ProcessIdentityUnavailable;
 pub use process::{
     ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token,
 };
