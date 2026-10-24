@@ -214,3 +214,21 @@ for the crates that lack one, runs only those crates, and pushes the notes (to `
 exits 0 when every crate is covered or signed, and `--crate NAME` narrows it. Measured: a full seeding of 52 crates is about 12 minutes on this host
 (prep 158 s, nextest 480 s, signing 53 s); after a merge that touched 2 crates it runs only those 2.
 
+## 12. Verification and push time (measured 2026-10-24)
+
+Two warm full runs on hetz2 took 935 s and 1116 s against the 12-minute budget, with 123 to 270 s outside every check row. Where it went, and what
+changed:
+
+- **Asking the verifier about 52 crates.** `st-test` ran `evidence-verify --crate-key` once per crate: 52 processes, each loading all of the tree's
+  52 records (2 880 `load` calls, two git runs each). The same 52 crates in one `evidence-verify --members` run, with each record read once per
+  process (`load` is cached: a record is content-addressed) and the members checked 8 at a time, give the identical answer. Measured on one input
+  (tree e9fd13c5b808, policy at main): per-crate processes 110.0 s, `--members` before the cache 105.9 s, with the cache 32.8 s, with the cache and
+  the members side by side 8.6 s. `st-test` now asks once (`--members`, falling back to the per-crate loop only when the verifier cannot answer).
+  The CI gate's `--members` call gets the same speed-up.
+- **The row's time.** The `rust-tests` row used to show only the tests (0 s when signed from linux-gate's report). It now shows all of its time, with
+  `[keys, verify, tests, sign, push]` in the detail, and a `setup` row shows the fetch, the clean tree and the megarepo members before any check.
+- **The push.** Records are pushed in chunks of 40 refs with git's porcelain output, and a ref that failed is retried (3 tries, 2 s and 4 s apart); the
+  error names the refs left and git's reason. One 76-ref push once reported only `(failed)` for a ref that pushed alone afterwards.
+- **What did not change.** Signing 52 crates still costs about 48 s: the post-sign check inside `evidence-wrap` (6.8 s per record, in its own process)
+  is the base tool's, and a change to it is its own trust review.
+

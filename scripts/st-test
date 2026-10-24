@@ -592,9 +592,32 @@ def fetch_crate_notes(remote, keys):
         git('fetch', '-q', '--no-tags', remote, *refspecs[start:start + 200], check=False)
 
 
+def members_missing(verifier, directory, tree, base, repository, lane_base):
+    """{crate: reason} for the workspace members with no satisfying note, from ONE verifier run (`--members`: one process reads each record once,
+    where 52 `--crate-key` runs each read all 52 of the tree's records); None when the verifier cannot say (the caller asks crate by crate)."""
+    command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', 'rust-tests', '--keys-from', base, '--members',
+               '--policy-from', base, '--repository', repository]
+    if lane_base and b'--lane-base' in Path(verifier).read_bytes():
+        command += ['--lane-base', lane_base]
+    done = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = json.loads(done.stdout)
+    except ValueError:
+        return None
+    if result.get('satisfied'):
+        return {}
+    return result.get('missing') if result.get('reason') == 'crate_uncovered' and isinstance(result.get('missing'), dict) else None
+
+
 def uncovered_crates(verifier, directory, tree, base, repository, lane_base, keys):
     """[(crate, reason)] for the crates with no passing note for their key, and the number of covered ones."""
     missing, have = [], 0
+    if repository and keys and all(keys.values()):
+        batched = members_missing(verifier, directory, tree, base, repository, lane_base)
+        if batched is not None:
+            # --members judges every workspace member; `keys` may be narrowed to some of them (--crate).
+            missing = [(crate, batched[crate]) for crate in sorted(keys) if crate in batched]
+            return missing, len(keys) - len(missing)
     for crate, key in sorted(keys.items()):
         if not key:
             missing.append((crate, 'no declared path exists in this tree'))
@@ -617,19 +640,46 @@ def listed_no_tests(base):
     return [name for name in listed if isinstance(name, str)] if isinstance(listed, list) else []
 
 
+PUSH_CHUNK = 40  # refs per `git push`: a rejected or failed ref is retried on its own, and no one request carries hundreds
+PUSH_TRIES = 3
+
+
 def push_records(directory, remote, refs):
-    """One push of every record's refs (the same refs evidence-wrap --push sends for one record, many at once). Returns an error text or None."""
+    """Push every record's refs (the same refs evidence-wrap --push sends for one record), in chunks, retrying the ones that failed.
+    git's porcelain output says which ref failed and why; a transient failure (one 76-ref push once reported only `(failed)` for one ref, and
+    the ref pushed alone afterwards) is retried up to PUSH_TRIES times with a pause. Returns an error text naming the refs left, or None."""
     token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
     environment = dict(os.environ)
     if token:  # the same header evidence-wrap sets; it travels in the environment, never in an argument
         header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
         environment.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.extraheader', GIT_CONFIG_VALUE_0=f'Authorization: Basic {header}')
-    done = subprocess.run(['git', '-C', str(directory), 'push', '--quiet', remote, *(f'{ref}:{ref}' for ref in refs)], capture_output=True, text=True,
-                          env=environment)
-    if done.returncode == 0:
-        return None
-    text = done.stderr.replace(token, '***') if token else done.stderr
-    return f'push of {len(refs)} refs failed: {text.strip()[-300:]}'
+    pending, reasons = list(refs), {}
+    for attempt in range(PUSH_TRIES):
+        if attempt:
+            time.sleep(2 * attempt)
+        failed = []
+        for start in range(0, len(pending), PUSH_CHUNK):
+            chunk = pending[start:start + PUSH_CHUNK]
+            done = subprocess.run(['git', '-C', str(directory), 'push', '--porcelain', remote, *(f'{ref}:{ref}' for ref in chunk)],
+                                  capture_output=True, text=True, env=environment)
+            if done.returncode == 0:
+                continue
+            rejected = {}
+            for line in done.stdout.splitlines():
+                if line.startswith('!'):
+                    fields = line.split('\t')
+                    if len(fields) >= 2:
+                        rejected[fields[1].split(':')[0]] = fields[2] if len(fields) > 2 else 'rejected'
+            if not rejected:  # nothing was said per ref (a transport error): the whole chunk goes round again
+                lines = (done.stderr.replace(token, '***') if token else done.stderr).strip().splitlines()
+                rejected = {ref: (lines[0][:120] if lines else 'push failed') for ref in chunk}
+            failed += [ref for ref in chunk if ref in rejected]
+            reasons.update(rejected)
+        pending = failed
+        if not pending:
+            return None
+    shown = ', '.join(f'{ref} ({reasons.get(ref, "failed")[:120]})' for ref in pending[:3])
+    return f'push of {len(pending)} of {len(refs)} refs failed after {PUSH_TRIES} tries: {shown}' + (' ...' if len(pending) > 3 else '')
 
 
 def sign_jobs():
@@ -674,16 +724,20 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
 
     With `report` (the JUnit file of linux-gate's own run in this invocation: the same workspace build, the whole selection) nothing is run again:
     the crates without a note are signed from it, and the records say so (filterset `workspace`, the command of linux-gate's run)."""
+    begun = time.monotonic()
     keys, error = crate_keys(args.base, directory, tree, scratch)
     if not error:
         keys, error = only_crates(keys, args.crate)
     if error:
         return [('rust-tests', 'NOT RUN', 0, f'cannot compute the per-crate keys: {error}')], True
     fetch_crate_notes(args.push or 'origin', keys)
+    keyed = time.monotonic()
     missing, have = uncovered_crates(tools['evidence-verify'], directory, tree, args.base, repository if judged_by_policy(args.base) else None,
                                      lane_base, keys)
+    verified_at = time.monotonic()
     if not missing:
-        return [('rust-tests', 'covered', 0, f'all {len(keys)} crates already have a passing note for their key')], False
+        return [('rust-tests', 'covered', round(verified_at - begun),
+                 f'all {len(keys)} crates already have a passing note for their key (keys {round(keyed - begun)}s, verify {round(verified_at - keyed)}s)')], False
     selected = [crate for crate, _ in missing]
     if usable_report(report):
         junit, ran_seconds = report, 0
@@ -708,6 +762,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         filterset = filterset_input(selected)
         run_sha = hashlib.sha256(json.dumps([RUN_TESTS, selected]).encode()).hexdigest()
     rows, failed, signed_count, empty = [], False, 0, []
+    signing_from = time.monotonic()
     # The dev shell's digest is the same for every crate: name it once (a nix evaluation of seconds) rather than once per signature.
     toolchain = args.toolchain_sha256 or shared_toolchain(tools['evidence-wrap'])
 
@@ -762,6 +817,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
             pushable += refs
             if not int(facts['tests_run']):
                 empty.append(crate)
+    pushing_from = time.monotonic()
     if args.push and pushable:
         pushed = push_records(directory, args.push, pushable)
         if pushed:
@@ -774,11 +830,16 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     if empty:
         # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).
         detail += f'; {len(empty)} ran no test (list under no_tests if they have none): {", ".join(empty[:8])}' + (' ...' if len(empty) > 8 else '')
-    rows.insert(0, ('rust-tests', 'passed' if not failed else 'FAILED', ran_seconds, detail))
+    ended = time.monotonic()
+    # The row's time is all of it, not only the tests: the keys, the verification of every crate, the signing and the push were 0 s here once.
+    detail += (f' [keys {round(keyed - begun)}s, verify {round(verified_at - keyed)}s, tests {ran_seconds}s, sign {round(pushing_from - signing_from)}s, '
+               f'push {round(ended - pushing_from)}s]')
+    rows.insert(0, ('rust-tests', 'passed' if not failed else 'FAILED', round(ended - begun), detail))
     return rows, failed
 
 
 def main(argv):
+    main_started = time.monotonic()
     POOL_SETTINGS.clear()
     POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
     scrub_git_environment()
@@ -896,6 +957,7 @@ def main(argv):
             lanes = lane_names(args.base)
             target, target_lock = shared_target(tree_target) if any(name in BUILDS for name in checks) else (None, None)
             unmaterialized = materialize_members(directory)
+            setup_seconds = round(time.monotonic() - main_started)  # fetch, the clean tree, the members: nothing a check row counts
             gate_report = Path(scratch) / 'linux-gate-nextest-junit.xml'
             def run_one(name, output=None):
                 """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
@@ -983,6 +1045,7 @@ def main(argv):
                 failed = failed or check_failed
                 unsigned = unsigned or check_unsigned
             print(f'\nst-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
+            rows.insert(0, ('setup', 'done', setup_seconds, 'fetch, the clean tree, the megarepo members (before any check)'))
             for name, result, seconds, why in rows:
                 print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
             if args.push and any(result != 'NOT RUN' for _, result, _, _ in rows):
