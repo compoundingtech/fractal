@@ -48,6 +48,7 @@ vi.mock('../data/react.tsx', () => ({
   useGatewaySync: () => gatewayObservation,
   useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch }),
   useFeedInterest: () => {},
+  useAttention: () => ({ _tag: 'Waiting' }),
 }))
 
 let workspace: typeof WorkspaceModule
@@ -412,6 +413,7 @@ describe('conversation import boundary', () => {
     const ux: UxTelemetry = {
       activeSpan: () => undefined,
       traceContext: () => undefined,
+      beginOpen: () => ({ phase: () => {}, contentCommitted: () => () => {}, cancel: () => {} }),
       shellCommitted: () => capture,
       rosterCommitted: () => () => {},
       beginSwitch: () => {},

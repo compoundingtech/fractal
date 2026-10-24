@@ -2,7 +2,7 @@
 
 Status: current language and runtime specification.
 
-See [kdl-lifecycle.md](./kdl-lifecycle.md) for complete day-to-day publication workflows.
+See [Configuration and KDL](../site/reference/configuration.md) for complete day-to-day publication workflows.
 
 Every st KDL document starts with `version 2`. Declarations follow the version directly.
 
@@ -282,6 +282,10 @@ can likewise create a plain shell at `pty/agent/PATH/UUID`. Only its exact creat
 Top-level schedules are also valid authored declarations: `st apply schedules.kdl` previews
 and publishes them without creating a mission run. Each schedule names the mission it will
 request at its declared times. Other top-level execution members still require a mission run.
+
+[`st schedules ls`](schedules-list.md) lists locally replicated declarations with recorded owners,
+nominal next declared ticks and explicit per-row knowledge age/unheard-host coverage. It does not
+contact the hosts or inspect occurrence history.
 
 The origin of the `mission-run.created` claim advances the mission run. It also materializes the run declarations.
 
@@ -1108,7 +1112,7 @@ step "wait-for-build" {
 
 The step is agentless and cannot name an agent. It completes when the named run completes. It fails when that run fails or is cancelled. Other steps order after it with `depends-on`. The value is a run ID or `mission-run/` subject, and it can use inputs.
 
-To make one run wait without changing its mission, start it with `after`. See [Starting after another run](kdl-lifecycle.md#starting-after-another-run).
+To make one run wait without changing its mission, start it with `after`. See [Starting after another run](../site/reference/configuration.md#definitions-runs-and-revisions).
 
 ## Run reports
 
@@ -1969,9 +1973,18 @@ schedule again never starts work from before the stop.
 
 The schedule does not assign work. The referenced mission defines its work selectors.
 
+### Optional automatic standby
+
+See [Automatic schedule standby](schedule-standby.md) for the `standby { host
+"archive"; after "5m" }` declaration and all-member adoption requirement.
+Jobs must be safe to run twice: while hosts cannot hear each other a job may run
+on both; write jobs so a second run is harmless.
+
+If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
+
 ## Mission revisions
 
-In [free mode](kdl-lifecycle.md#free-mode), any person or agent may revise any part of a run, as
+In [free mode](../site/reference/configuration.md#free-mode), any person or agent may revise any part of a run, as
 itself. Human-only revision protection still selects the reviewers who must approve the change.
 `mission-authority` blocks still parse and are ignored.
 
@@ -2070,7 +2083,7 @@ Eligibility reads register the absent binding as a dependency. Its later publica
 
 ### Revision controls
 
-`cargo test -p st3-daemon --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
+`cargo test -p fractal-daemon --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
 
 `scripts/st3-revision-seat-eval/run ST3_FIXTURE_BINARY OUTPUT_DIR` runs actual CLI controls on a private daemon and real PTYs, using invented garden seats and `sleep` commands. It checks four builders across repeated revisions, explicit stop, removal and intentional cancellation with finally cleanup. It also removes a mission-owned binding after its declaring step completes, checks the missing-agent fault delivered to the requester, restores eligibility and cancels the control. All sockets, HOME/XDG directories and terminal roots are isolated. It writes `result.json` and tears down its own runtimes.
 

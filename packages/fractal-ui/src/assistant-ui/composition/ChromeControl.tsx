@@ -6,6 +6,7 @@ import { interactionVars as interaction, geometryVars as g, motionVars as m, rad
 import { Icon, type IconName } from './Icons'
 import { Tooltip } from './Controls'
 import { NarrowLayoutContext } from './NarrowLayout'
+import { useTouchLayout } from '../sidebar/useTouchLayout'
 
 export interface ChromeControlProps {
   readonly icon: IconName
@@ -31,6 +32,8 @@ export interface ChromeControlProps {
   readonly tooltip?: string
   /** The enabled button, for hosts that move focus to it. */
   readonly ref?: React.Ref<HTMLButtonElement>
+  /** Warm the control's data on hover, focus or press start; it never opens or presses anything itself. */
+  readonly onPrefetch?: () => void
   /** A header-edge control: in a narrow host its 44px touch target overhangs the gutter so the glyph stays where the 28px control put it. */
   readonly edge?: 'lead' | 'trail'
   readonly tooltipPlacement?: 'top' | 'bottom'
@@ -39,13 +42,15 @@ export interface ChromeControlProps {
 /**
  * One quiet 28px icon button for the chrome: borderless, filled on hover, named by the kit tooltip.
  * Inside a React Aria trigger (MenuTrigger, DialogTrigger) it is the trigger's button.
- * Tooltips follow hover or user keyboard navigation, never autofocus or programmatic focus restoration.
+ * On desktop, tooltips follow hover or user keyboard navigation, never autofocus or programmatic focus restoration.
+ * A touch layout (narrow host or coarse primary pointer) keeps the kit tooltip's own hover and focus-visible policy.
  */
-export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, tooltip, ref, edge, tooltipPlacement = 'bottom' }: ChromeControlProps) {
+export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, tooltip, ref, onPrefetch, edge, tooltipPlacement = 'bottom' }: ChromeControlProps) {
   const reasonId = React.useId()
   // Inside a narrow (phone) host every chrome control is a 44px touch target; a narrow desktop pane keeps desktop density.
   const narrow = React.useContext(NarrowLayoutContext)
   const touch = narrow ? [styles.touch, edge === 'lead' && styles.touchLead, edge === 'trail' && styles.touchTrail] : []
+  const navigationFocusOnly = !useTouchLayout()
   if (disabledReason !== undefined) {
     // A natively disabled button leaves the tab order and receives no pointer events, so its reason would be
     // unreachable. The disabled Pressable consumes a surrounding trigger's press (DialogTrigger, MenuTrigger) and
@@ -53,7 +58,7 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
     // handler on the button, which opens on Enter, Space and the arrows unless the event is default-prevented,
     // so the capture phase prevents those keys before any trigger sees them. Tab and Escape still pass.
     return <>
-      <Tooltip label={`${label} · ${disabledReason}`} placement={tooltipPlacement} navigationFocusOnly>
+      <Tooltip label={`${label} · ${disabledReason}`} placement={tooltipPlacement} navigationFocusOnly={navigationFocusOnly}>
         <Focusable>
           <Pressable isDisabled>
             <button
@@ -73,7 +78,7 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
       <span id={reasonId} hidden>{disabledReason}</span>
     </>
   }
-  return <Tooltip label={tooltip ?? label} placement={tooltipPlacement} navigationFocusOnly>
+  return <Tooltip label={tooltip ?? label} placement={tooltipPlacement} navigationFocusOnly={navigationFocusOnly}>
     <Button
       {...(ref === undefined ? {} : { ref })}
       aria-label={label}
@@ -81,6 +86,7 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
       {...(popup === undefined ? {} : { 'aria-haspopup': popup })}
       {...(expanded === undefined ? {} : { 'aria-expanded': expanded })}
       {...(controls === undefined ? {} : { 'aria-controls': controls })}
+      {...(onPrefetch === undefined ? {} : { onHoverStart: onPrefetch, onFocus: onPrefetch, onPressStart: onPrefetch })}
       isDisabled={isDisabled}
       {...(onPress === undefined ? {} : { onPress })}
       {...stylex.props(styles.control, (pressed === true || active) && styles.pressed, ...touch)}

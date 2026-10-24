@@ -1,0 +1,29 @@
+# Test groups that run only in the daily run (docs/ci.md, Daily long lanes). scripts/ci-nextest
+# leaves them out of every other selection: pull requests, merge groups and local runs, unless
+# CI_TEST_LANE=daily. A group moves here once its per-PR contract tests run on every pull
+# request and the daily run has been green three days (doc/fleet/factory/test-speed/core-vs-daily).
+# One nextest filterset per line; the lines are joined with `or`.
+
+# Two real daemons, a TCP link proxy, the previous release and real 20-25 s waits: about 330 s
+# per run. Per-PR contracts: smallclaims worker_tests (link outage) and fractal-api-core tests
+# (refused handoff), #3456; mailbox restart recovery and delivery_presence, already per PR.
+package(=fractal) and binary(=integration) and test(/^messaging_faults::/)
+
+# Each boot canary starts a real daemon, PTY seats and stub providers and polls them against a
+# 180 s bound: about 950 s per run for these 35. Per-PR contracts: #3464 (restart, daemon-restart,
+# concurrent), #3466 (idle-hold, access modes, codex import), and the existing reexec, utf8,
+# claim-socket and when-idle tests (doc fleet/factory/test-speed/core-vs-daily §4.1). The mail
+# redelivery canaries (scripts/ci-mail-redelivery-canaries: every a_suspended_seat_resumes canary and
+# the three claude channel canaries) run daily too, in their own daily lane (2026-10-23). Kept per PR:
+# the canary harness's own fast self-tests.
+package(=fractal) and binary(=integration) and test(/^boot_canaries::/) and not test(/^boot_canaries::(event_waits_|every_exit_reaps_|interrupted_tests_keep_|the_canary_never_names_)/)
+
+# Two to four real daemons per test, each with a replication worker on a loopback port, and real
+# waits on the 35 s quiet window and the 60 s divergence window: about 477 s per run for these 40.
+# Per-PR contracts (doc fleet/factory/test-speed/core-vs-daily §4.2): #3607 (divergence in the
+# doctor and machines page), #3611 (every invite refusal), #3614 (the frozen-member doctor
+# warning), and the existing fractal-store fleet_admission_tests (removal fenced through a relay),
+# smallclaims fleet/membership.rs, fleet/transport.rs and sync/worker_tests.rs. Kept per PR: the
+# fleet::action_coverage_ tests, the transport_prefer_ command contracts, and the suite's two
+# fast self-tests. linux-fleet-compat runs its ignored test through cargo test and is unaffected.
+package(=fractal) and binary(=integration) and test(/^fleet::/) and not test(/^fleet::(action_coverage_|transport_prefer_|fleet_workflows_have_no_path_filter$|fixture_port_reservation_excludes_other_processes_until_released$)/)

@@ -1,7 +1,7 @@
 # st operational-state contract
 
 This page defines which facts each operational read selects. The tests in
-`crates/st3/tests/operational_state_contract.rs` check its fixtures and the two JSON inventories
+`crates/fractal/tests/operational_state_contract.rs` check its fixtures and the two JSON inventories
 beside it.
 
 ## Three layers
@@ -163,20 +163,67 @@ Compact list, detail, human tree, and JSON are renderers of typed models, not in
 `st doctor` is read-only. Its `operational-repair` check computes the same bounded plan returned by
 `GET /v1/repair` and points to `st repair dry-run` when contradictions exist. A plan uses
 `st3.operational-repair.v0`, lists the exact affected subjects and reasons, and carries an
-`orpv0:<sha256>` token over the canonically ordered repair items. Snapshot index is diagnostic and
-is not part of the token.
+`orpv0:<sha256>` token over the canonically ordered repair items. Repeatable `--subject` and
+`--class` options restrict exact item subjects and classes (AND between filter kinds, OR within
+each kind). A filtered token is `orpv0:<sha256>:<hex-encoded-canonical-filter>`; the digest binds
+both the normalized filter and selected items. Apply reads its scope from the token and never
+widens it. Unselected changes do not invalidate a filtered plan; selected changes do.
+Snapshot index is diagnostic and is not part of the token. A newer CLI refuses an older daemon
+that ignores requested filters.
 
 `st repair apply TOKEN` applies only that exact recomputed plan. A changed plan fails with
 `stale-repair-plan`; callers must inspect a new dry-run. Registered classes are terminal
 descendants, orphaned readiness, expired claims, superseded attention, contradicted wake failures,
-and impossible run/generation state. Apply appends normal graph transition claims and one
+impossible run/generation state, and owner-proven revoked legacy runtime starts. Apply appends normal graph transition claims and one
 `repair.applied` receipt. It never deletes or rewrites claims. Repeating an accepted token returns
 the replicated receipt with zero changes, and a new dry-run is clean once all listed contradictions
 have converged.
 
+The `revoked-legacy-runtime-start` class is local-owner Linux repair, not a relaxation of native
+launch retirement. The returned revoked start must be unresolved and already administratively
+applied; its retained PTY must be `vanished` with no PID, and it must lack operation-owned native
+producer metadata. The owner daemon must positively enumerate no matching seat/work/server
+systemd units and no live owner-user process carrying the exact start-operation label.
+Unreadable or incomplete evidence refuses repair. A null PID or an older operation tag alone
+never authorizes cleanup.
+
+Dry-run includes the physical evidence in the item and token. Apply captures fresh evidence,
+keeps the runtime spawn lock through the normal writer transaction, and refuses a changed token
+or changed eligibility. It records the same producer-closed cleanup transition used by normal
+reconciliation plus the repair receipt; registry rows and history are preserved.
+The replicated `repair.applied` schema is unchanged: legacy operation IDs and native evidence
+are JSON text appended to its existing `reason` string. Older peers can admit this receipt
+without knowing the new repair class; unknown fields would instead quarantine it. Repairs
+without legacy closures retain the original reason and never emit an extra field.
+
+
+Run on the owning host after deploying the daemon:
+
+```sh
+plan=$(mktemp /tmp/legacy-start-repair.XXXXXX.json)
+st repair dry-run --class revoked-legacy-runtime-start \
+  --subject agent/compoundingtech/st-notes \
+  --subject agent/dotfiles/st-delegation \
+  --subject agent/dotfiles/devnet \
+  --subject agent/dotfiles/flow \
+  --subject agent/dotfiles/fractal-web-app --json | tee "$plan"
+# Review the selected items and physical evidence before applying.
+st repair apply "$(jq -er '.token' "$plan")" --json
+st repair dry-run --class revoked-legacy-runtime-start \
+  --subject agent/compoundingtech/st-notes \
+  --subject agent/dotfiles/st-delegation \
+  --subject agent/dotfiles/devnet \
+  --subject agent/dotfiles/flow \
+  --subject agent/dotfiles/fractal-web-app --json
+```
+
+Review every selected item before using its exact token. The subject/class filters above exclude
+unrelated graph repairs. If a target legacy start is not listed, proof is missing; do not edit
+the ledger or remove its PTY row to force eligibility.
+
 ## Regression fixtures
 
-The fixtures under `crates/st3/tests/fixtures/operational-state` cover:
+The fixtures under `crates/fractal/tests/fixtures/operational-state` cover:
 
 - the terminal `signal-rename-codex/sig.sup` runtime;
 - a claimed step whose lease is already expired at snapshot time;

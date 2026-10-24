@@ -85,7 +85,7 @@ approval; do not replace a TODO with a permanent exemption.
 
 ### Conversation-owner inventory review (PR #3116)
 
-The [owner-once change](https://github.com/compoundingtech/smalltalk/pull/3116)
+The [owner-once change](https://github.com/compoundingtech/fractal/pull/3116)
 retains the existing inline claim representation. The responsible maintainers
 are the maintainers of the producer modules named below; ownership does not
 transfer to the offline command or this inventory. All entries remain
@@ -104,7 +104,7 @@ or returned claim bytes.
   values still come from historical claims. Its
   `trace-statement-and-value-representation` work must connect the canonical
   query expansion and extracted values to that representation.
-- `st3_store::store`: `lv-hd02768fb2b9c` and `lv-ha749c7998d2f` install
+- `fractal_store::store`: `lv-hd02768fb2b9c` and `lv-ha749c7998d2f` install
   runtime, actual-state and identity indexes. Runtime identifiers, subjects,
   origins and accepted-time keys remain variable; registry-derived predicates
   do not bound their bytes. The module maintainer owns
@@ -116,7 +116,7 @@ or returned claim bytes.
   `trace-statement-and-value-representation` work must account for formatted
   predicates, subject bindings, variable identities and full claim bodies;
   these reads introduce no physical size guarantee.
-- `st3_store::owner_indexes`: `lv-h735c5d58ef79` and `lv-h0f440b8d87b1`
+- `fractal_store::owner_indexes`: `lv-h735c5d58ef79` and `lv-h0f440b8d87b1`
   execute the shared transport/runtime DDL against an explicitly stopped store.
   The command retains existing key representations to match startup exactly.
   Its maintainer owns `trace-statement-and-value-representation`, linking those
@@ -125,7 +125,7 @@ or returned claim bytes.
   expected definitions. No claim is inserted there, but its TEXT declarations
   remain catalog candidates, not a general size exemption; the maintainer owns
   `chunk-or-reference-variable-columns` if that probe acquires value producers.
-- `st3_store::store::conversation_reads`: `lv-h81c8d6a2e0f8` binds the
+- `fractal_store::store::conversation_reads`: `lv-h81c8d6a2e0f8` binds the
   subject/existence query; `lv-h07dae6c16278` and `lv-h2752cd7a95e2` prepare
   and bind registry-derived identity reads. The module maintainer owns
   `trace-statement-and-value-representation`: trace subject parameters, JSON

@@ -3,7 +3,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Autocomplete, Dialog, Header, Input, Keyboard, Label, Menu, MenuItem, MenuSection, Modal, ModalOverlay, SearchField } from 'react-aria-components'
-import { StatusGlyph } from './MilestonePane'
+import { SidebarStatus } from '../../assistant-ui/sidebar/SidebarStatus'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { Icon } from '../../assistant-ui/composition/Icons'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
@@ -48,7 +48,7 @@ export function MilestonePalette({ isOpen, onOpenChange, agents, commands, froze
             {shownAgents.length > 0 && <MenuSection>
               <Header {...stylex.props(styles.section)}>Agents</Header>
               {shownAgents.map(({ row, folder }) => <MenuItem key={row.ref} id={row.ref} textValue={row.title} {...stylex.props(styles.item)}>
-                <StatusGlyph status={row.status} statusLabel={row.statusLabel} freshness={frozen ? 'stale' : row.freshness} frozen={frozen} />
+                <SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="SG-1" discRefinement="G3" freshness={row.freshness} frozen={frozen} iconOnly />
                 <span {...stylex.props(styles.label)}>{row.title}</span>
                 <span {...stylex.props(styles.meta)}>{row.parentRef === undefined ? folder : 'subagent'}</span>
               </MenuItem>)}

@@ -1,4 +1,4 @@
-import type { DecodedUsageSummary } from '@st3/sdk/effect'
+import type { DecodedUsageSummary } from '@fractal/sdk/effect'
 import * as DateTime from 'effect/DateTime'
 import type { Known } from './source.ts'
 
@@ -11,14 +11,14 @@ export type ContextOccupancy = {
   readonly observedAt: number
 } | { readonly _tag: 'Unknown' }
 
-/** The native UsageContext is exclusively folded from semantics=context_occupancy. */
+/** The SDK-normalized UsageContext is folded from semantics=context_occupancy; unknown aggregation cannot authorize a reading. */
 export const contextOccupancy = ({ usage, now, observedAfter }: {
   readonly usage: Known<DecodedUsageSummary>
   readonly now: number
   /** Incarnation transition fence: only a newer occupancy observation may restore the claim. */
   readonly observedAfter?: number
 }): ContextOccupancy => {
-  const context = usage._tag === 'Known' ? usage.value.context : undefined
+  const context = usage._tag === 'Known' && typeof usage.value.aggregation !== 'object' ? usage.value.context : undefined
   if (context === undefined) return { _tag: 'Unknown' }
   const observedAt = DateTime.toEpochMillis(context.observed_at_unix_ms)
   if (!Number.isFinite(now) || !Number.isFinite(observedAt) || observedAt < 0 || observedAt > now ||

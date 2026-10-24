@@ -5,19 +5,20 @@ import { systemEventsPreference } from './conversationPreferences.ts'
 import { EmbraceComposer } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx'
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
-import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
-import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot } from '../data/react.tsx'
+import type { WorkLogCall } from '@fractal/ui/assistant-ui'
+import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
-import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
+import { inputPaintRegionMounted, registerInputPaintRegions, type InputPaintRegion } from '../telemetry/inputPaint.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
+import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 
 /** The follow owns content and the kit owns its presentation. The display-contents host
  * boundary observes asynchronous runtime adoption without inventing a kit commit hook.
@@ -127,6 +128,24 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
 }) {
   const source = useDataSource()
   const grants = useGrants()
+  const composer = React.useRef<HTMLDivElement>(null)
+  const tail = React.useRef<HTMLElement | null>(null)
+  const tailRef = React.useCallback((node: HTMLElement | null) => {
+    const changed = node !== null && node !== tail.current
+    tail.current = node
+    if (changed && composer.current !== null) inputPaintRegionMounted(composer.current)
+  }, [])
+  React.useLayoutEffect(() => {
+    const owner = composer.current
+    if (owner === null) return
+    return registerInputPaintRegions(owner, () => {
+      const regions: InputPaintRegion[] = []
+      const field = owner.querySelector('textarea,input,[contenteditable="true"]')
+      if (field !== null) regions.push({ target: field })
+      if (tail.current !== null) regions.push({ target: tail.current })
+      return regions
+    })
+  }, [agentRef])
   const [refusal, setRefusal] = React.useState<SendRefusal>()
   const binding = composerSendBinding({
     source, agentRef, grants,
@@ -175,6 +194,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       viewportKey={agentRef}
       turns={frozen?.turns ?? (state._tag === 'Observed' ? state.turns : [])}
       scrollToBottomKey={feed._tag === 'Observed' ? feed.value.lastSendId : undefined}
+      tailRef={tailRef}
       title={agentName}
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}
@@ -192,9 +212,8 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     </div>
     {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
     <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} />
-    <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
-    <div data-testid="conversation-composer-dock" onInputCapture={(event) => {
+    <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
@@ -204,13 +223,19 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   </EmbraceRuntimeProvider>
 })
 
-/** Sync observations can change without rebuilding the runtime or its callbacks. */
+/**
+ * Sync observations can change without rebuilding the runtime or its callbacks. While live, only
+ * the transcript's time leaves tick; on transport loss they freeze at the last live sample.
+ */
 function ConversationTranscript({ agentRef, feed, ...props }: Omit<React.ComponentProps<typeof Transcript>, 'sync' | 'now' | 'observedAt'> & {
   readonly agentRef: string
   readonly feed: Feed<ConversationPage>
 }) {
-  const now = useNowSnapshot()
+  const paused = usePausedNow()
+  const snapshot = useNowSnapshot()
+  const now = paused ?? snapshot
   const observation = useConversationSync(agentRef)
-  return <Transcript {...props} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} />
+  const headerActionsHost = React.useContext(ThreadHeaderSlotContext)
+  return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerActionsHost} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} {...(paused === undefined ? {} : { now: paused })} />
 }
 

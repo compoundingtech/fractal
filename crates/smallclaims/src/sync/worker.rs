@@ -424,7 +424,7 @@ impl FleetContext {
 
     /// Record that a member refused this node for good, so it stops dialing and `st3 doctor`
     /// can say what happened.
-    fn mark_removed(&self, reported_by: &str, removed: &RemovedFromFleet) {
+    async fn mark_removed(&self, reported_by: &str, removed: &RemovedFromFleet) {
         if self.removed.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
@@ -432,23 +432,48 @@ impl FleetContext {
             "st3: {reported_by} refused this node ({}): {}; it stops syncing",
             removed.code, removed.message
         );
-        #[cfg(feature = "test-support")]
-        removal_write_barrier("before-lock");
-        if let Err(error) = self.persist_removal(reported_by, removed) {
+        // The settings lock is a blocking flock, and endpoint publication holds it across a
+        // request to the daemon. Waiting for it on a runtime thread can keep that request from
+        // finishing, so the lock is never released and the removal is never written.
+        let (state_dir, own_key) = (self.state_dir.clone(), self.own_key.clone());
+        let (reported_by, code, message) = (
+            reported_by.to_owned(),
+            removed.code.clone(),
+            removed.message.clone(),
+        );
+        let persisted = tokio::task::spawn_blocking(move || {
+            #[cfg(feature = "test-support")]
+            removal_write_barrier("before-lock");
+            let persisted = Self::persist_removal(
+                state_dir.as_deref(),
+                own_key.as_deref(),
+                &reported_by,
+                &RemovedFromFleet { code, message },
+            );
+            #[cfg(feature = "test-support")]
+            if let Some(directory) = std::env::var_os("ST3_TEST_REMOVAL_WRITE_BARRIER") {
+                std::fs::write(
+                    Path::new(&directory).join("finished"),
+                    b"refusal writer finished",
+                )
+                .expect("publish removal writer completion");
+            }
+            persisted
+        })
+        .await
+        .unwrap_or_else(|error| Err(anyhow::anyhow!("the refusal writer stopped: {error}")));
+        if let Err(error) = persisted {
             eprintln!("st3: cannot persist fleet refusal: {error:#}");
-        }
-        #[cfg(feature = "test-support")]
-        if let Some(directory) = std::env::var_os("ST3_TEST_REMOVAL_WRITE_BARRIER") {
-            std::fs::write(
-                Path::new(&directory).join("finished"),
-                b"refusal writer finished",
-            )
-            .expect("publish removal writer completion");
         }
     }
 
-    fn persist_removal(&self, reported_by: &str, removed: &RemovedFromFleet) -> Result<()> {
-        let Some(state_dir) = &self.state_dir else {
+    fn persist_removal(
+        state_dir: Option<&Path>,
+        own_key: Option<&str>,
+        reported_by: &str,
+        removed: &RemovedFromFleet,
+    ) -> Result<()> {
+        let Some(state_dir) = state_dir else {
             return Ok(());
         };
         let _lock = FleetFile::lock_settings(state_dir)?;
@@ -462,7 +487,7 @@ impl FleetContext {
         }
         // A foreground worker may outlive leave and a new join. Its old signed refusal
         // cannot end the new local incarnation, even when the fleet and node name match.
-        if let Some(own) = &self.own_key
+        if let Some(own) = own_key
             && MemberKey::load(&file.node_key_path(state_dir))?.public() != own
         {
             return Ok(());
@@ -594,7 +619,7 @@ pub async fn run<B: Backend>(
         config
             .fleet
             .as_ref()
-            .is_some_and(|file| file.transports.iter().any(|name| name == transport))
+            .is_none_or(|file| file.transports.iter().any(|name| name == transport))
     };
     let tailscale = config
         .fleet
@@ -628,10 +653,11 @@ pub async fn run<B: Backend>(
         view: Arc::default(),
         view_refresh: Arc::default(),
         view_changed: watch::channel(0).0,
-        transports: Arc::new(std::sync::RwLock::new(LocalTransports {
-            tailscale: false,
-            fabric: fabric.is_some(),
-        })),
+        transports: Arc::new(std::sync::RwLock::new(LocalTransports::configured(
+            config.fleet.as_ref().map(|file| file.transports.as_slice()),
+            local_addresses().iter().any(is_tailnet_address),
+            fabric.is_some(),
+        ))),
         fabric: fabric.clone(),
         bootstrap: config.fleet.as_ref().and_then(|file| {
             let sponsor = file.sponsor.clone()?;
@@ -752,6 +778,8 @@ pub async fn run<B: Backend>(
         if let Some(address) = tailnet {
             endpoints.update(|set| set.tailscale = vec![address]);
         }
+        // Only an enabled transport gets a probe task, so availability changes cannot
+        // re-enable Tailscale when the explicit local transport list excludes it.
         if let Some(tailscale) = tailscale {
             tokio::spawn(crate::task_cpu::account(
                 "replication.tailnet",
@@ -1180,10 +1208,10 @@ async fn lock_current_settings(
     .await?
 }
 
-/// Who this node dials, and the loopback URLs that reach each, most preferred first: every
-/// current listening member other than itself, and every config peer that has never been a
-/// member. A dial-out member is never dialed. A config peer entry for a member is that
-/// member's first route from this machine.
+/// Who this node dials, with routes most preferred first: every current listening member
+/// other than itself, and every config peer that has never been a member. A dial-out
+/// member is never dialed. An explicit config peer (`--peer`) route takes precedence over
+/// the local transport list, including its disabled transports, for backward compatibility.
 pub fn dial_targets(
     view: &FleetView,
     own: &str,
@@ -1570,6 +1598,10 @@ fn start_outbound<B: Backend>(
     ));
 }
 
+#[cfg(test)]
+#[path = "authority_guard_tests.rs"]
+mod authority_guard_tests;
+
 /// Exchange with one peer for as long as it stays a target, trying its routes in order.
 #[allow(clippy::too_many_arguments)]
 async fn dial_peer<B: Backend>(
@@ -1597,6 +1629,8 @@ async fn dial_peer<B: Backend>(
     // Routes whose one early attempt after an outage is spent, until a probe sees them down again
     // or an exchange over them succeeds. See `wait_peer_retry`.
     let mut early_spent = BTreeSet::new();
+    // Routes that answered for another shard than the one asked for, until the route set changes.
+    let mut misconfigured = Vec::<Route>::new();
     loop {
         // A removed node stops dialing; `st3 doctor` says what to do next.
         if fleet.is_removed() {
@@ -1636,12 +1670,14 @@ async fn dial_peer<B: Backend>(
                     .get(&name)
                     .cloned();
                 if let Some(offered) = offered
-                    && let Ok(current) = backend.guard_summary(auth.fleet_id()).await
+                    && let Ok(current) = backend
+                        .authority_digest(auth.fleet_id())
+                        .await
                 {
                     // The other side already knows this inventory and is draining both
                     // queues. Notifications from that exchange must not trigger a reverse
                     // connection. A genuinely new local envelope still requests a push.
-                    if current.exchange.authority_digest == offered {
+                    if !current.is_empty() && current == offered {
                         must_send = false;
                     }
                 }
@@ -1662,6 +1698,9 @@ async fn dial_peer<B: Backend>(
                 continue;
             }
         }
+        if routes.has_changed().unwrap_or(false) {
+            misconfigured.clear();
+        }
         // Retry waits must retain signs of life received during this attempt, including
         // an inbound request that arrives just before the outbound request fails.
         let attempt_started = tokio::time::Instant::now();
@@ -1673,8 +1712,20 @@ async fn dial_peer<B: Backend>(
                 route = 0;
                 preferred_retry = None;
             }
-            (!routes.is_empty()).then(|| routes[route % routes.len()].clone())
+            (0..routes.len())
+                .map(|offset| routes[route.wrapping_add(offset) % routes.len()].clone())
+                .find(|candidate| !misconfigured.contains(candidate))
         };
+        if selected.is_none() && !misconfigured.is_empty() {
+            // Every route answered for another shard. There is nothing to dial until the
+            // routes change.
+            record_worker(&backend, &name, "misconfigured", attempt_unix_ms, None, None).await;
+            if routes.changed().await.is_err() {
+                return;
+            }
+            misconfigured.clear();
+            continue;
+        }
         let preferred_route = selected
             .as_ref()
             .map(|selected| routes.borrow().first() == Some(selected));
@@ -1688,6 +1739,7 @@ async fn dial_peer<B: Backend>(
         )
         .await;
         let carrier = selected.as_ref().map(Route::carrier).unwrap_or_default();
+        let selected_route = selected.clone();
         let is_http = matches!(selected, Some(Route::Http(_)));
         let fabric_route = selected
             .clone()
@@ -1768,7 +1820,29 @@ async fn dial_peer<B: Backend>(
             }
             Err(mut error) => {
                 if let Some(removed) = error.downcast_ref::<RemovedFromFleet>() {
-                    fleet.mark_removed(&peer.name, removed);
+                    fleet.mark_removed(&peer.name, removed).await;
+                    continue;
+                }
+                if error.is::<PeerShardMismatch>() {
+                    // A shard route pointing at another store is a configuration error.
+                    // Repeating the same exchange cannot repair it. Keep the reason visible
+                    // until the route changes, without sending any shard envelopes.
+                    let failure = ReplicationExchangeFailure::from_error(
+                        &error, ReplicationFailurePhase::Verify, attempt_started.elapsed(), None,
+                    );
+                    let _ = backend
+                        .record_failure(
+                            &peer.name,
+                            "shard-mismatch",
+                            &error.to_string(),
+                            Some(carrier),
+                            Some(&failure),
+                        )
+                        .await;
+                    if let Some(selected_route) = selected_route {
+                        misconfigured.push(selected_route);
+                    }
+                    route = route.wrapping_add(1);
                     continue;
                 }
                 // `fabric dial` never connects, so the member's refusal reaches us only as a
@@ -2156,14 +2230,7 @@ async fn wait_peer_retry<B: Backend>(
 /// A worker timer. `ST3_WORKER_INTERVAL_MS` caps every one of them, so tests of several nodes on
 /// one machine need not wait out the 30- and 60-second defaults.
 fn worker_interval(default: Duration) -> Duration {
-    static CAP: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
-    CAP.get_or_init(|| {
-        std::env::var("ST3_WORKER_INTERVAL_MS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .map(Duration::from_millis)
-    })
-    .map_or(default, |cap| cap.min(default))
+    super::capped(default, super::worker_timer_cap())
 }
 
 /// The HTTP client one dialer exchanges with: short connects, and a bound on each exchange.
@@ -2777,6 +2844,41 @@ pub async fn exchange<B: Backend>(
     exchange_via(http, backend, node, peer, auth, fleet, Default::default()).await
 }
 
+#[derive(Debug)]
+struct PeerShardMismatch {
+    peer: String,
+    expected: Option<String>,
+    actual: Option<String>,
+}
+
+impl std::fmt::Display for PeerShardMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "peer {} answered for shard {:?}, expected {:?}",
+            self.peer, self.actual, self.expected
+        )
+    }
+}
+
+impl std::error::Error for PeerShardMismatch {}
+
+fn ensure_peer_exchange_shard(
+    peer: &str,
+    sent: &ReplicationExchange,
+    answer: &ReplicationExchange,
+) -> Result<()> {
+    if answer.shard_id != sent.shard_id {
+        return Err(PeerShardMismatch {
+            peer: peer.into(),
+            expected: sent.shard_id.clone(),
+            actual: answer.shard_id.clone(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 async fn finish_leave_receipt(
     http: &reqwest::Client,
     peer: &PeerConfig,
@@ -2882,6 +2984,7 @@ async fn exchange_inner<B: Backend>(
     let started = std::time::Instant::now();
     let (remote, peer_inflates) =
         post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
+    ensure_peer_exchange_shard(&peer.name, &query, &remote)?;
     let round_trip = started.elapsed();
     let different = remote.inventory.digest != query.inventory.digest;
     let received = receive_from_peer(
@@ -2895,6 +2998,7 @@ async fn exchange_inner<B: Backend>(
     )
     .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
     telemetry.pull(received.receipt.received);
+    let claim_ranges = received.receipt.claim_ranges.clone();
     // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
     // or keeps being sent, envelopes that are never stored must not keep the worker busy.
     let pulled = received.receipt.received != 0;
@@ -2916,6 +3020,7 @@ async fn exchange_inner<B: Backend>(
         // A peer that says it takes compressed requests gets a large push compressed.
         let (response, _) =
             post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
+        ensure_peer_exchange_shard(&peer.name, &push, &response)?;
         let round_trip = started.elapsed();
         // The peer stores a push before it answers, so its inventory moved if the push landed.
         pushed = !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
@@ -2953,8 +3058,167 @@ async fn exchange_inner<B: Backend>(
         backend.changed().await;
         refresh_fleet_view(backend, fleet).await;
     }
-    let progressed = pulled || pulled_follow_up || pushed || adopted;
+    let mut progressed = pulled || pulled_follow_up || pushed || adopted;
+    // Walking differing claim ranges is the lowest-priority sync work: it runs only once
+    // envelope transport has nothing left to move.
+    if let Some(comparison) = claim_ranges.filter(|comparison| !comparison.same && !progressed) {
+        progressed = walk_claim_ranges(
+            http, backend, node, peer, auth, fleet, telemetry, carrier, attempt, &query, &comparison,
+        )
+        .await?;
+    }
     Ok(progressed)
+}
+
+/// How far this node has walked one peer's differing claim ranges, by node and peer.
+static CLAIM_WALKS: std::sync::LazyLock<std::sync::Mutex<BTreeMap<(String, String), ClaimWalk>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The most claim-range round trips one exchange spends; a walk that needs more continues at
+/// the next exchange.
+const CLAIM_WALK_ROUND_TRIPS: usize = 4;
+
+/// One walk over the claim ranges that differ between this node and a peer, for one pair of
+/// whole-set digests: the tops, then the leaves of differing tops, then the IDs of differing
+/// leaves, then the claims this node lacks. A walk that finishes is not repeated until either
+/// side's claims change, so claims this node retired, or holds that the peer lacks, cost one
+/// walk, not one per exchange.
+#[derive(Debug, Default)]
+pub(crate) struct ClaimWalk {
+    pair: String,
+    asked_tops: bool,
+    tops: std::collections::VecDeque<u32>,
+    leaves: std::collections::VecDeque<u32>,
+    missing: BTreeSet<String>,
+}
+
+impl ClaimWalk {
+    pub(crate) fn new(pair: &str) -> Self {
+        Self { pair: pair.to_owned(), ..Default::default() }
+    }
+
+    /// The next question for the peer: fetch what was found missing first, then descend.
+    pub(crate) fn next_query(&mut self) -> Option<crate::replication::ClaimRangeQuery> {
+        use crate::replication::*;
+        let mut query = ClaimRangeQuery::default();
+        if !self.missing.is_empty() {
+            while query.claims.len() < CLAIM_RANGE_QUERY_CLAIMS {
+                let Some(id) = self.missing.pop_first() else { break };
+                query.claims.push(id);
+            }
+        } else if !self.leaves.is_empty() {
+            let take = self.leaves.len().min(CLAIM_RANGE_QUERY_LEAVES);
+            query.ids_of = self.leaves.drain(..take).collect();
+        } else if !self.tops.is_empty() {
+            let take = self.tops.len().min(CLAIM_RANGE_QUERY_TOPS);
+            query.leaves_of = self.tops.drain(..take).collect();
+        } else if !self.asked_tops {
+            self.asked_tops = true;
+            query.tops = true;
+        } else {
+            return None;
+        }
+        Some(query)
+    }
+
+    /// A walk with nothing left to ask: the claims already agree.
+    pub(crate) fn finished(pair: &str) -> Self {
+        Self { pair: pair.to_owned(), asked_tops: true, ..Default::default() }
+    }
+
+    /// Ask `query` again later: an index was still folding claims in, so the answer showed
+    /// nothing.
+    pub(crate) fn retry(&mut self, query: crate::replication::ClaimRangeQuery) {
+        self.asked_tops &= !query.tops;
+        for top in query.leaves_of.into_iter().rev() {
+            self.tops.push_front(top);
+        }
+        for leaf in query.ids_of.into_iter().rev() {
+            self.leaves.push_front(leaf);
+        }
+        self.missing.extend(query.claims);
+    }
+
+    /// Take in what one answer showed.
+    pub(crate) fn absorb(&mut self, comparison: &crate::replication::ClaimRangeComparison) {
+        self.tops.extend(&comparison.tops);
+        self.leaves.extend(&comparison.leaves);
+        self.missing.extend(comparison.missing.iter().cloned());
+    }
+}
+
+/// Continue this node's walk of a peer's differing claim ranges for a few round trips, each an
+/// ordinary summary exchange carrying one bounded query. Claims found missing arrive as
+/// ordinary envelopes and are admitted like any other. Returns whether any were stored.
+#[allow(clippy::too_many_arguments)]
+async fn walk_claim_ranges<B: Backend>(
+    http: &reqwest::Client,
+    backend: &B,
+    node: &str,
+    peer: &PeerConfig,
+    auth: &FleetAuth,
+    fleet: &FleetContext,
+    telemetry: &mut super::telemetry::Round,
+    carrier: crate::replication::ReplicationCarrier,
+    attempt: std::time::Instant,
+    summary: &ReplicationExchange,
+    comparison: &crate::replication::ClaimRangeComparison,
+) -> Result<bool> {
+    let key = (node.to_owned(), peer.name.clone());
+    let mut walk = CLAIM_WALKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&key)
+        .filter(|walk| walk.pair == comparison.pair)
+        .unwrap_or_else(|| ClaimWalk::new(&comparison.pair));
+    let mut fetched = false;
+    let mut result = Ok(());
+    for _ in 0..CLAIM_WALK_ROUND_TRIPS {
+        let Some(query) = walk.next_query() else { break };
+        let mut ask = summary.clone();
+        ask.inventory.claim_range_query = Some(query.clone());
+        let started = std::time::Instant::now();
+        let answer = match post_signed(http, backend, peer, node, auth, fleet, &ask, false).await {
+            Ok((answer, _)) => answer,
+            Err(error) => {
+                result = Err(error);
+                break;
+            }
+        };
+        let received = match receive_from_peer(
+            backend,
+            fleet,
+            &peer.name,
+            auth.fleet_id(),
+            &answer,
+            Some(started.elapsed()),
+            carrier,
+        )
+        .await
+        {
+            Ok(received) => received,
+            Err(error) => {
+                result = Err(exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None));
+                break;
+            }
+        };
+        telemetry.pull(received.receipt.received);
+        fetched |= received.receipt.received != 0;
+        match &received.receipt.claim_ranges {
+            // Either index is still folding claims in, so the answer shows nothing yet.
+            None => {
+                walk.retry(query);
+                break;
+            }
+            Some(comparison) if comparison.same => {
+                walk = ClaimWalk::finished(&walk.pair);
+                break;
+            }
+            Some(comparison) => walk.absorb(comparison),
+        }
+    }
+    CLAIM_WALKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, walk);
+    result.map(|()| fetched)
 }
 
 /// When an adoption last failed, by this node and the checkpoint's drop digest, so a manifest

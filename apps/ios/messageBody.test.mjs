@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { ClientError } from '../../clients/typescript/st3-client/index.ts';
+import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
 import { wholeText, wholeTextFailure } from './messageBody.ts';
 
 const refused = (code, message = 'm') => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message, retryable: false, details: {} }, 404);

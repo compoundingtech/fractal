@@ -5,11 +5,11 @@
   "exception_reason": null,
   "bundles": {
     "x86_64-unknown-linux-gnu": {
-      "url": "https://github.com/compoundingtech/smalltalk/releases/download/v0.3.17/smalltalk-x86_64-unknown-linux-gnu.tar.gz",
+      "url": "https://github.com/compoundingtech/fractal/releases/download/v0.3.17/smalltalk-x86_64-unknown-linux-gnu.tar.gz",
       "sha256": "d30869ac1251dbeb30862bc3f5c74db4a0ccfe385110e43c5c474aa385dcddb2"
     },
     "aarch64-apple-darwin": {
-      "url": "https://github.com/compoundingtech/smalltalk/releases/download/v0.3.17/smalltalk-aarch64-apple-darwin.tar.gz",
+      "url": "https://github.com/compoundingtech/fractal/releases/download/v0.3.17/smalltalk-aarch64-apple-darwin.tar.gz",
       "sha256": "9cfdde671712439309bfc1b9b05689ad3b5d084de2916d7131df92ed310b3a0a"
     }
   }

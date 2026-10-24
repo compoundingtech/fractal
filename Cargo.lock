@@ -1369,6 +1369,1179 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "alacritty_terminal",
+ "anyhow",
+ "assert_cmd",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "ciborium",
+ "clap",
+ "clap_complete",
+ "data-encoding",
+ "flate2",
+ "fractal",
+ "fractal-build-stamp",
+ "fractal-chatgpt",
+ "fractal-client",
+ "fractal-conversation-ui",
+ "fractal-daemon",
+ "fractal-drivers",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-terminal-direct",
+ "fractal-tui",
+ "fractal-ui-model",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "image",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "libghostty-vt",
+ "libghostty-vt-sys",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "portable-pty",
+ "predicates",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "pty-terminal",
+ "reqwest",
+ "resvg",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-api-client-v0"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "fractal-api-client-v0",
+ "fractal-api-core",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-ui-model",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "hyper",
+ "hyper-util",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-api-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "fractal-api-core",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-reconcile",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-ui-model",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "libghostty-vt",
+ "notify",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "pty-terminal",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-api-mailbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "fractal-api-core",
+ "fractal-api-mailbox",
+ "fractal-drivers",
+ "fractal-runtime",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "fractal-attention"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fractal-attention",
+ "fractal-client",
+ "fractal-kernel",
+ "fractal-schema",
+ "fractal-seats",
+ "fractal-store",
+ "hex",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-build-stamp"
+version = "0.1.0"
+
+[[package]]
+name = "fractal-chatgpt"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "rmcp",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fractal-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "ciborium",
+ "crossterm",
+ "fractal-schema",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook 0.3.18",
+ "smallclaims",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fractal-client-codegen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "fractal-client-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "crossterm",
+ "fractal-client",
+ "fractal-conversation-ui",
+ "fractal-feed",
+ "ratatui",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fractal-conversation-ui"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fractal-client",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "fractal-daemon"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "alacritty_terminal",
+ "anyhow",
+ "assert_cmd",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "ciborium",
+ "clap",
+ "clap_complete",
+ "data-encoding",
+ "flate2",
+ "fractal-api-client-v0",
+ "fractal-api-core",
+ "fractal-api-mailbox",
+ "fractal-attention",
+ "fractal-client",
+ "fractal-daemon",
+ "fractal-delivery",
+ "fractal-drivers",
+ "fractal-evidence",
+ "fractal-github",
+ "fractal-kernel",
+ "fractal-missions",
+ "fractal-peer",
+ "fractal-reconcile",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-seats",
+ "fractal-store",
+ "fractal-telemetry",
+ "fractal-terminal-direct",
+ "fractal-ui-model",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "image",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "libghostty-vt",
+ "libghostty-vt-sys",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "portable-pty",
+ "predicates",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "pty-terminal",
+ "reqwest",
+ "resvg",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "subtle",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-delivery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "ciborium",
+ "fractal-delivery",
+ "fractal-kernel",
+ "fractal-schema",
+ "fractal-secrets",
+ "fractal-store",
+ "futures-util",
+ "hex",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-delivery-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "fractal-client",
+ "fractal-delivery-base",
+ "fractal-drivers",
+ "fractal-secrets",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+]
+
+[[package]]
+name = "fractal-drivers"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "anyhow",
+ "fractal-resource-protocol",
+ "fractal-resource-providers",
+ "fractal-resource-wasip2",
+ "fractal-schema",
+ "fractal-wire",
+ "kdl",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "tungstenite 0.30.0",
+ "wat",
+]
+
+[[package]]
+name = "fractal-e2e"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "fractal-client",
+ "fractal-daemon",
+ "fractal-feed",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "ring",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+]
+
+[[package]]
+name = "fractal-evidence"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fractal-attention",
+ "fractal-evidence",
+ "fractal-kernel",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-fabric-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "fractal-feed"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fractal-client",
+ "fractal-conversation-ui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "fractal-evidence",
+ "fractal-github",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fractal-github-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "fractal-drivers",
+ "fractal-github-base",
+ "fractal-runtime",
+ "fractal-secrets",
+ "futures-util",
+ "hex",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-github-issue-component"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "fractal-github-pr-component"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "fractal-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-terminal-direct",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tar",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-legacy-runner"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "fractal-build-stamp",
+ "fractal-drivers",
+ "fractal-resource-protocol",
+ "fractal-resource-providers",
+ "fractal-resource-wasip2",
+ "fractal-wire",
+ "kdl",
+ "libc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "fractal-migrate"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "anyhow",
+ "clap",
+ "fractal-daemon",
+ "fractal-drivers",
+ "hex",
+ "kdl",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-mission-ui"
+version = "0.1.0"
+dependencies = [
+ "fractal-conversation-ui",
+ "fractal-ui-model",
+ "ratatui",
+]
+
+[[package]]
+name = "fractal-missions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "flate2",
+ "fractal-delivery",
+ "fractal-kernel",
+ "fractal-missions",
+ "fractal-schema",
+ "fractal-store",
+ "hex",
+ "kdl",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-missions-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fractal-missions-base",
+ "fractal-schema",
+ "fractal-secrets",
+ "hex",
+ "kdl",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+]
+
+[[package]]
+name = "fractal-peer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "fractal-client",
+ "fractal-github",
+ "fractal-peer",
+ "futures-util",
+ "hex",
+ "jsonschema",
+ "notify",
+ "parking_lot",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-pty-stats-component"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "fractal-reconcile"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-peer",
+ "fractal-reconcile",
+ "fractal-runtime",
+ "fractal-schema",
+ "futures-util",
+ "hex",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-resource-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "fractal-resource-providers"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fractal-resource-protocol",
+ "fractal-resource-wasip2",
+ "hickory-resolver",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wasmtime",
+]
+
+[[package]]
+name = "fractal-resource-wasip2"
+version = "0.1.0"
+dependencies = [
+ "fractal-resource-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "wasmtime",
+ "wat",
+]
+
+[[package]]
+name = "fractal-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "portable-pty",
+ "pty-client",
+ "pty-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "fractal-schema"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fractal-storage-version",
+ "hex",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "fractal-seats"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-kernel",
+ "fractal-missions",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-seats",
+ "fractal-secrets",
+ "fractal-store",
+ "hex",
+ "kdl",
+ "libc",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-seats-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-seats-base",
+ "fractal-secrets",
+ "hex",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-secrets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-kernel",
+ "fractal-secrets",
+ "fractal-telemetry",
+ "fractal-terminal-direct",
+ "fractal-tiles-registry",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-storage-version"
+version = "0.1.0"
+
+[[package]]
+name = "fractal-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "ciborium",
+ "clap",
+ "flate2",
+ "fractal-client",
+ "fractal-delivery-base",
+ "fractal-drivers",
+ "fractal-github-base",
+ "fractal-kernel",
+ "fractal-missions-base",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-seats-base",
+ "fractal-secrets",
+ "fractal-store",
+ "fractal-telemetry",
+ "fractal-terminal-direct",
+ "fractal-ui-model",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "kdl",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-telemetry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-kernel",
+ "futures-util",
+ "hex",
+ "libc",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-terminal-direct"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pty-core",
+ "serde",
+ "serde_json",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "fractal-tiles-registry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "fractal-tui"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "crossterm",
+ "flate2",
+ "fractal-client",
+ "fractal-conversation-ui",
+ "fractal-daemon",
+ "fractal-feed",
+ "fractal-mission-ui",
+ "fractal-schema",
+ "fractal-terminal-direct",
+ "fractal-ui-model",
+ "image",
+ "libc",
+ "portable-pty",
+ "pty-client",
+ "pty-core",
+ "pty-terminal",
+ "ratatui",
+ "ratatui-image",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook 0.3.18",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "unicode-width 0.2.0",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-ui-model"
+version = "0.1.0"
+dependencies = [
+ "fractal-client",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fractal-vista-component"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "fractal-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fraction"
 version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3362,7 +4535,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "libc",
  "pty-core",
@@ -3373,7 +4546,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "indexmap",
  "libc",
@@ -3388,7 +4561,7 @@ dependencies = [
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",
@@ -4479,6 +5652,7 @@ dependencies = [
  "ciborium",
  "data-encoding",
  "flate2",
+ "fractal-storage-version",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -4496,7 +5670,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "st-storage-version",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -4534,1099 +5707,6 @@ dependencies = [
  "http-body",
  "http-body-util",
  "pin-project-lite",
-]
-
-[[package]]
-name = "st-build-stamp"
-version = "0.1.0"
-
-[[package]]
-name = "st-chatgpt"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "libc",
- "parking_lot",
- "reqwest",
- "rmcp",
- "serde_json",
- "tempfile",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "st-drivers"
-version = "0.1.0"
-dependencies = [
- "agent-spec",
- "anyhow",
- "kdl",
- "libc",
- "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "parking_lot",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "st-resource-protocol",
- "st-wire",
- "st2-resource-providers",
- "st2-resource-wasip2",
- "st3-schema",
- "tempfile",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "tungstenite 0.30.0",
- "wat",
-]
-
-[[package]]
-name = "st-resource-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "st-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libc",
- "portable-pty",
- "pty-client",
- "pty-core",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "st-storage-version"
-version = "0.1.0"
-
-[[package]]
-name = "st-wire"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "st2"
-version = "0.1.0"
-dependencies = [
- "agent-spec",
- "anyhow",
- "clap",
- "clap_complete",
- "kdl",
- "libc",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2",
- "st-build-stamp",
- "st-drivers",
- "st-resource-protocol",
- "st-wire",
- "st2-resource-providers",
- "st2-resource-wasip2",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "st2-github-issue-component"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "wit-bindgen",
-]
-
-[[package]]
-name = "st2-github-pr-component"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "wit-bindgen",
-]
-
-[[package]]
-name = "st2-pty-stats-component"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "wit-bindgen",
-]
-
-[[package]]
-name = "st2-resource-providers"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hickory-resolver",
- "libc",
- "parking_lot",
- "reqwest",
- "serde",
- "serde_json",
- "st-resource-protocol",
- "st2-resource-wasip2",
- "tempfile",
- "tokio",
- "wasmtime",
-]
-
-[[package]]
-name = "st2-resource-wasip2"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "st-resource-protocol",
- "tempfile",
- "wasmtime",
- "wat",
-]
-
-[[package]]
-name = "st2-vista-component"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "wit-bindgen",
-]
-
-[[package]]
-name = "st3"
-version = "0.1.0"
-dependencies = [
- "agent-spec",
- "alacritty_terminal",
- "anyhow",
- "assert_cmd",
- "axum",
- "base64 0.22.1",
- "chrono",
- "chrono-tz",
- "ciborium",
- "clap",
- "clap_complete",
- "data-encoding",
- "flate2",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "hmac",
- "http-body-util",
- "hyper",
- "hyper-util",
- "image",
- "jsonschema",
- "kdl",
- "libc",
- "libghostty-vt",
- "libghostty-vt-sys",
- "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "portable-pty",
- "predicates",
- "proptest",
- "pty-client",
- "pty-core",
- "pty-terminal",
- "reqwest",
- "resvg",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-build-stamp",
- "st-chatgpt",
- "st-drivers",
- "st-runtime",
- "st3",
- "st3-client",
- "st3-conversation-ui",
- "st3-daemon",
- "st3-schema",
- "st3-terminal-direct",
- "st3-ui-model",
- "stui",
- "tar",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "toml 0.9.12+spec-1.1.0",
- "tower",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "urlencoding",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "st3-api-client-v0"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "chrono",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "hmac",
- "hyper",
- "hyper-util",
- "jsonschema",
- "kdl",
- "libc",
- "notify",
- "opentelemetry",
- "pty-client",
- "pty-core",
- "reqwest",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st-runtime",
- "st3-api-client-v0",
- "st3-api-core",
- "st3-client",
- "st3-schema",
- "st3-ui-model",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "tower",
- "tracing",
- "tracing-opentelemetry",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "st3-api-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "chrono",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "hmac",
- "http-body-util",
- "hyper",
- "hyper-util",
- "jsonschema",
- "kdl",
- "libc",
- "libghostty-vt",
- "notify",
- "opentelemetry",
- "opentelemetry_sdk",
- "parking_lot",
- "proptest",
- "pty-client",
- "pty-core",
- "pty-terminal",
- "reqwest",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st-runtime",
- "st3-api-core",
- "st3-client",
- "st3-reconcile",
- "st3-schema",
- "st3-ui-model",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "tower",
- "tracing",
- "tracing-opentelemetry",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "st3-api-mailbox"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "chrono",
- "futures-util",
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "pty-client",
- "pty-core",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st-runtime",
- "st3-api-core",
- "st3-api-mailbox",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "tower",
-]
-
-[[package]]
-name = "st3-attention"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "proptest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st3-attention",
- "st3-client",
- "st3-kernel",
- "st3-schema",
- "st3-seats",
- "st3-store",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "st3-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bytes",
- "ciborium",
- "crossterm",
- "futures-util",
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "opentelemetry",
- "opentelemetry_sdk",
- "reqwest",
- "ring",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook 0.3.18",
- "smallclaims",
- "st3-schema",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "st3-client-codegen"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "st3-client-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "crossterm",
- "ratatui",
- "serde_json",
- "st3-client",
- "st3-conversation-ui",
- "st3-feed",
- "tokio",
-]
-
-[[package]]
-name = "st3-conversation-ui"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "ratatui",
- "serde",
- "serde_json",
- "st3-client",
- "unicode-width 0.2.0",
-]
-
-[[package]]
-name = "st3-daemon"
-version = "0.1.0"
-dependencies = [
- "agent-spec",
- "alacritty_terminal",
- "anyhow",
- "assert_cmd",
- "axum",
- "base64 0.22.1",
- "chrono",
- "chrono-tz",
- "ciborium",
- "clap",
- "clap_complete",
- "data-encoding",
- "flate2",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "hmac",
- "http-body-util",
- "hyper",
- "hyper-util",
- "image",
- "jsonschema",
- "kdl",
- "libc",
- "libghostty-vt",
- "libghostty-vt-sys",
- "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "portable-pty",
- "predicates",
- "proptest",
- "pty-client",
- "pty-core",
- "pty-terminal",
- "reqwest",
- "resvg",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st-runtime",
- "st3-api-client-v0",
- "st3-api-core",
- "st3-api-mailbox",
- "st3-attention",
- "st3-client",
- "st3-daemon",
- "st3-delivery",
- "st3-evidence",
- "st3-github",
- "st3-kernel",
- "st3-missions",
- "st3-peer",
- "st3-reconcile",
- "st3-schema",
- "st3-seats",
- "st3-store",
- "st3-telemetry",
- "st3-terminal-direct",
- "st3-ui-model",
- "tar",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "toml 0.9.12+spec-1.1.0",
- "tower",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "urlencoding",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "st3-delivery"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "ciborium",
- "futures-util",
- "hex",
- "proptest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st3-delivery",
- "st3-kernel",
- "st3-schema",
- "st3-secrets",
- "st3-store",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "st3-delivery-base"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "futures-util",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st3-client",
- "st3-delivery-base",
- "st3-secrets",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
-]
-
-[[package]]
-name = "st3-e2e"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "bytes",
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "reqwest",
- "ring",
- "serde_json",
- "sha2",
- "smallclaims",
- "st3-client",
- "st3-daemon",
- "st3-feed",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
-]
-
-[[package]]
-name = "st3-evidence"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st3-attention",
- "st3-evidence",
- "st3-kernel",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "st3-feed"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "st3-client",
- "st3-conversation-ui",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "st3-github"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "getrandom 0.3.4",
- "hex",
- "libc",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st3-evidence",
- "st3-github",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "st3-github-base"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "chrono",
- "futures-util",
- "hex",
- "libc",
- "parking_lot",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st-runtime",
- "st3-github-base",
- "st3-secrets",
- "tempfile",
- "tokio",
- "tracing",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "st3-kernel"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "clap",
- "getrandom 0.3.4",
- "hex",
- "libc",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st-runtime",
- "st3-client",
- "st3-schema",
- "st3-terminal-direct",
- "tar",
- "tempfile",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "urlencoding",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "st3-migrate"
-version = "0.1.0"
-dependencies = [
- "agent-spec",
- "anyhow",
- "clap",
- "hex",
- "kdl",
- "serde",
- "serde_json",
- "sha2",
- "st-drivers",
- "st3-daemon",
- "tempfile",
- "walkdir",
-]
-
-[[package]]
-name = "st3-missions"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "flate2",
- "hex",
- "kdl",
- "proptest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st3-delivery",
- "st3-kernel",
- "st3-missions",
- "st3-schema",
- "st3-store",
- "tempfile",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "st3-missions-base"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "kdl",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st3-missions-base",
- "st3-schema",
- "st3-secrets",
-]
-
-[[package]]
-name = "st3-peer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "futures-util",
- "hex",
- "jsonschema",
- "notify",
- "parking_lot",
- "pty-client",
- "pty-core",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st3-client",
- "st3-github",
- "st3-peer",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "tower",
- "tracing",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "st3-reconcile"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "chrono",
- "chrono-tz",
- "futures-util",
- "hex",
- "libc",
- "notify",
- "opentelemetry",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st-runtime",
- "st3-client",
- "st3-peer",
- "st3-reconcile",
- "st3-schema",
- "tar",
- "tempfile",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "st3-schema"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "st-storage-version",
- "toml 0.9.12+spec-1.1.0",
-]
-
-[[package]]
-name = "st3-seats"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "hex",
- "kdl",
- "libc",
- "opentelemetry",
- "opentelemetry_sdk",
- "proptest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st-runtime",
- "st3-client",
- "st3-kernel",
- "st3-missions",
- "st3-schema",
- "st3-seats",
- "st3-secrets",
- "st3-store",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "st3-seats-base"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "hex",
- "libc",
- "pty-client",
- "pty-core",
- "rusqlite",
- "serde_json",
- "sha2",
- "st-drivers",
- "st3-client",
- "st3-seats-base",
- "st3-secrets",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "st3-secrets"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "clap",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "libc",
- "pty-client",
- "pty-core",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "smallclaims",
- "st-drivers",
- "st3-client",
- "st3-kernel",
- "st3-secrets",
- "st3-telemetry",
- "st3-terminal-direct",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "st3-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "chrono",
- "chrono-tz",
- "ciborium",
- "clap",
- "flate2",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "kdl",
- "libc",
- "notify",
- "opentelemetry",
- "opentelemetry_sdk",
- "proptest",
- "pty-client",
- "pty-core",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st-runtime",
- "st3-client",
- "st3-delivery-base",
- "st3-github-base",
- "st3-kernel",
- "st3-missions-base",
- "st3-schema",
- "st3-seats-base",
- "st3-secrets",
- "st3-store",
- "st3-telemetry",
- "st3-terminal-direct",
- "st3-ui-model",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "urlencoding",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "st3-telemetry"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "futures-util",
- "hex",
- "libc",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st3-client",
- "st3-kernel",
- "tempfile",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "st3-terminal-direct"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "pty-core",
- "serde",
- "serde_json",
- "smallclaims",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "st3-ui-model"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "st3-client",
 ]
 
 [[package]]
@@ -5675,46 +5755,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "stui"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "axum",
- "base64 0.22.1",
- "chrono",
- "clap",
- "crossterm",
- "flate2",
- "image",
- "libc",
- "portable-pty",
- "pty-client",
- "pty-core",
- "pty-terminal",
- "ratatui",
- "ratatui-image",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook 0.3.18",
- "smallclaims",
- "st3-client",
- "st3-conversation-ui",
- "st3-daemon",
- "st3-feed",
- "st3-schema",
- "st3-terminal-direct",
- "st3-ui-model",
- "tempfile",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "unicode-width 0.2.0",
- "uuid",
 ]
 
 [[package]]
@@ -6108,6 +6148,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

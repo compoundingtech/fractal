@@ -14,6 +14,11 @@ def main():
     binary, output = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
     output.mkdir(parents=True, exist_ok=True)
     node = Node(output / 'node', binary)
+    # The default spacing, not the fixture's fastest cap: with PTY launches slower than a pass
+    # (a 1 s launcher on a build host, or a loaded CI runner) this eval never saw its four seat
+    # processes at 600 passes a minute, though the daemon recorded them running.
+    with open(node.root / 'config.toml', 'a') as config:
+        config.write('\n[reconcile]\nmax_passes_per_minute = 30\n')
     node.subjects = []
     checks = {}
 

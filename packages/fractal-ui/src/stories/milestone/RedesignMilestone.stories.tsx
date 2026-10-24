@@ -1,9 +1,10 @@
 /**
- * Redesign milestone 1 (RM1) — workshop only.
+ * Redesign milestone 1 (RM1) — accepted RM1 reference (2026-10-18); the live app ports slices separately.
  *
  * Composes approved picks (SR-2, WF-1, RC-1, RC-3, SG-1) and the decided layout calls (RM1-Q1…Q7) with new shell states:
- * roster loading, empty, roster error, thread unavailable, stale, no-match, an empty main area and a command palette. No
- * open question remains, so the only args are scheme and state. The composer is deliberately untouched.
+ * roster loading, empty, roster error, thread unavailable, stale, no-match, an empty main area and a command palette. The
+ * thread pane and the docked Changes split are the kit `Pane` and `DockedSplit`. No open question remains, so the only
+ * args are scheme and state. The composer is deliberately untouched.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
@@ -21,7 +22,11 @@ const meta: Meta<Args> = {
   title: 'Fractal UI/Redesign milestone',
   parameters: {
     layout: 'fullscreen',
-    docs: { description: { component: `Workshop-only milestone. Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}. Nothing here is the accepted live design.` } },
+    scenario: {
+      _tag: 'contract-fixture',
+      reason: 'Accepted RM1 composition imports milestone-fixtures at module level. Loading, empty roster, empty thread and no-match switch on its state prop, not slice data; those stories convert to slices once the composition takes roster and conversation slice data. The remaining contracts require fixture titles, Known usage and duration, unread and prose chips, a fixed last-seen instant and command, branch-named Changes, or host-settled reload promises that worlds do not express.',
+    },
+    docs: { description: { component: `Accepted RM1 reference; live app ports slices separately. Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}. The sidebar uses the shared kit row.` } },
   },
   args: { scheme: 'dark', state: 'slice' },
   argTypes: {
@@ -62,17 +67,19 @@ export const Stale: Story = {
     // Narrow, the roster sits in the closed drawer and is not rendered.
     if (canvasElement.querySelector('[data-roster-state="stale"]') === null) return
     await expect(within(canvasElement).getByText(/^Last observed \d+ s ago$/)).toBeVisible()
-    // A last-observed roster has one glyph tone: nothing reads as live.
-    const tones = new Set([...canvasElement.querySelectorAll('[data-row-column="glyph"] svg')].map(svg => getComputedStyle(svg).color))
+    // A last-observed roster has one glyph tone: nothing reads as live, and stale is never the danger red.
+    const glyphs = [...canvasElement.querySelectorAll<SVGElement>('[data-milestone-row] [data-row-column="status"] svg')]
+    const tones = new Set(glyphs.map(svg => getComputedStyle(svg).color))
     await expect(tones.size).toBe(1)
-    // Every fixture event predates the frozen snapshot; a newer event must not be clamped into a misleading "0s".
-    const release = within(canvasElement).getByText('Draft release notes').closest('[data-testid="milestone-agent-row"]')!
-    await expect(release.querySelector('[data-row-column="time"]')).toHaveTextContent('14s')
-    const working = canvasElement.querySelector('[data-row-column="glyph"] [data-status="working"]')!
-    const idle = canvasElement.querySelector('[data-row-column="glyph"] [data-status="idle"]')!
-    await expect(working).toHaveAttribute('data-frozen', 'true')
-    await expect(idle).toHaveAttribute('data-frozen', 'true')
-    await expect(working.querySelectorAll('svg circle, svg path').length).toBeGreaterThan(idle.querySelectorAll('svg circle, svg path').length)
+    // One tone, so shape carries the state: frozen working and idle rows draw different shape cues.
+    const shape = (status: string) => canvasElement.querySelector(`[data-milestone-row][data-frozen][data-status="${status}"] [data-row-column="status"] svg`)?.innerHTML
+    await expect(shape('working')).toBeDefined()
+    await expect(shape('idle')).toBeDefined()
+    await expect(shape('working')).not.toBe(shape('idle'))
+    // Frozen times measure against the observation; nothing newer than it reads as a fake 0s.
+    const times = [...canvasElement.querySelectorAll('[data-milestone-row] [data-row-field="last-turn"] time')].map(time => time.textContent)
+    await expect(times.length).toBeGreaterThan(0)
+    await expect(times).not.toContain('0s')
   },
 }
 export const StaleLight = light(Stale)
@@ -81,16 +88,16 @@ export const Navigation: Story = {
   play: async ({ canvasElement }) => {
     // One status reads the same everywhere: the stale agent's glyph in Mod+K matches its sidebar glyph (muted, never danger).
     const paletteGlyph = await waitFor(() => { const svg = within(canvasElement).getByRole('menuitem', { name: /Fix flaky interaction gate/ }).querySelector('svg'); expect(svg).not.toBeNull(); return svg! })
-    const sidebarRow = [...canvasElement.querySelectorAll('[data-testid="milestone-agent-row"][data-status="stale"]')][0]
+    const sidebarRow = [...canvasElement.querySelectorAll('[data-milestone-row][data-status="stale"]')][0]
     if (sidebarRow === undefined) return
-    await expect(getComputedStyle(paletteGlyph).color).toBe(getComputedStyle(sidebarRow.querySelector('[data-row-column="glyph"] svg')!).color)
+    await expect(getComputedStyle(paletteGlyph).color).toBe(getComputedStyle(sidebarRow.querySelector('[data-row-column="status"] svg')!).color)
   },
 }
 export const NavigationLight = light(Navigation)
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const chord = (key: string) => isMac ? `{Meta>}${key}{/Meta}` : `{Control>}${key}{/Control}`
-const rows = (root: HTMLElement) => root.querySelectorAll('[data-testid="milestone-agent-row"]')
+const rows = (root: HTMLElement) => root.querySelectorAll('[data-milestone-row]')
 
 /** A reload the play settles itself: recovery plays assert the loading frame, then complete it with no timer to race. */
 function manualReload() {
@@ -131,7 +138,7 @@ export const HideChanges: Story = {
   },
 }
 
-/** Mod+K opens with the first result highlighted, so Enter opens it; "/" filter, tree arrows and Mod+B work end to end. */
+/** Mod+K opens with the first result highlighted, so Enter opens it; "/" filter, tree arrows, Mod+B and the row menu's Open conversation work end to end. */
 export const NavigationKeyboard: Story = {
   tags: ['critical'], args: { state: 'slice' },
   play: async ({ canvasElement }) => {
@@ -163,6 +170,14 @@ export const NavigationKeyboard: Story = {
     await waitFor(() => expect(canvas.queryByRole('searchbox', { name: 'Filter agents' })).toBeNull())
     await userEvent.keyboard(chord('b'))
     await waitFor(() => expect(canvas.getByRole('searchbox', { name: 'Filter agents' })).toBeVisible())
+    // The row menu opens the same conversation a row press does: enabled, and it lands on the agent's tab.
+    await userEvent.click(canvas.getByRole('button', { name: 'Actions for Fix flaky interaction gate' }))
+    const rowMenu = await page.findByRole('menu', { name: 'Actions for Fix flaky interaction gate' })
+    const openItem = within(rowMenu).getByRole('menuitem', { name: 'Open conversation' })
+    await expect(openItem).not.toHaveAttribute('aria-disabled', 'true')
+    await userEvent.click(openItem)
+    await waitFor(() => expect(page.queryByRole('menu')).toBeNull())
+    await waitFor(() => expect(within(canvas.getByRole('tablist', { name: 'Open conversations' })).getByRole('tab', { selected: true })).toHaveTextContent('Fix flaky interaction gate'))
   },
 }
 
@@ -209,6 +224,12 @@ export const ThreadRecovery: Story = {
 /** Decision sheet: every row is decided; rows settled by a decision request carry its question ID. */
 export const Decisions: Story = {
   args: { scheme: 'dark' },
+  parameters: {
+    scenario: {
+      _tag: 'contract-fixture',
+      reason: 'Static decision sheet shares this CSF module with RedesignMilestone, whose runtime import graph reaches milestone-fixtures; it is not a fixture-free primitive.',
+    },
+  },
   render: args => <article {...stylex.props(styles.sheet, ...baselineTheme, args.scheme === 'light' && lightTheme)}>
     <h1 {...stylex.props(styles.h1)}>Redesign milestone 1 — decisions</h1>
     <h2 {...stylex.props(styles.h2)}>Decided (composed, not re-asked)</h2>

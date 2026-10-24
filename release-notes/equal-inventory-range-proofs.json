@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep equal-digest replication answers compact across concurrent writes",
+  "replay": { "status": "none", "detail": "No replay or recovery is required; exported inventory metadata changes only." },
+  "schema": { "status": "none", "detail": "No database schema or stored claim changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules, envelope admission and digests are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Equal-digest answers retain existing range-digest fields instead of omitting them. Older peers already ignore these optional fields. No exchange body or metadata limit is raised. Explicit legacy full-inventory requests still receive the existing answer." },
+  "downtime": { "status": "none", "detail": "Only the ordinary binary upgrade restart is required; restart duration was not measured." },
+  "manual": { "status": "none", "detail": "Upgrade normally; there is no state migration or manual repair." },
+  "recovery": { "status": "none", "detail": "An older binary can read the unchanged state and restores the previous inventory export behavior." }
+}

@@ -42,7 +42,7 @@ This section is written for a person's own agent to read and act on at their req
   before editing `config.toml`.
 - **How to change it.** Set `access_mode = "auto"` or `access_mode = "bypass"` in that file
   (add the line when it is missing, leave the other keys alone), run `st service restart`
-  (the daemon adopts live seats; see [upgrading st](../upgrading-st.md#restart-the-services-and-verify)),
+  (the daemon adopts live seats; see [upgrading st](../site/guides/upgrading.md#install-and-restart-deliberately)),
   and run `st doctor`: its `harness-access-mode` check names the mode the daemon started with.
   Seats already running keep the permissions they started with until
   `st agents restart AGENT --as PERSON` restarts them.
@@ -86,7 +86,7 @@ Codex also cannot express two of the rules the policy wants. It cannot allow the
 naming the only local socket: with networking on, any local Unix socket the seat's OS user can
 reach connects. That includes other seats' PTY and attach sockets, the ssh agent, and any local
 daemon socket. With networking off, even the named socket is refused. A control in
-`crates/st-drivers/tests/codex_managed_sandbox.rs` keeps this visible and fails the day Codex
+`crates/fractal-drivers/tests/codex_managed_sandbox.rs` keeps this visible and fails the day Codex
 learns the rule. And Codex's `domains` allowlist is not enforced by `codex sandbox`, so egress is
 not narrowed to git, gh and registries.
 
@@ -116,7 +116,7 @@ branch, deleting remote branches, merging or closing pull requests, and any othe
 With it the push succeeded 10 times in 10. The wording matters ("the operator authorized" was rejected)
 and is a behavior of that model version; `scripts/st3-codex-minimal-eval/push-check` re-runs the probe.
 Nothing is opted in by this change; opting a seat in is the operator's decision, made in its declaration.
-st does not restrict who may publish that declaration: in [free mode](kdl-lifecycle.md#free-mode) any person
+st does not restrict who may publish that declaration: in [free mode](../site/reference/configuration.md#free-mode) any person
 or agent may publish a seat declaration as itself, so an agent that can publish can write this entry into a
 declaration, including its own. The control is review of the declarations before they are published,
 not an st check. The "not authorized" list is advice to a model and was not tested adversarially. The real boundary is
@@ -139,7 +139,7 @@ Codex's workspace profile allows reads and temporary-directory writes according 
 its built-in rules. On Linux, enabling networking also permits other Unix sockets:
 the socket entry is not a socket-only security boundary. Writes outside the workspace
 and permitted temporary roots remain restricted. The recorded Codex 0.160.1 controls
-in `crates/st-drivers/tests/fixtures/codex-managed-profile-probe.json` show workspace
+in `crates/fractal-drivers/tests/fixtures/codex-managed-profile-probe.json` show workspace
 writes and socket connection succeeding, an outside write failing with a read-only
 filesystem, and a socket connection failing with EPERM when networking is disabled.
 The fixture also retains an invalid initial probe invocation and the successful

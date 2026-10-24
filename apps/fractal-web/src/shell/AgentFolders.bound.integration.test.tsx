@@ -3,12 +3,12 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import type { AgentFoldersProps, SidebarNode } from '../folders/sidebarContract.ts'
-import { SidebarAgentRow, sidebarRowAccessibleName } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import * as sidebarKit from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, sidebarRowAccessibleName } from '@fractal/ui/assistant-ui/shell'
+import * as sidebarKit from '@fractal/ui/assistant-ui/shell'
 import { sidebarRow } from '../web/sidebarRow.ts'
 import { fleetFromAgents } from '../data/projections.ts'
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import { openAgent } from '@st3/sdk/effect'
+import { Agent, decodeUnknownSync } from '@fractal/client/schema'
+import { openAgent } from '@fractal/sdk/effect'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: Record<string, unknown>) => styles, defineVars: (vars: unknown) => vars, createTheme: () => ({}), keyframes: () => '', props: () => ({}) }))
 import { AgentFolders } from './AgentFolders.tsx'
@@ -40,7 +40,7 @@ const fixture: readonly SidebarNode[] = [
     { _tag: 'Agent', id: 'agent/two', subject: 'agent/two', label: 'Two' },
   ] },
 ]
-const mount = async () => {
+const mount = async (extra: Partial<AgentFoldersProps> = {}) => {
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
@@ -53,7 +53,7 @@ const mount = async () => {
       onToggleCollapsed: change => { toggles.push(change); setCollapsed(previous => { const next = new Set(previous); if (change.collapsed) next.add(change.id); else next.delete(change.id); return next }) },
       renderAgent: node => <span>{node.label}</span>,
     }
-    return <AgentFolders {...props} />
+    return <AgentFolders {...props} {...extra} />
   }
   await React.act(async () => { root.render(<Harness />) })
   const row = (label: string): HTMLElement => host.querySelector<HTMLElement>(`[role="row"][aria-label="${label}"]`)!
@@ -85,6 +85,19 @@ describe('bound live folder tree', () => {
       expect(view.toggles).toContainEqual({ id: 'alpha', collapsed: true })
       await key('ArrowRight')
       expect(view.toggles).toContainEqual({ id: 'alpha', collapsed: false })
+    } finally { await view.dispose() }
+  })
+  it('a refused folder retries through the kit row action, which never toggles the folder', async () => {
+    const onRetry = vi.fn()
+    const view = await mount({ rowStatus: new Map([['alpha', { _tag: 'Refused', reason: 'Folder layout changed.', onRetry }]]) })
+    try {
+      const retry = [...view.row('Alpha').querySelectorAll('button')].find(button => button.textContent === 'Try again')
+      // The kit row action stacks above a touch header's whole-row disclosure; the story pins the hit-testing.
+      expect(retry?.hasAttribute('data-sidebar-row-action')).toBe(true)
+      await React.act(async () => retry!.click())
+      expect(onRetry).toHaveBeenCalledTimes(1)
+      expect(view.toggles).toEqual([])
+      expect(view.row('Alpha').getAttribute('aria-expanded')).toBe('true')
     } finally { await view.dispose() }
   })
   it('retains sibling RAC item identities when one accessible status or roster label changes', async () => {
@@ -122,7 +135,7 @@ describe('bound live folder tree', () => {
     document.body.append(host)
     const root = createRoot(host)
     const agent: SidebarNode = { _tag: 'Agent', id: 'agent/atlas', subject: 'agent/atlas', label: 'Atlas Builder' }
-    const projected = fleetFromAgents([openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/atlas', name: 'Atlas Builder', host_id: 'host/host-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))]).agents[0]!
+    const projected = fleetFromAgents([openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/atlas', name: 'Atlas Builder', host_id: 'host/example-primary', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))]).agents[0]!
     const item = sidebarRow({ agent: projected, stale: false })
     const renders = vi.fn()
     const MemoContent = React.memo(() => { renders(); return <SidebarAgentRow inTree item={item} now={5000} /> })
@@ -133,7 +146,7 @@ describe('bound live folder tree', () => {
     }
     try {
       await React.act(async () => { root.render(<AgentFolders {...props} tree={[agent]} />) })
-      const named = () => [...host.querySelectorAll<HTMLElement>('[role="row"]')].filter(element => element.getAttribute('aria-label') === 'Atlas Builder, idle')
+      const named = () => [...host.querySelectorAll<HTMLElement>('[role="row"]')].filter(element => element.getAttribute('aria-label') === 'Atlas Builder, Idle')
       const row = named()[0]!
       expect(named()).toHaveLength(1)
       expect(renders).toHaveBeenCalledTimes(1)

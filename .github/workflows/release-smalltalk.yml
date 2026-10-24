@@ -14,8 +14,8 @@ on:
       - .github/workflows/release-smalltalk.yml
       - .github/workflows/release-smalltalk.yml.genie.ts
       - .gitignore
-      - crates/st-build-stamp/**
-      - crates/st-drivers/src/version.rs
+      - crates/fractal-build-stamp/**
+      - crates/fractal-drivers/src/version.rs
       - install.sh
       - scripts/download-install-test
       - scripts/linux-release-cc
@@ -366,7 +366,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Test install entry points and isolated app transactions
+      - name: Test release names, install entry points and isolated app transactions
         run: |
           scripts/install-test
           scripts/install-release-test
@@ -449,7 +449,6 @@ jobs:
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
           summarize: true
-        if: runner.os == 'Linux'
       - name: Provide the pinned Linux host C compiler
         if: runner.os == 'Linux'
         run: |
@@ -571,8 +570,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - uses: actions/download-artifact@v4
         with:
           name: smalltalk-release
@@ -600,7 +612,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - uses: actions/download-artifact@v4
         with:
           name: smalltalk-release
