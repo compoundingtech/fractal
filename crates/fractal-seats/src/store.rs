@@ -151,6 +151,8 @@ pub mod step_labels;
 pub mod stop_deferral;
 pub mod subagents;
 pub mod trace_principal;
+pub mod usage_accounts;
+pub use usage_accounts::AttributedUsage;
 pub mod usage_period;
 pub mod work_summaries_ivm;
 #[cfg(test)]

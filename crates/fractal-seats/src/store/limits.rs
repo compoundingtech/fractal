@@ -58,6 +58,10 @@ impl LimitsPolicy {
                 .as_ref()
                 .is_some_and(|name| self.exempt_accounts.contains(name))
             || self.exempt_accounts.contains(&episode_account(limit))
+            || limit
+                .identity
+                .as_ref()
+                .is_some_and(|label| self.exempt_accounts.contains(label))
     }
 }
 
@@ -113,9 +117,15 @@ pub trait LimitsStore {
             policy: &LimitsPolicy,
             now: u128,
         ) -> Result<LimitsOutcome, St3Error>;
+    /// The usage of a period against the declared accounts: every row and limit, and each
+    /// account's credits used so far in the calendar month of `until_ms`.
+    fn attributed_usage(&self, since_ms: u64, until_ms: u64) -> Result<super::usage_accounts::AttributedUsage>;
 }
 
 impl LimitsStore for Store {
+    fn attributed_usage(&self, since_ms: u64, until_ms: u64) -> Result<super::usage_accounts::AttributedUsage> {
+        super::usage_accounts::attributed_usage(self, since_ms, until_ms)
+    }
 
     fn account_limits(&self) -> Result<Vec<AccountLimit>> {
         if !self.account_limits_ready()? {
