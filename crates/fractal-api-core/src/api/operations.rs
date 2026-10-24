@@ -237,7 +237,7 @@ pub async fn apply_operational_repair(
     let result = blocking_action(move || {
         let (subjects, classes) = Store::operational_repair_token_filters(&request.token)?;
         let (_guards, evidence) = legacy_start_repair_evidence(&effect_state, &subjects, &classes)
-            .map_err(|error| St3Error::new("legacy-start-proof-unavailable", format!("{error:#}")))?;
+            .map_err(legacy_start_proof_error)?;
         effect_state.store.apply_operational_repair_with_legacy_starts(&request.token, &evidence)
     }).await?;
     if result.applied != 0 {
@@ -253,8 +253,60 @@ pub(super) fn owner_operational_repair_plan(state: &AppState) -> anyhow::Result<
 fn owner_operational_repair_plan_with_filter(
     state: &AppState, subjects: &[String], classes: &[String],
 ) -> anyhow::Result<OperationalRepairPlan> {
-    let (_guards, evidence) = legacy_start_repair_evidence(state, subjects, classes)?;
+    let (_guards, evidence) = legacy_start_repair_evidence(state, subjects, classes)
+        .map_err(legacy_start_proof_error)?;
     state.store.operational_repair_plan_with_legacy_starts_and_filter(&evidence, subjects, classes)
+}
+
+fn legacy_start_proof_error(error: anyhow::Error) -> St3Error {
+    let mut refusal = St3Error::new(
+        "legacy-start-proof-unavailable",
+        "could not prove the legacy runtime start is closed",
+    );
+    if let Some(process) = error.downcast_ref::<fractal_runtime::LegacyStartProofUnavailable>() {
+        refusal = refusal.with_detail("stage", process.stage).with_detail("pid", process.pid);
+        if let Some(errno) = process.errno {
+            refusal = refusal.with_detail("errno", errno);
+        }
+    } else {
+        refusal = refusal.with_detail("stage", "native-capture");
+        if let Some(errno) = error.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error) {
+            refusal = refusal.with_detail("errno", errno);
+        }
+    }
+    refusal
+}
+
+pub(super) fn operational_repair_check(
+    result: anyhow::Result<OperationalRepairPlan>,
+) -> Result<DoctorCheck, ApiError> {
+    match result {
+        Ok(plan) if plan.items.is_empty() => Ok(DoctorCheck {
+            name: "operational-repair".into(),
+            status: "pass".into(),
+            message: "the graph has no repairable operational contradictions".into(),
+        }),
+        Ok(plan) => Ok(DoctorCheck {
+            name: "operational-repair".into(),
+            status: "warn".into(),
+            message: format!(
+                "{} graph-authorized repairs are available; inspect `st repair dry-run` token {}",
+                plan.items.len(), plan.token
+            ),
+        }),
+        Err(error) => {
+            if let Some(refusal) = error.downcast_ref::<St3Error>()
+                && refusal.code == "legacy-start-proof-unavailable"
+            {
+                return Err(ApiError::internal(error));
+            }
+            Ok(DoctorCheck {
+                name: "operational-repair".into(),
+                status: "fail".into(),
+                message: format!("could not compute the operational repair plan: {error}"),
+            })
+        }
+    }
 }
 
 /// Physical evidence comes only from this owner daemon, never the repair request.
@@ -630,5 +682,54 @@ pub async fn events(
             )
                 .into_response());
         }
+    }
+}
+
+#[cfg(test)]
+mod legacy_proof_refusal_tests {
+    use super::*;
+
+    fn capture_error() -> St3Error {
+        legacy_start_proof_error(anyhow::Error::new(
+            fractal_runtime::LegacyStartProofUnavailable {
+                stage: "proc-environ",
+                pid: 123,
+                errno: Some(13), // Linux EACCES; no raw environment or path is exposed.
+            },
+        ).context("PRIVATE_TOKEN=must-not-appear"))
+    }
+
+    fn assert_refusal(error: ApiError) {
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "legacy-start-proof-unavailable");
+        assert_eq!(error.details.get("stage"), Some(&json!("proc-environ")));
+        assert_eq!(error.details.get("pid"), Some(&json!(123)));
+        assert_eq!(error.details.get("errno"), Some(&json!(13)));
+        assert!(!error.message.contains("PRIVATE_TOKEN"));
+        assert_eq!(error.details.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn legacy_proof_refusal_is_typed_for_dry_run_apply_and_doctor() {
+        let dry_run = blocking_store(|| {
+            Err::<OperationalRepairPlan, _>(capture_error().into())
+        }).await;
+        assert_refusal(dry_run.err().unwrap());
+        let apply = blocking_action(|| {
+            Err::<OperationalRepairResult, _>(capture_error())
+        }).await;
+        assert_refusal(apply.err().unwrap());
+        assert_refusal(operational_repair_check(Err(capture_error().into())).err().unwrap());
+    }
+
+    #[test]
+    fn legacy_proof_refusal_redacts_unstructured_capture_errors() {
+        let error = legacy_start_proof_error(anyhow::anyhow!("private path and environment"));
+        assert_eq!(error.code, "legacy-start-proof-unavailable");
+        assert_eq!(error.details.get("stage"), Some(&json!("native-capture")));
+        assert!(!error.message.contains("private path"));
+        assert_eq!(error.details.len(), 1);
+        let check = operational_repair_check(Err(anyhow::anyhow!("unrelated graph error"))).unwrap();
+        assert_eq!(check.status, "fail");
     }
 }

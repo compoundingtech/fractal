@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Legacy runtime repair dry-run, apply and doctor consistently refuse unavailable native proof with a typed 422 response and nonsecret process-read metadata",
+  "replay": {"status": "none", "detail": "No projection replay or new repair authority."},
+  "schema": {"status": "none", "detail": "No database or replicated claim schema changes."},
+  "rules": {"status": "none", "detail": "Checkpoint and closure-proof rules are unchanged; unreadable live processes still refuse repair."},
+  "compatibility": {"status": "changed", "detail": "Dry-run and doctor return legacy-start-proof-unavailable (HTTP 422) instead of an internal error or an aggregated doctor check when native proof capture fails. Apply uses the same redacted response. Details include stage, pid and numeric errno where available, never raw environment or native error paths."},
+  "downtime": {"status": "none", "detail": "Normal daemon rollout only."},
+  "manual": {"status": "none", "detail": "No additional operator action. This change does not make inaccessible process evidence eligible for cleanup."},
+  "recovery": {"status": "none", "detail": "No state edits, process exclusions or destructive recovery."}
+}
