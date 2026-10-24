@@ -170,3 +170,21 @@ follow-up: suppressing them without catch-up can permanently miss a terminal
 transition if another subscription advances the shared repository facts. Retired
 seat declarations already end their watches in normal reconciliation. No stored
 watch backfill or live-daemon change is part of this patch.
+## Adaptive standing-watch cadence
+
+The single standing `github.repository` observer shared by a repository's watches
+now starts at three minutes. Successive unchanged observations back off to six
+then ten minutes (the ceiling); any changed observed fact resets the next poll
+to three minutes, even when that fact does not wake a particular subscription.
+There are still no per-thread pollers. Existing standing declarations with
+`every "30s"` adapt by standing-observer identity, without live-state migration.
+New standing declarations use `every "3m"`. User-authored non-standing observers
+retain their explicit intervals, including faster thirty-second polling.
+
+Cadence is local scheduling state keyed by observer/revision, independent of the
+retained provider cursor, ETags and response bodies. A new revision or process
+starts active cadence; explicit refresh runs immediately and resets cadence.
+Pagination still continues at one second without advancing quiet backoff, and
+provider rate-limit errors retain their retry deadlines. This changes standing
+watch freshness to three minutes while active and up to ten minutes while quiet;
+it does not change direct merge/check gates or claim measured live savings.
