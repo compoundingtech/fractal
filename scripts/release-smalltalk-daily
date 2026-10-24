@@ -23,6 +23,9 @@ from release_notes import ImpactError, render
 
 WORKFLOW = 'release-smalltalk.yml'
 SEMVER = re.compile(r'v(\d+)\.(\d+)\.(\d+)')
+# Stay below GitHub's 125000-character release-body limit.
+RELEASE_BODY_LIMIT = 120000
+FULL_NOTES_POINTER = 'The complete notes are attached as the `RELEASE-NOTES.md` asset.'
 
 
 DIAGNOSTIC_LIMIT = 2000
@@ -81,6 +84,21 @@ def next_tag():
     return f'v{major}.{minor}.{patch + 1}'
 
 
+def release_body(rendered, previous):
+    """Keep all upgrade guidance, dropping only the per-change list when oversized."""
+    if len(rendered) <= RELEASE_BODY_LIMIT:
+        return rendered
+    headline, changes, remainder = rendered.partition(f'## Changes since {previous}\n')
+    _, separator, guide = remainder.partition('\n---\n')
+    if not changes or not separator:
+        raise ImpactError('cannot shorten release notes: expected Changes section and upgrade guide separator')
+    body = headline.rstrip() + '\n\n---\n' + guide.rstrip() + '\n\n' + FULL_NOTES_POINTER + '\n'
+    if len(body) > RELEASE_BODY_LIMIT:
+        raise ImpactError(f'essential release notes require {len(body)} characters, exceeding the '
+                          f'{RELEASE_BODY_LIMIT}-character body limit; shorten the upgrade guidance before publishing')
+    return body
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--dry-run', action='store_true', help='verify and print the notes; publish nothing')
@@ -112,6 +130,7 @@ def main():
         return 1
     try:
         rendered, impact = render(repo, previous, sha, tag, os.environ.get('GH_REPO', 'compoundingtech/smalltalk'), since)
+        body = release_body(rendered, previous)
     except ImpactError as error:
         say(str(error))
         return 1
@@ -125,18 +144,23 @@ def main():
 
     notes = dist / 'RELEASE-NOTES.md'
     notes.write_text(rendered)
+    body_notes = dist / 'RELEASE-BODY.md'
+    body_notes.write_text(body)
     (dist / 'UPGRADE-IMPACT.json').write_text(json.dumps(impact, indent=2) + '\n')
     assets = sorted(str(p) for pattern in ('*.tar.gz', '*.sha256') for p in dist.glob(pattern))
-    assets += [str(dist / 'SHA256SUMS'), str(dist / 'RELEASE.json'), str(dist / 'UPGRADE-IMPACT.json')]
+    assets += [str(dist / 'SHA256SUMS'), str(dist / 'RELEASE.json'), str(dist / 'UPGRADE-IMPACT.json'), str(notes)]
     if args.dry_run:
-        print(notes.read_text())
-        say(f'dry run: would publish {tag} at {sha} with {len(assets)} assets')
+        print(body)
+        shortened = 'shortened' if body != rendered else 'unchanged'
+        say(f'dry run: release body {shortened}: {len(body)} characters '
+            f'(full notes: {len(rendered)}; limit: {RELEASE_BODY_LIMIT})')
+        say(f'dry run: would publish {tag} at {sha} with {len(assets)} assets, including RELEASE-NOTES.md')
         return 0
 
     # A draft has no tag yet. Publishing it creates the tag at exactly this commit, so a partial
     # draft can be inspected and deleted without leaving a tag behind.
     run('gh', 'release', 'create', tag, '--target', sha, '--draft', '--title', f'Fractal {tag}',
-        '--notes-file', str(notes), *assets)
+        '--notes-file', str(body_notes), *assets)
     run('gh', 'release', 'edit', tag, '--draft=false')
     tagged = run('git', 'ls-remote', 'origin', f'refs/tags/{tag}^{{}}', f'refs/tags/{tag}', cwd=repo).split()
     if sha not in tagged:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the daily release's failure path: a failing gh names its cause, safely and bounded."""
+"""Exercise bounded release bodies, full-note assets and credential-safe command failures."""
 import hashlib
 import io
 import json
@@ -28,6 +28,13 @@ elif args[:2] == ['run', 'download']:
     for item in pathlib.Path(os.environ['FAKE_DIST']).iterdir():
         shutil.copy(item, destination / item.name)
 elif args[:2] == ['release', 'create']:
+    body_path = pathlib.Path(args[args.index('--notes-file') + 1])
+    assets = args[args.index('--notes-file') + 2:]
+    pathlib.Path(os.environ['FAKE_RECEIPT']).write_text(json.dumps({
+        'body': body_path.read_text(),
+        'assets': {pathlib.Path(asset).name: pathlib.Path(asset).read_text()
+                   for asset in assets if asset.endswith('.md')},
+    }))
     lines = os.environ['FAKE_FAILURE'].split('|')
     print('\n'.join(lines), file=sys.stderr)
     sys.exit(1)
@@ -38,9 +45,12 @@ else:
 STUB_NOTES = '''class ImpactError(ValueError):
     pass
 
+import os
+from pathlib import Path
+
 
 def render(repo, previous, source, tag, repository='x/y', since=None):
-    return 'notes\\n', {'stub': True}
+    return Path(os.environ['FAKE_NOTES']).read_text(), {'stub': True}
 '''
 
 
@@ -108,10 +118,16 @@ with tempfile.TemporaryDirectory() as temporary:
     (tools / 'gh').chmod(0o755)
     build_dist(root / 'dist', shas[1])
 
-    def daily(failure, token=TOKEN):
+    receipt = root / 'receipt.json'
+
+    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False):
+        receipt.unlink(missing_ok=True)
+        (root / 'notes.md').write_text(notes)
         env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', GH_TOKEN=token, GH_REPO='example/project',
-                   FAKE_SHA=shas[1], FAKE_DIST=str(root / 'dist'), FAKE_FAILURE=failure)
-        return subprocess.run(['python3', 'scripts/release-smalltalk-daily'], cwd=checkout, env=env,
+                   FAKE_SHA=shas[1], FAKE_DIST=str(root / 'dist'), FAKE_FAILURE=failure,
+                   FAKE_NOTES=str(root / 'notes.md'), FAKE_RECEIPT=str(receipt))
+        args = ['python3', 'scripts/release-smalltalk-daily']
+        return subprocess.run(args + (['--dry-run'] if dry_run else []), cwd=checkout, env=env,
                               text=True, capture_output=True, timeout=60)
 
     # The Oct 10-11 shape: every earlier step passes, then gh release create fails with a cause.
@@ -137,14 +153,61 @@ with tempfile.TemporaryDirectory() as temporary:
     done = daily(f'denied for {odd}', token=odd)
     assert odd not in done.stdout + done.stderr and 'denied for' in done.stdout + done.stderr, done
 
+    # The body and uploaded asset use separate files, even when no shortening is needed.
+    done = daily(notes='notes\n')
+    published = json.loads(receipt.read_text())
+    assert published == {'body': 'notes\n', 'assets': {'RELEASE-NOTES.md': 'notes\n'}}, published
+    done = daily(dry_run=True)
+    assert done.returncode == 0 and 'release body unchanged: 6 characters' in done.stdout, done
+    assert 'including RELEASE-NOTES.md' in done.stdout, done
+
+    essential = ('Fractal v0.3.18 headline\n\n## Upgrade impact\n\n### Breaking changes\n'
+                 '- Keep this [operator action](https://example.invalid/upgrade).\n\n'
+                 '### Action required\n- Back up before upgrading.\n\n')
+    guide = '\n---\n\n## Upgrade procedure\nRestart safely.\n'
+    large = essential + '## Changes since v0.3.17\n\n' + (
+        '- [A merged PR with a long title](https://example.invalid/pull/123)\n' * 2000) + guide
+    assert len(large) > 125000
+    done = daily(notes=large)
+    published = json.loads(receipt.read_text())
+    assert len(published['body']) <= 120000, len(published['body'])
+    assert published['body'].startswith(essential), published['body']
+    assert guide.strip() in published['body'], published['body']
+    assert published['body'].endswith(
+        'The complete notes are attached as the `RELEASE-NOTES.md` asset.\n'), published['body']
+    assert 'A merged PR' not in published['body'], published['body']
+    assert published['assets']['RELEASE-NOTES.md'] == large
+    done = daily(notes=large, dry_run=True)
+    assert done.returncode == 0 and 'release body shortened:' in done.stdout, done
+    assert f'{len(published["body"])} characters' in done.stdout, done
+    assert f'full notes: {len(large)}' in done.stdout, done
+
+    # Never discard essential guidance or submit an oversized body to GitHub.
+    too_large = essential + 'x' * 120000 + '\n## Changes since v0.3.17\n\n- PR\n' + guide
+    done = daily(notes=too_large)
+    assert done.returncode == 1 and 'essential release notes require' in done.stdout, done
+    assert 'shorten the upgrade guidance before publishing' in done.stdout, done
+    assert not receipt.exists(), 'must fail before creating a release'
+    done = daily(notes='x' * 120001)
+    assert done.returncode == 1 and 'cannot shorten release notes' in done.stdout, done
+    assert not receipt.exists()
+
 # run() still returns a successful command's output unchanged.
 from importlib.machinery import SourceFileLoader
 module = SourceFileLoader('daily', str(repo / 'scripts/release-smalltalk-daily')).load_module()
 assert module.run('printf', 'ok\n') == 'ok'
+
+# Pure body sizing retains complete operator sections and never cuts a Markdown link.
+assert module.release_body('x' * module.RELEASE_BODY_LIMIT, 'v0.3.17') == 'x' * module.RELEASE_BODY_LIMIT
+shortened = module.release_body(large, 'v0.3.17')
+assert len(shortened) <= module.RELEASE_BODY_LIMIT
+assert shortened.startswith(essential) and guide.strip() in shortened
+assert shortened.endswith(module.FULL_NOTES_POINTER + '\n')
+assert module.release_body('notes\n', 'v0.3.17') == 'notes\n'
 try:
     module.run('sh', '-c', 'echo reason >&2; exit 3')
 except module.CommandFailed as error:
     assert str(error) == 'sh exited 3: reason', str(error)
 else:
     raise AssertionError('a failing command must raise')
-print('Daily release failure path names a bounded, credential-safe cause')
+print('Daily release bodies are bounded, full notes are attached, and failures are credential-safe')
