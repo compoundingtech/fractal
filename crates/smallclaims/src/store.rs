@@ -1575,16 +1575,20 @@ impl CompactReplicationInventory {
     }
 
     /// Set the inventory digest by resuming at range `from`; the value equals
-    /// `refresh_digest`. `prefixes[i]` holds the digest state before `buckets[i]`, which must
-    /// list the held identities range by range, and no range before `from` may have changed
-    /// since `prefixes` was built. Ranges are ordered by writer, so new envelopes re-hash only
-    /// their own later ranges and those of later writers.
+    /// `refresh_digest`. `prefixes[i]` holds the digest state before `buckets[i]`, with
+    /// one terminal state after the last bucket. The buckets must list the held identities
+    /// range by range, and no range before `from` may have changed since `prefixes` was built.
+    /// Ranges are ordered by writer, so new envelopes re-hash only their own later ranges and
+    /// those of later writers. An unchanged inventory does no hashing or prefix scan.
     pub fn resume_digest(
         &mut self,
         buckets: &[ReplicationInventoryBucket],
         prefixes: &mut Vec<Sha256>,
         from: usize,
     ) {
+        if from == buckets.len() && prefixes.len() == buckets.len() + 1 {
+            return;
+        }
         let from = from.min(prefixes.len().saturating_sub(1));
         let mut digest = match prefixes.get(from) {
             Some(state) => state.clone(),
@@ -1616,6 +1620,7 @@ impl CompactReplicationInventory {
             position = end;
         }
         debug_assert_eq!(position, self.envelopes.len());
+        prefixes.push(digest.clone());
         self.digest = hex::encode(digest.finalize());
     }
 
