@@ -701,6 +701,7 @@
           src = self;
           ST3_DEPLOY_POLICY_TEST_MODE = name;
           ST3_DEPLOY_POLICY_FILE = if deployPolicyFile == null then "" else "${deployPolicyFile}";
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           cargoBuildFlags = [ "-p" "fractal-schema" ];
           cargoTestFlags = [ "-p" "fractal-schema" "--lib" "deploy_policy::tests" ];
           installPhase = ''touch "$out"'';
