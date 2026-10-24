@@ -4234,7 +4234,8 @@ fn deploy_reader_old_peer_quarantines_all_kinds_without_changing_projection() {
     let admission = receive_and_project(
         &older, "host-a", &exchange_from(&current, &older.replication_inventory().unwrap()),
     );
-    assert_eq!((admission.valid, admission.unknown, admission.invalid), (1, 0, 0));
+    // Backlog validation retries retained unknowns as well as the new known record.
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (1, 6, 0));
     assert_eq!(older.latest_claim("host/host-a", Some("transport.observed")).unwrap().unwrap().id, later.id);
     assert_eq!(older.replica_records(true).unwrap().len(), 6);
     assert!(!older.replication_projection_needs_recovery().unwrap());
