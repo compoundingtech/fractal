@@ -1,2 +1,12 @@
 record 48f963b406ddc004bed1f3008929b16b1272935c typescript-client 0 host/anvil 2026-10-24T10:56:48Z
 record e4ac8abffd5ff9e422eb9bf482c3ab6fc8258f25 ci-script-tests 0 host/anvil 2026-10-24T10:59:18Z
+record 0cb701d69484fa44a6228ffa099726e182391b03 linux-gate 0 fleet/ci 2026-10-24T11:15:43Z
+record 1580562fbd1455bd6d3ffeaae64786ad047002ff typescript-client 0 fleet/ci 2026-10-24T11:07:54Z
+record 197e58354e519b237ad710a576ba22f13505e326 genie-freshness 0 fleet/ci 2026-10-24T11:04:07Z
+record 25e01ee687142f61547816777a33715aa3bdd1a0 linux-tests-shard-2 0 fleet/ci 2026-10-24T11:14:43Z
+record 91334d57e2ccb7bd8ff2f46ab4e5d76f276438a5 ci-script-tests 0 fleet/ci 2026-10-24T11:03:28Z
+record 9c936f47dab37cb16a2f48e0f1b51305dffb053c linux-clippy 0 fleet/ci 2026-10-24T11:04:24Z
+record b8bf72cd8074fb696d5e7d48defb1bde4f72c80e linux-tests 0 fleet/ci 2026-10-24T11:14:43Z
+record b8edbe7ccd58d276f67cbbebfae3fcf5ad3d809f linux-fleet-compat 0 fleet/ci 2026-10-24T11:05:28Z
+record bb797c62197af90b3cba4056c12c5f6f89c7bbbf fractal-web 0 fleet/ci 2026-10-24T11:15:45Z
+record df974808bcdef5a22b7f3a21b513a992048cb881 fractal-web 0 fleet/ci 2026-10-24T11:14:35Z
