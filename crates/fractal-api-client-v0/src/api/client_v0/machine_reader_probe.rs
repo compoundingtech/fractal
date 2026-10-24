@@ -29,7 +29,7 @@ async fn machine_inventory_reader_observation() {
                     ("status".into(), json!("running")),
                     ("incarnation_id".into(), json!(format!("inc-{observation}"))),
                     ("driver".into(), json!("codex")),
-                    ("owner_host_id".into(), json!("host/probe")),
+                    ("host".into(), json!("probe")),
                 ]),
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
@@ -104,11 +104,23 @@ async fn machine_inventory_reader_observation() {
             tokio::time::timeout(Duration::from_secs(20), observed_rx).await, Ok(Ok(()))
         );
         let queue_started = std::time::Instant::now();
-        let queued = tokio::spawn(async move { admission.acquire_owned().await.unwrap() });
+        let queued = tokio::spawn(async move {
+            let permit = admission.acquire_owned().await.unwrap();
+            (permit, queue_started.elapsed())
+        });
+        let probe_store = state.store.clone();
+        let independent = tokio::task::spawn_blocking(move || {
+            let started = std::time::Instant::now();
+            let pinned_at_start = snapshot_live();
+            probe_store.readers.request_read(|| probe_store.index()).unwrap().unwrap();
+            (started.elapsed(), pinned_at_start)
+        });
         let (result, elapsed) = read.await.unwrap();
         let result = result.unwrap();
-        let _second_permit = queued.await.unwrap();
-        let queue_wait = queue_started.elapsed();
+        let (_second_permit, queue_wait) = queued.await.unwrap();
+        let (independent_wait, pinned_at_probe_start) = independent.await.unwrap();
+        println!("reader_capacity pass={pass} independent_read_us={} snapshot_live_at_probe_start={pinned_at_probe_start}",
+            independent_wait.as_micros());
         let metrics = monitor.join().unwrap();
         println!("machine_reader pass={pass} wall_us={} snapshot_observed={saw_snapshot} sampled_hold_us={} peak_active_connections={} commits_while_pinned={} truncate_busy={} peak_wal_bytes={} peak_unbackfilled_frames={} truncate_busy_after={} single_slot_queue_wait_us={} rows={} cut={}",
             elapsed.as_micros(), metrics.0.as_micros(), metrics.1, metrics.2, metrics.3,
