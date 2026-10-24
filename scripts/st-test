@@ -39,6 +39,8 @@ could not start (a refusal: dirty tree, bad argument); 3 from --status when the 
 was not signed because the tree edits that check's lane (evidence-wrap would refuse it; CI runs it).
 """
 import argparse
+import base64
+import concurrent.futures
 import fcntl
 import hashlib
 import importlib.machinery
@@ -80,6 +82,8 @@ RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]
 RUN_TESTS = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']
 # nextest: 0 every test passed, 100 some test failed (the report is complete either way), 4 the selection matched no test.
 RUN_COMPLETED = frozenset({0, 4, 100})
+# The signer refuses an input longer than 500 characters (scripts/evidence-sign); a full run's filterset is longer than that.
+FILTERSET_LIMIT = 400
 # Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
 # (a builds.slice scope, the kept target below), which nobody has to ask for.
 BUILDS = frozenset({'linux-gate', 'fractal-web', RUST_TESTS})
@@ -561,6 +565,49 @@ def uncovered_crates(verifier, directory, tree, base, repository, lane_base, key
     return missing, have
 
 
+def push_records(directory, remote, refs):
+    """One push of every record's refs (the same refs evidence-wrap --push sends for one record, many at once). Returns an error text or None."""
+    token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
+    environment = dict(os.environ)
+    if token:  # the same header evidence-wrap sets; it travels in the environment, never in an argument
+        header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+        environment.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.extraheader', GIT_CONFIG_VALUE_0=f'Authorization: Basic {header}')
+    done = subprocess.run(['git', '-C', str(directory), 'push', '--quiet', remote, *(f'{ref}:{ref}' for ref in refs)], capture_output=True, text=True,
+                          env=environment)
+    if done.returncode == 0:
+        return None
+    text = done.stderr.replace(token, '***') if token else done.stderr
+    return f'push of {len(refs)} refs failed: {text.strip()[-300:]}'
+
+
+def sign_jobs():
+    """How many crate signatures run at once (ST_TEST_SIGN_JOBS; default 8)."""
+    try:
+        return max(1, int(os.environ.get('ST_TEST_SIGN_JOBS', '8')))
+    except ValueError:
+        return 8
+
+
+def shared_toolchain(wrap_path):
+    """The dev shell digest evidence-wrap would compute for every signature, once; None when it cannot (each wrap then computes its own)."""
+    try:
+        loader = importlib.machinery.SourceFileLoader('evidence_wrap_for_st_test', wrap_path)
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        return module.toolchain_digest(None)
+    except Exception:  # an unreadable script, or nix cannot name the shell: the wrapper reports it for itself
+        return None
+
+
+def filterset_input(selected):
+    """The expression scripts/ci-linux builds from CI_TEST_PACKAGES, as the record's `filterset` input: the whole expression while the signer
+    takes it (an input is at most 500 characters), else the count and the sha256 of the expression, which still pins the exact crate list."""
+    expression = ' or '.join(f'package(={crate})' for crate in selected)
+    if len(expression) <= FILTERSET_LIMIT:
+        return expression
+    return f'{len(selected)} packages sha256:{hashlib.sha256(expression.encode()).hexdigest()}'
+
+
 def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes, target):
     """The `rust-tests` check: one nextest run of the crates that have no passing note for their key, on the workspace build CI makes,
     then one signature per crate over that crate's part of the run. Returns the summary rows."""
@@ -589,17 +636,20 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     if code not in RUN_COMPLETED or not junit.exists():
         return [('rust-tests', 'timed out' if code == 124 else 'NOT SIGNED', ran_seconds,
                  f'the run did not complete (exit {code}{"" if junit.exists() else ", no report"}): no crate was signed')], True
-    # Exactly the expression scripts/ci-linux builds from CI_TEST_PACKAGES: the record says which crates the run was filtered to.
-    filterset = ' or '.join(f'package(={crate})' for crate in selected)
+    # The expression scripts/ci-linux builds from CI_TEST_PACKAGES: the record says which crates the run was filtered to.
+    filterset = filterset_input(selected)
     run_sha = hashlib.sha256(json.dumps([RUN_TESTS, selected]).encode()).hexdigest()
     rows, failed, signed_count, empty = [], False, 0, []
-    for crate in selected:
+    # The dev shell's digest is the same for every crate: name it once (a nix evaluation of seconds) rather than once per signature.
+    toolchain = args.toolchain_sha256 or shared_toolchain(tools['evidence-wrap'])
+
+    def sign(crate):
+        """(row, refspecs): a summary row when the crate was not signed, else None and the refs of its record, which are pushed together
+        afterwards: its facts out of the report, then one wrapped, signed and locally verified record."""
         facts = json.loads(subprocess.run([sys.executable, str(directory / 'scripts/ci-rust-test-result'), '--summary'], capture_output=True,
                                           text=True, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate)).stdout or 'null')
         if not facts:
-            rows.append((f'rust-tests:{crate}', 'NOT SIGNED', 0, 'cannot read its result from the report'))
-            failed = True
-            continue
+            return (f'rust-tests:{crate}', 'NOT SIGNED', 0, 'cannot read its result from the report'), []
         wrap = [sys.executable, tools['evidence-wrap'], '--check', 'rust-tests', '--attempt', args.attempt,
                 '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base,
                 '--input', f'crate={crate}', '--input', f'source_inputs={keys[crate]}', '--input', f'tests_run={facts["tests_run"]}',
@@ -608,22 +658,47 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
                 '--input', f'filterset={filterset}', '--input', f'run_command_sha256={run_sha}']
         if RUST_TESTS in lanes:
             wrap += ['--lanes-from', lane_base]
-        if args.toolchain_sha256:
-            wrap += ['--toolchain-sha256', args.toolchain_sha256]
-        if args.push:
-            wrap += ['--push', args.push]
+        if toolchain:
+            wrap += ['--toolchain-sha256', toolchain]
         started = time.monotonic()
         signed = subprocess.run(wrap + ['--'] + RUST_TESTS_COMMAND, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        ok = signed.returncode == 0
-        failed = failed or not ok
-        if ok:
+        if signed.returncode != 0:
+            detail = (signed.stderr.strip().splitlines() or ['failed'])[-1][:160]
+            return (f'rust-tests:{crate}', f'FAILED ({signed.returncode})', round(time.monotonic() - started), detail), None
+        try:
+            record = json.loads(signed.stderr[signed.stderr.index('{'):])
+            if not record.get('verified'):
+                raise ValueError('the record did not verify locally')
+            key = keys[crate]
+            refs = [record['tag'], record['ref'], f'refs/tags/evidence/input/rust-tests/{key}/{record["record"]}',
+                    f'refs/notes/evidence-input/rust-tests/{key}/{record["record"]}']
+        except (ValueError, KeyError) as error:
+            return (f'rust-tests:{crate}', 'FAILED (record)', round(time.monotonic() - started), f'cannot read the signed record: {error}'[:160]), None
+        return None, (refs, facts)
+
+    # Each signature is a verifier run, a signer run and a push of refs of its own, a dozen seconds on a repository with many records:
+    # serial, 52 crates took as long as the tests. They are independent (distinct refs), so they run side by side.
+    # The first goes alone: the signer creates its scratch repository when it is missing, and two signers racing to create it fail one.
+    outcomes = [sign(selected[0])]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=sign_jobs()) as pool:
+        outcomes += list(pool.map(sign, selected[1:]))
+    pushable = []
+    for crate, (row, signed) in zip(selected, outcomes):
+        if row:
+            rows.append(row)
+            failed = True
+        else:
+            refs, facts = signed
             signed_count += 1
+            pushable += refs
             if not int(facts['tests_run']):
                 empty.append(crate)
-        else:
-            detail = (signed.stderr.strip().splitlines() or ['failed'])[-1][:160]
-            rows.append((f'rust-tests:{crate}', f'FAILED ({signed.returncode})', round(time.monotonic() - started), detail))
+    if args.push and pushable:
+        pushed = push_records(directory, args.push, pushable)
+        if pushed:
+            rows.append(('rust-tests:push', 'FAILED', 0, pushed))
+            failed = True
     detail = f'{signed_count} of {len(selected)} crates run and signed ({have} of {len(keys)} already had a passing note); one nextest run on the workspace build'
     if empty:
         # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).

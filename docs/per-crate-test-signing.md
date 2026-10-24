@@ -121,7 +121,7 @@ and a stale pass is reused. Four controls, in order of when they bite:
   fetches the per-crate index refs in one fetch, asks the verifier (`evidence-verify --crate-key CRATE=KEY`) for each crate, runs ONE
   `scripts/ci-local tests` for the missing crates (`CI_TEST_PACKAGES`, `CI_TEST_JUNIT`; the workspace build, so features unify as in CI), and
   signs each crate with `scripts/evidence-wrap --check rust-tests` over `scripts/ci-rust-test-result`, which reads that crate's part of the
-  JUnit report. The record signs `crate`, `source_inputs`, `tests_run`, `test_list_sha256` (the exact test list), `ignored_list_sha256`, `filterset` and `run_command_sha256`.
+  JUnit report. The record signs `crate`, `source_inputs`, `tests_run`, `test_list_sha256` (the exact test list), `ignored_list_sha256`, `filterset` (the expression, or the crate count and its sha256 when it is longer than the signer's 500-character input limit) and `run_command_sha256`.
   A run that did not complete (build failure, timeout, a nextest exit other than 0, 4 or 100, no report) signs nothing. A failing crate is
   signed as a failure and the others are still signed. `--status` names the crates it would run.
 - `evidence-wrap` also indexes a record that signs `source_inputs` under `refs/notes/evidence-input/<check>/<key>/<record>` and
@@ -160,3 +160,13 @@ and a stale pass is reused. Four controls, in order of when they bite:
 Measured with the committed extras over the last 57 first-parent merges of main (2026-10-23): the median merge changes the key of 5 of 52
 crates; 29 merges change at most 5, 5 change 6 to 20, 14 change 21 to 49, and 9 change 50 or more (global paths: a manifest, the lock, the
 stage scripts). So about half the merges re-run a handful of crates and one in six re-runs everything.
+
+## 9. Signing time (measured 2026-10-24)
+
+The first full run on main's tree signed 52 crates in 671 s (07:52:51Z to 08:04:02Z), as long as the tests (nextest 941.6 s): each
+signature was a serial `evidence-wrap` of 11.8 s (the dev shell's `nix eval` 2.6 s, the signer 1.4 s, the verifier's check of the new
+record 6.8 s) plus its own push. `st-test` now evaluates the digest once, signs the first crate alone (the signer creates its scratch
+repository when it is missing) and the rest `ST_TEST_SIGN_JOBS` (default 8) at a time, and pushes every record's four refs in one push.
+Each record's content and signature are as before. Fifty-two signatures from a saved report took 74.7 s on this host, before the push.
+The four workspace crates that ran no test in that run (demo-resolver-wasm, fractal-build-stamp, fractal-github-issue-component,
+fractal-github-pr-component) are listed under `no_tests` in `.st/rust-test-inputs.json`.
