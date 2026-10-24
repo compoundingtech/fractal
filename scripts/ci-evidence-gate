@@ -73,6 +73,12 @@ def input_refspecs(check, key):
             f'+refs/notes/evidence-input/{check}/{key}/*:refs/notes/evidence-input/{check}/{key}/*']
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 VERIFIER = 'scripts/evidence-verify'
+# Checks a note covers one crate at a time (docs/per-crate-test-signing.md): the gate asks whether EVERY workspace member of the tree
+# has a satisfying note for its own key (evidence-verify --members), with the accepted base's scripts/rust-test-keys beside the
+# verifier, which imports it.
+MEMBER_CHECKS = frozenset({'rust-tests'})
+MEMBER_KEYS = 'scripts/rust-test-keys'
+MEMBER_INPUTS = '.st/rust-test-inputs.json'
 KEYS = '.st/evidence-keys'
 LOG_KEY = '.st/evidence-log-key'
 LOG_REF = 'refs/evidence-log/main'
@@ -99,8 +105,9 @@ def classify(code, result):
     return 'rejected'
 
 
-def run(*command, stdin=None, timeout=120):
-    return subprocess.run(command, input=stdin, capture_output=True, timeout=timeout, check=False)
+def run(*command, stdin=None, timeout=120, env=None):
+    return subprocess.run(command, input=stdin, capture_output=True, timeout=timeout, check=False,
+                          env=dict(os.environ, **env) if env else None)
 
 
 def decide(context, outcome, result, tree):
@@ -233,14 +240,68 @@ def observe(context, revision='HEAD'):
         # A head tree is held to the lane definition at its branch point, once the base's verifier takes one.
         lane_base = ['--lane-base', context['lane_base']] if context.get('tree_of') == 'head' and context.get('lane_base') \
             and b'--lane-base' in script.stdout else []
-        fetch_input_notes(path, base, check, repository, revision)
-        done = run(sys.executable, path, '--repo', '.', '--revision', revision, '--check', check,
+        members = []
+        if check in MEMBER_CHECKS:
+            # Per crate: the base's verifier must take --members, and its scripts/rust-test-keys goes beside it; else the check runs.
+            if b'--members' not in script.stdout:
+                return 'unavailable', None, 'the accepted base has no per-crate verifier yet', digest
+            member_keys = run('git', 'show', f'{base}:{MEMBER_KEYS}')
+            if member_keys.returncode != 0:
+                return 'unavailable', None, f'the accepted base has no {MEMBER_KEYS}', digest
+            with open(os.path.join(scratch, 'rust-test-keys'), 'wb') as handle:
+                handle.write(member_keys.stdout)
+            context['manifests_fetch'] = prefetch_manifests(revision, base)
+            context['members_fetch'] = fetch_member_notes(path, base, check, repository, revision)
+            members = ['--members']
+        else:
+            fetch_input_notes(path, base, check, repository, revision)
+        done = run(sys.executable, path, '--repo', '.', '--revision', revision, '--check', check, *members,
                    '--policy-from', base, '--repository', repository, *keys, *log, *values, *lane_base, timeout=VERIFIER_TIMEOUT)
     try:
         result = json.loads(done.stdout)
     except ValueError:  # includes output that is not valid UTF-8
         return 'unavailable', None, f'verifier exit {done.returncode} without a JSON result', digest
     return classify(done.returncode, result), result, result.get('reason') or 'satisfied', digest
+
+
+def prefetch_manifests(revision, base):
+    """Every Cargo.toml blob of the tree and the base's .st/rust-test-inputs.json that this clone lacks, in ONE fetch: the verifier reads
+    them without fetching (a lazy read is one round trip each), and a head tree's clone has its trees but no blobs. 'ok', 'none' (all
+    present) or 'failed'; a failure only means the verifier refuses and the check runs."""
+    listing = run('git', 'ls-tree', '-r', '-z', '--full-tree', revision)
+    if listing.returncode != 0:
+        return 'failed'
+    wanted = []
+    for entry in listing.stdout.split(b'\0'):
+        meta, _, name = entry.partition(b'\t')
+        if name == b'Cargo.toml' or name.endswith(b'/Cargo.toml'):
+            wanted.append(meta.split()[2].decode())
+    inputs = run('git', 'rev-parse', '--verify', '-q', f'{base}:{MEMBER_INPUTS}')
+    if inputs.returncode == 0:
+        wanted.append(inputs.stdout.decode().strip())
+    missing = [oid for oid in wanted if OID.match(oid) and run('git', 'cat-file', '-e', oid, env={'GIT_NO_LAZY_FETCH': '1'}).returncode != 0]
+    if not missing:
+        return 'none'
+    return 'ok' if run('git', 'fetch', '--no-tags', '-q', 'origin', *missing).returncode == 0 else 'failed'
+
+
+def fetch_member_notes(verifier, base, check, repository, revision='HEAD'):
+    """The records indexed under every member's own key, in ONE fetch built from the verifier's own answer (--members --project prints
+    each crate's key and refspecs), never the whole namespace. 'ok', 'none' (no member has a key) or 'failed' (best effort: a failure
+    means no note is seen, and the check runs)."""
+    try:
+        done = run(sys.executable, verifier, '--repo', '.', '--revision', revision, '--check', check, '--members', '--project',
+                   '--policy-from', base, '--repository', repository, timeout=VERIFIER_TIMEOUT)
+        crates = json.loads(done.stdout).get('crates') if done.returncode == 0 else None
+    except (ValueError, AttributeError, subprocess.TimeoutExpired, OSError):
+        return 'failed'
+    if not isinstance(crates, dict):
+        return 'failed'
+    refspecs = sorted({spec for crate in crates.values() if isinstance(crate, dict) for spec in crate.get('refspecs') or []
+                       if isinstance(spec, str) and spec.startswith('+refs/') and ':refs/' in spec})
+    if not refspecs:
+        return 'none'
+    return fetch_state(run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *refspecs))
 
 
 def fetch_input_notes(verifier, base, check, repository, revision='HEAD'):
@@ -279,6 +340,9 @@ def line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sh
         ('notes_fetch', context.get('notes_fetch')), ('policy_sha256', context.get('policy_sha256')), ('keys_sha256', context.get('keys_sha256')),
         ('log', result.get('log')), ('log_head', result.get('log_head')), ('log_age_s', result.get('log_age_s')),
         ('log_missing', result.get('log_missing')), ('log_fetch', context.get('log_fetch')),
+        # A per-crate check: how many workspace members, and how many of them no satisfying note covers.
+        ('members', result.get('members')), ('missing', len(result['missing']) if isinstance(result.get('missing'), (dict, list)) else None),
+        ('manifests_fetch', context.get('manifests_fetch')), ('members_fetch', context.get('members_fetch')),
         ('head', context['head']),
         ('base', context['base']), ('event', context['event']), ('pr', context['pr']),
         ('repo', context['repository']), ('run', context['run']), ('attempt', context['attempt']),
