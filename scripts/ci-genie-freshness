@@ -2,49 +2,24 @@
 # The whole `genie-freshness` required check, from a checkout or a Nix sandbox.
 # CI runs it in the genie shell; `checks.genie-freshness` runs it in a derivation. One list, so
 # the two cannot drift. It needs git, python3, tar, jq, zstd, ssh-keygen and `genie`, and no network.
+#
+# Its evidence key is the whole tree, so it holds what reads the whole tree: the generated files, the licenses, the lints and the few
+# self-tests that read crates/ or apps/. The other self-tests read only the CI scripts and what they declare, and are the separate
+# `ci-script-tests` check (scripts/ci-script-tests), whose key a pull request that touches none of that leaves alone.
 set -euo pipefail
 . "$(dirname "$0")/script-test-supervisor"
 # Run from a git hook or alias this would see the caller's GIT_DIR, and every fixture test below would act on the caller's repository.
 . "$(dirname "$0")/git-env-clean"
 cd "$(dirname "$0")/.."
+. scripts/ci-parallel-tests
 
-python3 scripts/script-process-test
-python3 scripts/ci-fractal-web-licenses-test
 python3 scripts/ci-fractal-web-licenses --check-lockfile
-# The self-tests below are independent processes that each build their own fixtures, so they run side by side (GENIE_FRESHNESS_JOBS at a
-# time, default 6) instead of one after another; a failing test's last lines are printed after all have finished, in name order.
-parallel_tests() {
-  local logs failed
-  logs=$(mktemp -d)
-  printf '%s\n' "$@" | xargs -P "${GENIE_FRESHNESS_JOBS:-6}" -I{} bash -c 'python3 "scripts/$1" >"$2/$1.log" 2>&1 || echo "$1" >>"$2/failed"' _ {} "$logs"
-  if [ -f "$logs/failed" ]; then
-    for failed in $(sort "$logs/failed"); do
-      echo "::group::FAILED scripts/$failed"
-      tail -n 200 "$logs/$failed.log"
-      echo "::endgroup::"
-    done
-    rm -rf "$logs"
-    return 1
-  fi
-  rm -rf "$logs"
-}
 parallel_tests \
-  ci-ready-pr-test ci-draft-admission-test ci-workflow-concurrency-test check-ci-runner-test ci-namespace-usage-test \
-  ci-mail-redelivery-canaries-test ci-test-partitions-test ci-test-archive-test ci-build-memory-test ci-evidence-source-test \
-  check-ci-test-paths ci-queue-watch-test check-main-ci-test ci-perf-cache-test ci-perf-slot-test \
-  ci-perf-scope-test ci-cache-audit-test ci-genie-cache-cleanup-test ci-fractal-web-test web-skip-proof-test \
-  ci-evidence-observe-test evidence-verify-test evidence-lane-trace-test evidence-gc-test evidence-log-test \
-  ci-signed-tree-test ci-evidence-slo-test evidence-keygen-test st-test-test ci-local-test \
-  ci-local-web-test evidence-prepush-test evidence-presign-worker-test evidence-queue-signer-test evidence-wrap-test \
-  ci-evidence-signing-test evidence-publish-test ci-evidence-shadow-test nix-check-facts-test ci-evidence-gate-test \
-  evidence-flip-ready-test ci-evidence-presign-notice-test evidence-sign-hardening-test ci-daily-long-report-test ci-nextest-flaky-test \
-  nix-typescript-client-test nix-evidence-job-test ci-nextest-test
-python3 scripts/check-sqlite-large-values-test
+  ci-fractal-web-licenses-test check-sqlite-large-values-test check-public-repo-test check-native-names-test \
+  evidence-verify-test check-ci-test-paths ci-fractal-web-test
 python3 scripts/check-sqlite-large-values
 # Whole-tree lints live here, not in the Linux gate: this check's evidence key is the whole tree, while the Linux gate
 # may skip on a note for another tree with the same declared inputs, which a page under apps/ does not change.
-python3 scripts/check-public-repo-test
 python3 scripts/check-public-repo
-python3 scripts/check-native-names-test
 python3 scripts/check-native-names
 genie --check

@@ -1,0 +1,20 @@
+# Source me: `. scripts/ci-parallel-tests`, from the directory the tests are named relative to (`scripts/NAME`).
+#
+# parallel_tests NAME...: runs `python3 scripts/NAME` for each NAME, GENIE_FRESHNESS_JOBS (default 6) at a time. The tests are independent
+# processes that each build their own fixtures; a failing test's last lines are printed after all have finished, in name order, and the
+# function returns 1 if any failed.
+parallel_tests() {
+  local logs failed
+  logs=$(mktemp -d)
+  printf '%s\n' "$@" | xargs -P "${GENIE_FRESHNESS_JOBS:-6}" -I{} bash -c 'python3 "scripts/$1" >"$2/$1.log" 2>&1 || echo "$1" >>"$2/failed"' _ {} "$logs"
+  if [ -f "$logs/failed" ]; then
+    for failed in $(sort "$logs/failed"); do
+      echo "::group::FAILED scripts/$failed"
+      tail -n 200 "$logs/$failed.log"
+      echo "::endgroup::"
+    done
+    rm -rf "$logs"
+    return 1
+  fi
+  rm -rf "$logs"
+}

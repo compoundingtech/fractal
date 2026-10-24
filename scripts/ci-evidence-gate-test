@@ -35,7 +35,7 @@ fixtures = load('evidence_verify_test', 'scripts/evidence-verify-test')
 REPOSITORY = 'org/repo'
 # The checks with an evidence gate job in fleet.yml (evidence-gate-<check>).
 # isolation-vm and mail-redelivery-canaries run daily only (daily-long.yml): no gate, no policy entry.
-CHECKS = ('linux-gate', 'typescript-client', 'genie-freshness', 'fractal-web')
+CHECKS = ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web')
 # The checks with an entry in the skip policy: every gated one (fractal-web's entry is shadow, see its own tests).
 POLICY_CHECKS = CHECKS
 WEEK = 7 * 24 * 3600
@@ -48,6 +48,7 @@ GATE_ARGV = ['linux-gate', 'aggregate', 'linux-clippy', 'linux-fleet-compat',
 # The step-outcome notes of the other two checks (nix-evidence, agent/evidence-more-checks).
 STEP_ARGV = {
     'genie-freshness': ['bash', 'scripts/ci-genie-freshness'],
+    'ci-script-tests': ['bash', 'scripts/ci-script-tests'],
     'typescript-client': ['bash', 'scripts/ci-typescript-client'],
 }
 # fractal-web's whole-check note, signed by the evidence note job from the lane's jobs (scripts/ci-evidence-signing
@@ -874,7 +875,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_the_repository_policy_turns_skipping_on_only_for_the_checks_listed_here(self):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
-        enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness')
+        enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
@@ -1431,7 +1432,7 @@ class WorkflowStructure(unittest.TestCase):
                 body = push.group(1) + push.group(2)
                 self.assertRegex(body, r'branches|tags', f'{path.name} has an unfiltered push trigger')
 
-    WIRED = ('genie-freshness', 'typescript-client')
+    WIRED = ('genie-freshness', 'ci-script-tests', 'typescript-client')
     NOT_YET_WIRED = ('linux-gate',)  # not wired at the check-job level (see below)
     LANE_WIRED = ('fractal-web',)  # wired in its execution shards (see its own test)
 
@@ -1780,7 +1781,7 @@ class WorkflowStructure(unittest.TestCase):
                 self.assertTrue(referenced, name)
                 # Every gate it reads must be one of its needs, and the check's own gate must be among them.
                 self.assertTrue({f'evidence-gate-{g}' for g in referenced} <= self.needs_of(block), name)
-                expected = {'genie-freshness': {'genie-freshness'}, 'typescript-client': {'typescript-client'},
+                expected = {'genie-freshness': {'genie-freshness'}, 'ci-script-tests': {'ci-script-tests'}, 'typescript-client': {'typescript-client'},
                             'fractal-web-execution': {'fractal-web'}}.get(name, {'linux-gate'})
                 self.assertEqual(referenced, expected, name)
         self.assertGreaterEqual(signed, 8)  # the six stage jobs and the two step-outcome jobs
@@ -1872,7 +1873,7 @@ class WorkflowStructure(unittest.TestCase):
         self.assertEqual(GATE_ARGV, recorded)
         self.assertIn('linux-gate', names)
         # The note job still waits for the separate checks (it publishes their own notes), but they are not in its command.
-        for separate in ('genie-freshness', 'typescript-client'):
+        for separate in ('genie-freshness', 'ci-script-tests', 'typescript-client'):
             self.assertIn(separate, names)
             self.assertNotIn(separate, recorded)
         # Nor the fractal-web lane's jobs and gate: they make the lane's own whole-check note.
@@ -1980,11 +1981,13 @@ class WorkflowStructure(unittest.TestCase):
         self.assertNotIn('true', condition)
         self.assertEqual(condition.count('||'), 3 + condition.count("github.event_name != 'pull_request' ||"))
 
-    def test_every_evidence_test_script_runs_in_the_required_genie_freshness_check(self):
-        listed = (ROOT / 'scripts/ci-genie-freshness').read_text()
+    def test_every_evidence_test_script_runs_in_a_required_check(self):
+        # The self-tests that read only the CI scripts run in ci-script-tests; the ones that read the whole tree run in genie-freshness.
+        listed = (ROOT / 'scripts/ci-genie-freshness').read_text() + (ROOT / 'scripts/ci-script-tests').read_text()
         for path in sorted((ROOT / 'scripts').iterdir()):
             if re.fullmatch(r'(?:ci-)?evidence-[a-z-]*test', path.name):
-                self.assertRegex(listed, rf'(?<![\w-]){re.escape(path.name)}(?![\w-])', f'{path.name} is not run by scripts/ci-genie-freshness')
+                self.assertRegex(listed, rf'(?<![\w-]){re.escape(path.name)}(?![\w-])',
+                                 f'{path.name} is run by neither scripts/ci-genie-freshness nor scripts/ci-script-tests')
 
 if __name__ == '__main__':
     unittest.main()
