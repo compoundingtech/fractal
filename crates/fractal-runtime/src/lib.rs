@@ -37,7 +37,7 @@ pub use priority::{
 #[cfg(target_os = "linux")]
 pub use process::ProcessIdentityUnavailable;
 pub use process::{
-    ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token,
+    ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_is_absent, process_start_token,
 };
 pub use pty::{
     Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, PtyObservation, PtyRuntime,

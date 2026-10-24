@@ -211,6 +211,24 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pidfd_namespace_refusal_is_not_channel_death_evidence() {
+        let owner = authority(1);
+        let error = anyhow::Error::new(fractal_runtime::ProcessIdentityUnavailable {
+            pid: owner.pid,
+            stage: "pidfd-info",
+            errno: Some(libc::ENOENT),
+        });
+        assert_eq!(channel_liveness(&owner, Err(error), || true), ChannelLiveness::Indeterminate);
+        let error = anyhow::Error::new(fractal_runtime::ProcessIdentityUnavailable {
+            pid: owner.pid,
+            stage: "pidfd-open",
+            errno: Some(libc::ESRCH),
+        });
+        assert_eq!(channel_liveness(&owner, Err(error), || true), ChannelLiveness::Dead);
+    }
+
     #[test]
     fn uncertain_process_probes_preserve_the_canonical_capability() {
         let store = fixture();
@@ -223,6 +241,7 @@ mod tests {
             anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::Other)),
             anyhow::anyhow!("malformed process start token"),
             anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            anyhow::Error::from(std::io::Error::from_raw_os_error(libc::ESRCH)),
         ];
         for error in uncertain {
             let result = channel_liveness(&owner, Err(error), || false);
@@ -245,8 +264,13 @@ mod tests {
             Err(std::io::Error::from(std::io::ErrorKind::NotFound).into()),
             || true,
         );
+        let reaped = channel_liveness(
+            &owner,
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH).into()),
+            || true,
+        );
         let reused = channel_liveness(&owner, Ok(owner.process_token + 1), || false);
-        for result in [missing, reused] {
+        for result in [missing, reaped, reused] {
             assert_eq!(result, ChannelLiveness::Dead);
             assert!(
                 admit_with_probe(

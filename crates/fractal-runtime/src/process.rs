@@ -555,7 +555,8 @@ fn process_group_is_live(group: u32) -> Result<bool> {
     Ok(true)
 }
 
-fn process_is_absent(error: &anyhow::Error) -> bool {
+/// Positive evidence that the process is gone, not merely unreadable procfs.
+pub fn process_is_absent(error: &anyhow::Error) -> bool {
     #[cfg(target_os = "linux")]
     if let Some(absent) = identity::is_absent(error) { return absent; }
     error.downcast_ref::<std::io::Error>().is_some_and(|error| {

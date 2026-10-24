@@ -184,11 +184,7 @@ pub fn channel_liveness(
     match birth {
         Ok(token) if token == owner.process_token => ChannelLiveness::Alive,
         Ok(_) => ChannelLiveness::Dead,
-        Err(error)
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-                && absent() =>
+        Err(error) if fractal_runtime::process_is_absent(&error) && absent() =>
         {
             ChannelLiveness::Dead
         }

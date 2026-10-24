@@ -72,6 +72,10 @@ struct PinnedProcess {
 
 impl PinnedProcess {
     fn open(pid: u32) -> Result<Self> {
+        Self::open_at_depth(pid, namespace_depth()?)
+    }
+
+    fn open_at_depth(pid: u32, depth: usize) -> Result<Self> {
         // SAFETY: pidfd_open creates a new descriptor for the exact process
         // denoted in the caller's PID namespace; zero flags are required.
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0_u32) };
@@ -80,7 +84,6 @@ impl PinnedProcess {
         }
         // SAFETY: the successful syscall returned a fresh owned descriptor.
         let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-        let depth = namespace_depth()?;
         let mut process = Self { fd, pid, proc_pid: 0, depth };
         process.proc_pid = process.visible_pid()?;
         Ok(process)
@@ -124,7 +127,7 @@ pub(super) fn group_has_live_member(group: u32) -> Result<bool> {
     let depth = namespace_depth()?;
     for entry in fs::read_dir("/proc")? {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().parse::<u32>().is_err() { continue; }
+        let Ok(proc_pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue; };
         let stat = match fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
             Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied) => continue,
@@ -142,9 +145,25 @@ pub(super) fn group_has_live_member(group: u32) -> Result<bool> {
                 Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied) => continue,
                 Err(error) => return Err(refusal(group, "proc-group-status", error.into())),
             };
-            namespace_ids(&status, "NSpgid:")
+            let candidate_group = namespace_ids(&status, "NSpgid:")
                 .and_then(|mut ids| ids.nth(depth).map(str::parse::<u32>).transpose().map_err(Into::into))
-                .map_err(|error| refusal(group, "proc-group-namespace", error))? == Some(group)
+                .map_err(|error| refusal(group, "proc-group-namespace", error))?;
+            if candidate_group != Some(group) { continue; }
+            let candidate_pid = namespace_ids(&status, "NSpid:")
+                .and_then(|mut ids| ids.nth(depth).map(str::parse::<u32>).transpose().map_err(Into::into))
+                .map_err(|error| refusal(group, "proc-group-namespace", error))?;
+            let Some(candidate_pid) = candidate_pid else { continue; };
+            // Same-depth IDs in sibling namespaces can collide. Only a
+            // caller-local pidfd that resolves back to this exact procfs task
+            // proves the task belongs to our namespace or its descendants.
+            let pinned = match PinnedProcess::open_at_depth(candidate_pid, depth) {
+                Ok(pinned) => pinned,
+                Err(error) if is_absent(&error) == Some(true) => continue,
+                Err(error) => return Err(error),
+            };
+            if pinned.proc_pid != proc_pid { continue; }
+            pinned.verify()?;
+            true
         };
         if matches { return Ok(true); }
     }
