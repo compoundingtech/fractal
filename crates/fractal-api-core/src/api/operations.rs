@@ -267,7 +267,7 @@ fn legacy_start_proof_error(error: anyhow::Error) -> St3Error {
         refusal = refusal.with_detail("stage", "procfs-visibility")
             .with_detail("reason", procfs.detail);
         if let Some(options) = &procfs.mount_options {
-            refusal = refusal.with_detail("mount_options", options);
+            refusal = refusal.with_detail("mount_options", options.as_str());
         }
         return refusal;
     }
