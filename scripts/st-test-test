@@ -7,6 +7,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import time
 import os
 from pathlib import Path
 import shutil
@@ -501,6 +502,29 @@ class StTest(unittest.TestCase):
         self.assertTrue(tree.is_dir())
         self.assertIn(str(tree), git(self.work, 'worktree', 'list'))
         self.assertEqual(git(tree, 'rev-parse', 'HEAD'), git(self.work, 'rev-parse', 'HEAD'))
+
+    def test_a_target_trees_share_is_held_by_one_run_at_a_time(self):
+        """ST_EVIDENCE_TARGET names one target for every tree: two runs on different trees once relinked binaries under each other's
+        tests, so the lock is exclusive for the whole run."""
+        target = Path(self.tmp.name) / 'shared-target'
+        target.mkdir()
+        holder = subprocess.Popen([sys.executable, '-c', 'import fcntl, sys, time; f = open(sys.argv[1], "w"); fcntl.flock(f, fcntl.LOCK_SH); '
+                                   'print("held", flush=True); time.sleep(1.5)', str(target.parent / 'shared-target.lock')],
+                                  stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.assertEqual(holder.stdout.readline().strip(), 'held')
+        err = io.StringIO()
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, {'HOME': str(self.home), 'ST_EVIDENCE_TARGET': str(target)}, clear=True), \
+                contextlib.redirect_stderr(err):
+            got, lock = st_test.shared_target(tree_target=self.home / 'pool-target')
+        self.addCleanup(lock.close)
+        self.assertGreater(time.monotonic() - started, 1.0)  # it waited for the other run
+        self.assertEqual(got, target)
+        self.assertIn('another run is using', err.getvalue())
+        with open(target.parent / 'shared-target.lock', 'w') as other:
+            with self.assertRaises(BlockingIOError):  # and holds it exclusively, so a third run waits too
+                fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)
 
     def test_a_pool_tree_in_use_is_never_shared_with_a_concurrent_run(self):
         self.commit('b.txt', 'two')
