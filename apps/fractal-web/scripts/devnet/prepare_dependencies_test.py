@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from dependency_cache import install_key, populate
+from dependency_cache import _make_directories_writable, install_key, populate
 
 
 HELPER = Path(__file__).with_name('prepare-dependencies.py').resolve()
@@ -30,6 +30,7 @@ class PrepareDependenciesTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='prepare-dependencies-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.addCleanup(lambda: _make_directories_writable(self.root))
         self.source = self.root / 'source'
         self.snapshot = self.root / 'snapshot'
         self.cache = self.root / 'cache'
@@ -96,6 +97,44 @@ class PrepareDependenciesTest(unittest.TestCase):
         self.assertFalse(any('node_modules' in name for name in overlay))
         self.assertIn(f'key={self.key} linked=3 copied=0', result.stderr)
 
+    def test_in_place_snapshot_write_is_denied_and_directories_are_private(self):
+        self.prepare()
+        snapshot_file = self.snapshot / 'node_modules/fixture/index.js'
+        cache_file = self.generation / 'node_modules/fixture/index.js'
+        self.assertTrue(os.path.samefile(snapshot_file, cache_file))
+        self.assertEqual(snapshot_file.stat().st_mode & 0o222, 0)
+        self.assertNotEqual(snapshot_file.parent.stat().st_ino, cache_file.parent.stat().st_ino)
+        self.assertTrue(snapshot_file.parent.stat().st_mode & 0o200)
+        self.assertEqual(cache_file.parent.stat().st_mode & 0o222, 0)
+        # Root bypasses DAC, so exercise the actual open as an unprivileged UID.
+        self.root.chmod(0o755)
+        script = '''
+import errno, os, sys
+if os.geteuid() == 0:
+    os.setgroups([])
+    os.setgid(65534)
+    os.setuid(65534)
+try:
+    with open(sys.argv[1], 'w') as stream:
+        stream.write('must not modify the cache')
+except OSError as error:
+    assert error.errno == errno.EACCES, error
+else:
+    raise AssertionError('in-place snapshot write succeeded')
+'''
+        result = subprocess.run([sys.executable, '-c', script, str(snapshot_file)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(cache_file.read_text(), 'immutable root dependency\n')
+        # New build output can replace a directory entry without editing the
+        # shared inode, and subsequent snapshots can still reuse the generation.
+        snapshot_file.unlink()
+        snapshot_file.write_text('snapshot-only replacement\n')
+        self.assertEqual(cache_file.read_text(), 'immutable root dependency\n')
+        with (self.cache / '.cache.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            populate(self.source, self.cache, self.key)
+
     def test_reuses_clone_a_generation_with_clone_b_pinned_workspace(self):
         source_a = self.source
         source_b = self.root / 'source-b'
@@ -143,6 +182,7 @@ class PrepareDependenciesTest(unittest.TestCase):
             self.assertEqual(link.resolve(strict=False), self.snapshot / 'packages/workspace')
 
     def test_rejects_marker_mismatch_before_copying(self):
+        (self.generation / '.fractal-dep-key').chmod(0o644)
         (self.generation / '.fractal-dep-key').write_text('0' * 64 + '\n')
         with self.assertRaises(ValueError):
             self.prepare()
@@ -157,6 +197,7 @@ class PrepareDependenciesTest(unittest.TestCase):
         self.assertFalse((self.snapshot / 'apps').exists())
 
     def test_rejects_unsafe_inventory(self):
+        (self.generation / '.node-modules.json').chmod(0o644)
         for inventory in (['../outside/node_modules'], ['/outside/node_modules'],
                           ['packages/../../outside/node_modules'], ['packages/workspace'],
                           {'node_modules': True}, [7]):
@@ -167,6 +208,8 @@ class PrepareDependenciesTest(unittest.TestCase):
                 self.assertFalse((self.snapshot / 'node_modules').exists())
 
     def test_rejects_escaping_inventory_ancestor(self):
+        self.generation.chmod(0o755)
+        (self.generation / '.node-modules.json').chmod(0o644)
         outside = self.root / 'outside'
         (outside / 'node_modules').mkdir(parents=True)
         (self.generation / 'escape').symlink_to(outside, target_is_directory=True)

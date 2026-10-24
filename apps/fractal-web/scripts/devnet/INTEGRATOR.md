@@ -95,20 +95,44 @@ the snapshot namespace. Host Git remains the deployment's PATH Git, including it
 worktree-location policy. The source clone need not share the snapshot filesystem;
 the immutable dependency cache must share it.
 
-`dependency_cache.py` hashes the path and bytes of these inputs, in this exact order:
-`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `megarepo.kdl`, `megarepo.lock`,
-`pnpm-source-inputs.json`. This five-file key names `<cache>/<key>`.
+`dependency_cache.py` first computes the original public digest by hashing each
+relative path followed by its bytes, in this exact order: `pnpm-lock.yaml`,
+`pnpm-workspace.yaml`, `megarepo.kdl`, `megarepo.lock`, `pnpm-source-inputs.json`.
+The generation key is now `sha256("fractal-dependency-key-v2\0" + public_hex +
+"\0" + private_hex)` (UTF-8 text, literal NUL separators). The public five-file
+digest remains the first component; the private digest prevents replaying old
+private dependencies when only the deployment-owned overlay changes.
+The private digest walks `apps/fractal-web/private` then `apps/fractal-web/vendor`,
+each in sorted order, excluding `node_modules` and `.git`. It hashes package
+manifests, pnpm/npm/Yarn/Bun lockfiles, pnpm workspace/config hooks, npm/Yarn
+configuration, and files beneath `patches` directories. For each selected file it
+hashes the 8-byte big-endian path length, UTF-8 path relative to `apps/fractal-web`
+(including the overlay root), 8-byte big-endian content length, then exact bytes.
+Missing overlays produce the SHA256 of empty bytes. Symlinked input files/directories
+fail closed. Private input contents are never committed; only the derived key is
+used in deployment state.
 Under an exclusive `<cache>/.cache.lock`, initial population copies installed
 dependency trees from the mutable clone into a staging directory and atomically
 renames it into place. Source-to-cache copying never hardlinks mutable source files.
-Published generations are never rewritten. `.fractal-dep-key` and
-`.node-modules.json` inside each generation identify its key and safe source-relative
+Publication removes all write bits from regular files and directories, records
+per-file integrity metadata and hashes in schema-1 `.files.json`, and fully
+verifies SHA256 before selection.
+Clean reuse checks file inventory, size, mode, mtime_ns, inode identity and link-count
+sanity without rereading all dependency contents. A metadata mismatch triggers a
+full diagnostic rehash, exclusive-lease retirement, and source-based rebuild, never
+in-place repair. Snapshot directories are independently writable; dependency file
+inodes remain read-only. These mode bits stop accidental writes, **not hostile code
+running as the same UID**; the sandbox PR supplies the hostile-code boundary.
+`.fractal-dep-key` and `.node-modules.json` identify the key and safe source-relative
 dependency directories; mismatched markers or escaping inventories fail closed.
 Workspace symlinks are normalized in staging to clone-independent relative topology:
 an absolute link into clone A's `packages/` becomes a relative workspace link, so
 the same-key generation reused by clone B cannot retain A's mutable path.
-Published generations with absolute or escaping dependency links are rejected,
-not repaired in place; use a fresh cache root when adopting this invariant.
+Published generations with incompatible integrity metadata or absolute/escaping
+links require a fresh cache root. The v2 key intentionally does not select legacy
+five-file-only generations; no generation is migrated in place.
+These directories are disposable copies of the clone's installed dependencies;
+a fresh population rebuilds their contents from that source, not application data.
 
 `.selection.json` outside the generations records the selected current and previous
 generation. Reusing an older generation updates selection lineage without mutating it.
@@ -120,12 +144,16 @@ cache lock. This preserves current plus the previously selected generation and n
 deletes one in use. A new dependency selection can therefore wait for an older build.
 Under that exclusive lease, pruning removes selection references and atomically
 renames the obsolete directory into `<cache>/.garbage/` before recursive deletion.
+The exclusive owner temporarily enables writing on the generation root for Linux
+cross-parent rename; no active snapshot can still hold its lease. Only retired
+garbage directories are subsequently made writable for deletion; dependency file
+modes are never changed during cleanup.
 Garbage is never a selectable or verified generation and does not count toward
 retention. Each root-lock owner opportunistically removes leftover garbage without
 reading its markers; interrupted or partial deletion cannot poison later selection.
 
 `prepare-dependencies.py SOURCE_DIR SNAPSHOT_DIR MANIFEST_PATH GENERATION KEY`
-checks the source's five-file key and generation marker before linking. It copies
+checks the source's combined public/private key and generation marker before linking. It copies
 the private/vendor overlay, hardlinks installed files from the immutable generation,
 and redirects workspace symlinks using their original clone-relative locations,
 not the cache parent. An `EXDEV` hardlink failure emits an immediate warning before

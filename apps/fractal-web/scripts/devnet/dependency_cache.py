@@ -26,14 +26,55 @@ def _validate_key(key):
         raise ValueError('invalid dependency key')
 
 
-def install_key(source):
-    """Hash each install input's relative name followed by its exact bytes."""
+def public_install_key(source):
+    """Keep the original five-file digest as the first key component."""
     source = Path(source)
     inputs = hashlib.sha256()
     for name in INSTALL_INPUTS:
         inputs.update(name.encode())
         inputs.update((source / name).read_bytes())
     return inputs.hexdigest()
+
+
+def private_install_key(source):
+    """Hash deployment-owned overlay install inputs, not installed dependencies."""
+    web = Path(source) / 'apps/fractal-web'
+    digest = hashlib.sha256()
+    names = {'package.json', 'pnpm-lock.yaml', 'package-lock.json',
+             'npm-shrinkwrap.json', 'yarn.lock', 'bun.lock', 'bun.lockb',
+             'pnpm-workspace.yaml', '.npmrc', '.yarnrc', '.yarnrc.yml',
+             '.pnpmfile.cjs', '.pnpmfile.mjs'}
+    for overlay_name in ('private', 'vendor'):
+        overlay = web / overlay_name
+        if overlay.is_symlink():
+            raise ValueError('source overlay copy root escapes source or is a symlink')
+        if not overlay.exists():
+            continue
+        for root, dirs, files in os.walk(overlay):
+            dirs[:] = sorted(name for name in dirs if name not in ('node_modules', '.git'))
+            for name in sorted(files):
+                path = Path(root) / name
+                relative = path.relative_to(overlay)
+                if name not in names and 'patches' not in relative.parts[:-1]:
+                    continue
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError(f'private install input must be a regular file: {relative}')
+                encoded = path.relative_to(web).as_posix().encode()
+                content = path.read_bytes()
+                digest.update(len(encoded).to_bytes(8, 'big'))
+                digest.update(encoded)
+                digest.update(len(content).to_bytes(8, 'big'))
+                digest.update(content)
+            if any((Path(root) / name).is_symlink() for name in dirs):
+                raise ValueError('private install input directory must not be a symlink')
+    return digest.hexdigest()
+
+
+def install_key(source):
+    """Versioned public-first/private-second dependency install identity."""
+    return hashlib.sha256(
+        b'fractal-dependency-key-v2\0' + public_install_key(source).encode()
+        + b'\0' + private_install_key(source).encode()).hexdigest()
 
 
 def _regular_file(path):
@@ -94,6 +135,131 @@ def _normalize_generation_links(source, staging):
     _validate_generation_links(staging)
 
 
+class CorruptGeneration(ValueError):
+    """Safe generation topology whose captured file metadata has changed."""
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _entries(root):
+    for directory, dirs, files in os.walk(root):
+        for name in dirs + files:
+            path = Path(directory) / name
+            if not path.is_symlink():
+                yield path
+
+
+def _make_directories_writable(root):
+    # Only unpublished staging or atomically retired garbage may be unlocked.
+    # Never chmod files: snapshots can still hold hardlinks to their inodes.
+    root.chmod(stat.S_IMODE(root.stat().st_mode) | stat.S_IWUSR)
+    for path in _entries(root):
+        if path.is_dir():
+            path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IWUSR)
+
+
+def _seal_generation(staging, captured):
+    # Permission bits guard accidental writes, not a hostile process of our UID.
+    for path in _entries(staging):
+        if path.is_file():
+            path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o222)
+        elif not path.is_dir():
+            raise ValueError(f'unsupported dependency file type: {path}')
+    files = {}
+    for path in _entries(staging):
+        if not path.is_file():
+            continue
+        name = path.relative_to(staging).as_posix()
+        digest = _sha256(path)
+        if name in captured and digest != captured[name]:
+            raise ValueError(f'dependency file changed during publication: {name}')
+        info = path.stat()
+        files[name] = {'size': info.st_size, 'mode': stat.S_IMODE(info.st_mode),
+                       'mtime_ns': info.st_mtime_ns, 'inode': info.st_ino,
+                       'nlink': info.st_nlink, 'sha256': digest}
+    missing = set(captured) - set(files)
+    if missing:
+        raise ValueError(f'dependency files disappeared during publication: {sorted(missing)}')
+    (staging / '.files.json').write_text(json.dumps({'schema': 1, 'files': files}) + '\n')
+    (staging / '.files.json').chmod(0o444)
+    # copytree has finished populating every directory before removing write bits.
+    for path in _entries(staging):
+        if path.is_dir():
+            path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o222)
+    staging.chmod(stat.S_IMODE(staging.stat().st_mode) & ~0o222)
+
+
+def _verify_files(generation):
+    manifest = generation / '.files.json'
+    if not manifest.exists() and not manifest.is_symlink():
+        raise ValueError('dependency metadata schema is obsolete; use a fresh cache root')
+    _regular_file(manifest)
+    document = json.loads(manifest.read_text())
+    if (not isinstance(document, dict) or set(document) != {'schema', 'files'}
+            or document['schema'] != 1 or not isinstance(document['files'], dict)):
+        raise ValueError('unsupported dependency metadata schema; use a fresh cache root')
+    records = document['files']
+    for name, record in records.items():
+        relative = Path(name)
+        if (not name or relative.is_absolute() or '..' in relative.parts
+                or relative.as_posix() != name or name == '.files.json'
+                or not isinstance(record, dict)
+                or set(record) != {'size', 'mode', 'mtime_ns', 'inode', 'nlink', 'sha256'}
+                or any(type(record[field]) is not int or record[field] < 0
+                       for field in ('size', 'mode', 'mtime_ns', 'inode', 'nlink'))
+                or record['nlink'] < 1 or record['mode'] & 0o222
+                or not isinstance(record['sha256'], str)
+                or re.fullmatch(r'[0-9a-f]{64}', record['sha256']) is None):
+            raise ValueError('invalid dependency file metadata; use a fresh cache root')
+    actual = {}
+    changed = []
+    for path in (generation, *_entries(generation)):
+        info = path.lstat()
+        name = path.relative_to(generation).as_posix()
+        if stat.S_ISDIR(info.st_mode):
+            if info.st_mode & 0o222:
+                changed.append(name)
+        elif stat.S_ISREG(info.st_mode):
+            if path == manifest:
+                if info.st_mode & 0o222:
+                    changed.append(name)
+                continue
+            actual[name] = path
+            record = records.get(name)
+            if (record is None or info.st_size != record['size']
+                    or stat.S_IMODE(info.st_mode) != record['mode']
+                    or info.st_mtime_ns != record['mtime_ns']
+                    or info.st_ino != record['inode']
+                    # Each live snapshot adds hardlinks; deletion removes them.
+                    or info.st_nlink < record['nlink']):
+                changed.append(name)
+        else:
+            raise ValueError(f'unsupported dependency file type: {name}')
+    changed.extend(set(records) - set(actual))
+    if changed:
+        # A metadata mismatch always retires the generation, even when bytes
+        # still match. Hash only on this diagnostic path, never on clean reuse.
+        damaged = []
+        for name, path in actual.items():
+            try:
+                digest = _sha256(path)
+            except OSError as error:
+                damaged.append(f'{name} (unreadable: {error})')
+            else:
+                if name not in records or digest != records[name]['sha256']:
+                    damaged.append(name)
+        damaged.extend(set(records) - set(actual))
+        raise CorruptGeneration(
+            f'dependency generation metadata changed: {sorted(set(changed))}; '
+            f'sha256 mismatches: {sorted(set(damaged))}')
+
+
 def verify_generation(generation, expected):
     """Return validated source-relative node_modules roots from a generation."""
     generation = Path(os.path.abspath(generation))
@@ -121,6 +287,7 @@ def verify_generation(generation, expected):
         _dependency_root(generation, relative)
         relatives.append(relative)
     _validate_generation_links(generation)
+    _verify_files(generation)
     return inventory
 
 
@@ -191,6 +358,7 @@ def _delete_garbage(path):
         if path.is_symlink() or not path.is_dir():
             path.unlink()
         else:
+            _make_directories_writable(path)
             shutil.rmtree(path)
     except OSError as error:
         # Garbage has no public identity and cannot prevent a usable generation
@@ -205,7 +373,33 @@ def _cleanup_garbage(cache):
         raise ValueError('dependency garbage namespace must be a directory')
     if garbage.exists():
         for path in garbage.iterdir():
-            _delete_garbage(path)
+            lease_path = path / '.lease'
+            if not path.is_symlink() and lease_path.is_file() and not lease_path.is_symlink():
+                with lease_path.open('r') as lease:
+                    fcntl.flock(lease, fcntl.LOCK_EX)
+                    _delete_garbage(path)
+            else:
+                # Interrupted garbage deletion may already have removed .lease.
+                _delete_garbage(path)
+
+
+def _retire(cache, generation):
+    """Root lock and exclusive generation lease must both be held."""
+    garbage = cache / '.garbage'
+    garbage.mkdir(exist_ok=True)
+    _forget_selection(cache, generation.name)
+    retired = Path(tempfile.mkdtemp(prefix=f'{generation.name}-{os.getpid()}-', dir=garbage))
+    # Linux requires write permission on a moved directory to update its '..'
+    # entry across parents. The exclusive lease guarantees no live snapshots;
+    # unlock only this root for rename, never payload files or child directories.
+    mode = stat.S_IMODE(generation.stat().st_mode)
+    generation.chmod(mode | stat.S_IWUSR)
+    try:
+        generation.rename(retired)
+    except BaseException:
+        generation.chmod(mode)
+        raise
+    _delete_garbage(retired)
 
 
 def _prune(cache, current, previous):
@@ -214,17 +408,13 @@ def _prune(cache, current, previous):
         if (re.fullmatch(r'[0-9a-f]{64}', old.name) is None
                 or old.name in (current, previous)):
             continue
-        verify_generation(old, old.name)
+        try:
+            verify_generation(old, old.name)
+        except CorruptGeneration as error:
+            print(f'WARNING: {error}', file=sys.stderr, flush=True)
         with (old / '.lease').open('r') as lease:
             fcntl.flock(lease, fcntl.LOCK_EX)
-            garbage = cache / '.garbage'
-            garbage.mkdir(exist_ok=True)
-            # Remove lineage references before the atomic retirement. After the
-            # rename, a killed rmtree can leave only unselectable garbage.
-            _forget_selection(cache, old.name)
-            retired = Path(tempfile.mkdtemp(prefix=f'{old.name}-{os.getpid()}-', dir=garbage))
-            old.rename(retired)
-            _delete_garbage(retired)
+            _retire(cache, old)
 
 
 def populate(source, cache, expected):
@@ -239,17 +429,27 @@ def populate(source, cache, expected):
     generation = cache / expected
     previous = _previous_selection(cache, expected)
     if generation.exists() or generation.is_symlink():
-        verify_generation(generation, expected)
-        _prune(cache, expected, previous)
-        _record_selection(cache, expected, previous)
-        print(f'dependency-cache: reused key={expected}', file=sys.stderr, flush=True)
-        return
+        try:
+            verify_generation(generation, expected)
+        except CorruptGeneration as error:
+            print(f'WARNING: {error}; rebuilding from source', file=sys.stderr, flush=True)
+            with (generation / '.lease').open('r') as lease:
+                fcntl.flock(lease, fcntl.LOCK_EX)
+                _retire(cache, generation)
+            previous = _previous_selection(cache, expected)
+        else:
+            _prune(cache, expected, previous)
+            _record_selection(cache, expected, previous)
+            print(f'dependency-cache: reused key={expected}', file=sys.stderr, flush=True)
+            return
     staging = Path(tempfile.mkdtemp(prefix=f'.staging-{expected}-', dir=cache))
     inventory = []
     counts = {'files': 0, 'bytes': 0}
+    captured = {}
 
     def copy_file(src, dst):
         # Never link mutable source files into an immutable generation.
+        captured[Path(dst).relative_to(staging).as_posix()] = _sha256(Path(src))
         result = shutil.copy2(src, dst)
         counts['files'] += 1
         counts['bytes'] += os.stat(src).st_size
@@ -272,6 +472,7 @@ def populate(source, cache, expected):
         (staging / '.fractal-dep-key').write_text(expected + '\n')
         (staging / '.node-modules.json').write_text(json.dumps(inventory) + '\n')
         (staging / '.lease').touch()
+        _seal_generation(staging, captured)
         # Free the old slot before atomic publication: at most two generations.
         # Selection references are removed before a generation is retired into
         # garbage; interrupted cleanup never leaves a damaged public key.
@@ -280,6 +481,7 @@ def populate(source, cache, expected):
         _record_selection(cache, expected, previous)
     finally:
         if staging.exists():
+            _make_directories_writable(staging)
             shutil.rmtree(staging)
     print(f"dependency-cache: populated key={expected} copied={counts['files']} bytes={counts['bytes']}",
           file=sys.stderr, flush=True)

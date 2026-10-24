@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 from dependency_cache import install_key, verify_generation
@@ -76,6 +77,10 @@ def prepare(source, snapshot, manifest_path, generation, expected):
         destination_path(snapshot, dst.relative_to(snapshot))
         shutil.copytree(src, dst, symlinks=True, copy_function=copy_dependency)
         for copied_root, copied_dirs, files in os.walk(dst):
+            # copytree preserves generation modes; directory inodes are private
+            # to this snapshot and must allow link redirection and build output.
+            directory = Path(copied_root)
+            directory.chmod(stat.S_IMODE(directory.stat().st_mode) | stat.S_IWUSR)
             for name in copied_dirs + files:
                 link = Path(copied_root) / name
                 if not link.is_symlink():

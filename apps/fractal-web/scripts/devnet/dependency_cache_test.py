@@ -24,6 +24,7 @@ class DependencyCacheTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix='dependency-cache-')
         self.addCleanup(temporary.cleanup)
         self.fixture = Path(temporary.name)
+        self.addCleanup(lambda: dependency_cache._make_directories_writable(self.fixture))
         self.source = self.fixture / 'source'
         self.source.mkdir()
         self.cache = self.fixture / 'cache'
@@ -74,17 +75,52 @@ class DependencyCacheTest(unittest.TestCase):
             expected.update(name.encode())
             expected.update((self.source / name).read_bytes())
         self.assertEqual(dependency_cache.INSTALL_INPUTS, names)
-        self.assertEqual(dependency_cache.install_key(self.source), expected.hexdigest())
+        public_key = expected.hexdigest()
+        expected_key = hashlib.sha256(
+            b'fractal-dependency-key-v2\0' + public_key.encode()
+            + b'\0' + hashlib.sha256(b'').hexdigest().encode()).hexdigest()
+        self.assertEqual(dependency_cache.public_install_key(self.source), public_key)
+        self.assertEqual(dependency_cache.install_key(self.source), expected_key)
         result = subprocess.run([sys.executable, str(HELPER), 'key', str(self.source)],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, expected.hexdigest() + '\n')
+        self.assertEqual(result.stdout, expected_key + '\n')
         self.assertEqual(result.stderr, '')
         for name in names:
             original = (self.source / name).read_bytes()
             (self.source / name).write_bytes(original + b'changed')
-            self.assertNotEqual(dependency_cache.install_key(self.source), expected.hexdigest())
+            self.assertNotEqual(dependency_cache.install_key(self.source), expected_key)
             (self.source / name).write_bytes(original)
+
+    def test_private_install_inputs_change_key_without_public_changes(self):
+        original = dependency_cache.install_key(self.source)
+        public = dependency_cache.public_install_key(self.source)
+        private = self.source / 'apps/fractal-web/private'
+        private.mkdir(parents=True)
+        manifest = private / 'package.json'
+        manifest.write_text('{"dependencies":{"tool":"1"}}\n')
+        first = self.populate()
+        self.assertNotEqual(first, original)
+        manifest.write_text('{"dependencies":{"tool":"2"}}\n')
+        second = self.populate()
+        self.assertNotEqual(second, first)
+        self.assertEqual(dependency_cache.public_install_key(self.source), public)
+        self.assertEqual(self.generations(), {first, second})
+        for name in ('pnpm-lock.yaml', '.npmrc', 'nested/package.json', 'patches/tool.patch'):
+            path = private / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('new private install input\n')
+            changed = dependency_cache.install_key(self.source)
+            self.assertNotEqual(changed, second)
+            second = changed
+        ignored = private / 'node_modules/tool/package.json'
+        ignored.parent.mkdir(parents=True)
+        ignored.write_text('installed output is not an input')
+        self.assertEqual(dependency_cache.install_key(self.source), second)
+        vendor = self.source / 'apps/fractal-web/vendor/tool/package.json'
+        vendor.parent.mkdir(parents=True)
+        vendor.write_text('{"dependencies":{"vendor-tool":"1"}}\n')
+        self.assertNotEqual(dependency_cache.install_key(self.source), second)
 
     def test_population_copies_source_and_reuse_is_immutable(self):
         key = self.populate()
@@ -105,6 +141,167 @@ class DependencyCacheTest(unittest.TestCase):
         self.assertEqual(result.stdout, '')
         self.assertIn('reused key=' + key, result.stderr)
         self.assertEqual(self.fingerprint(generation), before)
+
+    def test_publication_removes_write_bits_preserving_reads_and_execution(self):
+        self.dependency.chmod(0o775)
+        key = self.populate()
+        generation = self.cache / key
+        self.assertEqual((generation / 'node_modules/package/index.js').stat().st_mode & 0o777,
+                         0o555)
+        for path in (generation, *dependency_cache._entries(generation)):
+            self.assertEqual(path.stat().st_mode & 0o222, 0, str(path))
+
+    def test_clean_reuse_never_hashes_payload_and_accepts_snapshot_hardlinks(self):
+        key = self.populate()
+        installed = self.cache / key / 'node_modules/package/index.js'
+        snapshot = self.fixture / 'snapshot-link'
+        os.link(installed, snapshot)
+        with mock.patch.object(dependency_cache, '_sha256',
+                               side_effect=AssertionError('clean reuse hashed a file')):
+            self.assertEqual(self.populate(), key)
+            snapshot.unlink()
+            self.assertEqual(self.populate(), key)
+
+    def test_changed_metadata_rehashes_retires_and_rebuilds_from_source(self):
+        for change in ('mode', 'mtime', 'content', 'inode', 'directory'):
+            with self.subTest(change=change):
+                key = self.populate()
+                generation = self.cache / key
+                installed = generation / 'node_modules/package/index.js'
+                held = self.fixture / 'snapshot-link'
+                os.link(installed, held)
+                if change == 'mode':
+                    installed.chmod(0o644)
+                elif change == 'mtime':
+                    info = installed.stat()
+                    os.utime(installed, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+                elif change == 'content':
+                    installed.chmod(0o644)
+                    installed.write_text('corrupted cache bytes\n')
+                    installed.chmod(0o444)
+                elif change == 'inode':
+                    installed.parent.chmod(0o755)
+                    installed.unlink()
+                    shutil.copy2(held, installed)
+                    installed.parent.chmod(0o555)
+                else:
+                    installed.parent.chmod(0o755)
+                old_mode = held.stat().st_mode
+                self.dependency.write_text(f'fresh source for {change}\n')
+                with mock.patch.object(dependency_cache, '_sha256',
+                                       wraps=dependency_cache._sha256) as hashing:
+                    self.assertEqual(self.populate(), key)
+                # Diagnostic hashing reads the public generation, not just staging.
+                self.assertTrue(any(Path(call.args[0]).is_relative_to(generation)
+                                    for call in hashing.call_args_list))
+                self.assertFalse(os.path.samefile(held, installed))
+                self.assertEqual(held.stat().st_mode, old_mode,
+                                 'garbage cleanup chmodded a payload hardlink')
+                self.assertEqual(installed.read_text(), f'fresh source for {change}\n')
+                self.assertEqual(dependency_cache.verify_generation(generation, key),
+                                 ['node_modules', 'apps/web/node_modules'])
+                self.assertEqual(self.selection(), {'current': key, 'previous': None})
+                self.assertEqual(list((self.cache / '.garbage').iterdir()), [])
+                held.unlink()
+
+    def test_corrupt_generation_waits_for_lease_without_chmod_or_retirement(self):
+        key = self.populate()
+        generation = self.cache / key
+        installed = generation / 'node_modules/package/index.js'
+        info = installed.stat()
+        os.utime(installed, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+        before = self.fingerprint(generation)
+        selection = self.selection()
+        flock = fcntl.flock
+        lease_inode = (generation / '.lease').stat().st_ino
+
+        def nonblocking_generation_lock(descriptor, operation):
+            if (operation == fcntl.LOCK_EX
+                    and os.fstat(descriptor.fileno()).st_ino == lease_inode):
+                operation |= fcntl.LOCK_NB
+            return flock(descriptor, operation)
+
+        with (generation / '.lease').open('r') as live:
+            flock(live, fcntl.LOCK_SH)
+            with mock.patch.object(dependency_cache.fcntl, 'flock',
+                                   side_effect=nonblocking_generation_lock):
+                with self.assertRaises(BlockingIOError):
+                    self.populate()
+            self.assertEqual(self.fingerprint(generation), before)
+            self.assertEqual(self.selection(), selection)
+            self.assertFalse((self.cache / '.garbage').exists())
+        self.assertEqual(self.populate(), key)
+
+    def test_interrupted_corruption_retirement_rebuilds_on_next_population(self):
+        key = self.populate()
+        generation = self.cache / key
+        installed = generation / 'node_modules/package/index.js'
+        info = installed.stat()
+        os.utime(installed, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+        rmtree = shutil.rmtree
+
+        def interrupt_retired(path, *args, **kwargs):
+            if Path(path).parent == self.cache / '.garbage':
+                self.assertFalse(generation.exists())
+                self.assertFalse((self.cache / '.selection.json').exists())
+                (Path(path) / '.lease').unlink()
+                raise RuntimeError('interrupted corrupt generation cleanup')
+            return rmtree(path, *args, **kwargs)
+
+        with mock.patch.object(dependency_cache.shutil, 'rmtree', side_effect=interrupt_retired):
+            with self.assertRaisesRegex(RuntimeError, 'interrupted corrupt'):
+                self.populate()
+        self.assertEqual(self.generations(), set())
+        self.assertEqual(self.populate(), key)
+        self.assertEqual(list((self.cache / '.garbage').iterdir()), [])
+        self.assertEqual(self.selection(), {'current': key, 'previous': None})
+
+    def test_failed_retirement_rename_restores_generation_root_mode(self):
+        key = self.populate()
+        generation = self.cache / key
+        installed = generation / 'node_modules/package/index.js'
+        info = installed.stat()
+        os.utime(installed, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+        original_mode = generation.stat().st_mode
+        rename = Path.rename
+
+        def failed_rename(path, destination):
+            if path == generation:
+                self.assertTrue(path.stat().st_mode & 0o200)
+                self.assertEqual(installed.parent.stat().st_mode & 0o222, 0)
+                self.assertEqual(installed.stat().st_mode & 0o222, 0)
+                raise PermissionError('injected retirement rename failure')
+            return rename(path, destination)
+
+        with mock.patch.object(Path, 'rename', autospec=True, side_effect=failed_rename):
+            with self.assertRaisesRegex(PermissionError, 'injected retirement'):
+                self.populate()
+        self.assertEqual(generation.stat().st_mode, original_mode)
+        self.assertEqual(self.populate(), key)
+
+    def test_publication_rehashes_every_captured_file_before_rename(self):
+        normalize = dependency_cache._normalize_generation_links
+
+        def mutate_capture(source, staging):
+            normalize(source, staging)
+            (staging / 'node_modules/package/index.js').write_text('changed after copy\n')
+
+        with mock.patch.object(dependency_cache, '_normalize_generation_links',
+                               side_effect=mutate_capture):
+            with self.assertRaisesRegex(ValueError, 'changed during publication'):
+                self.populate()
+        self.assertEqual(self.generations(), set())
+        self.assertEqual(list(self.cache.glob('.staging-*')), [])
+        self.assertFalse((self.cache / '.selection.json').exists())
+
+    def test_old_metadata_schema_requires_fresh_cache_root(self):
+        key = self.populate()
+        generation = self.cache / key
+        generation.chmod(0o755)
+        (generation / '.files.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'fresh cache root'):
+            self.populate()
+        self.assertTrue(generation.exists())
 
     def test_absolute_workspace_links_are_relative_and_reused_across_clones(self):
         workspace = self.source / 'packages/pkg'
@@ -198,6 +395,7 @@ class DependencyCacheTest(unittest.TestCase):
         generation = self.cache / key
         selection = (self.cache / '.selection.json').read_bytes()
         link = generation / 'node_modules/workspace'
+        link.parent.chmod(0o755)
         for target in (self.source / 'apps/web', generation / 'apps/web',
                        self.fixture / 'outside', Path('../../outside')):
             with self.subTest(target=target):
@@ -215,12 +413,15 @@ class DependencyCacheTest(unittest.TestCase):
     def test_marker_inventory_and_metadata_rejection(self):
         key = self.populate()
         generation = self.cache / key
+        generation.chmod(0o755)
         marker = generation / '.fractal-dep-key'
+        marker.chmod(0o644)
         marker.write_text('f' * 64 + '\n')
         with self.assertRaisesRegex(ValueError, 'marker'):
             dependency_cache.verify_generation(generation, key)
         marker.write_text(key + '\n')
         inventory = generation / '.node-modules.json'
+        inventory.chmod(0o644)
         for invalid in ({}, 'node_modules', [None], [1], ['/node_modules'],
                         ['../node_modules'], ['apps/../../node_modules'],
                         ['./node_modules'], ['node_modules/'], ['node_modules', 'node_modules'],
@@ -248,6 +449,8 @@ class DependencyCacheTest(unittest.TestCase):
     def test_inventory_rejects_symlink_roots_and_ancestors(self):
         key = self.populate()
         generation = self.cache / key
+        generation.chmod(0o755)
+        (generation / '.node-modules.json').chmod(0o644)
         outside = self.fixture / 'outside'
         (outside / 'node_modules').mkdir(parents=True)
         for target in (outside, generation / 'apps/web'):
@@ -374,9 +577,11 @@ class DependencyCacheTest(unittest.TestCase):
         b = self.populate()
         garbage = self.cache / '.garbage'
         garbage.mkdir()
+        (self.cache / a).chmod(0o755)
         (self.cache / a).rename(garbage / 'previous')
         self.assertEqual(self.populate(), b)
         self.assertEqual(self.selection(), {'current': b, 'previous': None})
+        (self.cache / b).chmod(0o755)
         (self.cache / b).rename(garbage / 'current')
         self.assertEqual(self.populate(), b)
         self.assertEqual(self.selection(), {'current': b, 'previous': None})
