@@ -7,6 +7,8 @@ use fractal_schema::deploy::{VerifyGoRequest, VerifyGoReceipt};
 
 type Checked<T> = std::result::Result<T, St3Error>;
 const UNREPAIRED_REPLICA: &str = "NOT EXISTS (SELECT 1 FROM replica_records WHERE replica_records.claim_id=claims.id AND replica_records.state='repaired')";
+const CLOCK_TOLERANCE_MS: u128 = 2 * 60 * 1000;
+const ORIGIN_FRESHNESS_MS: u128 = 10 * 60 * 1000;
 fn refuse(code: &'static str, message: impl Into<String>) -> St3Error { St3Error::new(code, message) }
 fn fields(claim: &ClaimRecord) -> Checked<BTreeMap<String, Value>> {
     let fields = serde_json::from_value(claim.body.get("fields").cloned().unwrap_or(Value::Null))
@@ -79,12 +81,51 @@ impl Store {
         Ok((claim, go))
     }
 
+    /// Principal signatures authenticate signed_at_unix_ms; local receipt times do not.
+    /// Use only accepted, active whole-record proofs from this GO's origin.
+    fn deploy_trusted_now(&self, go_id: &str, now: u128) -> Checked<u128> {
+        let connection = self.readers.get();
+        let origin: String = connection.query_row(&format!(
+            "SELECT origin FROM claims WHERE id=?1 AND kind='deploy.go'
+             AND {UNREPAIRED_CLAIM} AND {UNREPAIRED_REPLICA}"), [go_id], |row| row.get(0))
+            .optional().map_err(internal)?
+            .ok_or_else(|| refuse("deploy-dangling-reference", "missing active deploy.go"))?;
+        let mut query = connection.prepare_cached(&format!(
+            "SELECT id FROM claims WHERE origin=?1 AND {UNREPAIRED_CLAIM} AND {UNREPAIRED_REPLICA}"))
+            .map_err(internal)?;
+        let records = query.query_map([&origin], |row| row.get::<_, String>(0)).map_err(internal)?;
+        let mut newest = None;
+        for id in records {
+            let auth = self.claim_authorization(&id.map_err(internal)?).map_err(internal)?;
+            if auth.verdict != Verdict::Verified { continue; }
+            if let Some(signature) = auth.signature.filter(|signature|
+                signature.on_behalf.is_none() && signature.format.is_none() && signature.signed_fields.is_empty())
+            {
+                let signed_at = u128::from(signature.signed_at_unix_ms);
+                newest = Some(newest.map_or(signed_at, |previous: u128| previous.max(signed_at)));
+            }
+        }
+        let clock_error = |reason| refuse("deploy-clock-untrusted", "local clock is outside the signed origin window")
+            .with_detail("reason", reason);
+        let newest = newest.ok_or_else(|| clock_error("no-reference"))?;
+        if now < newest.saturating_sub(CLOCK_TOLERANCE_MS) { return Err(clock_error("behind")); }
+        if now > newest.saturating_add(ORIGIN_FRESHNESS_MS + CLOCK_TOLERANCE_MS) {
+            return Err(clock_error("ahead"));
+        }
+        Ok(newest)
+    }
+
     fn verify_deploy_go_snapshot(&self, policy: &Policy, request: &VerifyGoRequest, now: u128) -> Checked<VerifyGoReceipt> {
         if policy.version != 1 { return Err(refuse("deploy-policy-refused", "unsupported policy version")); }
         if request.host != self.origin || policy.refused_verifier_hosts.contains(&self.origin) {
             return Err(refuse("deploy-policy-refused", "verification is authorized only on the allowed executing host"));
         }
+        let signed_now = self.deploy_trusted_now(&request.go_id, now)?;
         let (claim, go) = self.deploy_go_record(policy, &request.go_id, Some(now))?;
+        // Clock tolerance must not resurrect a GO already expired by signed evidence.
+        if timestamp(&go, "expiresAt")? <= signed_now {
+            return Err(refuse("deploy-invalid-time", "GO has expired according to signed origin evidence"));
+        }
         for (name, expected) in [
             ("host", json!(request.host)), ("actor", json!(request.actor)),
             ("operation", json!(request.operation)), ("trainId", json!(request.train_id)),
@@ -107,7 +148,7 @@ impl Store {
             .optional().map_err(internal)?.flatten();
         let last = last.and_then(|s| s.parse::<u128>().ok())
             .ok_or_else(|| refuse("deploy-stale-replica", "no successful sync receipt for GO origin"))?;
-        if last > now || now - last > 10 * 60 * 1000 {
+        if last > now || now - last > ORIGIN_FRESHNESS_MS {
             return Err(refuse("deploy-stale-replica", "GO origin sync receipt is stale or in the future"));
         }
         let mut query = connection.prepare_cached(&format!(

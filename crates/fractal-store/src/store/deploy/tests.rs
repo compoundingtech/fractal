@@ -131,6 +131,61 @@ fn origin_receipt_requires_recent_nonfuture_success() {
 }
 
 #[test]
+fn signed_origin_window_refuses_behind_and_ahead_local_clocks() {
+    let fixture = Fixture::new();
+    for (now, reason) in [
+        (fixture.now - CLOCK_TOLERANCE_MS - 60_000, "behind"),
+        (fixture.now + ORIGIN_FRESHNESS_MS + CLOCK_TOLERANCE_MS + 60_000, "ahead"),
+    ] {
+        // Even a locally stamped "successful sync now" cannot establish clock trust.
+        fixture.receipt(Some(now));
+        let error = fixture.local.verify_deploy_go(&fixture.policy, &fixture.request, now).unwrap_err();
+        assert_eq!(error.code, "deploy-clock-untrusted");
+        assert_eq!(error.details["reason"], reason);
+    }
+}
+
+#[test]
+fn clock_without_verified_signed_origin_reference_is_untrusted() {
+    let fixture = Fixture::new();
+    let unsigned = Store::open_memory("host-a").unwrap();
+    let claim = publish(&unsigned, "deploy.go", MANAGER, fixture.go.clone());
+    let mut request = fixture.request.clone();
+    request.go_id = claim.id;
+    let error = unsigned.verify_deploy_go(&fixture.policy, &request, fixture.now).unwrap_err();
+    assert_eq!(error.code, "deploy-clock-untrusted");
+    assert_eq!(error.details["reason"], "no-reference");
+}
+
+#[test]
+fn clocks_within_signed_origin_tolerance_pass() {
+    let mut fixture = Fixture::new();
+    let mut go = fixture.go.clone();
+    go["issuedAt"] = json!(time(fixture.now - 5*60*1000));
+    fixture.replace_go(go);
+    for now in [fixture.now - CLOCK_TOLERANCE_MS + 1000, fixture.now + CLOCK_TOLERANCE_MS - 1000] {
+        fixture.receipt(Some(now));
+        fixture.local.verify_deploy_go(&fixture.policy, &fixture.request, now).unwrap();
+    }
+}
+
+#[test]
+fn moving_clock_back_cannot_resurrect_expired_go_even_within_tolerance() {
+    let mut fixture = Fixture::new();
+    let mut go = fixture.go.clone();
+    go["issuedAt"] = json!(time(fixture.now - 20*60*1000));
+    go["expiresAt"] = json!(time(fixture.now - 30_000));
+    fixture.replace_go(go);
+    for (now, expected) in [
+        (fixture.now - 15*60*1000, "deploy-clock-untrusted"),
+        (fixture.now - 60_000, "deploy-invalid-time"),
+    ] {
+        fixture.receipt(Some(now));
+        assert_eq!(fixture.local.verify_deploy_go(&fixture.policy, &fixture.request, now).unwrap_err().code, expected);
+    }
+}
+
+#[test]
 fn issue_expiry_and_four_hour_boundary() {
     let mut fixture = Fixture::new();
     for (issued, expires, approved) in [

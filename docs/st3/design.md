@@ -92,6 +92,18 @@ claim's own origin node within ten minutes. Never-synced, unknown-origin, future
 or older-than-ten-minute receipts fail closed. A configured issuer node or a successful
 sync with another node cannot substitute for the GO origin's receipt.
 
+Before expiry, lifetime or freshness comparisons, the verifier establishes clock trust
+from the newest authenticated `signed_at_unix_ms` among accepted, active whole-record
+principal signatures on claims from the GO's origin. This uses the existing principal
+judge, including its admitted node/delegation chain, not a locally assigned claim or
+sync-receipt timestamp. With a named two-minute tolerance, local `now` must be at least
+that signed reference minus two minutes and no later than the reference plus ten
+minutes plus two minutes. Missing signed reference, a clock behind this window or a
+clock ahead of it returns `deploy-clock-untrusted` with reason `no-reference`, `behind`
+or `ahead`, before GO time/freshness checks. Local sync receipts alone cannot establish
+clock trust. Clock tolerance cannot revive a GO already expired by signed origin
+evidence: expiry must exceed both local `now` and the signed reference.
+
 The packaged policy has one strict JSON schema with integer `version: 1` and explicit
 `refusedVerifierHosts`, `consumptionSigners`, `goSigners`, `stopSigners` and
 `compatSignoffSigners` arrays. Missing, unreadable, malformed or unknown-version policy
