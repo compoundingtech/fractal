@@ -2599,15 +2599,23 @@ async fn cli_list_rendering_is_unchanged_by_quarantined_deploy_claims() {
         &["launch", "ls"], &["lanes", "ls"], &["sets", "ls"],
         &["documents", "ls"],
     ];
+    // Generic list envelopes carry a fresh request ID and snapshot creation time
+    // even when the graph is unchanged. Compare every other rendered line,
+    // including snapshot identity/store cut and all collection/page contents.
+    let stable_output = |bytes: &[u8]| {
+        std::str::from_utf8(bytes).unwrap().lines()
+            .filter(|line| !line.starts_with("REQUEST ID ") && !line.starts_with("  CREATED AT "))
+            .map(str::to_owned).collect::<Vec<_>>()
+    };
     let mut baseline = Vec::new();
     for arguments in commands {
         let output = daemon.cli_command_format(PERSON, arguments, false).output().await.unwrap();
         assert!(output.status.success(), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
         assert!(!output.stdout.is_empty(), "{arguments:?}");
-        baseline.push((output.stdout, output.stderr));
+        baseline.push((stable_output(&output.stdout), output.stderr));
     }
-    assert!(String::from_utf8_lossy(&baseline[0].0).contains("example-reader"));
-    assert!(String::from_utf8_lossy(&baseline[1].0).contains("example/inspect"));
+    assert!(baseline[0].0.iter().any(|line| line.contains("example-reader")));
+    assert!(baseline[1].0.iter().any(|line| line.contains("example/inspect")));
     let source = Store::open_memory("host-a").unwrap();
     source.bind_fleet(FLEET).unwrap();
     let examples = [
@@ -2652,7 +2660,7 @@ async fn cli_list_rendering_is_unchanged_by_quarantined_deploy_claims() {
     for (arguments, (stdout, stderr)) in commands.iter().zip(baseline) {
         let output = daemon.cli_command_format(PERSON, arguments, false).output().await.unwrap();
         assert!(output.status.success(), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(output.stdout, stdout, "{arguments:?}: list rendering changed");
+        assert_eq!(stable_output(&output.stdout), stdout, "{arguments:?}: list rendering changed");
         assert_eq!(output.stderr, stderr, "{arguments:?}: list diagnostics changed");
     }
 }
