@@ -224,13 +224,34 @@ pub async fn apply_operational_repair(
     bound: Option<Extension<BoundAgent>>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
-    if bound.is_none() && request.actor.is_some() {
+    if bound.is_some() || request.actor.is_some() {
         return Err(ApiError::bad(St3Error::new(
             "foreign-agent-actor",
-            "repair caller attribution requires an authenticated harness binding",
+            "the legacy repair route accepts only unbound token-only callers",
         )));
     }
-    let bound_actor = bound.map(|bound| bound.0.0);
+    apply_operational_repair_with_actor(state, request, None).await
+}
+
+/// A separate route makes an older token-only daemon refuse attributed applies
+/// before mutation, even if it would silently ignore an unknown actor field.
+pub async fn apply_attributed_operational_repair(
+    State(state): State<AppState>,
+    bound: Option<Extension<BoundAgent>>,
+    Json(request): Json<OperationalRepairApplyRequest>,
+) -> Result<Json<OperationalRepairResult>, ApiError> {
+    let bound = bound.ok_or_else(|| ApiError::bad(St3Error::new(
+        "foreign-agent-actor",
+        "attributed repair apply requires an authenticated harness binding",
+    )))?;
+    apply_operational_repair_with_actor(state, request, Some(bound.0.0)).await
+}
+
+async fn apply_operational_repair_with_actor(
+    state: AppState,
+    request: OperationalRepairApplyRequest,
+    bound_actor: Option<String>,
+) -> Result<Json<OperationalRepairResult>, ApiError> {
     let effect_state = state.clone();
     let result = blocking_action(move || {
         let (subjects, classes) = Store::operational_repair_token_filters(&request.token)?;

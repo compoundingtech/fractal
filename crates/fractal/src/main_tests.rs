@@ -84,6 +84,28 @@ fn repair_actor_path_keeps_unrelated_subjects_and_classes_out() {
 }
 
 #[test]
+fn repair_apply_guidance_preserves_actorless_humans_and_effective_agent_aliases() {
+    let human = fractal_drivers::contracts::env_with("ST_AGENT", &|_| None);
+    assert_eq!(repair_apply_guidance("orpv0:token", human.as_deref()),
+        "st repair apply orpv0:token");
+    for variable in ["ST_AGENT", "FRACTAL_AGENT"] {
+        let own = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
+            (name == variable).then(|| "agent/own".to_owned())
+        });
+        let read = Cli::try_parse_from(["st", "repair", "dry-run"]).unwrap();
+        guard_mutating_cli_actor(&read.command, own.as_deref(), None).unwrap();
+        assert_eq!(repair_apply_guidance("orpv0:token", own.as_deref()),
+            "st repair apply --as agent/own orpv0:token", "{variable}");
+    }
+}
+
+#[test]
+fn repair_apply_actor_requests_use_only_the_new_attributed_route() {
+    assert_eq!(repair_apply_path(None), "/v1/repair/apply");
+    assert_eq!(repair_apply_path(Some("agent/own")), "/v1/repair/apply-attributed");
+}
+
+#[test]
 fn owner_index_preparation_is_explicit_and_only_in_maintenance_help() {
     assert!(Cli::try_parse_from(["st", "store", "prepare-indexes"]).is_err());
     let cli = Cli::try_parse_from([

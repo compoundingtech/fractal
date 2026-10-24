@@ -10367,6 +10367,18 @@ fn validate_repair_plan_filters(
     Ok(())
 }
 
+fn repair_apply_path(actor: Option<&str>) -> &'static str {
+    if actor.is_some() { "/v1/repair/apply-attributed" } else { "/v1/repair/apply" }
+}
+
+fn repair_apply_guidance(token: &str, own: Option<&str>) -> String {
+    let token = presentation::shell_argument(token);
+    match own.filter(|own| own.starts_with("agent/") && own.len() > "agent/".len()) {
+        Some(own) => format!("st repair apply --as {} {token}", presentation::shell_argument(own)),
+        None => format!("st repair apply {token}"),
+    }
+}
+
 async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) -> Result<()> {
     match command {
         RepairCommand::DryRun { subjects, classes, actor } => {
@@ -10398,12 +10410,14 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                         println!("  evidence\t{}", serde_json::to_string(&item.details)?);
                     }
                 }
-                println!("Apply this exact plan with: st repair apply --as \"$ST_AGENT\" {}", plan.token);
+                let own = fractal_drivers::contracts::env("ST_AGENT");
+                println!("Apply this exact plan with: {}", repair_apply_guidance(&plan.token, own.as_deref()));
             }
         }
         RepairCommand::Apply { token, actor } => {
+            let path = repair_apply_path(actor.as_deref());
             let result: OperationalRepairResult = client
-                .post("/v1/repair/apply", &OperationalRepairApplyRequest { token, actor })
+                .post(path, &OperationalRepairApplyRequest { token, actor })
                 .await?;
             if json_output {
                 print_value(&result, true)?;
