@@ -1501,9 +1501,9 @@ fn runtime_subject(subject: &str) -> bool {
 }
 
 /// Status reductions kept per subject between snapshots. `through` is the newest snapshot whose
-/// arrivals were applied: a subject that gained a claim, acted in one, or whose owning run or
-/// generation gained one since an answer was read loses it. `conflicts` counts conflicting
-/// operations, which change a subject's status without a claim of its own.
+/// arrivals were applied. Runtime statuses and membership follow the input generation of the
+/// subject and its owning run/generation; other modes also invalidate on authored claims.
+/// `conflicts` counts conflicting operations, which change status without a claim of its own.
 #[derive(Default)]
 pub struct SubjectCache {
     through: u64,
@@ -4461,10 +4461,15 @@ impl Store {
                     "SELECT subject, actor FROM claims WHERE store_index>?1 AND store_index<=?2",
                 )?;
                 let mut changed = HashSet::new();
+                // Runtime reductions and current/history membership read claims about
+                // the runtime and its owners, not claims it authored elsewhere. Keep
+                // those input generations separate from actor-sensitive status modes.
+                let mut changed_subjects = HashSet::new();
                 for row in statement.query_map(params![cache.through, store_index], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
                 })? {
                     let (subject, actor) = row?;
+                    changed_subjects.insert(subject.clone());
                     changed.insert(subject);
                     changed.extend(actor);
                 }
@@ -4472,14 +4477,18 @@ impl Store {
                 let stale = |subject: &String, owners: &[String]| {
                     changed.contains(subject) || owners.iter().any(|owner| changed.contains(owner))
                 };
+                let runtime_stale = |subject: &String, owners: &[String]| {
+                    changed_subjects.contains(subject)
+                        || owners.iter().any(|owner| changed_subjects.contains(owner))
+                };
                 cache
                     .views
-                    .retain(|subject, entry| !stale(subject, &entry.owners));
+                    .retain(|subject, entry| !runtime_stale(subject, &entry.owners));
                 cache
                     .statuses
                     .retain(|subject, entry| !stale(subject, &entry.owners));
                 cache.summary_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
-                cache.runtime_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
+                cache.runtime_statuses.retain(|subject, entry| !runtime_stale(subject, &entry.owners));
                 cache.card_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
             }
             cache.through = store_index;
