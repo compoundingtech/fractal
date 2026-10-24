@@ -193,8 +193,9 @@ const staysWithoutTooltip = async (ms: number) => {
 /**
  * Desktop decision C: Tab onto Resources names it (positive control), but focus moved by code while the input
  * modality is still keyboard, as a host restoring focus does, shows no tooltip although the ring is visible.
+ * After pointer input, programmatic focus retains neither the ring nor a tooltip.
  */
-export const ProgrammaticFocusQuiet: Story = { play: async ({ canvasElement }) => {
+export const ProgrammaticFocusQuiet: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
   const scope = within(header(canvasElement))
   const resources = scope.getByRole('button', { name: 'Resources' })
   const conversation = scope.getByRole('button', { name: 'Conversation menu' })
@@ -207,6 +208,13 @@ export const ProgrammaticFocusQuiet: Story = { play: async ({ canvasElement }) =
   conversation.focus()
   await expect(conversation).toHaveFocus()
   await expect(conversation).toHaveAttribute('data-focus-visible', 'true')
+  await expect(getComputedStyle(conversation).outlineStyle).toBe('solid')
+  await staysWithoutTooltip(600)
+  await userEvent.click(canvasElement)
+  resources.focus()
+  await expect(resources).toHaveFocus()
+  await waitFor(() => expect(resources).not.toHaveAttribute('data-focus-visible'))
+  await expect(getComputedStyle(resources).outlineStyle).toBe('none')
   await staysWithoutTooltip(600)
 } }
 

@@ -27,8 +27,6 @@ export function PhoneAgentDrawer({ ref, triggerRef, headerActions, children, hea
   const closeButton = React.useRef<HTMLButtonElement>(null)
   const portalHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => portalHost.current, [])
-  // The input that last acted inside the open drawer decides whether the restored trigger shows its focus ring.
-  const dismissedBy = React.useRef<'keyboard' | 'pointer'>('keyboard')
   const wasOpen = React.useRef(false)
   const coarse = useCoarsePointer()
   const state = useOverlayTriggerState({})
@@ -37,18 +35,17 @@ export function PhoneAgentDrawer({ ref, triggerRef, headerActions, children, hea
   const { modalProps, underlayProps } = useModalOverlay({ isDismissable: true }, state, dialog)
   const { dialogProps } = useDialog({ 'aria-label': 'Agents' }, dialog)
   React.useLayoutEffect(() => {
-    if (isOpen) { wasOpen.current = true; dismissedBy.current = 'keyboard'; closeButton.current?.focus(); return }
+    if (isOpen) { wasOpen.current = true; closeButton.current?.focus(); return }
     if (!wasOpen.current) return
     wasOpen.current = false
     // Restore after React Aria has released containment and its pending blur frame.
-    const focusVisible = dismissedBy.current === 'keyboard'
-    const frame = window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true, focusVisible }))
+    const frame = window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
     return () => window.cancelAnimationFrame(frame)
   }, [isOpen, triggerRef])
   React.useImperativeHandle(ref, () => ({ close, toggle: () => { if (isOpen) close(); else open() } }), [close, isOpen, open])
   return <>
     {header(open, { open: isOpen, id })}
-    <div {...underlayProps} onPointerDownCapture={() => { dismissedBy.current = 'pointer' }} onKeyDownCapture={() => { dismissedBy.current = 'keyboard' }} hidden={!isOpen} {...stylex.props(styles.overlay, !isOpen && styles.hidden)}>
+    <div {...underlayProps} hidden={!isOpen} {...stylex.props(styles.overlay, !isOpen && styles.hidden)}>
       <FocusScope contain={isOpen}>
         <div {...mergeProps(modalProps, dialogProps)} ref={dialog} id={id} aria-modal="true" {...stylex.props(styles.drawer)}>
           {/* Touch density follows the pointer, not the window: a fine pointer at 899px keeps the dock's rows and controls. */}

@@ -2,6 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Focusable, Pressable } from 'react-aria-components'
+import { useFocusRing } from 'react-aria'
 import { interactionVars as interaction, geometryVars as g, motionVars as m, radiusVars as r, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { Icon, type IconName } from './Icons'
 import { Tooltip } from './Controls'
@@ -47,6 +48,7 @@ export interface ChromeControlProps {
  */
 export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, tooltip, ref, onPrefetch, edge, tooltipPlacement = 'bottom' }: ChromeControlProps) {
   const reasonId = React.useId()
+  const { focusProps, isFocusVisible } = useFocusRing()
   // Inside a narrow (phone) host every chrome control is a 44px touch target; a narrow desktop pane keeps desktop density.
   const narrow = React.useContext(NarrowLayoutContext)
   const touch = narrow ? [styles.touch, edge === 'lead' && styles.touchLead, edge === 'trail' && styles.touchTrail] : []
@@ -62,6 +64,8 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
         <Focusable>
           <Pressable isDisabled>
             <button
+              {...focusProps}
+              data-focus-visible={isFocusVisible || undefined}
               onKeyDownCapture={event => { if (triggerKeys[event.key] === true) event.preventDefault() }}
               type="button"
               aria-label={label}
@@ -107,10 +111,11 @@ const styles = stylex.create({
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxSizing: 'border-box',
     width: g.controlMd, height: g.controlMd, padding: 0,
     borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: ink.fgMuted,
+    outlineStyle: 'none',
     cursor: 'pointer',
     transitionProperty: 'background-color, color', transitionDuration: m.fast, transitionTimingFunction: m.ease,
     ':hover': { backgroundColor: surface.rowHover, color: ink.fg },
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
+    ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
     ':disabled': { opacity: 0.64, cursor: 'default', backgroundColor: 'transparent', color: ink.fgMuted },
   },
   pressed: { backgroundColor: surface.rowActive, color: ink.fg, ':hover': { backgroundColor: surface.rowActive, color: ink.fg } },
