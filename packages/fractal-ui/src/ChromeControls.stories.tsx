@@ -9,6 +9,7 @@ import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { tooltipFor } from './story-play'
 
 /**
  * The chrome's quiet icon controls in place: the sidebar header and footer, and the thread header with the
@@ -234,8 +235,8 @@ export const WindowBlurQuiet: Story = { play: async ({ canvasElement }) => {
 } }
 
 /**
- * Phone host: a tap presses the 44px control and opens no tooltip. The touch layout keeps the kit tooltip's own policy,
- * so after a key returns the modality to keyboard, focus moved by code names the control (desktop decision C would not).
+ * Phone host: a tap presses the 44px control and opens no tooltip. Restoring focus after keyboard input keeps
+ * the ring without a tooltip; real Tab navigation still discloses the focused control's label.
  */
 export const PhoneTapQuiet: Story = { args: { phone: true }, play: async ({ canvasElement }) => {
   const sidebar = within(within(canvasElement).getByRole('complementary', { name: 'Agents' }))
@@ -247,7 +248,12 @@ export const PhoneTapQuiet: Story = { args: { phone: true }, play: async ({ canv
   await userEvent.keyboard('a')
   sort.focus()
   await waitFor(() => expect(sort).toHaveAttribute('data-focus-visible', 'true'))
-  await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent('Sort agents · Manual'))
+  await expect(sort).toHaveFocus()
+  await staysWithoutTooltip(600)
+  await userEvent.tab({ shift: true })
+  await userEvent.tab()
+  await expect(sort).toHaveFocus()
+  await expect(await tooltipFor(sort, 'Sort agents · Manual')).toHaveTextContent('Sort agents · Manual')
   await userEvent.keyboard('{Escape}')
 } }
 
