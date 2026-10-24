@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Legacy runtime repair dry-run, apply and doctor consistently refuse unavailable native proof with a typed 422 response and nonsecret process-read metadata",
+  "summary": "Legacy runtime repair consistently returns typed 422 refusals for unavailable native proof and refuses procfs mounts that can hide live producers",
   "replay": {"status": "none", "detail": "No projection replay or new repair authority."},
   "schema": {"status": "none", "detail": "No database or replicated claim schema changes."},
-  "rules": {"status": "none", "detail": "Checkpoint and closure-proof rules are unchanged; unreadable live processes still refuse repair."},
-  "compatibility": {"status": "changed", "detail": "Dry-run and doctor return legacy-start-proof-unavailable (HTTP 422) instead of an internal error or an aggregated doctor check when native proof capture fails. Apply uses the same redacted response. Details include stage, pid and numeric errno where available, never raw environment or native error paths."},
-  "downtime": {"status": "none", "detail": "Normal daemon rollout only."},
-  "manual": {"status": "none", "detail": "No additional operator action. This change does not make inaccessible process evidence eligible for cleanup."},
-  "recovery": {"status": "none", "detail": "No state edits, process exclusions or destructive recovery."}
+  "rules": {"status": "none", "detail": "No claim admission, checkpoint or projection rule changes. Native closure capture now requires complete procfs visibility before process ownership checks or enumeration."},
+  "compatibility": {"status": "changed", "detail": "Dry-run, apply and doctor consistently return legacy-start-proof-unavailable (HTTP 422) when native capture cannot prove closure. Process-read details contain only stage, pid and numeric errno when available, never raw environment or native error paths. Procfs that can hide processes refuses with stage procfs-visibility and reason procfs-hides-processes, including mount options: any hidepid value other than 0/off (including 1, 2, invisible, noaccess and ptraceable), or subset=pid. Unreadable, malformed or missing mount evidence refuses with the same type and a distinct reason. Ordinary procfs behavior is unchanged."},
+  "downtime": {"status": "none", "detail": "Normal daemon rollout; no migration, projection replay or rebuild."},
+  "manual": {"status": "none", "detail": "No automatic configuration changes. Hosts whose procfs can hide processes cannot use legacy-start repair until complete visibility is established. Inaccessible live process evidence never becomes cleanup authority."},
+  "recovery": {"status": "none", "detail": "Refusal changes neither runtime nor store state. No process exclusions or destructive recovery. Earlier binaries do not enforce the procfs visibility precondition."}
 }
