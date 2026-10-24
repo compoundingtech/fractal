@@ -196,6 +196,17 @@ fn cli_command_with_bindings(
         .mut_subcommands(|command| cli_command_with_bindings(command, bindings))
 }
 
+/// The reconcile pass cap when the config sets none. The test fixture runs at the fastest
+/// supported cap, so integration tests check what converges without waiting out pass spacing;
+/// a test about spacing sets its cap in the config. The binary name is a compile-time value.
+fn default_max_passes_per_minute() -> u32 {
+    if env!("CARGO_BIN_NAME") == "st3-fixture" {
+        600
+    } else {
+        fractal_daemon::config::DEFAULT_MAX_PASSES_PER_MINUTE
+    }
+}
+
 fn agent_environment_present() -> bool {
     std::env::var_os("FRACTAL_AGENT").is_some() || std::env::var_os("ST_AGENT").is_some()
 }
@@ -6240,7 +6251,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
     )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
-    reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
+    reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
@@ -18143,7 +18154,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
         match reloaded {
             Some(Ok((reloaded, reconcile))) => {
                 // Validation already passed; preserve last-start history while changing the rate.
-                reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute)
+                reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
                 limits = reloaded;
