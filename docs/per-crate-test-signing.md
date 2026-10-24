@@ -117,7 +117,7 @@ and a stale pass is reused. Four controls, in order of when they bite:
   `scripts/rust-test-inputs-scan` (the textual first pass of the extras: `--write` produced the committed file, a policy test fails when a
   crate's scan names a path its entry does not cover). `.st/rust-test-inputs.json` starts from that scan; the daily trace of section 5
   is what lets a crate's extras shrink or grow after review. Test file: `scripts/rust-test-keys-test`.
-- `scripts/st-test --check rust-tests` (opt-in; `--all` still signs `linux-gate` until the gate accepts per-crate notes): computes the keys,
+- `scripts/st-test --check rust-tests` (in the default suite since step 5a, after `linux-gate`; see section 10): computes the keys,
   fetches the per-crate index refs in one fetch, asks the verifier (`evidence-verify --crate-key CRATE=KEY`) for each crate, runs ONE
   `scripts/ci-local tests` for the missing crates (`CI_TEST_PACKAGES`, `CI_TEST_JUNIT`; the workspace build, so features unify as in CI), and
   signs each crate with `scripts/evidence-wrap --check rust-tests` over `scripts/ci-rust-test-result`, which reads that crate's part of the
@@ -190,3 +190,13 @@ A full run once sat 30 minutes in the megarepo member step (`mr apply`, whose `g
 the network was fine). The step now has a limit (`ST_TEST_MEMBERS_LIMIT`, default 1200 s), writes its output to a file, and is killed with
 everything it started when the limit passes; the run then reports "NOT RUN" with the reason. The `ST_TEST_*` settings are read before the seat
 environment scrub, which would otherwise remove them.
+
+## 10. Step 5a: rust-tests in the default suite, signed from linux-gate's own run
+
+While the per-crate gate is in shadow, `linux-gate` still runs the tests stage. Running the tests a second time for `rust-tests` would double the
+test time of every push, so when both are selected (the default) `st-test` asks linux-gate's run for nextest's JUnit report (`CI_TEST_JUNIT`, an
+absolute path in its scratch: the same `--workspace` build and the whole selection, `conversation_model` included) and `rust-tests` then signs the
+crates that have no passing note for their key from that report, running nothing. Each such record says `filterset=workspace` and carries the
+sha256 of linux-gate's command as `run_command_sha256`, so it is told apart from a filtered run. When linux-gate did not run (a lane edit) or left no
+whole report, `rust-tests` runs the crates it lacks itself, as before. When the enforce step has landed (linux-gate's test jobs skip on
+`evidence-gate-rust-tests`), linux-gate's local command shrinks to clippy and fleet-compat and `rust-tests` is the only run of the tests.
