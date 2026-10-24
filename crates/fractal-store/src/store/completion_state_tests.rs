@@ -238,3 +238,62 @@ fn completion_state_external_work_rejects_preparation_until_canonical_flush() {
     let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h2ecd69fcc8f6 owner=fractal_store::store::completion_state_tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     assert!(fence.current(&store, &store.connection.write(), &prepared));
 }
+
+#[test]
+fn completion_state_external_commit_between_seed_and_snapshot_rejects_preparation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.db");
+    let store = Store::open(&path, "example-health").unwrap();
+    let id = {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        let id = append(&tx, &store.origin, OBSERVER, "observer.state",
+            json!({"state":"healthy","revision":"first"}));
+        flush(&tx).unwrap();
+        tx.commit().unwrap();
+        id
+    };
+    let external = Connection::open(&path).unwrap();
+    resource_preparation::BEFORE_SNAPSHOT.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            assert!(current(&external).unwrap(), "seed starts with a complete projection");
+            external.execute(/* sqlite-large-value: allow-for-now lv-hf7e3da82da36 owner=fractal_store::store::completion_state_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.state','degraded') WHERE id=?1",
+                [&id]).unwrap();
+            assert!(!current(&external).unwrap());
+        }));
+    });
+    let fence = resource_preparation::Fence::new(&store);
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h899ee994aebb owner=fractal_store::store::completion_state_tests TODO=trace-statement-and-value-representation */ &store, |_| panic!("pending work must reject before inputs"));
+    assert!(prepared.cut.is_some(), "the writer seed preceded the external commit");
+    assert!(prepared.value.is_none());
+}
+
+#[test]
+#[ignore = "explicit cold-backfill benchmark writes about 2 GB of synthetic cursor history"]
+fn completion_state_cold_backfill_twenty_thousand_large_cursors() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.db");
+    let store = Store::open(&path, "example-backfill").unwrap();
+    let cursor = "x".repeat(99_000);
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        for _ in 0..20_000 {
+            append(&tx, &store.origin, OBSERVER, "observer.observed",
+                json!({"revision":"current","cursor":cursor}));
+        }
+        tx.commit().unwrap();
+    }
+    let mut writer = store.connection.write();
+    let started = std::time::Instant::now();
+    let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+    let locked = std::time::Instant::now();
+    rebuild(&tx).unwrap();
+    tx.commit().unwrap();
+    let lock_time = locked.elapsed();
+    let elapsed = started.elapsed();
+    let peak = std::fs::read_to_string("/proc/self/status").ok().and_then(|status|
+        status.lines().find(|line| line.starts_with("VmHWM:")).map(str::to_owned));
+    eprintln!("cold completion backfill: rows=20000 cursor_bytes=99000 duration={elapsed:?} writer_lock={lock_time:?} peak={peak:?}");
+    assert_eq!(actual(&writer, OBSERVER).unwrap().unwrap(), json!({"revision":"current"}));
+}
