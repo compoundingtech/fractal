@@ -385,5 +385,10 @@
    "extra": []
   }
  },
- "no_tests": []
+ "no_tests": [
+  "demo-resolver-wasm",
+  "fractal-build-stamp",
+  "fractal-github-issue-component",
+  "fractal-github-pr-component"
+ ]
 }
