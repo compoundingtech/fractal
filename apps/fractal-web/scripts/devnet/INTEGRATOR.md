@@ -42,6 +42,15 @@ when adopting the script to reuse the existing member key. The production build
 helper and generated launchers remain deployment-owned inputs, not replacements
 for the separate launcher scripts.
 
+## Tick observability
+
+Every tick records `current`: no `error`, a non-null `sha`, and equality with the
+stripped production `current-sha` file; a missing file or lock-held tick is false.
+`build` is `built`, `skipped`, `failed`, or `dry-run`; it is not a freshness signal.
+Skipped `reason` is `unchanged`, `lock-held`, or `known-built-tree`/`known-failed-tree`.
+Dry-run `reason` is `merged-and-regenerated-no-build-no-swap`; errors retain `build=failed`.
+Observability alerts when the last `current=true` timestamp is over 24 hours old, or no tick arrives for 30 minutes.
+
 ## Follower inputs
 
 Set `FRACTAL_FOLLOW_CLONE` to a dedicated main clone and `FRACTAL_FOLLOW_LOG` to

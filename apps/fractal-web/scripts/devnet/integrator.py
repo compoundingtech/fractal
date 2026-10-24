@@ -541,6 +541,12 @@ def tick():
             row['detail']=((e.stdout or '') + '\n' + (e.stderr or '')).strip()[-4000:]
         print('tick failed:',row['error'],row.get('detail',''),flush=True)
     finally:
+        try:
+            current_sha=(P/'current-sha').read_text().strip()
+        except FileNotFoundError:
+            current_sha=None
+        row['current']=('error' not in row and row.get('sha') is not None
+                        and row['sha']==current_sha)
         row['ms']=round((time.monotonic()-start)*1000)
         row['timingsMs']['other']=max(0,row['ms']-sum(row['timingsMs'].values()))
         publish_skips(row)
