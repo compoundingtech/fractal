@@ -63,6 +63,7 @@ when you need them.
 - [Installation](docs/site/getting-started/install.md)
 - [Concepts](docs/site/concepts/index.md)
 - [Engineering documentation](docs/st3/README.md)
+- [UI component Storybook](https://storybook.compounding.tech): Fractal UI stories; [deployment setup](docs/development.md#storybook-deployment).
 
 [Contributing](docs/development.md#contributing) covers source builds, checks, and repository layout.
 This repository also carries the previous generation; see [its guide](README.st2.md).
