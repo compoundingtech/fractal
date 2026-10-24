@@ -216,6 +216,9 @@ assert 'Keep valid same-source build outputs' in blocks['linux-test-build'], 'sh
 assert 'mail_redelivery' not in blocks['linux-tests'] and 'scripts/ci-mail-redelivery-canaries' not in blocks['linux-tests'], "canaries cannot serialize the primary shard"
 assert 'mail-redelivery-canaries' not in blocks['linux-gate'], "the canaries are no member of the Linux gate: they run daily"
 assert "job.priority={1}" in blocks["linux-tests"] and "github.run-id={0}" in blocks["linux-tests"], "event priority and evaluated run id in Namespace fallback"
+upkeep = (ROOT / '.github/workflows/main-upkeep.yml').read_text()
+upkeep_cost = upkeep.split('  perf-cost:\n', 1)[1]
+assert 'job.priority=5' in upkeep_cost, 'main cost uses the same low Namespace class'
 performance = (ROOT / ".github/workflows/perf.yml").read_text()
 assert "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3" in performance
 assert "github.run-id=" in performance
