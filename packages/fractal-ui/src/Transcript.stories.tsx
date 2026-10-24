@@ -2,9 +2,9 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, spyOn, userEvent, waitFor, within } from 'storybook/test'
-import { Transcript, type TranscriptAvailability, type TranscriptHistory, type TranscriptTurn } from './assistant-ui/composition/Transcript'
+import { Transcript, type TranscriptAvailability, type TranscriptHistory, type TranscriptProps, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 import type { TranscriptEmptyState } from './assistant-ui/composition/TranscriptFeedback'
-import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
+import { EmbraceRuntimeProvider, RuntimeAdoptedIds } from './assistant-ui/EmbraceRuntime'
 import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
 import type { ConversationItem, SendState, TextItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems, type WorkLogCall } from './assistant-ui/taste/work-log'
@@ -13,6 +13,7 @@ import type { SyncStatus } from './assistant-ui/st3-views/sync-status'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
+import { harnessWeightExamples } from './assistant-ui/composition/HarnessNotice.fixtures'
 
 const now = Date.parse('2026-01-15T12:01:00Z')
 const at = '2026-01-15T12:00:00Z'
@@ -43,10 +44,10 @@ const cases: Readonly<Record<State, TranscriptStoryData>> = {
   settled: fixture('settled', 'settled'), expanded: fixture('expanded', 'expanded'), streaming: fixture('streaming', 'streaming'), failed: fixture('failed', 'failed'), interrupted: fixture('interrupted', 'interrupted'), unknown: fixture('unknown', 'unknown'), loading: fixture('loading', 'loading'), 'catching-up': fixture('catching-up', 'catching-up'), reconnecting: fixture('reconnecting', 'reconnecting'), 'sync-failed': fixture('sync-failed', 'sync-failed'), 'pending-send': fixture('pending-send', 'pending-send'), 'failed-send': fixture('failed-send', 'failed-send'), 'unconfirmed-send': fixture('unconfirmed-send', 'unconfirmed-send'), empty: fixture('empty', 'empty'),
 }
 /** `drop` withholds ids from the runtime adapter, standing in for an adapter that never adopts them. */
-function RuntimeTranscript({ data, drop, onOpenTool, onRetry, onRetrySend, availability, history, emptyState }: { data: TranscriptStoryData; drop?: readonly string[]; onOpenTool?: (call: WorkLogCall) => void; onRetry: () => void; onRetrySend?: (itemId: string) => void; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState }) {
+function RuntimeTranscript({ data, drop, onOpenTool, onRetry, onRetrySend, availability, history, emptyState, renderTurnFooter }: { data: TranscriptStoryData; drop?: readonly string[]; onOpenTool?: (call: WorkLogCall) => void; onRetry: () => void; onRetrySend?: (itemId: string) => void; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState; renderTurnFooter?: TranscriptProps['renderTurnFooter'] }) {
   const messages = React.useMemo(() => data.turns.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]).filter(item => !drop?.includes(item.id)), [data, drop])
   const options = React.useMemo(() => ({ messages, isRunning: data.turns.some(turn => turn.work.running), onNew: async () => {} }), [messages, data])
-  return <EmbraceRuntimeProvider options={options}><Transcript title="Row projection" turns={data.turns} sync={data.sync} now={now} observedAt={now - 8000} onOpenTool={onOpenTool} onRetryRun={onRetry} onRetrySync={onRetry} onRetrySend={onRetrySend} availability={availability} history={history} emptyState={emptyState} /></EmbraceRuntimeProvider>
+  return <EmbraceRuntimeProvider options={options}><Transcript title="Row projection" turns={data.turns} sync={data.sync} now={now} observedAt={now - 8000} onOpenTool={onOpenTool} onRetryRun={onRetry} onRetrySync={onRetry} onRetrySend={onRetrySend} availability={availability} history={history} emptyState={emptyState} renderTurnFooter={renderTurnFooter} /></EmbraceRuntimeProvider>
 }
 function TranscriptStory({ scheme = 'dark', state = 'settled', availability, history, emptyState }: { scheme?: Scheme; state?: State; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState }) {
   const [opened, setOpened] = React.useState<WorkLogCall | undefined>(undefined)
@@ -57,6 +58,26 @@ function TranscriptStory({ scheme = 'dark', state = 'settled', availability, his
 const meta = { title: 'Fractal UI/Transcript', component: TranscriptStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', state: 'settled' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, state: { options: Object.keys(cases), control: 'select' } } } satisfies Meta<typeof TranscriptStory>
 export default meta
 type Story = StoryObj<typeof meta>
+const harnessEventData: TranscriptStoryData = {
+  turns: [{ id: 'harness-events', items: harnessWeightExamples, work: workLogTurnFromItems(harnessWeightExamples, { kindFor: () => 'run', running: false, failed: false, interrupted: false, completeHistory: true }) }],
+  sync: { _tag: 'Live', since: now - 5000 },
+}
+export const HarnessEvents: Story = {
+  tags: ['critical'],
+  render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={harnessEventData} onRetry={() => {}} /></main>,
+  play: async ({ canvasElement }) => {
+    const notices = await within(canvasElement).findAllByTestId('harness-notice')
+    await expect(notices).toHaveLength(harnessWeightExamples.length)
+    for (const notice of notices) await expect(notice).toHaveAttribute('data-harness-weight', 'row')
+    const failed = notices.find(notice => notice.dataset.itemId === 'weight/failed-job')!
+    await expect(within(failed).getByTestId('harness-kind')).toHaveTextContent('failed')
+  },
+}
+export const HarnessEventsLight: Story = { ...HarnessEvents, args: { scheme: 'light' } }
+export const StrandedHarnessEvents: Story = {
+  ...HarnessEvents,
+  render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><EmbraceRuntimeProvider options={{ messages: [], onNew: async () => {} }}><RuntimeAdoptedIds.Provider value={undefined}><Transcript title="Harness events" turns={harnessEventData.turns} sync={harnessEventData.sync} now={now} observedAt={now - 8000} /></RuntimeAdoptedIds.Provider></EmbraceRuntimeProvider></main>,
+}
 const adjacentReasoning = Array.from({ length: 11 }, (_, index): ConversationItem => ({
   _tag: 'Reasoning', id: `reasoning-run/${index}`, text: `Check ${index + 1}: keep the observed reasoning in order.`, streaming: false, at,
 }))
@@ -126,6 +147,18 @@ export const Settled: Story = { tags: ['critical'], play: async ({ canvasElement
   await expect(canvasElement.querySelector('[data-testid="live-work"]')).toBeNull()
 } }
 export const SettledLight: Story = { ...Settled, args: { scheme: 'light' } }
+/** The host supplies facts and presentation; the kit only owns the per-turn slot. */
+export const TurnFooter: Story = {
+  tags: ['critical'],
+  render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={cases.settled} onRetry={() => {}} renderTurnFooter={() => <footer data-testid="example-turn-footer">example-model · 4,200 tokens · $0.0250</footer>} /></main>,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const turns = await canvas.findAllByTestId('transcript-turn')
+    await expect(canvas.getAllByTestId('example-turn-footer')).toHaveLength(turns.length)
+    for (const turn of turns) await expect(turn.lastElementChild).toHaveAttribute('data-testid', 'example-turn-footer')
+  },
+}
+export const TurnFooterLight: Story = { ...TurnFooter, args: { scheme: 'light' } }
 export const Expanded: Story = { tags: ['critical'], args: { state: 'expanded' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
