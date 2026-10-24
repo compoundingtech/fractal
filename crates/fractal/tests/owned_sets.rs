@@ -1557,7 +1557,7 @@ async fn suspended_authored_selection_refuses_start_and_resumes_the_recorded_ses
     let anchor = Arc::new(MemberKey::generate().unwrap().0);
     let d = daemon(root.path(), "amber", anchor.clone(), &anchor).await;
     let subject = "agent/garden/orchard";
-    let native = "suspended-native";
+    let native = "00000000-0000-4000-8000-000000000024";
     let transcript = root.path().join(format!("2026-10-24_{native}.jsonl"));
     std::fs::write(&transcript, format!("{{\"type\":\"session\",\"id\":\"{native}\"}}\n")).unwrap();
     let source = format!(
