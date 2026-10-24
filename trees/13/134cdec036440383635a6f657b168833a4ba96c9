@@ -9,3 +9,7 @@ record ae8886e985fc5f7406208e15968ece4c4d4e1874 linux-tests 0 fleet/ci 2026-10-2
 record b74cae337a51cde9f9493f6af268aa2aca56908b linux-clippy 0 fleet/ci 2026-10-24T06:53:12Z
 record c72c663bd23bbb384fe8703fef1f0fff2753a0b9 linux-gate 0 fleet/ci 2026-10-24T07:06:40Z
 record fad34526aaab741b3dacdbf39b5e24da9c16e740 typescript-client 0 fleet/ci 2026-10-24T07:01:12Z
+record abca9979b9bdef6cf6330b3bbaee43765938a0ef rust-tests 0 host/anvil 2026-10-24T07:52:58Z
+record da77e96e4de13685c1a2f8e1f4fabe31b5e94356 rust-tests 0 host/anvil 2026-10-24T07:53:12Z
+record e3097e742549feb1b59b892196a0b60a5f76d6a4 rust-tests 0 host/anvil 2026-10-24T07:53:05Z
+record ebacb747409a464cc20b3dde5793c40ab82d66f1 rust-tests 0 host/anvil 2026-10-24T07:52:51Z
