@@ -463,7 +463,9 @@
           source = self;
         };
 
-        st3Check = pkgs.rustPlatform.buildRustPackage {
+        st3Check = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
+          assert deployPolicyFile == null || pkgs.lib.hasPrefix "${builtins.storeDir}/" "${deployPolicyFile}";
+          pkgs.rustPlatform.buildRustPackage {
           pname = "st3";
           inherit version;
           src = self;
@@ -486,6 +488,9 @@
           '';
           # Stamp st3 from this declared flake source; it hands the stamp to its libraries at startup.
           CLI_BUILD_STAMP = buildStamp;
+          # A declared immutable input, captured by option_env! in fractal-schema.
+          # Empty means no packaged policy: verification refuses all requests.
+          ST3_DEPLOY_POLICY_FILE = if deployPolicyFile == null then "" else "${deployPolicyFile}";
           inherit cargoDeps;
           cargoBuildFlags = [
             "-p"
@@ -669,13 +674,37 @@
             license = pkgs.lib.licenses.mit;
             mainProgram = "st3";
           };
-        };
+        }) { };
 
         # Installing the current tools must not depend on running the full runtime suite.
         # Keep that suite as checks.st3; st/ci also runs it in the native test environment.
-        st3 = st3Check.overrideAttrs (_: {
-          doCheck = false;
+        st3 = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
+          (st3Check.override { inherit deployPolicyFile; }).overrideAttrs (_: {
+            doCheck = false;
+          })
+        ) { };
+
+        # Policy-only checks exercise absent, readable and unreadable compiled inputs.
+        # No test introduces a runtime selector, including in development builds.
+        deployPolicyFixture = pkgs.writeText "example-deploy-policy.json" (builtins.toJSON {
+          version = 1;
+          refusedVerifierHosts = [ "host-b" ];
+          consumptionSigners = [ "agent/example-executor" ];
+          goSigners = [ "agent/example-manager" ];
+          stopSigners = [ "agent/example-manager" ];
+          compatSignoffSigners = [ "agent/example-reviewer" ];
         });
+        unreadableDeployPolicy = pkgs.runCommand "unreadable-deploy-policy" { } ''mkdir "$out"'';
+        mkDeployPolicyCheck = name: deployPolicyFile: pkgs.rustPlatform.buildRustPackage {
+          pname = "st3-deploy-policy-${name}";
+          inherit version cargoDeps;
+          src = self;
+          ST3_DEPLOY_POLICY_TEST_MODE = name;
+          ST3_DEPLOY_POLICY_FILE = if deployPolicyFile == null then "" else "${deployPolicyFile}";
+          cargoBuildFlags = [ "-p" "fractal-schema" ];
+          cargoTestFlags = [ "-p" "fractal-schema" "--lib" "deploy_policy::tests" ];
+          installPhase = ''touch "$out"'';
+        };
 
         # Explicit opt-in: the default st3 package never gains bin/fractal.
         fractal = pkgs.runCommand "fractal-${version}" {
@@ -1046,6 +1075,9 @@
         # wants them.
         checks.st2 = st2;
         checks.st3 = st3Check;
+        checks.st3-deploy-policy-absent = mkDeployPolicyCheck "absent" null;
+        checks.st3-deploy-policy-packaged = mkDeployPolicyCheck "packaged" deployPolicyFixture;
+        checks.st3-deploy-policy-unreadable = mkDeployPolicyCheck "unreadable" unreadableDeployPolicy;
         checks.st3-runtime-inputs =
           assert import ./nix/st3-runtime-input-tests.nix {
             inherit self system;

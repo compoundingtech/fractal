@@ -16,6 +16,7 @@ macro_rules! message_desired_recipient_match {
 // Store methods by domain (the crate plan's domain rules); core stays in this file.
 pub mod attention;
 pub mod delivery;
+pub mod deploy;
 pub mod evidence;
 pub mod missions;
 mod mission_projection_upgrade;

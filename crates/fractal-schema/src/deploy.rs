@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use chrono::DateTime;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{ValidationError, error};
@@ -32,6 +32,45 @@ pub struct Package<'a> {
 pub struct Combined<'a> {
     pub stop_id: &'a str,
     pub plan_id: &'a str,
+}
+
+/// The caller's exact package tuple; these strings are evidence identities, not selectors.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PackageIdentity {
+    pub package_path: String,
+    pub nar_hash: String,
+    pub commit: String,
+}
+
+/// A read-only local verification request. Policy and current time are never caller inputs.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerifyGoRequest {
+    pub go_id: String,
+    pub host: String,
+    pub actor: String,
+    pub operation: String,
+    pub train_id: String,
+    pub old: PackageIdentity,
+    pub new: PackageIdentity,
+    pub preview_digest: String,
+    pub failure_restore: bool,
+}
+
+/// A verification observation, not a consumption record or authorization to execute an installer.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerifyGoReceipt {
+    pub go_id: String,
+    pub origin: String,
+    pub actor: String,
+    pub host: String,
+    pub operation: String,
+    pub train_id: String,
+    pub expires_at: String,
+    pub policy_path: Option<String>,
+    pub policy_hash: String,
 }
 
 fn invalid(message: impl Into<String>) -> ValidationError {

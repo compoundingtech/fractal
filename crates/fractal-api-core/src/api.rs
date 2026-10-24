@@ -124,6 +124,7 @@ pub use tile_endpoint::{
 };
 pub use published_lists::{start_published_lists, wait_published_lists_at_least};
 mod changes;
+mod deploy;
 
 #[cfg(test)]
 mod legacy_handler_guard_tests;
@@ -523,6 +524,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route(
+            "/v1/deploy/verify-go",
+            post(deploy::verify_go).layer(Extension(transport)),
+        )
         .route("/v1/harnesses", get(operations::available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
         .route(

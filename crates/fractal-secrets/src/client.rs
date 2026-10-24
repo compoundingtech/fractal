@@ -518,6 +518,20 @@ impl Client {
         self.request("POST", path, Some(body)).await
     }
 
+    /// Verify one GO from the local replica; this request must never use HTTP or sync.
+    pub async fn verify_deploy_go(
+        &self,
+        request: &fractal_schema::deploy::VerifyGoRequest,
+    ) -> Result<fractal_schema::deploy::VerifyGoReceipt> {
+        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+            return Err(crate::model::St3Error::new(
+                "deploy-local-only",
+                "deploy verification requires the local Unix endpoint",
+            ).into());
+        }
+        self.post("/v1/deploy/verify-go", request).await
+    }
+
     /// Send a message, retrying one unanswered request with the same idempotency key and body.
     /// The receipt says whether the key had already sent it. If both attempts go unanswered the
     /// error is a [`MessageSendUnconfirmed`]: keep this request for a later retry, and ask

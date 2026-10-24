@@ -40,8 +40,8 @@ runtime only through that trait.
 
 ### Deployment audit records
 
-The `deploy.*` claim family records deployment receipts on `resource/` subjects without
-adding a projection, command, installer entry, signing key, or trust root. Its receipt ID
+The `deploy.*` claim family records deployment receipts on existing `resource/`
+subjects without an installer entry, new signing key, or new trust root. Its receipt ID
 is the content-addressed claim ID. Every body requires integer `version: 1`; readers
 reject unsupported versions. The authoritative fields and nested validation live in
 [`fractal-schema::deploy`](../../crates/fractal-schema/src/deploy.rs) and the schema registry.
@@ -59,19 +59,47 @@ reject unsupported versions. The authoritative fields and nested validation live
 - `deploy.compat-signoff` binds `trainId`, `oldCommit`, and `newCommit`. A GO's
   `compatSignoffId` denotes this typed claim, not a message or an untyped approval.
 
-Schema admission is not authorization. Deployment authorization requires the existing
-`smallclaims::principal::judge` signature/delegation verification and policy-approved
-signers, a matching typed compatibility sign-off, and consumption signed by the GO's
-actor on the GO's host. Revocation, consumption, STOP coverage, expiry and caller facts
-must also be checked. Replica freshness is measured against the GO claim's origin node,
-not a configured issuer node. These are verifier requirements, not capabilities exposed
-by the claim registry.
+Schema admission is not authorization. `st deploy verify-go` checks the local replica
+through the local Unix daemon API; remote endpoints are refused and verification never
+contacts fleet peers or requests synchronization. The verifier uses the existing
+`smallclaims::principal::judge` signature/delegation authorization model and its complete
+local serving state. Unsigned, held or invalid signatures cannot grant authorization.
 
-The deployment policy contract has one schema with integer `version: 1`,
-`refusedVerifierHosts`, `consumptionSigners` and `compatSignoffSigners`. Its path is injected by
-the package wrapper at build time, with no runtime, environment or CLI override.
-Missing, unreadable or unknown-version policy refuses all authorization. Example policy
-and test identities use `host-a`, `host-b` and `agent/example-*`.
+The caller supplies the executing host and actor, operation, train ID, both exact package
+tuples, preview digest and failure-restore choice. Every value must match the GO. The
+current time must be at or after issue and strictly before expiry, with the four-hour
+lifetime cap still enforced. A GO is unusable after any consumption or revocation.
+Consumption is authoritative only when signed by the GO's actor on its host; that actor
+must also be authorized by the packaged consumption-signer policy.
+
+`compatSignoffId` must resolve to a verified `deploy.compat-signoff` from an allowed
+signer with the same train and old/new commits. Revocation, consumption and STOP-release
+references are typed; dangling references fail closed. A matching combined binding can
+authorize its one active STOP without a separate lift record. Its STOP must cover this
+host/scope, and the required top-level GO preview digest must exactly equal the caller's
+preview. Another active covering STOP still blocks the GO. A lifted STOP needs no
+combined binding; binding an absent, lifted or non-covering STOP is refused.
+A STOP covers a host when it is explicitly listed and its scope is `installer-entry`
+or exactly the GO's train ID. STOP IDs are explicit `stopId` identities; GO and
+compatibility-signoff references are claim IDs. A lift remains durable when its
+referenced release GO expires; expiry does not reactivate an already lifted STOP.
+
+Offline verification still requires a recorded successful synchronization with the GO
+claim's own origin node within ten minutes. Never-synced, unknown-origin, future-dated
+or older-than-ten-minute receipts fail closed. A configured issuer node or a successful
+sync with another node cannot substitute for the GO origin's receipt.
+
+The packaged policy has one strict JSON schema with integer `version: 1` and explicit
+`refusedVerifierHosts`, `consumptionSigners`, `goSigners`, `stopSigners` and
+`compatSignoffSigners` arrays. Missing, unreadable, malformed or unknown-version policy
+refuses all authorization. Signer entries authorize verified principal identities;
+they do not introduce trusted keys or roots. Empty signer lists grant nothing.
+
+The Nix package accepts `deployPolicyFile` as an immutable file input and injects its
+store path at compilation. The installed program does not accept a runtime, environment
+or CLI policy-path override. A bare development package without that build input
+refuses verification. The policy's store path and exact-byte SHA-256 accompany verifier
+receipts. Policy examples and tests use `host-a`, `host-b` and `agent/example-*`.
 
 Claims reuse the daemon-held agent keys and admitted node delegation chains. This is
 an auditable cooperative same-user boundary, not isolation from code running as the

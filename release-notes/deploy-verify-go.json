@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Verify signed deployment GO receipts offline against the local replica and immutable packaged signer policy, without activating installers.",
+  "replay": {"status": "none", "detail": "Verification reads existing claims, signature authorization and local synchronization receipts. No new projection or replay."},
+  "schema": {"status": "changed", "detail": "Add a strict version-1 packaged policy and read-only GO verification request/receipt contract. Existing deployment claim shapes, including combined STOP/plan bindings and required top-level previewDigest, are unchanged."},
+  "rules": {"status": "none", "detail": "No checkpoint or claim retention changes."},
+  "compatibility": {"status": "changed", "detail": "The new deploy verify-go command requires a local Unix daemon and refuses missing, unreadable or unsupported packaged policy. Existing commands and claim kinds retain their behavior."},
+  "manual": {"status": "changed", "detail": "Package an immutable deployPolicyFile to enable authorization. There is no runtime, environment or CLI policy path override. Offline verification requires a successful local synchronization receipt from the GO claim origin within ten minutes."},
+  "recovery": {"status": "none", "detail": "Expired, revoked, consumed, mismatched, stale or STOP-blocked GOs fail closed. Verification does not synchronize, issue claims or mutate deployment state."},
+  "downtime": {"status": "unknown", "detail": "No measured downtime claim. Installer wiring remains absent."}
+}
