@@ -6614,6 +6614,7 @@ pub async fn guard_bound_request(
         "/v1/custom/reply",
         "/v1/diagnostic",
         "/v1/rules/",
+        "/v1/repair",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix))
@@ -6625,6 +6626,14 @@ pub async fn guard_bound_request(
         .await
         .map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+        if parts.uri.path() == "/v1/repair/apply"
+            && value.get("actor").and_then(Value::as_str).is_none_or(str::is_empty)
+        {
+            return Err(ApiError::bad(St3Error::new(
+                "foreign-agent-actor",
+                format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
+            )));
+        }
         for key in ["actor", "requester"] {
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?

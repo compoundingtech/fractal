@@ -4,8 +4,8 @@
   "replay": {"status": "none", "detail": "No claim replay or repair planning changes."},
   "schema": {"status": "none", "detail": "No persistent schema changes."},
   "rules": {"status": "none", "detail": "No checkpoint rule changes."},
-  "compatibility": {"status": "none", "detail": "repair dry-run and conversations status accept optional --as for guarded callers; these remain actorless GETs and print the standard ignored-actor notice. repair apply accepts --as and requires it to equal the literal ST_AGENT/FRACTAL_AGENT seat in an agent environment. The existing repair API remains token-only: this local actor binding does not add actor attribution to repair.applied receipts. Human token-only apply remains supported."},
-  "downtime": {"status": "none", "detail": "CLI-only change; no daemon interruption required."},
-  "manual": {"status": "none", "detail": "Use st repair dry-run --as \"$ST_AGENT\" --class revoked-legacy-runtime-start --subject SUBJECT, then st repair apply --as \"$ST_AGENT\" TOKEN. Existing leading-actor agent-policy guards support both without a Home Manager activation."},
+  "compatibility": {"status": "none", "detail": "repair apply carries optional actor attribution. Bound harnesses must supply their own actor; unbound callers cannot supply one, while legacy token-only unbound requests remain accepted. repair.applied retains its four-field envelope and daemon/runtime author for older peers; authenticated caller JSON is stored in reason before the existing legacy-closures suffix. Subject/class filters and approval tokens are unchanged. Dry-run and conversations status remain actorless GETs; optional CLI --as compatibility remains available until the guard read-classification rollout."},
+  "downtime": {"status": "none", "detail": "Agent apply requires the updated CLI and daemon. No storage migration or replay is required."},
+  "manual": {"status": "none", "detail": "Use st repair dry-run --as \"$ST_AGENT\" --class revoked-legacy-runtime-start --subject SUBJECT, then st repair apply --as \"$ST_AGENT\" TOKEN. Existing leading-actor guards support this compatibility spelling without Home Manager activation; after the read-policy rollout, dry-run and status need no --as."},
   "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
 }
