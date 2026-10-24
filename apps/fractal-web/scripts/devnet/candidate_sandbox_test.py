@@ -44,6 +44,8 @@ class RunnerTest(unittest.TestCase):
         self.assertNotIn('/run/user', argv)
         self.assertNotIn('/nix/var/nix/daemon-socket', argv)
         self.assertIn(str(self.worktree / '.devenv/candidate-members'), argv)
+        self.assertIn('--remount-ro', argv)
+        self.assertIn('--chmod', argv)
 
     def test_shell_definition_is_not_executed_on_host(self):
         responses = [subprocess.CompletedProcess([], 0, 'export SHELL_HOOK_MARKER=1\n'),
@@ -236,13 +238,15 @@ class IsolationTest(unittest.TestCase):
                 probe = ('[[ $HOME == /tmp/home && -d /nix/store && -d "$1" ]]\n'
                          '[[ ! -e "$2/ssh" && ! -e "$2/st3.sock" && ! -e /run/user ]]\n'
                          '[[ ! -e /nix/var/nix/daemon-socket/socket ]]\n'
+                         'if ls -A "$5" >/dev/null 2>&1; then exit 12; fi\n'
+                         'if chmod 0700 "$5" 2>/dev/null; then exit 13; fi\n'
                          'if printf changed > "$3/dependency" 2>/dev/null; then exit 9; fi\n'
                          'if printf changed > "$4/dependency" 2>/dev/null; then exit 10; fi\n'
                          'if printf new > "$4/new-entry" 2>/dev/null; then exit 11; fi\n'
                          '[[ $("$1/lifecycle") == lifecycle-ok ]]\n'
                          'printf allowed > "$1/sandbox-write"\n'
                          'env\n')
-                result = sandbox.run([binaries['bash'], '-euc', probe, 'probe', str(worktree), str(private), str(modules), str(store)],
+                result = sandbox.run([binaries['bash'], '-euc', probe, 'probe', str(worktree), str(private), str(modules), str(store), str(Path.home())],
                                      worktree=worktree, readonly_dependencies=True, capture_output=True, text=True, check=True)
             names = {line.partition('=')[0] for line in result.stdout.splitlines()}
             forbidden = ('GH_', 'ST_', 'FRACTAL_', 'AGENT_POLICY_', 'OP_PROXY', 'SCG_', 'SSH_')

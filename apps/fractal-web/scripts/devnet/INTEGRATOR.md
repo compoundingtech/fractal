@@ -21,6 +21,9 @@ Symlink, missing, and non-regular candidate flake files are recorded by type wit
 no candidate digest; receipt collection never follows their targets. The megarepo
 materializer is also realized from the trusted launcher's effect-utils pin, not
 from the candidate lock. Its member operations still execute inside bubblewrap.
+The operator home is a private, execute-only, read-only tmpfs ancestor: nested
+candidate/cache mounts remain usable, but listing that home or restoring its read
+permission is denied. The candidate's own `HOME` is a separate empty scratch home.
 The trusted hook publishes `.devenv/pnpm-source-inputs` before
 `pnpm install --prefer-offline --frozen-lockfile`. The generated-metadata cache
 includes `pnpm-source-inputs.json`; the sandbox policy version invalidates old

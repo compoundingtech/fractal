@@ -135,6 +135,9 @@ def run(args, *, worktree, shell=None, network=False, output=None,
         raise ValueError('sandbox environment and cwd are runner-owned')
     binaries, state, store = tools()
     worktree = Path(worktree).resolve(strict=True)
+    host_home = Path.home().resolve()
+    if host_home == Path('/') or any(host_home.is_relative_to(path) for path in (worktree, store)):
+        raise RuntimeError('candidate mounts must not contain the operator home')
     cwd = Path(working_directory).resolve(strict=True) if working_directory else worktree
     if not cwd.is_relative_to(worktree):
         raise RuntimeError('candidate working directory escapes the worktree')
@@ -157,8 +160,11 @@ def run(args, *, worktree, shell=None, network=False, output=None,
                    '--cap-drop', 'ALL']
         if network:
             command += ['--share-net']
+        # Nested worktree/cache mounts recreate home ancestors. Make that synthetic
+        # home traversable but not listable, without exposing or modifying host HOME.
         command += ['--ro-bind', '/nix/store', '/nix/store', '--proc', '/proc', '--dev', '/dev',
                     '--tmpfs', '/tmp', '--tmpfs', '/home', '--dir', '/tmp/home', '--dir', '/tmp/work',
+                    '--tmpfs', str(host_home),
                     '--dir', '/sandbox', '--ro-bind', str(script), '/sandbox/environment.sh',
                     '--bind', str(worktree), str(worktree),
                     '--ro-bind' if readonly_dependencies else '--bind', str(store), str(store)]
@@ -211,6 +217,7 @@ def run(args, *, worktree, shell=None, network=False, output=None,
                        'MEGAREPO_STORE': str(worktree / '.devenv' / 'candidate-members'),
                        'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_SYSTEM': '/dev/null',
                        'GIT_OPTIONAL_LOCKS': '0'}
+        command += ['--chmod', '0111', str(host_home), '--remount-ro', str(host_home)]
         command += ['--clearenv']
         for key, value in environment.items():
             command += ['--setenv', key, value]
