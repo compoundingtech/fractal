@@ -57,8 +57,10 @@ explicit `--store-dir` option. Runtime store variables are child-only, never
 exported into the integrator, follower, trusted Nix realization, or ordinary
 developer builds. The store is shared between untrusted candidates and must
 never be configured as a trusted build's store. Existing install receipts are
-invalidated when the install policy changes, so candidate-local stores are not
-silently carried into new dependency generations. The immutable dependency cache
+invalidated when the install policy changes. If an obsolete project-local CAS is
+present, the frozen install first discards that generated `node_modules` tree
+inside bubblewrap; pnpm's already-up-to-date fast path cannot retain the old store.
+The immutable dependency cache
 remains in the `bwrap-v1` namespace and copies installed packages, not the external
 content-addressed package store.
 

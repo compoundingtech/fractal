@@ -455,8 +455,7 @@ def install():
     lockhash=inputs.hexdigest()
     state=L/f'{C.name}-lockhash'
     if not (C/'node_modules').exists() or not state.exists() or state.read_text()!=lockhash:
-        run(['nice','-n','19','pnpm','install','--store-dir',candidate_sandbox.PNPM_STORE_PATH,
-             '--prefer-offline','--frozen-lockfile'],
+        run(['nice','-n','19',*candidate_sandbox.pnpm_install_command('--prefer-offline','--frozen-lockfile')],
             cwd=C, timeout=900, sandbox_shell='web', network=True)
         state.write_text(lockhash)
 def build(name):

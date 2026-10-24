@@ -243,7 +243,7 @@ class IsolationTest(unittest.TestCase):
                 sandbox.run([*command, '--store-dir', 'node_modules/.pnpm-store'],
                             worktree=worktree, shell='web', check=True)
                 self.assertTrue((worktree / 'node_modules/.pnpm-store').is_dir())
-                sandbox.run([*command, '--store-dir', sandbox.PNPM_STORE_PATH],
+                sandbox.run(sandbox.pnpm_install_command('--offline', '--ignore-scripts', '--no-frozen-lockfile'),
                             worktree=worktree, shell='web', check=True)
                 sandbox.run(['node', '-e', 'if(require("fixture-dependency") !== "installed-from-external-store") process.exit(1)'],
                             worktree=worktree, shell='web', check=True)

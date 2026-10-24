@@ -21,6 +21,15 @@ PNPM_STORE_PATH = '/sandbox/pnpm-store'
 TRUSTED_CHECKOUT = Path(__file__).resolve().parents[4]
 
 
+def pnpm_install_command(*options):
+    # A prior project-local CAS can make pnpm's fast path retain its old store.
+    # Discard that obsolete generated install only inside the candidate boundary.
+    launch = ('if [[ -e node_modules/.pnpm-store || -L node_modules/.pnpm-store ]]; then '
+              'rm -rf -- node_modules; fi\nexec "$@"')
+    return ['bash', '-euc', launch, 'candidate-install', 'pnpm', 'install',
+            '--store-dir', PNPM_STORE_PATH, *options]
+
+
 def shell_provenance(worktree):
     """Record toolchain drift without evaluating any candidate Nix expression."""
     files = {}
