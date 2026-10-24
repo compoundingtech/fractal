@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A per-crate rust-tests note counts only when its run ran a test, unless the accepted base lists the crate under no_tests in .st/rust-test-inputs.json; the keys come only from the accepted base's rust-test-keys and inputs once a policy judges rust-tests",
+  "replay": {"status": "none", "detail": "CI and local tooling only; no product code changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product contract change. The rust-tests policy entry is not enforced and no gate job reads it yet."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

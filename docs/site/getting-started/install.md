@@ -60,6 +60,11 @@ fractal doctor
 fractal service status
 ```
 
+`fractal --version` identifies the embedded package version and source commit, for example
+`fractal 0.1.0+49da1efe597e (release)`. Daily release tags such as `v0.3.18` name
+already-built artifacts; they are not the embedded package version. Keep the commit
+when reporting a problem. The legacy `st` and `st3` aliases display the same Fractal identity.
+
 Doctor should report a reachable daemon and available `pty`. A machine without a fleet is healthy. An installed harness is not necessarily authenticated: check the agent's readiness and finish its native first-run screens before continuing.
 
 Next: declare your [first agent](first-agent.md). For declarative installation, see [Home Manager](../reference/home-manager.md). If a check fails, use [troubleshooting](../guides/troubleshooting.md).

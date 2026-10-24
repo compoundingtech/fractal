@@ -819,6 +819,8 @@ code = int(os.environ.get('FAKE_EXIT', '0'))
 if os.environ.get('FAKE_NO_REPORT') != '1':
     out = ['<testsuites name="nextest-run">']
     for package in os.environ['CI_TEST_PACKAGES'].split(','):
+        if package == os.environ.get('FAKE_EMPTY'):
+            continue  # the selection matched no test of this crate
         out.append('<testsuite name=%s>' % quoteattr(package))
         out.append('<testcase name="unit_one" classname=%s></testcase>' % quoteattr(package))
         failing = package == os.environ.get('FAKE_FAIL')
@@ -840,6 +842,7 @@ class PerCrate(StTest):
         self.calls = Path(self.tmp.name) / 'fake-calls'
         fake = Path(self.tmp.name) / 'fake-run.py'
         fake.write_text(FAKE_RUN)
+        st_test.LOCAL['rust-tests'] = ['python3', 'scripts/ci-rust-test-result']  # StTest's patcher restores the table
         patcher = mock.patch.object(st_test, 'RUN_TESTS', [sys.executable, str(fake)])
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -854,6 +857,12 @@ class PerCrate(StTest):
                                                                          'crates': {'base': {'extra': []}, 'top': {'extra': []}}}))
         for script in ('rust-test-keys', 'ci-rust-test-result'):
             shutil.copy(ROOT / 'scripts' / script, self.work / 'scripts' / script)
+        # The real rust-tests policy entry and a lane for it: the verifier then judges every note by the repository's rules.
+        policy = json.loads(json.dumps(POLICY))
+        policy['checks']['rust-tests'] = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['rust-tests']
+        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
+        (self.work / '.st/required-lanes.json').write_text(json.dumps({'version': 1, 'lanes': {'rust-tests': {
+            'argv': ['python3', 'scripts/ci-rust-test-result'], 'definition_paths': ['.st', 'scripts'], 'tree_inputs': ['.']}}}))
         git(self.work, 'add', '.')
         git(self.work, 'commit', '-q', '-m', 'workspace')
         git(self.work, 'push', '-q', 'origin', 'main')
@@ -935,6 +944,158 @@ class PerCrate(StTest):
         code, out, err = self.run_crates('--crate', 'nope')
         self.assertEqual(code, 1, out + err)
         self.assertIn('not a workspace crate of this tree: nope', out)
+
+    def test_the_filterset_input_stays_within_what_the_signer_takes_and_still_pins_the_crate_list(self):
+        small = st_test.filterset_input(['base', 'top'])
+        self.assertEqual(small, 'package(=base) or package(=top)')
+        crates = [f'fractal-crate-number-{n}' for n in range(52)]
+        big = st_test.filterset_input(crates)
+        self.assertLessEqual(len(big), 500)
+        self.assertRegex(big, r'^52 packages sha256:[0-9a-f]{64}$')
+        self.assertNotEqual(big, st_test.filterset_input(crates[:-1] + ['other']))
+        self.assertEqual(big, st_test.filterset_input(list(crates)))
+
+    def test_signing_jobs_come_from_the_environment_and_a_bad_value_is_the_default(self):
+        for value, expected in (('3', 3), ('0', 1), ('-2', 1), ('x', 8), ('', 8)):
+            with mock.patch.dict(os.environ, {'ST_TEST_SIGN_JOBS': value}):
+                self.assertEqual(st_test.sign_jobs(), expected, value)
+        with mock.patch.dict(os.environ):
+            os.environ.pop('ST_TEST_SIGN_JOBS', None)
+            self.assertEqual(st_test.sign_jobs(), 8)
+
+    def test_the_shared_toolchain_digest_is_none_when_it_cannot_be_named_so_each_wrap_reports_for_itself(self):
+        self.assertIsNone(st_test.shared_toolchain('/nonexistent/evidence-wrap'))
+
+    def test_every_crate_is_signed_when_the_signatures_run_side_by_side(self):
+        for jobs in ('1', '8'):
+            with mock.patch.dict(os.environ, {'ST_TEST_SIGN_JOBS': jobs}):
+                git(self.work, 'checkout', '-q', '-B', f'jobs{jobs}', 'main')
+                code, out, err = self.run_crates()
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual(self.crate_records(), [('base', 0), ('top', 0)], jobs)
+            git(self.work, 'checkout', '-q', 'feature')
+            for ref in git(self.work, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence', 'refs/tags/evidence', 'refs/notes/evidence-input').split():
+                git(self.work, 'update-ref', '-d', ref)
+
+    def test_the_records_of_a_run_are_pushed_together_with_their_input_index_refs(self):
+        origin = Path(self.tmp.name) / 'origin.git'
+        def remote_refs():
+            return subprocess.run(['git', '-C', str(origin), 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/', 'refs/notes/evidence', 'refs/notes/evidence-input/'],
+                                  capture_output=True, text=True, check=True).stdout.split()
+        before = len(remote_refs())
+        code, out, err = self.run_crates('--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        refs = remote_refs()[:]
+        self.assertEqual(len(refs) - before, 8, 'four refs for each of the two records: tag, note and both input index refs')
+        self.assertEqual(sum('evidence/input/rust-tests/' in ref for ref in refs), 2)
+        self.assertEqual(sum('evidence-input/rust-tests/' in ref for ref in refs), 2)
+
+    def test_a_push_that_fails_is_a_failed_row_not_a_silent_success(self):
+        git(self.work, 'remote', 'set-url', '--push', 'origin', '/nonexistent/origin.git')
+        code, out, err = self.run_crates('--push', 'origin')
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('rust-tests:push', out)
+        self.assertIn('push of 8 refs failed', out)
+
+    def members(self, *extra):
+        verifier = ROOT / 'scripts/evidence-verify'
+        # The gate copies the accepted base's verifier and scripts/rust-test-keys side by side; so does this.
+        side = Path(self.tmp.name) / 'side'
+        side.mkdir(exist_ok=True)
+        for name in ('evidence-verify', 'rust-test-keys'):
+            shutil.copy(ROOT / 'scripts' / name, side / name)
+        keys = Path(self.tmp.name) / 'keys'
+        keys.write_text(git(self.work, 'show', 'origin/main:.st/evidence-keys') + '\n')
+        done = subprocess.run([sys.executable, str(side / 'evidence-verify'), '--repo', str(self.work), '--revision', 'HEAD', '--check', 'rust-tests',
+                               '--members', '--policy-from', 'origin/main', '--repository', 'org/repo', '--keys', str(keys), *extra],
+                              capture_output=True, text=True, env=GIT_ENV)
+        return done.returncode, json.loads(done.stdout)
+
+    def test_the_verifier_is_satisfied_only_when_every_member_has_a_note_for_its_own_key(self):
+        code, result = self.members()
+        self.assertEqual((code, result['reason']), (1, 'crate_uncovered'), result)
+        self.assertEqual(sorted(result['missing']), ['base', 'top'])
+        self.run_crates()
+        code, result = self.members()
+        self.assertEqual(code, 0, result)
+        self.assertEqual((result['satisfied'], result['members'], sorted(result['crates'])), (True, 2, ['base', 'top']))
+        self.assertEqual(result['trust_level'], 'host')
+        self.assertTrue(result['enforce'] is False and result['policy'] is True)
+        self.commit('crates/top/src/lib.rs', '// changed\n')
+        code, result = self.members()
+        self.assertEqual((code, sorted(result['missing'])), (1, ['top']), 'base is below top and keeps its note')
+        self.run_crates()
+        self.assertEqual(self.members()[0], 0)
+
+    def on_main(self, message, change):
+        git(self.work, 'checkout', '-q', 'main')
+        change()
+        git(self.work, 'commit', '-qam', message)
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+
+    def test_a_note_that_ran_no_test_covers_a_crate_only_when_the_base_lists_it_as_having_none(self):
+        code, out, err = self.run_crates(FAKE_EMPTY='base')
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('1 ran no test (list under no_tests if they have none): base', out)
+        code, result = self.members()
+        self.assertEqual((code, sorted(result['missing'])), (1, ['base']), 'top ran tests; base ran none')
+        # The same judgement on the local skip decision: base is still to run, top is covered.
+        code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
+        self.assertEqual(code, 3, out + err)
+        self.assertIn('to run: base', out)
+        # A tree cannot list its own crate: only the accepted base's list counts.
+        inputs = json.loads((self.work / '.st/rust-test-inputs.json').read_text())
+        self.commit('.st/rust-test-inputs.json', json.dumps(dict(inputs, no_tests=['base'])))
+        self.assertEqual(self.members()[0], 1)
+        git(self.work, 'reset', '-q', '--hard', 'HEAD~1')
+        branch_point = git(self.work, 'rev-parse', 'origin/main').strip()
+        self.on_main('list base as having no test', lambda: (self.work / '.st/rust-test-inputs.json').write_text(json.dumps(dict(inputs, no_tests=['base']))))
+        git(self.work, 'fetch', '-q', 'origin')
+        # The notes were signed at the branch point; the list is a change of the lane's definition on main, so they are judged there.
+        code, result = self.members('--lane-base', branch_point)
+        self.assertEqual((code, result['satisfied']), (0, True), result)
+
+    def test_a_malformed_no_tests_list_is_an_error_never_an_empty_allowance(self):
+        self.run_crates()
+        branch_point = git(self.work, 'rev-parse', 'origin/main').strip()
+        inputs = json.loads((self.work / '.st/rust-test-inputs.json').read_text())
+        self.on_main('break the list', lambda: (self.work / '.st/rust-test-inputs.json').write_text(json.dumps(dict(inputs, no_tests='base'))))
+        git(self.work, 'fetch', '-q', 'origin')
+        code, result = self.members('--lane-base', branch_point)
+        self.assertEqual((code, result['reason']), (1, 'error'), result)
+
+    def test_a_base_that_judges_rust_tests_without_the_key_tool_is_an_error_never_a_fallback_to_the_trees_own(self):
+        self.on_main('drop the tool', lambda: git(self.work, 'rm', '-q', 'scripts/rust-test-keys'))
+        git(self.work, 'fetch', '-q', 'origin')
+        code, out, err = self.run_crates()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('only the base\'s tool and inputs may key a note', out)
+        self.assertEqual(self.crate_records(), [])
+        self.assertEqual(self.ran(), [], 'nothing was tested or signed')
+
+    def test_a_failed_crate_note_keeps_the_members_check_unsatisfied(self):
+        self.run_crates(FAKE_FAIL='top')
+        code, result = self.members()
+        self.assertEqual((code, result['missing']), (1, {'top': 'check_failed'}))
+
+    def test_members_project_prints_every_crates_key_for_the_gate_to_fetch(self):
+        code, result = self.members('--project')
+        self.assertEqual(code, 0)
+        self.assertEqual((sorted(result['crates']), result['members']), (['base', 'top'], 2))
+        for crate in result['crates'].values():
+            self.assertEqual(len(crate['key']), 40)
+            self.assertEqual(crate['refspecs'][1], f"+refs/notes/evidence-input/rust-tests/{crate['key']}/*:refs/notes/evidence-input/rust-tests/{crate['key']}/*")
+
+    def test_a_tree_without_a_manifest_the_verifier_can_read_is_an_error_never_a_pass(self):
+        git(self.work, 'rm', '-q', 'crates/top/Cargo.toml')
+        git(self.work, 'commit', '-q', '-m', 'break')
+        code, result = self.members()
+        self.assertEqual((code, result['reason']), (1, 'error'), result)
+        git(self.work, 'rm', '-q', '-r', 'crates', 'Cargo.toml')
+        git(self.work, 'commit', '-q', '-m', 'no workspace')
+        code, result = self.members()
+        self.assertEqual((code, result['reason']), (1, 'error'), result)
 
     def test_status_names_the_crates_to_run(self):
         code, out, err = self.run_st_test('--status', '--check', 'rust-tests')

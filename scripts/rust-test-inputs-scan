@@ -128,7 +128,13 @@ def main(argv):
         print(f'rust-test-inputs-scan: {error}', file=sys.stderr)
         return 2
     if args.write:
-        Path(args.write).write_text(json.dumps(scanned, indent=1) + '\n')
+        target = Path(args.write)
+        if target.exists():  # the reviewed list of crates with no test is not something a scan can find: keep it
+            try:
+                scanned['no_tests'] = json.loads(target.read_text()).get('no_tests', [])
+            except (ValueError, AttributeError):
+                pass
+        target.write_text(json.dumps(scanned, indent=1) + '\n')
         return 0
     if args.check:
         committed = json.loads(Path(args.check).read_text())
