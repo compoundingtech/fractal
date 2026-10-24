@@ -74,7 +74,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn('--clearenv', argv)
         self.assertNotIn('env', execute.call_args.kwargs)
         self.assertNotIn('/secret', argv)
-        self.assertNotIn('/run/user', argv)
+        self.assertNotIn('/run', argv)
         self.assertNotIn('/nix/var/nix/daemon-socket', argv)
         self.assertIn(str(self.worktree / '.devenv/candidate-members'), argv)
         self.assertIn('--remount-ro', argv)
@@ -324,7 +324,7 @@ class IsolationTest(unittest.TestCase):
             with patch.dict(os.environ, env):
                 binaries, _, _ = sandbox.tools()
                 probe = ('[[ $HOME == /tmp/home && -d /nix/store && -d "$1" ]]\n'
-                         '[[ ! -e "$2/ssh" && ! -e "$2/st3.sock" && ! -e /run/user ]]\n'
+                         '[[ ! -e "$2/ssh" && ! -e "$2/st3.sock" && ! -e /run ]]\n'
                          '[[ ! -e /nix/var/nix/daemon-socket/socket ]]\n'
                          'if ls -A "$5" >/dev/null 2>&1; then exit 12; fi\n'
                          'if chmod 0700 "$5" 2>/dev/null; then exit 13; fi\n'

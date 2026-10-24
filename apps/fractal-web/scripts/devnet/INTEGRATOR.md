@@ -368,7 +368,7 @@ dev-shell PATH. Agent credentials and agent-policy variables are not inherited.
 The filesystem exposes only the writable candidate clone/snapshot and dedicated
 pnpm cache, read-only `/nix/store`, read-only Git metadata, resolver/CA material,
 private `/proc` and `/dev`, and scratch `/tmp`/HOME. Host HOME, SSH agents,
-`/run/user`, agent sockets and the Nix daemon socket are not mounted. Locked
+`/run`, agent sockets and the Nix daemon socket are not mounted. Locked
 members live beneath `<clone>/.devenv/candidate-members`; snapshots copy only selected
 member source trees, excluding Git metadata and node_modules, and rewrite workspace
 links locally. Every installed dependency tree comes from the verified immutable
