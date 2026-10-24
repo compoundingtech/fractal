@@ -6439,6 +6439,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
             tokio::spawn(fractal_daemon::maintenance::run_client_message_selectors(
                 Arc::downgrade(&store), notify.clone(), event_notify.clone(),
             ));
+            tokio::spawn(fractal_daemon::maintenance::run_completion_health(
+                Arc::downgrade(&store),
+            ));
             eprintln!("st: local API listening at {}", config.socket.display());
             eprintln!(
                 "st: paired client gateway listening at {}",

@@ -3,11 +3,11 @@
   "summary": "Read observer completion health and subscription state without folding historical cursor payloads inside the writer",
   "replay": {
     "status": "changed",
-    "detail": "Store open deterministically builds the new local completion-health namespace from retained observer and subscription claims, discovered through indexed subject ranges. Each subsequent changed claim updates at most three canonical field candidates. Late arrivals and repaired winners use indexed predecessors rather than replaying subject history. Historical at-index reads remain unchanged."
+    "detail": "After serving starts, bounded background loans deterministically hydrate the new local completion-health namespace through indexed subject/kind/index seeks. Open decodes no historical cursor bodies. Preparation refuses incomplete hydration and canonical reads retain their original fold until completion. Each subsequent changed claim updates at most three canonical field candidates. Late arrivals and repaired winners use indexed predecessors rather than replaying subject history. Historical at-index reads remain unchanged."
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds local_completion_health_v1_claims, local_completion_health_v1_fields and local_completion_health_v1_pending. Only state, revision and reason are materialized; SQL NULL clearing markers are distinct from JSON null. These derived tables contain no cursor and do not replace any prior projection namespace or authoritative claim bytes."
+    "detail": "Adds local_completion_health_v1_claims, local_completion_health_v1_fields, local_completion_health_v1_pending and local_completion_health_v1_backfill. Only state, revision and reason are materialized; SQL NULL clearing markers are distinct from JSON null. These derived tables contain no cursor and do not replace any prior projection namespace or authoritative claim bytes."
   },
   "rules": {
     "status": "none",

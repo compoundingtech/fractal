@@ -159,6 +159,9 @@ fn completion_state_rebuild_and_reopen_are_deterministic() {
         let expected = actual(&tx, OBSERVER).unwrap();
         rebuild(&tx).unwrap();
         assert_eq!(actual(&tx, OBSERVER).unwrap(), expected);
+        while !backfill(&tx).unwrap() {}
+        assert!(backfill_complete(&tx).unwrap());
+        assert_eq!(actual(&tx, OBSERVER).unwrap(), expected);
         tx.commit().unwrap();
         expected
     };
@@ -269,6 +272,68 @@ fn completion_state_external_commit_between_seed_and_snapshot_rejects_preparatio
 }
 
 #[test]
+fn completion_state_backfill_is_bounded_resumable_and_uses_canonical_until_complete() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.db");
+    {
+        let store = Store::open(&path, "example-backfill").unwrap();
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        for _ in 0..65 {
+            append(&tx, &store.origin, OBSERVER, "observer.observed",
+                json!({"revision":"old","cursor":"x".repeat(64 * 1024)}));
+        }
+        rebuild(&tx).unwrap();
+        tx.commit().unwrap();
+    }
+    BODIES_DECODED.with(|count| count.set(0));
+    let store = Store::open(&path, "example-backfill").unwrap();
+    assert_eq!(BODIES_DECODED.with(std::cell::Cell::get), 0, "open must not hydrate history");
+    let fence = resource_preparation::Fence::new(&store);
+    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h608592d729cd owner=fractal_store::store::completion_state_tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none());
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        assert!(!backfill(&tx).unwrap());
+        assert!(BODIES_DECODED.with(std::cell::Cell::get) <= 16);
+        // This subject sorts behind the saved scan cursor: only the durable pending phase
+        // can include it. New claims during bootstrap must not be lost on restart.
+        append(&tx, &store.origin, "observer/aaa", "observer.state", json!({"state":"healthy"}));
+        append(&tx, &store.origin, OBSERVER, "observer.state", json!({"state":"healthy","revision":"new"}));
+        flush(&tx).unwrap();
+        assert!(!backfill_complete(&tx).unwrap());
+        parity(&tx, OBSERVER);
+        tx.commit().unwrap();
+    }
+    drop(store);
+    let store = Store::open(&path, "example-backfill").unwrap();
+    assert!(!backfill_complete(&store.readers.get()).unwrap());
+    {
+        let mut writer = store.connection.write();
+        let before: i64 = writer.query_row("SELECT count(*) FROM local_completion_health_v1_claims", [], |row| row.get(0)).unwrap();
+        let tx = writer.transaction().unwrap();
+        backfill(&tx).unwrap();
+        tx.rollback().unwrap();
+        let after: i64 = writer.query_row("SELECT count(*) FROM local_completion_health_v1_claims", [], |row| row.get(0)).unwrap();
+        assert_eq!(before, after, "candidate and cursor changes roll back together");
+    }
+    let mut chunks = 0;
+    loop {
+        BODIES_DECODED.with(|count| count.set(0));
+        let more = store.maintain_completion_health().unwrap();
+        assert!(BODIES_DECODED.with(std::cell::Cell::get) <= 16);
+        chunks += 1;
+        assert!(chunks < 100);
+        if !more { break; }
+    }
+    let writer = store.connection.write();
+    assert!(current(&writer).unwrap());
+    assert_eq!(actual(&writer, OBSERVER).unwrap().unwrap(), json!({"state":"healthy","revision":"new"}));
+    assert_eq!(actual(&writer, "observer/aaa").unwrap().unwrap(), json!({"state":"healthy"}));
+    parity(&writer, OBSERVER);
+}
+
+#[test]
 #[ignore = "explicit cold-backfill benchmark writes about 2 GB of synthetic cursor history"]
 fn completion_state_cold_backfill_twenty_thousand_large_cursors() {
     let directory = tempfile::tempdir().unwrap();
@@ -283,17 +348,64 @@ fn completion_state_cold_backfill_twenty_thousand_large_cursors() {
                 json!({"revision":"current","cursor":cursor}));
         }
         tx.commit().unwrap();
+        let tx = writer.transaction().unwrap();
+        rebuild(&tx).unwrap();
+        tx.commit().unwrap();
     }
-    let mut writer = store.connection.write();
+    drop(store);
+    BODIES_DECODED.with(|count| count.set(0));
     let started = std::time::Instant::now();
-    let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
-    let locked = std::time::Instant::now();
-    rebuild(&tx).unwrap();
-    tx.commit().unwrap();
-    let lock_time = locked.elapsed();
-    let elapsed = started.elapsed();
+    let store = Store::open(&path, "example-backfill").unwrap();
+    let open_time = started.elapsed();
+    assert_eq!(BODIES_DECODED.with(std::cell::Cell::get), 0);
+    let mut chunks = 0;
+    let mut longest_lock = std::time::Duration::ZERO;
+    let mut total_lock = std::time::Duration::ZERO;
+    let hydration = std::time::Instant::now();
+    loop {
+        let complete = {
+            let mut writer = store.connection.write_background();
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+            let locked = std::time::Instant::now();
+            let complete = backfill(&tx).unwrap();
+            tx.commit().unwrap();
+            let held = locked.elapsed();
+            longest_lock = longest_lock.max(held);
+            total_lock += held;
+            complete
+        };
+        chunks += 1;
+        if complete { break; }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let duration = hydration.elapsed();
     let peak = std::fs::read_to_string("/proc/self/status").ok().and_then(|status|
         status.lines().find(|line| line.starts_with("VmHWM:")).map(str::to_owned));
-    eprintln!("cold completion backfill: rows=20000 cursor_bytes=99000 duration={elapsed:?} writer_lock={lock_time:?} peak={peak:?}");
-    assert_eq!(actual(&writer, OBSERVER).unwrap().unwrap(), json!({"revision":"current"}));
+    eprintln!("cold completion backfill: rows=20000 cursor_bytes=99000 open={open_time:?} hydrate={duration:?} chunks={chunks} max_writer_lock={longest_lock:?} total_writer_lock={total_lock:?} peak={peak:?}");
+    assert_eq!(actual(&store.readers.get(), OBSERVER).unwrap().unwrap(), json!({"revision":"current"}));
+}
+
+#[tokio::test]
+async fn completion_state_background_worker_hydrates_and_releases_store() {
+    let store = Arc::new(Store::open_memory("example-worker").unwrap());
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        for _ in 0..33 {
+            append(&tx, &store.origin, OBSERVER, "observer.observed", json!({"revision":"current"}));
+        }
+        rebuild(&tx).unwrap();
+        tx.commit().unwrap();
+    }
+    let weak = Arc::downgrade(&store);
+    let worker = tokio::spawn(crate::maintenance::run_completion_health(weak.clone()));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !backfill_complete(&store.readers.get()).unwrap() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(actual(&store.readers.get(), OBSERVER).unwrap().unwrap(), json!({"revision":"current"}));
+    drop(store);
+    tokio::time::timeout(std::time::Duration::from_secs(5), worker).await.unwrap().unwrap();
+    assert!(weak.upgrade().is_none());
 }

@@ -264,7 +264,7 @@ qualification work. This source guard supplies none of those results.
 ## Completion-health candidate review
 
 `fractal_store::store::completion_state` owns the new health-v1 namespace and its
-inventory exceptions. Schema site `lv-ha8a94220e780` retains claim identifiers,
+inventory exceptions. Schema site `lv-hde7868afa605` retains claim identifiers,
 subjects, canonical sort keys and three selected JSON fields inline. Field count
 is bounded; encoded identifier/key/reason sizes are not. No cursor, resource facts
 or signed envelope is copied into this namespace. The producer maintainer retains
@@ -281,6 +281,16 @@ candidates preserve existing canonical ordering and avoid copying historical
 cursor payloads on completion reads; eventual physical breakup must preserve
 explicit clearing markers versus JSON null and indexed repaired predecessors.
 Queue/reclamation and dynamic-source TODOs remain with this same producer.
+
+Cold-store hydration runs after both APIs bind. Its persisted subject/kind/index
+cursor seeks at most sixteen source identities per independent background writer
+loan, yielding after ten milliseconds between candidates and resting outside the
+writer between loans. Bootstrap does not copy the historical inventory into the
+pending queue. Live changes behind its cursor are drained in a bounded final phase.
+Until hydration completes, preparation refuses the projection and canonical reads
+retain the original fold. A single source body and COMMIT remain indivisible, so
+the chunk budget is not a hard elapsed-time bound. Local-observation retention does
+not bound replicated observer claim history.
 
 `fractal_store::store::completion_state_tests` owns the associated fixture-only
 exceptions: invented time/origin/position mutations, repair membership, deletion,

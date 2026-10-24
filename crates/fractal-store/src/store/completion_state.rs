@@ -8,7 +8,7 @@ use super::*;
 const FIELDS: [&str; 3] = ["state", "revision", "reason"];
 const RELEVANT: &str = "((claims.subject>='observer/' AND claims.subject<'observer0')
     OR (claims.subject>='subscription/' AND claims.subject<'subscription0'))";
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha8a94220e780 owner=fractal_store::store::completion_state TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hde7868afa605 owner=fractal_store::store::completion_state TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_completion_health_v1_claims (
     claim_id TEXT PRIMARY KEY, subject TEXT NOT NULL
 ) WITHOUT ROWID;
@@ -24,16 +24,32 @@ ON local_completion_health_v1_fields(subject,field,sort_key DESC);
 CREATE TABLE IF NOT EXISTS local_completion_health_v1_pending (
     claim_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_completion_health_v1_backfill (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1), phase INTEGER NOT NULL,
+    subject TEXT NOT NULL, kind TEXT NOT NULL, store_index INTEGER NOT NULL
+);
 ";
 
-pub(crate) fn current(connection: &Connection) -> Result<bool> {
+pub(crate) fn backfill_complete(connection: &Connection) -> Result<bool> {
     Ok(connection.query_row(
+        "SELECT phase=3 FROM local_completion_health_v1_backfill WHERE singleton=1",
+        [], |row| row.get(0))?)
+}
+
+pub(crate) fn current(connection: &Connection) -> Result<bool> {
+    Ok(backfill_complete(connection)? && connection.query_row(
         "SELECT NOT EXISTS(SELECT 1 FROM local_completion_health_v1_pending)", [], |row| row.get(0))?)
 }
 
 /// Fixed-cardinality indexed reads at the connection's SQLite cut. Historical cuts still use
 /// latest_actual_at; this projection deliberately has no historical-cut argument.
 pub fn actual(connection: &Connection, subject: &str) -> Result<Option<Value>> {
+    if !backfill_complete(connection)? {
+        // Until hydration is complete, preserve the original canonical answer at this cut.
+        return Ok(latest_actual(connection, subject)?.map(|value| Value::Object(
+            FIELDS.into_iter().filter_map(|field|
+                value.get(field).map(|value| (field.into(), value.clone()))).collect())));
+    }
     let exists: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_completion_health_v1_claims WHERE subject=?1)",
         [subject], |row| row.get(0))?;
@@ -56,15 +72,8 @@ pub fn actual(connection: &Connection, subject: &str) -> Result<Option<Value>> {
 pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h377af59e3adf owner=fractal_store::store::completion_state TODO=trace-statement-and-value-representation */ SCHEMA)?;
     tracking(transaction)?;
-    let initialized: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='completion_health_v1_initialized')",
-        [], |row| row.get(0))?;
-    if !initialized {
-        rebuild(transaction)?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-hd830598def62 owner=fractal_store::store::completion_state TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('completion_health_v1_initialized','1')", [])?;
-    } else {
-        flush(transaction)?;
-    }
+    initialize(transaction)?;
+    flush(transaction)?;
     Ok(())
 }
 
@@ -73,9 +82,75 @@ pub(super) fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h078aadd1fddd owner=fractal_store::store::completion_state TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_completion_health_v1_fields;
         DELETE FROM local_completion_health_v1_claims;
         DELETE FROM local_completion_health_v1_pending;")?;
-    transaction.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-hf054c520226e owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "INSERT INTO local_completion_health_v1_pending
-        SELECT id FROM claims INDEXED BY claims_subject_kind_index WHERE {RELEVANT}"))?;
-    flush(transaction)
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h0c7212755048 owner=fractal_store::store::completion_state TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_completion_health_v1_backfill", [])?;
+    initialize(transaction)
+}
+
+fn initialize(connection: &Connection) -> Result<()> {
+    // Indexed existence checks only: no body decode, history queue, or synchronous replay.
+    connection.execute(&format!(/* sqlite-large-value: allow-for-now lv-hc094ccc8c96f owner=fractal_store::store::completion_state TODO=prepare-body-and-predecessor-values */ "INSERT INTO local_completion_health_v1_backfill
+        SELECT 1,CASE WHEN EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+            WHERE {RELEVANT}) THEN 0 ELSE 3 END,'observer/','',0
+        WHERE NOT EXISTS(SELECT 1 FROM local_completion_health_v1_backfill)"), [])?;
+    Ok(())
+}
+
+/// Hydrate at most sixteen candidates and spend at most ten milliseconds between candidates.
+/// One unusually large individual source row is indivisible; no history fold occurs here.
+pub(crate) fn backfill(transaction: &Transaction<'_>) -> Result<bool> {
+    let (phase, subject, kind, index): (u8, String, String, i64) = transaction.query_row(
+        "SELECT phase,subject,kind,store_index FROM local_completion_health_v1_backfill WHERE singleton=1",
+        [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+    if phase == 3 { return Ok(true); }
+    if phase == 2 {
+        let ids = transaction.prepare_cached(
+            "SELECT claim_id FROM local_completion_health_v1_pending LIMIT 16")?
+            .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let started = std::time::Instant::now();
+        for id in &ids {
+            advance_pending(transaction, id)?;
+            if started.elapsed() >= std::time::Duration::from_millis(10) { return Ok(false); }
+        }
+        if ids.len() < 16 {
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h09a53c4a9430 owner=fractal_store::store::completion_state TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_completion_health_v1_backfill SET phase=3 WHERE singleton=1", [])?;
+        }
+        return backfill_complete(transaction);
+    }
+    let upper = if phase == 0 { "observer0" } else { "subscription0" };
+    let rows = transaction.prepare_cached(
+        "SELECT id,subject,kind,store_index FROM claims INDEXED BY claims_subject_kind_index
+         WHERE subject>=?1 AND subject<?2 AND (subject,kind,store_index)>(?1,?3,?4)
+         ORDER BY subject,kind,store_index LIMIT 16")?
+        .query_map(params![subject,upper,kind,index], |row| Ok((row.get::<_,String>(0)?,
+            row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let started = std::time::Instant::now();
+    for (position, (id,subject,kind,index)) in rows.iter().enumerate() {
+        advance_pending(transaction, id)?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h68dabf67da02 owner=fractal_store::store::completion_state TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_completion_health_v1_backfill
+            SET subject=?1,kind=?2,store_index=?3 WHERE singleton=1", params![subject,kind,index])?;
+        if position + 1 < rows.len() && started.elapsed() >= std::time::Duration::from_millis(10) {
+            return Ok(false);
+        }
+    }
+    if rows.len() < 16 {
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hb84a59c89448 owner=fractal_store::store::completion_state TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_completion_health_v1_backfill
+            SET phase=?1,subject='subscription/',kind='',store_index=0 WHERE singleton=1",
+            [phase + 1])?;
+    }
+    backfill_complete(transaction)
+}
+
+impl Store {
+    /// One independent background writer loan; returns whether another chunk is required.
+    pub fn maintain_completion_health(&self) -> Result<bool> {
+        if backfill_complete(&self.readers.get())? { return Ok(false); }
+        let mut connection = self.connection.write_background();
+        let transaction = connection.transaction()?;
+        let complete = backfill(&transaction)?;
+        transaction.commit()?;
+        Ok(!complete)
+    }
 }
 
 fn tracking(connection: &Connection) -> Result<()> {
@@ -130,12 +205,19 @@ fn tracking(connection: &Connection) -> Result<()> {
 /// Process changed identities only, never subject history. One claim produces at most three
 /// field candidates. Indexed predecessor selection handles both late claims and repaired winners.
 pub fn flush(connection: &Connection) -> Result<()> {
+    // Bootstrap history is exclusively the bounded background driver's responsibility.
+    if !backfill_complete(connection)? { return Ok(()); }
     let ids = connection.prepare_cached("SELECT claim_id FROM local_completion_health_v1_pending")?
         .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for id in ids {
-        advance(connection, &id)?;
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h80ae4507da68 owner=fractal_store::store::completion_state TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_completion_health_v1_pending WHERE claim_id=?1", [&id])?;
+        advance_pending(connection, &id)?;
     }
+    Ok(())
+}
+
+fn advance_pending(connection: &Connection, id: &str) -> Result<()> {
+    advance(connection, id)?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h80ae4507da68 owner=fractal_store::store::completion_state TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_completion_health_v1_pending WHERE claim_id=?1", [id])?;
     Ok(())
 }
 
