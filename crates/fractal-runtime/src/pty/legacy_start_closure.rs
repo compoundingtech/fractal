@@ -442,7 +442,8 @@ mod tests {
             Ok(())
         }
         if let Ok(pid) = std::env::var(READER) {
-            assert_denied(pid.parse().unwrap(), unsafe { libc::geteuid() }).unwrap();
+            let (pid, owner_uid) = pid.split_once(':').expect("reader pid:owner_uid");
+            assert_denied(pid.parse().unwrap(), owner_uid.parse().unwrap()).unwrap();
             eprintln!("{TEST}: EACCES assertion exercised by user-namespace reader");
             return;
         }
@@ -478,7 +479,7 @@ mod tests {
                 let gid_map = format!("{gid} {gid} 1");
                 let mut command = Command::new(std::env::current_exe()?);
                 command.args(["--exact", TEST, "--nocapture"])
-                    .env(READER, child.id().to_string());
+                    .env(READER, format!("{}:{uid}", child.id()));
                 // SAFETY: pre_exec runs only in the isolated, single-threaded
                 // post-fork reader. User-namespace unshare in a libtest worker
                 // would fail EINVAL because its harness is multithreaded.
