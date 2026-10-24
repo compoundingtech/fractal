@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed Linux confinement for candidate-controlled preparation and builds."""
 import argparse
+import errno
 import hashlib
 import functools
 import json
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 
@@ -22,9 +24,21 @@ def shell_provenance(worktree):
     files = {}
     for name in ('flake.nix', 'flake.lock'):
         trusted = hashlib.sha256((TRUSTED_CHECKOUT / name).read_bytes()).hexdigest()
-        candidate_path = Path(worktree) / name
-        candidate = hashlib.sha256(candidate_path.read_bytes()).hexdigest() if candidate_path.is_file() else None
-        files[name] = {'trustedSha256': trusted, 'candidateSha256': candidate}
+        candidate = None
+        kind = 'regular'
+        try:
+            fd = os.open(Path(worktree) / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError as error:
+            if error.errno not in (errno.ENOENT, errno.ELOOP):
+                raise
+            kind = 'missing' if error.errno == errno.ENOENT else 'symlink'
+        else:
+            with os.fdopen(fd, 'rb') as stream:
+                if stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    candidate = hashlib.file_digest(stream, 'sha256').hexdigest()
+                else:
+                    kind = 'non-regular'
+        files[name] = {'trustedSha256': trusted, 'candidateSha256': candidate, 'candidateType': kind}
     differs = any(item['trustedSha256'] != item['candidateSha256'] for item in files.values())
     return {'source': 'trusted-launcher-checkout', 'files': files, 'candidateDiffers': differs,
             'note': ('Candidate flake differs; using the integrator pinned main toolchain until merged.'
@@ -91,7 +105,12 @@ def validate_configuration():
     tools()
 
 
-def realize(installable):
+def realize_megarepo():
+    pin = json.loads((TRUSTED_CHECKOUT / 'flake.lock').read_text())['nodes']['effect-utils']['locked']
+    if (pin.get('owner') != 'overengineeringstudio' or pin.get('repo') != 'effect-utils'
+            or not re.fullmatch(r'[0-9a-f]{40}', pin['rev'])):
+        raise RuntimeError('trusted launcher must pin overengineeringstudio/effect-utils')
+    installable = f"github:overengineeringstudio/effect-utils/{pin['rev']}#megarepo"
     _, state, _ = tools()
     with tempfile.TemporaryDirectory(prefix='package-', dir=state) as home:
         result = subprocess.run([shutil.which('nix'), 'build', *NIX_OPTIONS, '--no-link',
@@ -103,10 +122,10 @@ def realize(installable):
     return Path(paths[0])
 
 
-def run_package(installable, binary, args, *, worktree, **kwargs):
-    if not re.fullmatch(r'[A-Za-z0-9._-]+', binary):
-        raise ValueError('invalid package binary')
-    executable = realize(installable) / 'bin' / binary
+def run_package(binary, args, *, worktree, **kwargs):
+    if binary != 'mr':
+        raise ValueError('unknown trusted candidate package')
+    executable = realize_megarepo() / 'bin' / binary
     return run([str(executable), *args], worktree=worktree, **kwargs)
 
 

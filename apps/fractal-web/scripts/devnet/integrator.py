@@ -287,11 +287,10 @@ def prepare_dependencies():
             any(not (C/'repos'/name).is_dir() or
                 not (C/'repos'/name).resolve().is_relative_to(C.resolve()/'.devenv/candidate-members')
                 for name in members)):
-        effect_rev=json.loads((C/'flake.lock').read_text())['nodes']['effect-utils']['locked']['rev']
         # The runner fixes MEGAREPO_STORE inside C so member links survive scratch HOME.
         run(['apply', '--worktree-mode', 'commit', '--git-protocol', 'https'],
             cwd=C, timeout=1800, network=True,
-            package=(f'github:overengineeringstudio/effect-utils/{effect_rev}#megarepo', 'mr'))
+            package='mr')
         # Rematerialized members invalidate installed workspace/source-input links.
         (L/f'{C.name}-lockhash').unlink(missing_ok=True)
         atomic_json(member_state, {'key': member_key})
@@ -420,7 +419,7 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
                      stderr=subprocess.PIPE if capture or log_capture else None,
                      check=check and not log_capture, timeout=timeout)
         if package is not None:
-            result=candidate_sandbox.run_package(*package, command, worktree=cwd or C,
+            result=candidate_sandbox.run_package(package, command, worktree=cwd or C,
                                                 network=network, **options)
         elif sandbox_shell is not None:
             result=candidate_sandbox.run(command, worktree=cwd or C, shell=sandbox_shell,

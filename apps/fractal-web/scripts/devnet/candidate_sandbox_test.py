@@ -81,6 +81,31 @@ class RunnerTest(unittest.TestCase):
         self.assertNotEqual(receipt['files']['flake.nix']['trustedSha256'],
                             receipt['files']['flake.nix']['candidateSha256'])
 
+    def test_shell_provenance_never_follows_candidate_symlink(self):
+        secret = self.root / 'private-sentinel'
+        secret.write_text('outside secret bytes')
+        (self.worktree / 'flake.nix').symlink_to(secret)
+        with patch.object(sandbox.hashlib, 'file_digest', side_effect=AssertionError('secret read')):
+            receipt = sandbox.shell_provenance(self.worktree)
+        self.assertEqual(receipt['files']['flake.nix']['candidateType'], 'symlink')
+        self.assertIsNone(receipt['files']['flake.nix']['candidateSha256'])
+        self.assertEqual(receipt['files']['flake.lock']['candidateType'], 'missing')
+        self.assertTrue(receipt['candidateDiffers'])
+
+    def test_shell_provenance_does_not_open_fifo_for_reading(self):
+        os.mkfifo(self.worktree / 'flake.nix')
+        receipt = sandbox.shell_provenance(self.worktree)
+        self.assertEqual(receipt['files']['flake.nix']['candidateType'], 'non-regular')
+        self.assertIsNone(receipt['files']['flake.nix']['candidateSha256'])
+
+    def test_megarepo_is_pinned_only_from_trusted_lock(self):
+        (self.worktree / 'flake.lock').write_text('{"nodes":{"effect-utils":{"locked":{"rev":"untrusted"}}}}')
+        with patch.object(sandbox.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '/nix/store/trusted-mr\n')) as execute:
+            self.assertEqual(sandbox.realize_megarepo(), Path('/nix/store/trusted-mr'))
+        pin = sandbox.json.loads((sandbox.TRUSTED_CHECKOUT / 'flake.lock').read_text())['nodes']['effect-utils']['locked']
+        self.assertEqual(execute.call_args.args[0][-1],
+                         f"github:overengineeringstudio/effect-utils/{pin['rev']}#megarepo")
+
     def test_output_is_promoted_only_after_success(self):
         output = self.root / 'production/builds/revision'
         def complete(argv, **kwargs):
