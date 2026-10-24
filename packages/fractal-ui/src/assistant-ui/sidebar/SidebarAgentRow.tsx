@@ -10,6 +10,7 @@ import { matchPositions, usageScopeLabel, type SidebarActions, type SidebarAgent
 import { SidebarStatus, type DiscRefinement, type GlyphVariant } from './SidebarStatus'
 import { SidebarTime, type SidebarClock } from './SidebarTime'
 import { SidebarDuration } from './SidebarDuration'
+import { formatDuration } from '../../time/human-time'
 import { SidebarRowSignals, attachSidebarLine1Fit } from './SidebarRowSignals'
 import { useSidebarHoverIntent } from './useSidebarHoverIntent'
 
@@ -75,7 +76,7 @@ export function sidebarRowDescription(row: Row, reportedStatusOnly = false): str
   if (row.description !== undefined) parts.push(row.description)
   parts.push(`Host: ${row.host}.${reportedStatusOnly && row.status === 'unobserved' ? '' : ` Status: ${row.statusLabel};`} ${row.freshness} observation`)
   if (row.usage._tag === 'Known') parts.push(usageText(row.usage))
-  if (row.duration._tag === 'Known') parts.push(`${row.duration.scope === '24h-activity-span' ? '24h activity span' : 'Lifetime duration'}: ${row.duration.ms} milliseconds`)
+  if (row.duration._tag === 'Known') parts.push(`${row.duration.scope === '24h-activity-span' ? '24h activity span' : 'Lifetime duration'}: ${formatDuration(row.duration.ms)}`)
   if (row.lastTurn._tag === 'Known') parts.push(`${row.lastTurn.kind === 'activity' ? 'Since activity' : 'Last completed turn'}: ${new Date(row.lastTurn.at).toISOString()}`)
   if (row.harness !== undefined) parts.push(`Harness: ${row.harness}`)
   if (row.model !== undefined) parts.push(`Model: ${row.model}`)
