@@ -89,6 +89,23 @@ PATH=$(IFS=':'; printf '%s' "${kept[*]}")
 # ~/.cargo/bin holds rustup's proxies: `cargo clippy` would then run rustup's toolchain, not the dev shell's. Named last, the
 # directory comes after the dev shell's.
 case ":$PATH:" in *":$cargo_home/bin:"*) ;; *) PATH="$PATH:$cargo_home/bin" ;; esac
+# The host's build admission (the nix and cargo shims in ~/.local/bin and the build-admission program) finds its program, limits,
+# priorities and queue state under the account's home. The stages' HOME below would hide them: every nix and cargo command inside
+# a stage then found no admission program and took the shims' fallback cap, under a lock of its own per run, so a stage was admitted
+# by nothing the host's other builds wait in. They are named here, from the account's home, by the variables the shims read; a
+# value the caller set is kept, and a host without them is unchanged.
+account_home=$HOME
+if [ -x "$account_home/.local/bin/build-admission" ]; then
+  export BUILD_ADMISSION_BIN="${BUILD_ADMISSION_BIN:-$account_home/.local/bin/build-admission}"
+  export BUILD_ADMISSION_CONFIG="${BUILD_ADMISSION_CONFIG:-$account_home/.config/build-admission}"
+  export BUILD_ADMISSION_STATE="${BUILD_ADMISSION_STATE:-$account_home/.local/state/st3/operations}"
+  export BUILD_ADMISSION_FALLBACK_LOCK="${BUILD_ADMISSION_FALLBACK_LOCK:-$account_home/.local/state/st3/operations/build-admission-fallback.lock}"
+fi
+[ -r "$account_home/.config/cargo-priority" ] && export CARGO_PRIORITY_FILE="${CARGO_PRIORITY_FILE:-$account_home/.config/cargo-priority}"
+if [ -z "${CARGO_HEAVY_SLOTS:-}" ] && [ -r "$account_home/.config/cargo-heavy-slots" ]; then
+  CARGO_HEAVY_SLOTS=$(tr -d '[:space:]' < "$account_home/.config/cargo-heavy-slots")
+  export CARGO_HEAVY_SLOTS
+fi
 export HOME="$scratch/home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" CARGO_REAL="$cargo_real"
 export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
 export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md" TMPDIR="$tmp"

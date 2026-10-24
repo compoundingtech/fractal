@@ -184,6 +184,49 @@
         "wit"
       ]
     },
+    "rust-tests": {
+      "argv": [
+        "python3",
+        "scripts/ci-rust-test-result"
+      ],
+      "definition_paths": [
+        ".config/daily-only.filterset",
+        ".config/nextest.toml",
+        ".st",
+        "flake.lock",
+        "flake.nix",
+        "scripts"
+      ],
+      "tree_inputs": [
+        ".cargo",
+        ".config/nextest.toml",
+        ".github",
+        "Cargo.lock",
+        "Cargo.toml",
+        "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
+        "claude-channel",
+        "clients",
+        "components",
+        "crates",
+        "docs/st2",
+        "docs/st3",
+        "docs/vrs",
+        "evals",
+        "examples",
+        "fixtures",
+        "flake.lock",
+        "flake.nix",
+        "nix",
+        "plugins",
+        "scripts",
+        "slo",
+        "src",
+        "templates",
+        "tests",
+        "vendor",
+        "wit"
+      ]
+    },
     "typescript-client": {
       "argv": [
         "nix",

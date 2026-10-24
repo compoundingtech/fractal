@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""One crate's result out of a nextest run's JUnit file (docs/per-crate-test-signing.md).
+
+  RUST_TEST_JUNIT=FILE RUST_TEST_CRATE=NAME scripts/ci-rust-test-result            print the result, exit 0 iff no test of the crate failed
+  RUST_TEST_JUNIT=FILE RUST_TEST_CRATE=NAME scripts/ci-rust-test-result --summary  print {"tests_run", "tests_ignored", "test_list_sha256", "ignored_list_sha256"} and stop
+
+The crate and the file come from the environment so the recorded argv stays the one the skip policy pins. The printed result is one sorted
+line per test, `pass`, `flaky` (passed on a retry; nextest counts it as passed, as the CI gate does), `FAIL` or `skip`, then a summary;
+its sha256 is the digest the signer records. `tests_run` counts the tests that ran, `tests_ignored` those nextest reports as skipped (the
+`#[ignore]`d tests CI does not run either; they are counted and signed, not hidden), and `test_list_sha256` is the digest of the sorted
+names of the tests that ran, so a record names the exact test list it covers; `ignored_list_sha256` is the same for the ignored ones, so a test
+that silently moves to #[ignore] changes the record. A suite belongs to a crate when its name is the crate's or starts
+with `<crate>::` (nextest's binary id). A crate with no suite ran no test: tests_run is 0 and it passes.
+"""
+import hashlib
+import json
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+sys.dont_write_bytecode = True
+
+
+def results(junit, crate):
+    """[(status, name)] for every test case of the crate's suites."""
+    out = []
+    for suite in ET.parse(junit).getroot().iter('testsuite'):
+        name = suite.get('name', '')
+        if name != crate and not name.startswith(crate + '::'):
+            continue
+        for case in suite.iter('testcase'):
+            children = {child.tag for child in case}
+            if children & {'failure', 'error'}:
+                status = 'FAIL'
+            elif children & {'flakyFailure', 'flakyError'}:
+                status = 'flaky'
+            elif 'skipped' in children:
+                status = 'skip'
+            else:
+                status = 'pass'
+            out.append((status, f'{name} {case.get("name", "")}'))
+    return sorted(out, key=lambda item: item[1])
+
+
+def summary(found):
+    ran = sorted(name for status, name in found if status != 'skip')
+    ignored = sorted(name for status, name in found if status == 'skip')
+    return {'tests_run': len(ran), 'tests_ignored': len(ignored), 'test_list_sha256': hashlib.sha256('\n'.join(ran).encode()).hexdigest(),
+            'ignored_list_sha256': hashlib.sha256('\n'.join(ignored).encode()).hexdigest()}
+
+
+def main(argv):
+    junit, crate = os.environ.get('RUST_TEST_JUNIT'), os.environ.get('RUST_TEST_CRATE')
+    if not junit or not crate:
+        print('ci-rust-test-result: RUST_TEST_JUNIT and RUST_TEST_CRATE are required', file=sys.stderr)
+        return 2
+    try:
+        found = results(junit, crate)
+    except (OSError, ET.ParseError) as error:
+        print(f'ci-rust-test-result: cannot read {junit}: {error}', file=sys.stderr)
+        return 2
+    facts = summary(found)
+    if argv == ['--summary']:
+        print(json.dumps(facts))
+        return 0
+    if argv:
+        print('usage: ci-rust-test-result [--summary]', file=sys.stderr)
+        return 2
+    failed = [name for status, name in found if status == 'FAIL']
+    for status, name in found:
+        print(f'{status} {name}')
+    print(f'crate={crate} tests_run={facts["tests_run"]} tests_ignored={facts["tests_ignored"]} failed={len(failed)} test_list_sha256={facts["test_list_sha256"]}')
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

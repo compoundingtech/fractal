@@ -99,7 +99,7 @@ class SparseTree(unittest.TestCase):
         for name in narrow + wide:
             self.assertTrue((ROOT / 'scripts' / name).is_file(), name)
         # The tests that read crates/, apps/ or the whole tree cannot run in the sparse copy: they stay with the whole-tree key.
-        for name in ('evidence-verify-test', 'check-ci-test-paths', 'ci-fractal-web-test'):
+        for name in ('evidence-verify-test', 'check-ci-test-paths', 'ci-fractal-web-test', 'rust-test-keys-test'):
             self.assertIn(name, wide)
             self.assertNotIn(name, narrow)
 

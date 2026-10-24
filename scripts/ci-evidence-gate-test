@@ -65,6 +65,7 @@ EXPECTED_PROTECTED = (
     '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts', '.github/workflows/workspace-ci.ts',
     'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing', '.st/required-lanes.json',
+    'scripts/rust-test-keys', '.st/rust-test-inputs.json', 'scripts/ci-rust-test-result',
     '.st/evidence-log-key',
 )
 
@@ -877,7 +878,8 @@ class EndToEnd(unittest.TestCase):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
         enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
-        self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS))
+        # rust-tests (per crate, scripts/st-test) has a policy entry and no gate job of its own until the gate step lands.
+        self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS + ('rust-tests',)))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
         for check, entry in policy['checks'].items():
             self.assertIn(entry.get('enforce', False), (True, False), check)
@@ -1345,6 +1347,7 @@ class EndToEnd(unittest.TestCase):
                 (self.f.repo / '.github/workflows/fleet.yml.genie.ts').write_text('export default 1\n')
                 for name in ('.github/workflows/workspace-ci.ts', 'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
                              '.st/evidence-authors.json', 'scripts/ci-evidence-signing', '.st/required-lanes.json',
+                             'scripts/rust-test-keys', '.st/rust-test-inputs.json', 'scripts/ci-rust-test-result',
                              '.st/evidence-log-key'):
                     (self.f.repo / name).parent.mkdir(parents=True, exist_ok=True)
                     (self.f.repo / name).write_text('placeholder\n')
