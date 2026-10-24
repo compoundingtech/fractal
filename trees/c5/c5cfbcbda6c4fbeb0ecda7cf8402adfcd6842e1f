@@ -8,3 +8,4 @@ record c841a6d733b19e11e9344cd5602524d17373d8dc linux-tests-shard-2 0 fleet/ci 2
 record db86c7e073b842cc08ed035f53cc293242fe042c typescript-client 0 fleet/ci 2026-10-21T20:48:04Z
 record ea54766911401dda3b05788b377c874ac359b616 isolation-vm 0 fleet/ci 2026-10-21T20:49:18Z
 record f41ba66d60b22c71523af29f8074f759072553eb mail-redelivery-canaries 0 fleet/ci 2026-10-21T20:50:35Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

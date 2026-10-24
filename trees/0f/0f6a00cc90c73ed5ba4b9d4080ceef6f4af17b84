@@ -7,3 +7,4 @@ record b947405dd789e5795e3080899cd95e732c567e02 linux-clippy 0 fleet/ci 2026-10-
 record dfd25004fe63c814f0a96333ca650b77d4ee0c92 linux-tests 0 fleet/ci 2026-10-23T14:08:59Z
 record f436455c3a67101e6cfc2aacd03a534473ab0409 mail-redelivery-canaries 0 fleet/ci 2026-10-23T13:57:16Z
 record fcdcae5a4341c83a00ed9872134051cb68a1f1c0 typescript-client 0 fleet/ci 2026-10-23T13:57:02Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

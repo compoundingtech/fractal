@@ -11,3 +11,4 @@ record d68f400cc08d3e7656345177342af69da6e9551c fractal-web 0 fleet/ci 2026-10-2
 record dd6239eb42d73733a0117b5d8becc297b8b17500 linux-clippy 0 fleet/ci 2026-10-20T17:51:05Z
 record f5dbbad9babebda7524461354c7b9d74b1ccc325 isolation-vm 0 fleet/ci 2026-10-20T17:55:33Z
 record f811d7946c2a04156adf5abde1c3a5c391ecdb4c linux-gate 0 fleet/ci 2026-10-20T18:14:00Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

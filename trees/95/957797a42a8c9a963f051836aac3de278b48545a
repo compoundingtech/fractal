@@ -6,3 +6,4 @@ record a8ba5f3ba0b97661eb6fc43b3f0c7963382a976b linux-fleet-compat 0 fleet/ci 20
 record bc4749d745d4db02c125ccfa525f1def1296c475 linux-clippy 0 fleet/ci 2026-10-23T05:15:21Z
 record e165d5ca221f1db0773be48426f6268f5f6d6ca3 mail-redelivery-canaries 0 fleet/ci 2026-10-23T05:27:29Z
 record ebd7f3a46cf77b83c8c821f1369a2cfcc00d654d linux-gate 0 fleet/ci 2026-10-23T05:36:33Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

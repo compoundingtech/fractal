@@ -6,3 +6,4 @@ record c178dff2d47edfb80af82dadd75dec3edc7a7732 mail-redelivery-canaries 0 fleet
 record c5457aec21a23e7a162858677000e83a12e58a5a linux-fleet-compat 0 fleet/ci 2026-10-23T09:42:12Z
 record c9daa8ae8cd0ad0fd7656fc50b64f609e204fb52 linux-tests 0 fleet/ci 2026-10-23T09:52:28Z
 record d371fd5754c00ac05b235bda386085e847ffa38d linux-gate 1 fleet/ci 2026-10-23T09:55:14Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

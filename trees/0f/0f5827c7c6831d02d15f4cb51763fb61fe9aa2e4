@@ -11,3 +11,4 @@ record 72c89105d34a646e601a5dd98b3eaf41c491ef0d mail-redelivery-canaries 0 fleet
 record 8eb85fc4064d97976cb11f3f735756dbd7a29b91 linux-tests-shard-3 0 fleet/ci 2026-10-20T11:00:31Z
 record c7724884021597a52f233edb5e297b044dabfc00 isolation-vm 0 fleet/ci 2026-10-20T10:58:20Z
 record f6450acc6ca7cc11a0ea0f92b7d43bd1b031a006 linux-tests 0 fleet/ci 2026-10-20T11:01:27Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

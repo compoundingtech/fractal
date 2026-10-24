@@ -4,3 +4,4 @@ record a0a0db1366368c12f171a2b1bc0b5059dfb87669 linux-fleet-compat 0 fleet/ci 20
 record b349868c8cd5a5d13a354751c7b005dda0cb21d2 linux-gate 0 fleet/ci 2026-10-23T23:26:11Z
 record d1d1ce812f30fe43c12f3b152493bf1aa1e1d0db typescript-client 0 fleet/ci 2026-10-23T23:15:17Z
 record e84a75d18fe595484aab1a67a72b5447de91ef27 linux-clippy 0 fleet/ci 2026-10-23T23:15:23Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

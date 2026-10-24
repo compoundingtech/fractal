@@ -9,3 +9,4 @@ record b45c185a18bbbfde3eb1f8c82858cbcf13c32c1f linux-tests-shard-2 0 fleet/ci 2
 record df558de50dbc5732b4ebb01a411f7245248d6660 mail-redelivery-canaries 0 fleet/ci 2026-10-23T07:12:27Z
 record e603f45225ae6b8e0ed57a62720ac6f7da8bdf44 typescript-client 0 fleet/ci 2026-10-23T07:12:39Z
 record fc4808ba027ff4de83911d5fbff7e1cd3b082c6e genie-freshness 0 fleet/ci 2026-10-23T07:08:30Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

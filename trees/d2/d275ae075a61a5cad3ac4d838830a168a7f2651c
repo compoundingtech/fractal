@@ -9,3 +9,4 @@ record bd4398dc8820fa83b66bb479aeae64f5f9416350 linux-tests-shard-2 0 fleet/ci 2
 record d731acb23a8213f0f74fd346b754486720018075 linux-fleet-compat 0 fleet/ci 2026-10-21T02:05:22Z
 record d82f6697bcbbfc0d4ca17d0e2b21d2b3979bb626 linux-tests-shard-3 0 fleet/ci 2026-10-21T02:13:02Z
 record d9e2cab1beba6eea8609e6e4d788d9fd2c85a306 linux-clippy 0 fleet/ci 2026-10-21T02:05:10Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

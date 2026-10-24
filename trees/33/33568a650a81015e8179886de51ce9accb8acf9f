@@ -6,3 +6,4 @@ record a173760b899644727a33333b6dda609a3367df07 linux-tests 0 fleet/ci 2026-10-2
 record c57eef8832116fd37d99fdebe9a8e74f8b850dc9 linux-tests-shard-2 0 fleet/ci 2026-10-23T10:12:42Z
 record d2e179697b32ddc3fba6ce8cc79ade320f3e29e7 linux-clippy 0 fleet/ci 2026-10-23T10:00:21Z
 record f8751ec543c4a1a0e3d50234be2f6c898b1ef6dd isolation-vm 0 fleet/ci 2026-10-23T10:11:56Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

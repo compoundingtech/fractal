@@ -7,3 +7,4 @@ record beeee006c937e3e147c17435eb0c16946fb00e19 mail-redelivery-canaries 0 fleet
 record c1ef032ff857ec739d5bc776c89ef6462b381024 linux-clippy 0 fleet/ci 2026-10-23T16:44:39Z
 record c71ced471c0d34b1f07b3d7ab5059f16a03e2cac linux-tests 0 fleet/ci 2026-10-23T16:54:44Z
 record ec2ab55224548807555fd77e6af5f123239d8191 genie-freshness 0 fleet/ci 2026-10-23T16:47:47Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

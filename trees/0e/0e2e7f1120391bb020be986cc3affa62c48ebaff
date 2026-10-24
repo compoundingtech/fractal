@@ -9,3 +9,4 @@ record be7c5bba79a7cfd5b7f6f78720f229089f9d8175 linux-gate 0 fleet/ci 2026-10-20
 record d4e6c964ad10a91aa129696b57d0295f8c6f1107 typescript-client 0 fleet/ci 2026-10-20T03:58:58Z
 record dbb1a1e497299f99020beea639b9c323692b00de mail-redelivery-canaries 0 fleet/ci 2026-10-20T04:11:43Z
 record fa3f5c08d4b44571de126b7b9a0d8c9d4155cbd9 linux-tests 0 fleet/ci 2026-10-20T04:15:08Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

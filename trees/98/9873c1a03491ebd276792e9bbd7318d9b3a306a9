@@ -7,3 +7,4 @@ record f60f1cd525fc018763bd4810232f033eaf6b317c linux-fleet-compat 0 fleet/ci 20
 record f6e6b3676a285528b71c6ed6f14408e27fd0c576 typescript-client 0 fleet/ci 2026-10-23T14:27:14Z
 record f7bb3466ed5eae0e3a2b44eca4ed48cd90728b4c linux-tests-shard-2 0 fleet/ci 2026-10-23T14:35:15Z
 record f97d1d681982e1e72ae490969cd022058ce41e79 mail-redelivery-canaries 0 fleet/ci 2026-10-23T14:24:04Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

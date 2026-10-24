@@ -11,3 +11,4 @@ record 747a1cf3a954b7ad99ad8e221fa3a2dec8563149 linux-fleet-compat 0 fleet/ci 20
 record 852a6ae9631a420770999c388a7954f02a639c8a linux-clippy 0 fleet/ci 2026-10-20T05:41:01Z
 record a13ff98c84b9a8bf096c2bfa256703d5a6fa0d84 genie-freshness 0 fleet/ci 2026-10-20T05:44:45Z
 record b2abc6037ba3a98c3ac0446e21d11425c4ff18ca fractal-web 0 fleet/ci 2026-10-20T05:59:35Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

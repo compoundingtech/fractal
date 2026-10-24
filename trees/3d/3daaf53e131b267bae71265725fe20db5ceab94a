@@ -7,3 +7,4 @@ record 8e474752619d249eb59e7b601a1593822a07bb95 linux-clippy 0 fleet/ci 2026-10-
 record bc969549e38ef256e23cd8502b9c83df3e337aeb linux-tests-shard-2 0 fleet/ci 2026-10-23T21:20:44Z
 record cd814f72edf3a20a5e7f1c98ad31e75310dc27f5 mail-redelivery-canaries 0 fleet/ci 2026-10-23T21:16:02Z
 record f6e8945cfb26a9fffcc281c7ba54df0d1b02065e isolation-vm 0 fleet/ci 2026-10-23T21:19:48Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2

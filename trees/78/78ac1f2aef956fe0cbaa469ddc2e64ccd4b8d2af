@@ -23,3 +23,4 @@ record d90cda2577a99567406e0b4bd3aca04d7c138701 linux-clippy 0 fleet/ci 2026-10-
 record dc86ef9cd997a116bcd3aaa4cb08f2a0ea2ca35f fractal-web 0 fleet/ci 2026-10-20T13:17:49Z
 record e96e4f87b8bdc9dd1998a3e61dca96af45ffdb01 mail-redelivery-canaries 0 fleet/ci 2026-10-20T12:22:37Z
 record ef2e8b867309297cb7e8680a31ea079fa24310a6 linux-tests 0 fleet/ci 2026-10-20T13:08:24Z
+gc 2026-10-24T03:40:47+00:00 db768435d7748faaa0376d499705e4f945c5a72e7553ccaac8f84cd7a618d7f2
