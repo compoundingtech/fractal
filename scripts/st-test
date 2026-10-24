@@ -830,6 +830,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         junit = Path(scratch) / 'nextest-junit.xml'
         environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
         environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit))
+        environment.setdefault('CARGO_INCREMENTAL', '0')  # as the other checks: no incremental state in a one-shot build
         if target:
             environment['CARGO_TARGET_DIR'] = str(target)
         started = time.monotonic()
