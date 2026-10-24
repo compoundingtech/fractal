@@ -8949,11 +8949,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Reuse the observation needed for record-once deduplication. Unmarked agents
         // need no extra actual-state query or harness fold on this hot path.
         let previous = self.store.latest_observation(&subject.subject, "runtime.observed")?;
-        // An incarnation that has ended cannot run again; a restart is a new incarnation. The
+        // An exec incarnation that has ended cannot run again; a restart is a new incarnation. The
         // `st3 driver exec` wrapper reports its child's exit before it exits itself, so its own
         // process can still look live here for a moment. Recording that would put `running` over
         // the exit until the next full pass. Only a terminal latest observation needs the fold.
-        if matches!(observation.status.as_str(), "running" | "starting")
+        // Execs only: a pty a registry snapshot wrongly called vanished must read running again at
+        // once, or the reconciler could relaunch or clean up a live seat.
+        if member.kind == MemberKind::Exec
+            && matches!(observation.status.as_str(), "running" | "starting")
             && let Some(incarnation) = observation.incarnation_id.as_deref()
             && previous.as_ref().is_some_and(|claim| {
                 matches!(
@@ -20089,6 +20092,54 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         assert_eq!(
             actual_field(&actual, "incarnation_id").and_then(Value::as_str),
             Some(format!("{incarnation}-next").as_str())
+        );
+    }
+
+    #[test]
+    fn a_pty_seen_again_after_a_vanished_report_still_reads_running() {
+        use serde_json::json;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"orchid/seat\" { workspace \"/tmp\"; command \"true\" }",
+            "seat",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.reconcile_once().unwrap();
+        let subject = "agent/orchid/seat".to_owned();
+        let runtime_id = runtime.started_members.lock().unwrap()[0].runtime_id.clone();
+        let incarnation = "4242:1792800000".to_owned();
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id,
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(incarnation.clone()),
+        });
+        reconciler.reconcile_once().unwrap();
+        // A registry snapshot that missed the live pty, recorded for the same pid:created.
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("status".into(), json!("vanished")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        let actual = store.latest_actual_value(&subject).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("running"));
+        assert_eq!(
+            actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+            Some(incarnation.as_str())
         );
     }
 
