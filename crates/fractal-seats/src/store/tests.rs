@@ -1179,6 +1179,59 @@ fn terminal_resource_status_never_warms_full_harness_or_provenance() {
 }
 
 #[test]
+fn runtime_status_reuses_subject_generations_across_actor_only_claims() {
+    let store = Store::open_memory("node").unwrap();
+    // Keep the selected set below the parallel reduction threshold so the existing
+    // thread-local reduction counter observes all work, with substantial history.
+    for n in 0..32 {
+        for observation in 0..100 {
+            observe_runtime(&store, &format!("agent/reuse-{n}"), "running", &format!("inc-{observation}"));
+        }
+    }
+    let cut = store.index().unwrap();
+    let original = store.status_for_claim_kind_at(
+        "runtime.observed", Some(cut), false, ClaimsReduction::Runtime,
+    ).unwrap();
+    assert_eq!(original.subjects.len(), 32);
+    for n in 0..32 {
+        store.append_claim(&ClaimInput {
+            subject: format!("message/unrelated-{n}"),
+            kind: "message.sent".into(),
+            actor: Some(format!("agent/reuse-{n}")),
+            fields: BTreeMap::from([
+                ("from".into(), json!(format!("agent/reuse-{n}"))),
+                ("to".into(), json!("agent/recipient")),
+                ("content".into(), json!("unrelated activity")),
+                ("status".into(), json!("sent")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+    SUBJECT_REDUCTIONS.with(|count| count.set(0));
+    let unchanged = store.status_for_claim_kind_at(
+        "runtime.observed", Some(store.index().unwrap()), false, ClaimsReduction::Runtime,
+    ).unwrap();
+    assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0,
+        "actor-only claims do not advance a runtime subject's input generation");
+    assert_eq!(serde_json::to_value(&unchanged.subjects).unwrap(),
+        serde_json::to_value(&original.subjects).unwrap());
+
+    observe_runtime(&store, "agent/reuse-0", "stopped", "changed");
+    SUBJECT_REDUCTIONS.with(|count| count.set(0));
+    let changed = store.status_for_claim_kind_at(
+        "runtime.observed", Some(store.index().unwrap()), true, ClaimsReduction::Runtime,
+    ).unwrap();
+    assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 1,
+        "only the changed runtime must be reduced");
+    assert_eq!(changed.subjects[0].actual.as_ref().unwrap()["status"], "stopped");
+    let historical = store.status_for_claim_kind_at(
+        "runtime.observed", Some(cut), false, ClaimsReduction::Runtime,
+    ).unwrap();
+    assert_eq!(serde_json::to_value(historical).unwrap(),
+        serde_json::to_value(original).unwrap(), "a newer generation must not enter an older cut");
+}
+
+#[test]
 fn an_internal_apply_replays_after_desired_state_drifts() {
     let store = Store::open_memory("node").unwrap();
     let intent = simple("true");
