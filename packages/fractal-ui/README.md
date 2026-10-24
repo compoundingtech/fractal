@@ -72,6 +72,7 @@ The SSR check uses StyleX's Rollup compiler adapter, without the Vite adapter's
 browser stylesheet refresh timer, so Vitest can close its middleware server cleanly.
 
 `Fractal/App/Composer images` uses the app's live image adapter, including its 10 MiB refusal, over a controlled upload transport. `UploadInProgress` stays pending until **Complete fixture upload** is pressed; no timer determines its state. `UploadCancelled` proves the transport observes the composer's aborted signal and rejects without a send or failed attachment. The signal flows through the app upload port to the client's capability preflight and blob fetch. `SeveralImages` stages three images below the four-image limit, keeping Attach visible, and runs at both commit-gate widths.
+This app-owned integration specimen is deliberately listed in `.storybook/stories.ts`, alongside the existing app specimens: a kit-only imitation would not cover the production adapter. Its exact source path and bundled adapter are declared kit inputs in `scripts/ci-fractal-web-changes`, so editing either selects kit plays. `ci-fractal-web-kit-graph` checks that declaration against the actual Storybook module graph; keep the input contract aligned when adding app integration specimens.
 
 
 ## Strict play gate

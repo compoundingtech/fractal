@@ -3175,6 +3175,8 @@ jobs:
               "apps/fractal-web/src/changelog/**",
               "apps/fractal-web/src/web/ColdOpen.stories.tsx",
               "apps/fractal-web/src/web/coldOpen.fixtures.ts",
+              # The image composer integration story exercises the app's live imageUploadAdapter in kit Storybook.
+              "apps/fractal-web/src/web/ComposerImages.stories.tsx",
               # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
               "apps/fractal-web/.changelog/**",
               "packages/fractal-sdk/src/**",
