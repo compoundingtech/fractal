@@ -36,37 +36,100 @@ def public_install_key(source):
     return inputs.hexdigest()
 
 
+OVERLAY_OUTPUTS = frozenset(('node_modules', '.git', 'dist', 'build', '.next',
+                             '.turbo', '.cache', 'coverage', 'out'))
+
+
+def _input_tree(root):
+    """Deterministic source inventory; generated outputs cannot be install inputs."""
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = sorted(name for name in dirs if name not in OVERLAY_OUTPUTS)
+        for name in sorted(dirs + files):
+            yield Path(directory) / name
+
+
 def private_install_key(source):
-    """Hash deployment-owned overlay install inputs, not installed dependencies."""
-    web = Path(source) / 'apps/fractal-web'
+    """Hash entire overlays and recursively referenced local-package source trees."""
+    source = Path(source).resolve()
     digest = hashlib.sha256()
-    names = {'package.json', 'pnpm-lock.yaml', 'package-lock.json',
-             'npm-shrinkwrap.json', 'yarn.lock', 'bun.lock', 'bun.lockb',
-             'pnpm-workspace.yaml', '.npmrc', '.yarnrc', '.yarnrc.yml',
-             '.pnpmfile.cjs', '.pnpmfile.mjs'}
-    for overlay_name in ('private', 'vendor'):
-        overlay = web / overlay_name
-        if overlay.is_symlink():
-            raise ValueError('source overlay copy root escapes source or is a symlink')
-        if not overlay.exists():
-            continue
-        for root, dirs, files in os.walk(overlay):
-            dirs[:] = sorted(name for name in dirs if name not in ('node_modules', '.git'))
-            for name in sorted(files):
-                path = Path(root) / name
-                relative = path.relative_to(overlay)
-                if name not in names and 'patches' not in relative.parts[:-1]:
+    pending = [source / 'apps/fractal-web' / name for name in ('private', 'vendor')]
+    visited, inputs = set(), {}
+    workspace_packages = None
+
+    def local_path(path):
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(source):
+            raise ValueError('source overlay install input escapes source clone')
+        return resolved
+
+    def workspace(name):
+        nonlocal workspace_packages
+        if workspace_packages is None:
+            workspace_packages = {}
+            for path in _input_tree(source):
+                if path.name != 'package.json' or path.is_symlink() or not path.is_file():
                     continue
-                if path.is_symlink() or not path.is_file():
-                    raise ValueError(f'private install input must be a regular file: {relative}')
-                encoded = path.relative_to(web).as_posix().encode()
-                content = path.read_bytes()
-                digest.update(len(encoded).to_bytes(8, 'big'))
-                digest.update(encoded)
-                digest.update(len(content).to_bytes(8, 'big'))
-                digest.update(content)
-            if any((Path(root) / name).is_symlink() for name in dirs):
-                raise ValueError('private install input directory must not be a symlink')
+                package = json.loads(path.read_text())
+                package_name = package.get('name')
+                if isinstance(package_name, str):
+                    workspace_packages.setdefault(package_name, []).append(path.parent)
+        matches = workspace_packages.get(name, [])
+        if len(matches) != 1:
+            raise ValueError(f'private workspace dependency must resolve uniquely: {name}')
+        return matches[0]
+
+    while pending:
+        root = pending.pop(0)
+        if root.is_symlink():
+            raise ValueError('source overlay or local package root must not be a symlink')
+        if not root.exists():
+            continue
+        root = local_path(root)
+        if root in visited:
+            continue
+        visited.add(root)
+        paths = [root] if root.is_file() else _input_tree(root)
+        for path in paths:
+            relative = path.relative_to(source).as_posix()
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                # Follow source aliases only within the clone, and include both
+                # topology and target contents. Never read arbitrary host paths.
+                target = local_path(path)
+                inputs[relative] = (b'link', os.readlink(path).encode(), 0)
+                pending.append(target)
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f'private install input must be a regular file: {relative}')
+            content = path.read_bytes()
+            inputs[relative] = (b'file', content, stat.S_IMODE(info.st_mode) & 0o111)
+            if path.name != 'package.json':
+                continue
+            package = json.loads(content)
+            for field in ('dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'):
+                for name, spec in package.get(field, {}).items():
+                    if not isinstance(spec, str):
+                        raise ValueError(f'invalid private dependency specification: {name}')
+                    if spec.startswith(('file:', 'link:')):
+                        pending.append(local_path(path.parent / spec.split(':', 1)[1]))
+                    elif spec.startswith('workspace:'):
+                        value = spec.split(':', 1)[1]
+                        if value.startswith(('.', '/')):
+                            pending.append(local_path(path.parent / value))
+                        else:
+                            # workspace aliases may spell another package name.
+                            alias = value.rsplit('@', 1)[0] if '@' in value.lstrip('@') else name
+                            pending.append(workspace(alias))
+    for name in sorted(inputs):
+        kind, content, executable = inputs[name]
+        encoded = name.encode()
+        digest.update(kind + executable.to_bytes(1, 'big'))
+        digest.update(len(encoded).to_bytes(8, 'big'))
+        digest.update(encoded)
+        digest.update(len(content).to_bytes(8, 'big'))
+        digest.update(content)
     return digest.hexdigest()
 
 

@@ -102,15 +102,25 @@ The generation key is now `sha256("fractal-dependency-key-v2\0" + public_hex +
 "\0" + private_hex)` (UTF-8 text, literal NUL separators). The public five-file
 digest remains the first component; the private digest prevents replaying old
 private dependencies when only the deployment-owned overlay changes.
-The private digest walks `apps/fractal-web/private` then `apps/fractal-web/vendor`,
-each in sorted order, excluding `node_modules` and `.git`. It hashes package
-manifests, pnpm/npm/Yarn/Bun lockfiles, pnpm workspace/config hooks, npm/Yarn
-configuration, and files beneath `patches` directories. For each selected file it
-hashes the 8-byte big-endian path length, UTF-8 path relative to `apps/fractal-web`
-(including the overlay root), 8-byte big-endian content length, then exact bytes.
-Missing overlays produce the SHA256 of empty bytes. Symlinked input files/directories
-fail closed. Private input contents are never committed; only the derived key is
-used in deployment state.
+The private digest conservatively hashes **every source file** beneath
+`apps/fractal-web/private` and `apps/fractal-web/vendor`, not a filename allowlist.
+Arbitrary lifecycle scripts can read non-manifest files, so a minimal static
+install closure is not reliable. Even unrelated private source changes invalidate
+the cache. Directory exclusions are exactly `node_modules`, `.git`, `dist`,
+`build`, `.next`, `.turbo`, `.cache`, `coverage`, `out`: these generated directories
+must not be install inputs. Source install/postinstall scripts and local-package
+sources must live outside excluded outputs.
+Package manifests in these trees recursively add all source files of their
+`file:`, `link:` and `workspace:` dependencies, including packages outside the
+overlay but inside the source clone. Workspace names must resolve to exactly one
+source package manifest. Missing/ambiguous local packages, malformed manifests,
+and inputs escaping the source clone fail closed. Source symlinks contribute their
+literal target plus in-clone target contents; overlay roots cannot be symlinks.
+All collected entries are sorted by source-clone-relative path. Each contributes
+`file`/`link` bytes, one byte of executable mode bits (zero for links), an 8-byte
+big-endian path length, UTF-8 relative path, 8-byte big-endian content length, then
+exact content/target bytes. Empty overlays produce SHA256 of empty bytes. Private
+source contents are never committed; only the derived key enters deployment state.
 Under an exclusive `<cache>/.cache.lock`, initial population copies installed
 dependency trees from the mutable clone into a staging directory and atomically
 renames it into place. Source-to-cache copying never hardlinks mutable source files.

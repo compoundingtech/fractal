@@ -109,7 +109,7 @@ class DependencyCacheTest(unittest.TestCase):
         for name in ('pnpm-lock.yaml', '.npmrc', 'nested/package.json', 'patches/tool.patch'):
             path = private / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('new private install input\n')
+            path.write_text('{}\n' if path.name == 'package.json' else 'new private install input\n')
             changed = dependency_cache.install_key(self.source)
             self.assertNotEqual(changed, second)
             second = changed
@@ -121,6 +121,53 @@ class DependencyCacheTest(unittest.TestCase):
         vendor.parent.mkdir(parents=True)
         vendor.write_text('{"dependencies":{"vendor-tool":"1"}}\n')
         self.assertNotEqual(dependency_cache.install_key(self.source), second)
+
+    def test_private_scripts_local_closure_and_unrelated_files_invalidate(self):
+        public = dependency_cache.public_install_key(self.source)
+        private = self.source / 'apps/fractal-web/private'
+        private.mkdir(parents=True)
+        local = self.source / 'packages/local'
+        local.mkdir(parents=True)
+        nested = self.source / 'packages/nested'
+        nested.mkdir(parents=True)
+        workspace = self.source / 'packages/workspace'
+        workspace.mkdir(parents=True)
+        (private / 'package.json').write_text(json.dumps({
+            'scripts': {'postinstall': 'node install.cjs'},
+            'dependencies': {'local': 'file:../../../packages/local',
+                             'workspace': 'workspace:*'}}))
+        (local / 'package.json').write_text(json.dumps({
+            'name': 'local', 'dependencies': {'nested': 'link:../nested'}}))
+        (nested / 'package.json').write_text('{"name":"nested"}')
+        (workspace / 'package.json').write_text('{"name":"workspace"}')
+        paths = [private / 'install.cjs', local / 'index.js', nested / 'source.js',
+                 workspace / 'index.js', private / 'unrelated.txt']
+        for path in paths:
+            path.write_text('original source\n')
+        previous = self.populate()
+        for path in paths:
+            with self.subTest(path=path.relative_to(self.source)):
+                path.write_text('changed source\n')
+                current = self.populate()
+                self.assertNotEqual(current, previous)
+                self.assertEqual(dependency_cache.public_install_key(self.source), public)
+                previous = current
+        generated = private / 'build/generated.js'
+        generated.parent.mkdir()
+        generated.write_text('not an install input')
+        self.assertEqual(dependency_cache.install_key(self.source), previous)
+
+    def test_private_local_input_escape_and_missing_workspace_fail_closed(self):
+        private = self.source / 'apps/fractal-web/private'
+        private.mkdir(parents=True)
+        manifest = private / 'package.json'
+        manifest.write_text(json.dumps({'dependencies': {
+            'outside': 'file:' + str(self.fixture)}}))
+        with self.assertRaisesRegex(ValueError, 'escapes source'):
+            dependency_cache.install_key(self.source)
+        manifest.write_text('{"dependencies":{"missing":"workspace:*"}}')
+        with self.assertRaisesRegex(ValueError, 'resolve uniquely'):
+            dependency_cache.install_key(self.source)
 
     def test_population_copies_source_and_reuse_is_immutable(self):
         key = self.populate()
