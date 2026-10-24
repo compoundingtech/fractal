@@ -636,6 +636,67 @@ jobs:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-ci-script-tests:
+    name: evidence-gate-ci-script-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    outputs:
+      skip: ${{ steps.taken.outputs.skip }}
+      record: ${{ steps.taken.outputs.record }}
+      line: ${{ steps.gate.outputs.line }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: ci-script-tests
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        id: taken
+        if: steps.gate.outputs.skip == 'true'
+        env:
+          RECORD: ${{ steps.gate.outputs.record }}
+        run: echo evidence skip taken && printf 'skip=true\nrecord=%s\n' "$RECORD" >> "$GITHUB_OUTPUT"
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-gate-fractal-web:
     name: evidence-gate-fractal-web
     needs: [fractal-web-changes]
@@ -766,13 +827,12 @@ jobs:
     timeout-minutes: 3
     continue-on-error: true
     needs:
-      [
-        evidence-gate-linux-gate,
-        evidence-gate-typescript-client,
-        evidence-gate-genie-freshness,
-        evidence-gate-fractal-web,
-        evidence-gate-rust-tests,
-      ]
+      - evidence-gate-linux-gate
+      - evidence-gate-typescript-client
+      - evidence-gate-genie-freshness
+      - evidence-gate-ci-script-tests
+      - evidence-gate-fractal-web
+      - evidence-gate-rust-tests
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && github.event_name == 'pull_request') }}
     permissions:
       contents: read
@@ -787,6 +847,7 @@ jobs:
             ${{ needs.evidence-gate-linux-gate.outputs.line }}
             ${{ needs.evidence-gate-typescript-client.outputs.line }}
             ${{ needs.evidence-gate-genie-freshness.outputs.line }}
+            ${{ needs.evidence-gate-ci-script-tests.outputs.line }}
             ${{ needs.evidence-gate-fractal-web.outputs.line }}
             ${{ needs.evidence-gate-rust-tests.outputs.line }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -865,7 +926,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-gate-rust-tests":[],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-fractal-web","evidence-gate-rust-tests"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","evidence-gate-rust-tests"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","genie-freshness","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-genie-freshness","evidence-gate-typescript-client","evidence-gate-fractal-web","evidence-gate-rust-tests"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-ci-script-tests":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-gate-rust-tests":[],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-fractal-web","evidence-gate-rust-tests"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"ci-script-tests":["pick-runner","evidence-gate-ci-script-tests"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","evidence-gate-rust-tests"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","genie-freshness","ci-script-tests","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-typescript-client","evidence-gate-fractal-web","evidence-gate-rust-tests"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -1160,6 +1221,160 @@ jobs:
         if: needs.evidence-gate-genie-freshness.outputs.skip == 'true'
         env:
           RECORD: ${{ needs.evidence-gate-genie-freshness.outputs.record }}
+        run: echo "covered by trusted evidence note $RECORD" >> "$GITHUB_STEP_SUMMARY"
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  ci-script-tests:
+    name: ci-script-tests
+    env:
+      CI_CACHE_DEV_SHELL: genie
+    needs: [pick-runner, evidence-gate-ci-script-tests]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+        if: needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+      - name: Use the runner's own caches
+        run: |
+          if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+        if: needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+      - name: Restore the local Nix cache
+        id: nix-cache
+        if: (env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1') && needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: "${{ runner.temp }}/st-ci-cache"
+          key: "nix6-genie-closure-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', 'scripts/ci-nix-cache', 'scripts/ci-genie-cache-verify') }}"
+          restore-keys: ""
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+        if: needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+      - name: Isolate test home and XDG state
+        run: |
+          # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
+          # and actions/cache expands a leading tilde against the HOME of the step that runs it.
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          home="$RUNNER_TEMP/test-home"
+          mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
+          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+        if: needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+      - name: Use the cached Nix outputs
+        if: (env.CI_LOCAL_CACHES != '1') && needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+        run: bash scripts/ci-nix-cache use
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
+        if: needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+      - name: Run the CI scripts' self-tests on their declared inputs
+        shell: bash
+        run: "nix develop '.#genie' -c bash scripts/ci-script-tests"
+        id: tests
+        if: needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+      - name: Save Nix outputs
+        if: (success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')) && needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+        run: bash scripts/ci-nix-cache save
+      - if: (always()) && needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: (always() && steps.evidence-base.outcome == 'success') && needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: (always() && steps.evidence-guard.outcome == 'success') && needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: (always() && steps.evidence-configure.outcome == 'success') && needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+        continue-on-error: true
+        name: Sign this job result
+        env:
+          STEP_CHECK: ci-script-tests
+          STEP_COMMAND: '["bash","scripts/ci-script-tests"]'
+          STEP_OUTCOMES: '{"tests":"${{ steps.tests.outcome }}"}'
+          GATE_SKIP: ${{ needs.evidence-gate-ci-script-tests.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STEP_CHECK"
+          python3 "$helper" step-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STEP_CHECK" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes" \
+            --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"
+      - if: (always()) && needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: (always()) && needs.evidence-gate-ci-script-tests.outputs.skip != 'true'
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-ci-script-tests
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: evidence covered by a trusted note
+        if: needs.evidence-gate-ci-script-tests.outputs.skip == 'true'
+        env:
+          RECORD: ${{ needs.evidence-gate-ci-script-tests.outputs.record }}
         run: echo "covered by trusted evidence note $RECORD" >> "$GITHUB_STEP_SUMMARY"
       - name: Report job cache coverage
         if: always()
@@ -2999,12 +3214,14 @@ jobs:
       - linux-clippy
       - linux-fleet-compat
       - genie-freshness
+      - ci-script-tests
       - typescript-client
       - fractal-web-changes
       - fractal-web-execution
       - fractal-web
       - evidence-gate-linux-gate
       - evidence-gate-genie-freshness
+      - evidence-gate-ci-script-tests
       - evidence-gate-typescript-client
       - evidence-gate-fractal-web
       - evidence-gate-rust-tests
@@ -3116,7 +3333,7 @@ jobs:
         run: |
           git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
-            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,typescript-client,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
+            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,ci-script-tests,typescript-client,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
       - name: Shadow-verify the published notes
         if: ${{ always() && steps.configure.outcome == 'success' }}
         continue-on-error: true
@@ -3124,7 +3341,7 @@ jobs:
           shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
           [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
           python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \
-            --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,typescript-client,fractal-web" --optional "fractal-web" --remote origin
+            --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,ci-script-tests,typescript-client,fractal-web" --optional "fractal-web" --remote origin
       - name: Remove the key
         if: always()
         continue-on-error: true
