@@ -271,7 +271,9 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
       probe.remove()
     }
   }, [pillLayout, runtimeText, props.tokenDraft])
-  const stacked = props.variant === 'C2' || wrapped || cramped || runtimeText.includes('\n')
+  // An attachment tray takes its own row, so the pill opens into the slab while the draft carries images.
+  const trayShown = useAuiState(state => props.imageAttachments !== undefined && state.composer.attachments.length > 0)
+  const stacked = props.variant === 'C2' || wrapped || cramped || runtimeText.includes('\n') || trayShown
   const composerProps = {
     ...props,
     style: [styles.adaptiveRoot, stacked ? styles.slab : props.variant === 'C3' ? styles.focusSlab : styles.pill, props.style],

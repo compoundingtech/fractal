@@ -612,6 +612,10 @@ export const PlainImageAttachments: Story = { tags: ['critical'],
     await userEvent.click(textbox(canvasElement))
     await userEvent.paste(pngFiles('first.png', 'second.png'))
     await waitFor(() => expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible())
+    // The tray takes its own row above the field at every width; the one-line pill would squeeze the draft beside it.
+    await settle()
+    const tray = canvasElement.querySelector<HTMLElement>('[data-testid="composer-attachments"]')!.getBoundingClientRect()
+    await expect(tray.bottom).toBeLessThanOrEqual(textbox(canvasElement).getBoundingClientRect().top + 1)
     // Over the limit: the excess is named, Send and Attach are withheld instead of a later refusal.
     await expect(canvas.getByRole('alert')).toHaveTextContent('A message can carry at most 1 image. Remove 1 to send.')
     await expect(canvas.getByRole('button', { name: 'Send' })).toBeDisabled()
