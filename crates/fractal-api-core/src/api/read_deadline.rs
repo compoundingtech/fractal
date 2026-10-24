@@ -103,6 +103,9 @@ pub fn deadline(request: &Request<Body>) -> Option<Duration> {
                 .unwrap_or(0)
                 .min(MAX_WAIT_MS),
         )
+    } else if path.starts_with("/v1/hosts/") && path.ends_with("/agent-launch") {
+        Some(parameter("wait_ms").and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0).min(10_000))
     } else if path.starts_with("/v1/sessions/logs/") && parameter("wait").as_deref() == Some("true")
     {
         Some(MAX_WAIT_MS)
@@ -132,6 +135,7 @@ fn long_poll_route(route: &str) -> bool {
         || (route.starts_with("/v1/client/conversations/") && route.ends_with("/changes"))
         || (route.starts_with("/v1/client/terminals/") && route.ends_with("/screen"))
         || route.starts_with("/v1/sessions/logs/")
+        || (route.starts_with("/v1/hosts/") && route.ends_with("/agent-launch"))
 }
 
 // Export seals/judges via the writer before/after its explicit consistent snapshot.
@@ -179,7 +183,8 @@ fn forwarded_deadline(operation: &crate::peer::ClientReadOperation) -> Option<Du
     match operation {
         ClientReadOperation::TerminalControl { .. } => None,
         ClientReadOperation::ConversationChanges { .. }
-        | ClientReadOperation::TerminalScreenChange { .. } => Some(ORDINARY + operation.wait()),
+        | ClientReadOperation::TerminalScreenChange { .. }
+        | ClientReadOperation::AgentLaunch { .. } => Some(ORDINARY + operation.wait()),
         ClientReadOperation::ConversationContent { .. }
         | ClientReadOperation::Timeline { .. }
         | ClientReadOperation::TerminalScreen { .. }
@@ -1960,6 +1965,11 @@ use super::*;
                 facts: false,
             };
             assert_eq!(forwarded_deadline(&screen), forwarded_deadline(&read));
+            let launch = ClientReadOperation::AgentLaunch {
+                subject: "agent/example/worker".into(), token: "invented".into(),
+                after: None, wait_ms,
+            };
+            assert_eq!(forwarded_deadline(&launch), forwarded_deadline(&read));
         }
         let action = ClientReadOperation::TerminalControl {
             action_id: "invented".into(),

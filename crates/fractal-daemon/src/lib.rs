@@ -11,6 +11,7 @@ pub use fractal_kernel::{cli_print, cli_println};
 mod ci_test_paths;
 
 pub use fractal_kernel::accounts;
+pub use fractal_store::agent_launch;
 pub mod api;
 pub mod web;
 pub use fractal_kernel::archive;

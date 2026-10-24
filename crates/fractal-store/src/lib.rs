@@ -22,6 +22,7 @@ pub use smallclaims::{performance, profile, task_cpu};
 pub mod test_support;
 
 
+pub mod agent_launch;
 pub mod backup;
 pub mod external_sessions;
 pub mod recorder_receipts;

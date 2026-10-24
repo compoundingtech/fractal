@@ -113,6 +113,60 @@ fn resource_service_name(request: &Value) -> &str {
         .unwrap()
 }
 
+#[tokio::test]
+async fn local_startup_detail_is_not_sent_to_the_collector() {
+    let (collector, endpoint) = start_collector().await;
+    let store = Arc::new(Store::open_memory("node-a").unwrap());
+    let marker = "local-fixture-launch-detail-must-stay-on-node";
+    for action in ["start", "startup-output"] {
+        store
+            .append_claim(&ClaimInput {
+                subject: "agent/node.worker".into(),
+                kind: "runtime.action.failed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("action".into(), json!(action)),
+                    ("reason".into(), json!(marker)),
+                    ("incarnation_id".into(), json!("inc-1")),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("local-startup:{action}")),
+            })
+            .unwrap();
+    }
+    let exporter = OtlpExporter::new(
+        &OtlpConfig {
+            endpoint,
+            headers_file: None,
+        },
+        "node-a",
+    )
+    .unwrap();
+    assert_eq!(exporter.export_once(&store).await.unwrap().exported, 2);
+    assert_eq!(exporter.export_once(&store).await.unwrap().exported, 0);
+    let requests = collector.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].1.to_string().contains(marker));
+    let logs = records(&requests[0].1);
+    assert_eq!(logs.len(), 2);
+    for (log, action) in logs.iter().zip(["start", "startup-output"]) {
+        assert!(log.to_string().contains(action));
+        assert!(log.to_string().contains("inc-1"));
+        assert!(
+            log.to_string()
+                .contains("startup detail is available from the runtime host")
+        );
+    }
+    let local = store.local_observations_after(0, 10).unwrap();
+    assert_eq!(local.len(), 2);
+    assert!(
+        local
+            .iter()
+            .all(|claim| claim.body["fields"]["reason"] == marker)
+    );
+}
+
 #[test]
 fn a_local_observation_becomes_an_otlp_log_record() {
     let store = Store::open_memory("node-a").unwrap();

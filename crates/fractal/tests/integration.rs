@@ -10,6 +10,7 @@ mod ci_test_paths;
 mod action_coverage;
 mod actor_contract;
 mod adhoc_work;
+mod agent_launch;
 mod agents_restart;
 mod assistant_native;
 mod authored_resume;

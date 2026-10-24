@@ -67,6 +67,7 @@ use crate::model::IntentInput;
 use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
+mod agent_launch;
 pub mod wire_names;
 mod client_blobs;
 mod client_documents;
@@ -611,6 +612,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/sets/preview", post(owned_sets::preview))
         .route("/v1/sets/apply", post(owned_sets::apply))
         .route("/v1/intent/apply", post(launches::apply_with_bound))
+        .route("/v1/hosts/{host}/agent-launch", get(agent_launch::get))
         .route("/v1/agents/rename", post(agents::rename_agent))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
