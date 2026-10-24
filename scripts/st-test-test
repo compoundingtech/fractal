@@ -694,6 +694,34 @@ class StTest(unittest.TestCase):
             self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
         self.assertEqual(len(calls), 1)
 
+    def test_the_checks_see_one_fixed_path_whatever_the_callers_is(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "$PATH" >> {seen}']
+        callers = os.environ.get('PATH', '') + ':/seat-one/state/bin'
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'PATH': callers})[0], 0)
+        self.assertEqual(self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'PATH': '/seat-two/bin:' + callers})[0], 0)
+        first, second = seen.read_text().splitlines()
+        self.assertEqual(first, second)
+        self.assertNotIn('/seat-', first)
+        self.assertTrue(all(os.path.isdir(entry) for entry in first.split(':')))
+        self.assertIn('/usr/bin', first.split(':'))
+        self.assertEqual(len(set(first.split(':'))), len(first.split(':')))
+
+    def test_the_fixed_path_keeps_cargo_s_bin_because_the_clippy_ratchet_s_toolchain_string_depends_on_it(self):
+        (self.home / '.cargo/bin').mkdir(parents=True)
+        (self.home / '.local/bin').mkdir(parents=True, exist_ok=True)
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}):
+            entries = st_test.check_path().split(':')
+        self.assertEqual(entries[:2], [str(self.home / '.local/bin'), str(self.home / '.cargo/bin')])
+
+    def test_the_callers_path_is_kept_when_asked(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "$PATH" >> {seen}']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'PATH': os.environ['PATH'] + ':/seat-one/bin', 'ST_EVIDENCE_PATH': 'keep'})[0], 0)
+        self.assertTrue(seen.read_text().strip().endswith('/seat-one/bin'))
+
     def test_a_worktree_left_by_a_killed_run_is_removed_by_the_next_run(self):
         self.commit('b.txt', 'two')
         stale = Path(tempfile.mkdtemp(prefix='st-test-'))
