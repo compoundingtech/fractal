@@ -8,3 +8,4 @@ record 858884015c1efc8d28beab8dd3366fc5b4234ba9 genie-freshness 0 fleet/ci 2026-
 record e0784825b1fcc9353af80f3b8d52ce3bc172b799 linux-clippy 0 fleet/ci 2026-10-24T12:17:25Z
 record e5bb27f43e38f2d1a641f3b432c94574809e2123 typescript-client 0 fleet/ci 2026-10-24T12:23:24Z
 record 1d9850ff2f3948c7629ef59d04de7a250286d8d9 typescript-client 0 host/anvil 2026-10-24T12:30:15Z
+record a802ce7913b254ed61bbff393f7b2302d3893dd3 genie-freshness 0 host/anvil 2026-10-24T12:34:27Z
