@@ -179,6 +179,7 @@ pub(super) async fn run_message(
             print_message_receipt(&receipt, json_output)
         }
         MessageCommand::Status(args) => {
+            notice_ignored_read_actor(args.ignored_actor.as_deref());
             if let Some(key) = args.idempotency_key {
                 return print_message_key_status(client, &key, json_output).await;
             }

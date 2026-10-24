@@ -571,13 +571,13 @@
         "ignores_actor": false
       },
       "st conversations status": {
-        "actor": "none",
-        "accepts_person": false,
+        "actor": "optional",
+        "accepts_person": true,
         "can_carry_person": false,
-        "as_role": "none",
+        "as_role": "ignored",
         "alternate_actor_option": null,
         "actor_environment": null,
-        "ignores_actor": false
+        "ignores_actor": true
       },
       "st conversations thread": {
         "actor": "none",
@@ -1426,22 +1426,22 @@
         "ignores_actor": false
       },
       "st repair apply": {
-        "actor": "none",
-        "accepts_person": false,
-        "can_carry_person": false,
-        "as_role": "none",
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": false
       },
       "st repair dry-run": {
-        "actor": "none",
-        "accepts_person": false,
+        "actor": "optional",
+        "accepts_person": true,
         "can_carry_person": false,
-        "as_role": "none",
+        "as_role": "ignored",
         "alternate_actor_option": null,
         "actor_environment": null,
-        "ignores_actor": false
+        "ignores_actor": true
       },
       "st replication checkpoint excuse": {
         "actor": "optional",

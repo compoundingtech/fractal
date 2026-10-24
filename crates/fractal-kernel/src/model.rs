@@ -2497,6 +2497,9 @@ pub struct OperationalRepairPlan {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OperationalRepairApplyRequest {
     pub token: String,
+    /// Caller actor, honoured only for an authenticated local harness binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

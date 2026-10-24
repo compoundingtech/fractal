@@ -3201,6 +3201,212 @@ async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     assert!(!state.store.desired_subjects().unwrap().iter().any(|item| item.kind == "subscription"));
 }
 
+async fn repair_actor_apply_request(
+    app: Router,
+    bound_actor: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/repair/apply-attributed")
+        .header("content-type", "application/json");
+    if let Some(actor) = bound_actor {
+        request = request.extension(BoundAgent(actor.into()));
+    }
+    let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    let value = if status.is_success() { envelope["value"].clone() } else { envelope };
+    (status, value)
+}
+
+#[tokio::test]
+async fn repair_actor_bound_router_refuses_foreign_agent_and_person_before_token_handling() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    for actor in ["agent/foreign", "person/operator"] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = repair_actor_apply_request(
+            app.clone(),
+            Some("agent/own"),
+            json!({"token":"not-a-repair-token","actor":actor}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor", "{actor}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn repair_actor_bound_router_requires_present_nonempty_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    for body in [
+        json!({"token":"not-a-repair-token"}),
+        json!({"token":"not-a-repair-token","actor":null}),
+        json!({"token":"not-a-repair-token","actor":""}),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = repair_actor_apply_request(
+            app.clone(), Some("agent/own"), body.clone(),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor", "{body}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn repair_actor_bound_router_own_actor_reaches_token_validation_and_daemon_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let before = state.store.index().unwrap();
+    let (status, refusal) = repair_actor_apply_request(
+        app.clone(),
+        Some("agent/own"),
+        json!({"token":"not-a-repair-token","actor":"agent/own"}),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert_eq!(refusal["code"], "invalid-repair-token");
+    assert_eq!(state.store.index().unwrap(), before);
+
+    let (status, plan) = get_request(app.clone(), "/v1/repair").await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    assert_eq!(plan["items"], json!([]));
+    let token = plan["token"].as_str().unwrap();
+    let (status, result) = repair_actor_apply_request(
+        app,
+        Some("agent/own"),
+        json!({"token":token,"actor":"agent/own"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["applied"], 0);
+    assert!(result["receipt_claim_id"].is_null(), "{result}");
+    assert_eq!(state.store.index().unwrap(), before);
+}
+
+#[tokio::test]
+async fn repair_actor_unbound_router_supports_legacy_token_only_apply() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let before = state.store.index().unwrap();
+    let (status, plan) = get_request(app.clone(), "/v1/repair").await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    assert_eq!(plan["items"], json!([]));
+    let token = plan["token"].as_str().unwrap();
+    let (status, result) = json_request(app, "/v1/repair/apply", json!({"token":token})).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["applied"], 0);
+    assert!(result["receipt_claim_id"].is_null(), "{result}");
+    assert_eq!(state.store.index().unwrap(), before);
+}
+
+#[tokio::test]
+async fn repair_actor_bound_router_refuses_legacy_apply_with_or_without_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let (status, plan) = get_request(app.clone(), "/v1/repair").await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    let token = plan["token"].as_str().unwrap();
+    // Both the handler and the daemon's outer binding guard must close the legacy path.
+    for app in [
+        app.clone(),
+        app.layer(from_fn_with_state(state.store.clone(), guard_bound_actor)),
+    ] {
+        for body in [
+            json!({"token":token}),
+            json!({"token":token,"actor":"agent/own"}),
+        ] {
+            let before = state.store.index().unwrap();
+            let response = app.clone().oneshot(Request::builder()
+                .method("POST")
+                .uri("/v1/repair/apply")
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/own".into()))
+                .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {refusal}");
+            assert_eq!(refusal["code"], "foreign-agent-actor", "{body}: {refusal}");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn repair_actor_unbound_router_refuses_supplied_actor_without_daemon_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    for actor in ["agent/own", "person/operator", ""] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = repair_actor_apply_request(
+            app.clone(), None, json!({"token":"not-a-repair-token","actor":actor}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor", "{actor}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn repair_actor_unbound_router_refuses_attributed_token_only_apply() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let before = state.store.index().unwrap();
+    let (status, plan) = get_request(app.clone(), "/v1/repair").await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    let token = plan["token"].as_str().unwrap();
+    let (status, refusal) = repair_actor_apply_request(app, None, json!({"token":token})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert_eq!(refusal["code"], "foreign-agent-actor");
+    assert_eq!(state.store.index().unwrap(), before);
+}
+
+#[tokio::test]
+async fn repair_actor_attributed_route_fails_closed_against_legacy_only_daemon() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handler_calls = calls.clone();
+    // An older daemon accepts the token but silently ignores the unknown actor field.
+    let app = Router::new().route("/v1/repair/apply", post(
+        move |Json(body): Json<Value>| async move {
+            assert!(body["token"].is_string());
+            handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Json(json!({"applied":1}))
+        },
+    ));
+    let body = json!({"token":"legacy-token","actor":"agent/own"});
+    let response = app.clone().oneshot(Request::builder()
+        .method("POST")
+        .uri("/v1/repair/apply-attributed")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let response = app.oneshot(Request::builder()
+        .method("POST")
+        .uri("/v1/repair/apply")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn a_seat_writes_only_its_own_handoff() {
     let root = tempfile::tempdir().unwrap();
