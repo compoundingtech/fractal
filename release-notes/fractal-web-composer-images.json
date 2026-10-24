@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Fractal web: the conversation composer attaches and pastes up to four images, uploads them on send and names their blob references in message.send",
+  "replay": {
+    "status": "none",
+    "detail": "No graph, claim or storage change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change. Uses the existing blob upload route and message.send attachments."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Attach appears only on devices granted control.messages and message.send; other devices keep the text-only composer."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the pull request; text sends are unchanged."
+  }
+}

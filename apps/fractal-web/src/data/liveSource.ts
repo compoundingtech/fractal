@@ -155,6 +155,7 @@ export const liveSource = ({
   const noGrants: Grants = {
     actions: 'ungranted',
     messageSend: 'ungranted',
+    attachmentUpload: 'ungranted',
     terminalInput: 'ungranted',
   }
   setDebug('Wf.socketErrors', 0)
@@ -1096,6 +1097,7 @@ export const liveSource = ({
             actions:
               allowed.has('message.send') || allowed.has('work.done') ? 'granted' : 'ungranted',
             messageSend: allowed.has('message.send') ? 'granted' : 'ungranted',
+            attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
           })
         }),

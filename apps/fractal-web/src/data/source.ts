@@ -196,6 +196,8 @@ export interface ConversationPage {
 export interface Grants {
   readonly actions: 'granted' | 'ungranted'
   readonly messageSend: 'granted' | 'ungranted'
+  /** Image upload for message attachments (`control.messages`); sending them still needs `messageSend`. */
+  readonly attachmentUpload: 'granted' | 'ungranted'
   readonly terminalInput: 'granted' | 'ungranted'
 }
 

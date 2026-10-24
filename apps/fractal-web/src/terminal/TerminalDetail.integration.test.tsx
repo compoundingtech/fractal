@@ -129,7 +129,7 @@ describe('terminal detail input', () => {
 
   it('keeps the keyboard disabled with an honest reason when terminal.input is not granted', async () => {
     const { opened, factory } = sessions()
-    await mount({ terminal: observed({ value: screen }), grants: { actions: 'granted', messageSend: 'granted', terminalInput: 'ungranted' }, terminalInput: factory })
+    await mount({ terminal: observed({ value: screen }), grants: { actions: 'granted', messageSend: 'granted', attachmentUpload: 'ungranted', terminalInput: 'ungranted' }, terminalInput: factory })
     expect(field().disabled).toBe(true)
     expect(host.textContent).toContain('This device is not allowed to type into terminals.')
     expect(button('Enable input')).toBeUndefined()
@@ -188,7 +188,7 @@ describe('terminal detail input', () => {
       if (cut === 'switches terminals') await mount({ terminal: terminals, terminalInput, at: other })
       else {
         granted = false
-        await mount({ terminal: terminals, terminalInput, grants: { actions: 'granted', messageSend: 'granted', terminalInput: 'ungranted' } })
+        await mount({ terminal: terminals, terminalInput, grants: { actions: 'granted', messageSend: 'granted', attachmentUpload: 'ungranted', terminalInput: 'ungranted' } })
       }
       await act(async () => read.resolve('snapshot/late'))
       expect(posted).toEqual([])

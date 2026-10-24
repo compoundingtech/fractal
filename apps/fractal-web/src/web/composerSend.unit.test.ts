@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import type { AttachmentPort } from '../data/source.ts'
-import { composerSendBinding, sendFailureDetail } from './composerSend.ts'
+import { composerSendBinding, imageUploadAdapter, sendFailureDetail } from './composerSend.ts'
 import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
 import { createComposerDraftSession, createLocalComposerDraftStore } from './composerDrafts.ts'
 import { createComposerDraftAdapter } from './composerDraftAdapter.ts'
@@ -10,7 +10,7 @@ const message = {
   role: 'user', content: [{ type: 'text', text: 'hello' }], createdAt: new Date(0),
   metadata: { custom: {} }, parentId: null, sourceId: null, runConfig: undefined,
 } as const
-const grants = { actions: 'granted', messageSend: 'granted', terminalInput: 'ungranted' } as const
+const grants = { actions: 'granted', messageSend: 'granted', attachmentUpload: 'granted', terminalInput: 'ungranted' } as const
 const seat = 'agent/example/scratch'
 
 describe('composer send contract', () => {
@@ -121,6 +121,43 @@ describe('composer send contract', () => {
     // The send grant is the more fundamental refusal and keeps its own reason.
     const ungranted = composerSendBinding({ source: { attachments }, agentRef: seat, grants: { ...grants, messageSend: 'ungranted' }, readable: false, items: [], onRefused: vi.fn() })
     expect(ungranted.disabledReason).toBe('Message send is not granted for this device.')
+  })
+
+  it('uploads composer images at send and names their blob references in the message action', async () => {
+    const blob = `blob/${'a'.repeat(64)}`
+    const upload = vi.fn<AttachmentPort['upload']>().mockResolvedValue({ _tag: 'Success', value: { blob, sha256: 'a'.repeat(64), size: 3, media_type: 'image/png' } })
+    const send = vi.fn<AttachmentPort['send']>().mockResolvedValue({ _tag: 'Refused', reason: 'failed', detail: 'Actual refusal' })
+    const adapter = imageUploadAdapter(upload)
+    await expect(adapter.add({ file: new File(['<svg/>'], 'vector.svg', { type: 'image/svg+xml' }) })).rejects.toThrow('Only PNG, JPEG, GIF and WebP images can be attached.')
+    const file = new File([new Uint8Array([1, 2, 3])], 'screen.png', { type: 'image/png' })
+    const pending = await adapter.add({ file })
+    // Drafting never uploads; only the send does.
+    expect(upload).not.toHaveBeenCalled()
+    const complete = await adapter.send(pending)
+    expect(upload).toHaveBeenCalledWith({ bytes: file, mediaType: 'image/png' })
+    const binding = composerSendBinding({ source: { attachments: { capabilities: vi.fn(), upload, chunk: vi.fn(), send } }, agentRef: seat, grants, readable: true, items: [], onRefused: vi.fn(), attachmentAdapter: adapter })
+    expect(binding.runtime.adapters?.attachments).toBe(adapter)
+    expect(binding.imageAttachments).toEqual({ max: 4 })
+    await binding.runtime.onNew({ ...message, attachments: [complete] })
+    expect(send.mock.calls[0]![0]).toMatchObject({ _tag: 'Send', parameters: { content: 'hello', attachments: [{ blob, media_type: 'image/png', name: 'screen.png' }] } })
+  })
+
+  it('fails a refused upload with its reason and sends nothing', async () => {
+    const upload = vi.fn<AttachmentPort['upload']>().mockResolvedValue({ _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted attachment upload.' })
+    const adapter = imageUploadAdapter(upload)
+    const pending = await adapter.add({ file: new File([new Uint8Array([1])], 'screen.webp', { type: 'image/webp' }) })
+    await expect(adapter.send(pending)).rejects.toThrow('This device is not granted attachment upload.')
+  })
+
+  it('offers image attachments only while both send and upload are granted', () => {
+    const attachments = { capabilities: vi.fn(), upload: vi.fn<AttachmentPort['upload']>(), chunk: vi.fn(), send: vi.fn<AttachmentPort['send']>() }
+    const adapter = imageUploadAdapter(attachments.upload)
+    const bind = (overrides: Partial<typeof grants>, readable = true) => composerSendBinding({ source: { attachments }, agentRef: seat, grants: { ...grants, ...overrides }, readable, items: [], onRefused: vi.fn(), attachmentAdapter: adapter })
+    for (const binding of [bind({ attachmentUpload: 'ungranted' }), bind({ messageSend: 'ungranted' }), bind({}, false)]) {
+      expect(binding.runtime.adapters).toBeUndefined()
+      expect(binding.imageAttachments).toBeUndefined()
+    }
+    expect(bind({}).runtime.adapters?.attachments).toBe(adapter)
   })
 
   it.each(['future-reason', 'constructor', '__proto__', 'raw-diagnostic-sentinel'])('uses generic copy for unclassified reason %s', reason => {

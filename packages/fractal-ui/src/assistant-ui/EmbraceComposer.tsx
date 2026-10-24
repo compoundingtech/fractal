@@ -15,6 +15,7 @@ import {
   activeTrigger, defaultCommands, draftFromText, insertToken, serializeDraft,
   type Draft, type DraftToken, type MentionToken, type SerializedDraft, type SlashCommand,
 } from './embrace-composer/draft'
+import { ComposerAttachmentTray } from './embrace-composer/AttachmentTray'
 
 export interface EmbraceComposerProps {
   readonly variant: 'C1' | 'C2' | 'C3'
@@ -64,6 +65,12 @@ export interface EmbraceComposerProps {
   readonly placeholder?: string
   /** Why the host could not stop the active run; shown beside Stop, which becomes pressable again. Clear it when the next Stop starts. */
   readonly stopRefusal?: string
+  /**
+   * Plain-composer image attachments with the host's per-message limit. With it, the composer shows its own tray
+   * and Attach (while the runtime has an attachment adapter, which also accepts pasted images), hides Attach at the
+   * limit and names any excess instead of sending it. Hosts that render their own tray and toolbar omit it.
+   */
+  readonly imageAttachments?: { readonly max: number }
 }
 
 /**
@@ -325,7 +332,7 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
   </>
 }
 
-function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, stopRefusal, placeholder = 'Message, @ mentions and / commands as text' }: EmbraceComposerProps) {
+function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, stopRefusal, imageAttachments, placeholder = 'Message, @ mentions and / commands as text' }: EmbraceComposerProps) {
   const isDisabled = useAuiState((s) => s.thread.isDisabled)
   const readOnly = disabledReason !== undefined || isDisabled
   const helpId = React.useId()
@@ -335,6 +342,10 @@ function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar
   const canSend = useAuiState(s => s.composer.canSend)
   const runtimeText = useAuiState(s => s.composer.text)
   const cold = readOnly && runtimeText === ''
+  // The runtime has an attachment adapter; it then also accepts pasted images.
+  const canAttach = useAuiState(s => s.thread.capabilities.attachments) && !readOnly
+  const attachmentCount = useAuiState(s => s.composer.attachments.length)
+  const overLimit = imageAttachments !== undefined && attachmentCount > imageAttachments.max
   const composing = React.useRef(false)
   const { compact } = React.useContext(CompactComposerContext)
   // Stop sits beside Send for the whole run; Escape in the composer stops too. Hosts with their own `actions`
@@ -355,7 +366,7 @@ function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar
       tabIndex={-1}
       aria-label={conversationLabel === undefined ? 'Message composer' : `Message composer, ${conversationLabel}`}
       {...stylex.props(styles.root, style, cold && styles.cold)}
-      onSubmit={event => { if (readOnly || onRequestSubmit !== undefined) event.preventDefault(); if (!readOnly) onRequestSubmit?.(false) }}
+      onSubmit={event => { if (readOnly || overLimit || onRequestSubmit !== undefined) event.preventDefault(); if (!readOnly && !overLimit) onRequestSubmit?.(false) }}
       onCompositionStartCapture={() => { composing.current = true }}
       onCompositionEndCapture={() => { composing.current = false }}
       onKeyDownCapture={event => {
@@ -372,6 +383,7 @@ function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar
         }
       }}
     >
+      {imageAttachments === undefined ? null : <ComposerAttachmentTray max={imageAttachments.max} />}
       <div {...stylex.props(styles.fieldWrap, fieldStyle, cold && styles.coldField)}>
       {runtimeText === '' ? <span id={guidanceId} data-testid="composer-placeholder" {...stylex.props(styles.placeholder)}>{guidance}</span> : null}
       {input !== undefined ? input(cold ? [inputStyle ?? styles.input, styles.coldInput] : inputStyle ?? styles.input, [helpId, runtimeText === '' && reason === undefined ? guidanceId : undefined].filter(Boolean).join(' ')) : <ComposerPrimitive.Input
@@ -389,10 +401,11 @@ function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar
           {reason ?? (targetLabel === undefined ? undefined : `To ${targetLabel}`)}
         </div>
         {toolbar}
+        {imageAttachments !== undefined && canAttach && attachmentCount < imageAttachments.max ? <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment> : null}
         <div {...stylex.props(styles.grow)} />
         {canStop && stopRefusal !== undefined && !stopping ? <span role="status" title={stopRefusal} {...stylex.props(styles.stopRefusal)}>{stopRefusal}</span> : null}
         {canStop ? <StopRunButton onStop={stop} pending={stopping} /> : null}
-        {actions !== undefined ? actions(compact) : onRequestSubmit === undefined ? <ComposerPrimitive.Send disabled={readOnly} aria-label={submitIcon === undefined ? undefined : 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? 'Send'}</ComposerPrimitive.Send> : <Button isDisabled={readOnly || !canSend} onPress={() => onRequestSubmit(false)} aria-label={submitIcon === undefined ? undefined : submitLabel ?? 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? submitLabel ?? 'Send'}</Button>}
+        {actions !== undefined ? actions(compact) : onRequestSubmit === undefined ? <ComposerPrimitive.Send disabled={readOnly || overLimit} aria-label={submitIcon === undefined ? undefined : 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? 'Send'}</ComposerPrimitive.Send> : <Button isDisabled={readOnly || !canSend || overLimit} onPress={() => onRequestSubmit(false)} aria-label={submitIcon === undefined ? undefined : submitLabel ?? 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? submitLabel ?? 'Send'}</Button>}
       </div>
     </ComposerPrimitive.Root>
   )
