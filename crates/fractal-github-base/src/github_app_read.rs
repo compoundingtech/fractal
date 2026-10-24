@@ -40,8 +40,10 @@ fn counters() -> &'static Mutex<Counts> {
 pub fn fallback(owner: &str, app: &str, reason: &str) {
     crate::otel::github_auth_fallback(owner, app, reason);
     #[cfg(test)]
-    *counters().lock()
-        .entry((owner.into(), app.into(), reason.into())).or_default() += 1;
+    {
+        *counters().lock()
+            .entry((owner.into(), app.into(), reason.into())).or_default() += 1;
+    }
     tracing::warn!(owner, app, reason, "GitHub installation read using transition PAT fallback");
 }
 
