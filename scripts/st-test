@@ -2,6 +2,7 @@
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
   scripts/st-test [--check NAME]... [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
+  scripts/st-test --seed [REF] [--base origin/main] [--push REMOTE]
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
 
@@ -163,13 +164,16 @@ def text(done):
     return done.stdout.decode().strip()
 
 
+TARGET = []  # [commit] when --seed names the tree to sign instead of HEAD
+
+
 def target_commit(base):
-    """The commit that is signed: HEAD, the commit being pushed.
+    """The commit that is signed: HEAD, the commit being pushed (with --seed, the commit it names).
 
     A pull request check is reported on the head commit, and the CI gate looks up the note for the head's own tree (see
     docs/st3/gate-evidence.md, "Which tree a pull request run asks about"), so the tree an agent built and signed is the
     tree that counts, whether or not main has moved since. The merge queue still tests the integrated tree."""
-    return text(git('rev-parse', 'HEAD'))
+    return TARGET[0] if TARGET else text(git('rev-parse', 'HEAD'))
 
 
 def branch_point(commit, base):
@@ -308,7 +312,7 @@ def lane_edits(verifier_path, directory, base, check, tree):
 
 def behind(base):
     """How many commits of the base this branch lacks (0 when it holds the base's tip)."""
-    done = git('rev-list', '--count', f'HEAD..{base}', check=False)
+    done = git('rev-list', '--count', f'{target_commit(base)}..{base}', check=False)
     return int(text(done)) if done.returncode == 0 and text(done).isdigit() else None
 
 
@@ -787,6 +791,9 @@ def main(argv):
     parser.add_argument('--attempt', default='1')
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
+    parser.add_argument('--seed', nargs='?', const='', metavar='REF', help='sign the per-crate rust-tests notes of REF (default: the base) instead of HEAD, '
+                        'for the crates that lack one, and push them (to origin unless --push says otherwise): what a merge-queue signer runs after a merge that moved '
+                        'a crate key or the lane, from any checkout, whatever HEAD is')
     parser.add_argument('--all', action='store_true', help='accepted, and the same as no flag: every check runs')
     parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree (a lane edit, '
                         'and with no --check a policy check that has no local command, count as covered: CI runs them); exit 0 if all are, 3 if not')
@@ -797,6 +804,16 @@ def main(argv):
     unknown = [name for name in args.check if name not in LOCAL]
     if unknown:
         raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join(LOCAL)}')
+    TARGET.clear()
+    if args.seed is not None:
+        if args.check and args.check != [RUST_TESTS]:
+            raise Failure('--seed signs rust-tests only; it takes no other --check')
+        resolved = git('rev-parse', '--verify', '-q', (args.seed or args.base) + '^{commit}', check=False)
+        if resolved.returncode != 0:
+            raise Failure(f'--seed {(args.seed or args.base)!r} is not a commit (fetch it first)')
+        TARGET.append(text(resolved))
+        args.check = [RUST_TESTS]
+        args.push = args.push or 'origin'
     checks = args.check or [name for name in LOCAL if name not in OPT_IN]
     if args.list:
         for name in checks:
