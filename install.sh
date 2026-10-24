@@ -92,32 +92,38 @@ tar -xzf "$work/$archive" -C "$work"
 # PATH contains a foreign fractal command; keep their collision guidance on stderr.
 "$work/$package/install.sh" --bin-dir "$bin_dir" >/dev/null
 bin_dir=$(cd "$bin_dir" && pwd)
-# Read the verified binary's stable machine identity, never the build host's git
-# checkout. Retained archives may not provide this output; they simply get no receipt.
-version=$("$work/$package/bin/st3" --version --json 2>/dev/null) || version=
-version=${version#'{"machine_version":"'}
-version=${version%'"}'}
-commit=${version##*+}
-case "$commit" in ''|*[!0-9a-f]*) commit= ;; esac
-if [ "${#commit}" -ge 7 ]; then
+# A release receipt is optional display metadata. Failure must never prevent a
+# successfully installed executable from launching.
+write_receipt() (
+    receipt_stage=
+    trap '[ -z "$receipt_stage" ] || rm -f "$receipt_stage"' EXIT
+    version=$("$work/$package/bin/st3" --version --json) || return 1
+    case "$version" in '{"machine_version":"'*'"}') ;; *) return 1 ;; esac
+    version=${version#'{"machine_version":"'}
+    version=${version%'"}'}
+    commit=${version##*+}
+    case "$commit" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#commit}" -ge 7 ] || return 1
     receipt="$bin_dir/RELEASE.json"
-    if [ "$(uname -s)" = Darwin ]; then
-        # The executable lives in a signed app. Keep its receipt outside the
-        # bundle, so recording an installation does not invalidate its signature.
+    platform=$(uname -s) || return 1
+    if [ "$platform" = Darwin ]; then
+        # Keep the receipt outside the signed application bundle.
         receipt=$(python3 - "$bin_dir/st3" <<'PY'
 from pathlib import Path
 import sys
 binary = Path(sys.argv[1]).resolve()
 print(str(binary.parents[2]) + '.RELEASE.json')
 PY
-)
+) || return 1
     fi
+    installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || return 1
+    receipt_stage=$(mktemp "$receipt.XXXXXX") || return 1
     printf '{"tag":"%s","commit":"%s","target":"%s","installed_at":"%s"}\n' \
-        "$tag" "$commit" "$target" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$work/RELEASE.json"
-    # Stage on the destination filesystem for atomic replacement.
-    receipt_stage=$(mktemp "$receipt.XXXXXX")
-    cat "$work/RELEASE.json" > "$receipt_stage"
-    mv -f "$receipt_stage" "$receipt"
+        "$tag" "$commit" "$target" "$installed_at" > "$receipt_stage" || return 1
+    mv -f "$receipt_stage" "$receipt" || return 1
+)
+if ! write_receipt 2>/dev/null; then
+    printf 'install: warning: release receipt unavailable; continuing with the installed binary\n' >&2
 fi
 rm -rf "$work"
 trap - EXIT HUP INT TERM

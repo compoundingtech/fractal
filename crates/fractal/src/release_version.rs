@@ -13,7 +13,7 @@ fn receipt_path(binary: &Path) -> Option<PathBuf> {
     }
 }
 
-fn display(receipt: &Path, machine: &str) -> String {
+fn display(receipt: &Path, machine: &str, fallback: &str) -> String {
     let release = (|| {
         if !std::fs::metadata(receipt).ok()?.is_file() {
             return None;
@@ -38,15 +38,16 @@ fn display(receipt: &Path, machine: &str) -> String {
         }
         Some(format!("{tag} ({commit})"))
     })();
-    release.unwrap_or_else(|| machine.to_owned())
+    release.unwrap_or_else(|| fallback.to_owned())
 }
 
 pub(crate) fn print() {
     let machine = fractal_drivers::version::machine_version();
+    let fallback = fractal_drivers::version::display_version();
     let version = std::env::current_exe()
         .ok()
         .and_then(|binary| receipt_path(&binary))
-        .map_or_else(|| machine.clone(), |path| display(&path, &machine));
+        .map_or_else(|| fallback.to_owned(), |path| display(&path, &machine, fallback));
     println!("fractal {version}");
 }
 
@@ -59,7 +60,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("RELEASE.json");
         std::fs::write(&path, r#"{"tag":"v0.3.18","commit":"abcdef123"}"#).unwrap();
-        assert_eq!(display(&path, "0.3.17+abcdef123"), "v0.3.18 (abcdef123)");
+        assert_eq!(display(&path, "0.3.17+abcdef123", "fallback"), "v0.3.18 (abcdef123)");
     }
 
     #[test]
@@ -67,8 +68,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("RELEASE.json");
         std::fs::write(&path, r#"{"tag":"v0.3.18","commit":"abcdef123"}"#).unwrap();
-        assert_eq!(display(&path, "0.3.17+abcdef124"), "0.3.17+abcdef124");
-        assert_eq!(display(&path, "0.3.17+abcdef123-dirty"), "0.3.17+abcdef123-dirty");
+        assert_eq!(display(&path, "0.3.17+abcdef124", "fallback"), "fallback");
+        assert_eq!(display(&path, "0.3.17+abcdef123-dirty", "fallback"), "fallback");
     }
 
     #[test]
@@ -76,10 +77,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("RELEASE.json");
         let fallback = "0.3.17+abcdef123";
-        assert_eq!(display(&path, fallback), fallback);
+        assert_eq!(display(&path, fallback, fallback), fallback);
         for bytes in ["not json", "{}", r#"{"tag":"v0.3.18\nforged","commit":"abcdef123"}"#] {
             std::fs::write(&path, bytes).unwrap();
-            assert_eq!(display(&path, fallback), fallback);
+            assert_eq!(display(&path, fallback, fallback), fallback);
         }
     }
 

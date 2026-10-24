@@ -72,6 +72,10 @@ fn version_is_baked_and_available_without_a_daemon() {
     }
     let human = version(root.path(), &["--version"]);
     assert!(human.starts_with("fractal "));
+    assert_eq!(
+        human.trim(),
+        format!("fractal {}", fractal_drivers::version::display_version())
+    );
     assert_ne!(human.trim(), format!("fractal {}", env!("CARGO_PKG_VERSION")));
     assert!(!human.contains("decaf00"));
     assert_eq!(human.lines().count(), 1);

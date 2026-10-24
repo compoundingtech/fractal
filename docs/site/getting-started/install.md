@@ -40,6 +40,10 @@ running the download installer or writing a release receipt. They therefore
 display the baked version and commit, not a daily release tag. Copying a binary
 without its receipt has the same fallback behavior.
 
+The receipt is best-effort metadata: if it cannot be recorded, installation and
+launch still succeed with one warning, and version display uses its normal
+fallback.
+
 ## Set up your machine
 
 Run `fractal setup` in your terminal. Choose your person name, a persistent machine name, which installed harnesses to integrate, and whether to keep the daemon running as a user service. The machine name `local` is reserved. Native harness login and workspace trust may need your interaction.

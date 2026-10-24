@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory() as d:
     payload = root / 'fractal-x86_64-unknown-linux-gnu'; (payload / 'bin').mkdir(parents=True)
     for name in ['st3', 'pty']:
         p = payload / 'bin' / name
-        p.write_text('#!/bin/sh\nif [ "${1:-}" = --version ]; then printf \'{"machine_version":"0.3.17+abcdef123"}\\n\'; else printf "' + name + '-fixture\\n"; fi\n'); p.chmod(0o755)
+        p.write_text('#!/bin/sh\nif [ "${1:-}" = --version ]; then [ "${FAIL_RECEIPT:-}" != version ] || exit 1; printf \'{"machine_version":"0.3.17+abcdef123"}\\n\'; else printf "' + name + '-fixture\\n"; fi\n'); p.chmod(0o755)
     (payload / 'bin/st').symlink_to('st3')
     (payload / 'bin/fractal').symlink_to('st3')
     (payload / 'share/fractal-web').mkdir(parents=True)
@@ -47,6 +47,16 @@ fi
 '''); curl.chmod(0o755)
     uname = tools / 'uname'
     uname.write_text('#!/bin/sh\ncase "$1" in -s) echo "${PLATFORM:-Linux}";; -m) echo "${ARCH:-x86_64}";; esac\n'); uname.chmod(0o755)
+    for command in ['mktemp', 'mv']:
+        real = shutil.which(command)
+        wrapper = tools / command
+        wrapper.write_text(f'''#!/bin/sh
+if [ "${{FAIL_RECEIPT:-}}" = {command} ]; then
+    case "$*" in *RELEASE.json*) printf 'injected receipt failure\\n' >&2; exit 1 ;; esac
+fi
+exec "{real}" "$@"
+''')
+        wrapper.chmod(0o755)
     env = dict(os.environ, PATH=str(tools) + ':' + os.environ['PATH'], HOME=str(root / 'home'),
                FIXTURES=str(root), RECEIPTS=str(root / 'requests'))
     def install(*args, extra=None):
@@ -65,6 +75,15 @@ fi
     result = install('--tag', 'v0.3.18')
     assert result.returncode == 0 and result.stdout == 'st3-fixture\n' and result.stderr == '', result
     assert json.loads((installed / 'RELEASE.json').read_text())['tag'] == 'v0.3.18'
+    # Optional metadata failures must not turn a committed installation into a
+    # failure, skip launch, overwrite the previous receipt, or leave staging files.
+    previous_receipt = (installed / 'RELEASE.json').read_bytes()
+    for failure in ['version', 'mktemp', 'mv']:
+        result = install('--tag', 'v0.3.19', extra={'FAIL_RECEIPT': failure})
+        assert result.returncode == 0 and result.stdout == 'st3-fixture\n', (failure, result)
+        assert result.stderr == 'install: warning: release receipt unavailable; continuing with the installed binary\n', (failure, result)
+        assert (installed / 'RELEASE.json').read_bytes() == previous_receipt
+        assert not list(installed.glob('RELEASE.json.*')), failure
     (installed / 'fractal').unlink()
     (installed / 'fractal').write_text('foreign command')
     result = install('--no-run')
