@@ -138,6 +138,19 @@ class SelectionTest(unittest.TestCase):
                 self.module.run(['gh', 'api', 'test'], capture=True, timeout=120)
         self.assertEqual(run.call_args.kwargs['timeout'], 2)
 
+    def test_successful_gh_call_still_checks_selection_deadline(self):
+        self.module.SELECTION_DEADLINE = 12
+        with patch.object(self.module.time, 'monotonic', side_effect=[10, 10, 12]), \
+                patch.object(self.module.subprocess, 'run', return_value=self.response({})) as run, \
+                patch.object(self.module.candidate_sandbox, 'run',
+                             side_effect=AssertionError('selection must use bounded host route')):
+            with self.assertRaises(self.module.SelectionDeadline):
+                self.module.run(['gh', 'api', 'test'], capture=True, timeout=120)
+        self.assertEqual(run.call_args.kwargs['timeout'], 2)
+
+    def test_merged_signature_version_invalidates_both_parent_versions(self):
+        self.assertGreater(self.module.INTEGRATOR_VERSION, 8)
+
     def test_deadline_propagates_through_permission_check(self):
         self.module.TRUST_MODE = 'collaborator-permission'
         with patch.object(self.module, 'run', side_effect=self.module.SelectionDeadline('expired')):
@@ -153,6 +166,7 @@ class SelectionTest(unittest.TestCase):
         with patch.object(self.module, 'run', side_effect=self.module.SelectionDeadline('expired')), \
                 patch.object(self.module, 'observe_served', side_effect=observed), \
                 patch.object(self.module, 'prepare_clone', side_effect=AssertionError('candidate mutated')), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.module.tick()
         row = json.loads((self.module.L / 'live-r3.jsonl').read_text())
