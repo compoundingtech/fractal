@@ -44,6 +44,28 @@ def shell_provenance(worktree):
             'note': ('Candidate flake differs; using the integrator pinned main toolchain until merged.'
                      if differs else 'Candidate flake matches the integrator pinned main toolchain.')}
 
+
+def prepare_removal(snapshot, snapshot_root):
+    """Unseal private snapshot directories, never hardlinked payloads or link targets."""
+    snapshot, root = Path(snapshot), Path(snapshot_root)
+    if (not snapshot.is_absolute() or not root.is_absolute() or snapshot.parent != root
+            or root.resolve(strict=True) != root
+            or not re.fullmatch(r'[0-9a-f]{40}-[0-9]+', snapshot.name)):
+        raise RuntimeError('cleanup target must be a direct revision/PID child of the snapshot root')
+    if snapshot.is_symlink():
+        raise RuntimeError('cleanup snapshot must not be a symlink')
+    if not snapshot.exists():
+        return
+    if not snapshot.is_dir():
+        raise RuntimeError('cleanup snapshot must be a directory')
+    snapshot.chmod(stat.S_IMODE(snapshot.stat().st_mode) | stat.S_IRWXU)
+    for _, directories, _, fd in os.fwalk(snapshot, topdown=True, follow_symlinks=False):
+        for name in directories:
+            mode = os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode
+            if stat.S_ISDIR(mode):
+                os.chmod(name, stat.S_IMODE(mode) | stat.S_IRWXU,
+                         dir_fd=fd, follow_symlinks=False)
+
 NIX_OPTIONS = ['--option', 'pure-eval', 'true', '--option', 'sandbox', 'true',
                '--option', 'builders', '', '--option', 'accept-flake-config', 'false']
 
@@ -256,6 +278,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check-config', action='store_true')
     parser.add_argument('--print-policy', action='store_true')
+    parser.add_argument('--prepare-removal')
+    parser.add_argument('--snapshot-root')
     parser.add_argument('--worktree')
     parser.add_argument('--directory')
     parser.add_argument('--shell', choices=('web', 'genie'))
@@ -268,6 +292,11 @@ def main():
         print(DEPENDENCY_POLICY)
         return 0
     try:
+        if options.prepare_removal:
+            if not options.snapshot_root:
+                parser.error('--prepare-removal requires --snapshot-root')
+            prepare_removal(options.prepare_removal, options.snapshot_root)
+            return 0
         validate_configuration()
         if options.check_config:
             return 0

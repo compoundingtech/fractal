@@ -38,6 +38,8 @@ class SnapshotLeaseTest(unittest.TestCase):
 import json, os, pathlib, sys
 args = sys.argv[1:]
 if args and pathlib.Path(args[0]).name == 'candidate_sandbox.py':
+    if args[1:2] == ['--prepare-removal']:
+        os.execv(sys.executable, [sys.executable, *args])
     args = args[1:]
     root = pathlib.Path(os.environ['SNAPSHOT_LEASE_FIXTURE'])
     with (root / 'sandbox-calls.jsonl').open('a') as stream:
@@ -101,6 +103,10 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
 (build / 'launch.sh').write_text('#!/bin/sh\\n')
 (build / 'build-receipt.json').write_text(json.dumps({
     'buildIdentity': {'rev': sha, 'dirty': False}, 'stackHead': sha}))
+sealed = pathlib.Path('.devenv/pnpm-source-inputs/sealed')
+sealed.mkdir(parents=True)
+(sealed / 'payload').write_text('published source input')
+sealed.chmod(0o500)
 ''')
             git.chmod(0o755)
             node.chmod(0o755)
@@ -113,7 +119,8 @@ try:
     os.getcwd()
 except FileNotFoundError:
     raise SystemExit("command wrapper refuses deleted cwd")
-if os.environ.get("SNAPSHOT_CLEANUP_FAIL_LOCK") == "1" and sys.argv[-1].endswith(".lock"):
+if (os.environ.get("SNAPSHOT_CLEANUP_FAIL_LOCK") == "1" and sys.argv[-1].endswith(".lock")
+        and pathlib.Path(sys.argv[-1]).name.startswith(os.environ["SNAPSHOT_LEASE_SHA"] + "-")):
     raise SystemExit("injected recoverable lock-file cleanup failure")
 os.execv({shutil.which('rm')!r}, ["rm", *sys.argv[1:]])
 ''')
@@ -167,6 +174,11 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                 original_stat = dependency.stat()
                 self.assertNotEqual(original_stat.st_ino, (source / 'node_modules/fixture/index.js').stat().st_ino)
                 self.assertEqual((live_snapshot / 'node_modules/fixture/index.js').stat().st_ino, original_stat.st_ino)
+                stale_snapshot = snapshot_root / 'shared' / ('c' * 40 + '-123')
+                stale_sealed = stale_snapshot / '.devenv/pnpm-source-inputs/sealed'
+                stale_sealed.mkdir(parents=True)
+                (stale_sealed / 'payload').write_text('stale sealed input')
+                stale_sealed.chmod(0o500)
                 with (generation / '.lease').open() as lease:
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -183,6 +195,7 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                 self.assertEqual(dependency.read_text(), '// synthetic fixture\n')
                 self.assertEqual(dependency.stat().st_ino, original_stat.st_ino)
                 self.assertEqual(dependency.stat().st_mtime_ns, original_stat.st_mtime_ns)
+                self.assertEqual(dependency.stat().st_mode, original_stat.st_mode)
                 receipt = json.loads((fixture / 'build-root-b/shared/builds' / second_sha / 'build-receipt.json').read_text())
                 self.assertEqual(receipt['dependencyKey'], second_key)
                 self.assertEqual(receipt['dependencyFiles'], {'linked': 1, 'copied': 0})
@@ -193,6 +206,9 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                 logged = json.loads((fixture / 'build-root-b/shared/builds.jsonl').read_text())
                 self.assertEqual(logged['outcome'], 'built')
                 self.assertIn('cannot remove snapshot lock file', logged['cleanupWarnings'])
+                self.assertNotIn('cannot remove snapshot worktree', logged['cleanupWarnings'])
+                self.assertFalse(any(p.is_dir() for p in (snapshot_root / 'shared').glob(second_sha + '-*')))
+                self.assertFalse(stale_snapshot.exists(), 'stale sealed snapshot was not reclaimed')
                 calls = [json.loads(line) for line in (fixture / 'git-calls.jsonl').read_text().splitlines()]
                 self.assertFalse(any(args[:2] == ['worktree', 'remove'] and args[3] == str(live_snapshot)
                                      for args in calls))

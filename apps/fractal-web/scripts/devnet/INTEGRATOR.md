@@ -113,6 +113,11 @@ snapshot's lock non-blocking, so runs with different build roots can safely shar
 the snapshot namespace. Host Git remains the deployment's PATH Git, including its
 worktree-location policy. The source clone need not share the snapshot filesystem;
 the immutable dependency cache must share it.
+Finish and stale reclamation restore owner access on private snapshot directory
+inodes before removing the worktree: source-input publication can seal directories
+inside an otherwise writable snapshot. Cleanup accepts only a direct revision/PID
+child of the canonical snapshot namespace and never traverses symlinks. It does
+not chmod regular files, whose inodes may be hardlinked to the immutable cache.
 
 `dependency_cache.py` first computes the original public digest by hashing each
 relative path followed by its bytes, in this exact order: `pnpm-lock.yaml`,

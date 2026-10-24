@@ -96,7 +96,12 @@ finish() {
   fi
   rm -f "$P/admitted-$$" "$P/overlay-manifest-$$" || cleanup_warning 'cannot remove temporary admission/overlay files'
   if [[ -n $snapshot ]]; then
-    git -C "$SOURCE" worktree remove --force "$snapshot" || cleanup_warning 'cannot remove snapshot worktree; later stale reclamation can retry'
+    if python3 "$script_dir/candidate_sandbox.py" --prepare-removal "$snapshot" --snapshot-root "$snapshot_root"; then
+      git -C "$SOURCE" worktree remove --force "$snapshot" ||
+        { rm -rf -- "$snapshot" || cleanup_warning 'cannot remove snapshot worktree; later stale reclamation can retry'; }
+    else
+      cleanup_warning 'cannot safely unseal snapshot directories; later stale reclamation can retry'
+    fi
   fi
   [[ -z $snapshot_lock ]] || rm -f -- "$snapshot_lock" || cleanup_warning 'cannot remove snapshot lock file'
   log_run || cleanup_warning 'cannot append build log'
@@ -132,7 +137,11 @@ for stale in "$snapshot_root"/*; do
   (
     exec 7>"$stale.lock"
     if flock -n 7; then
-      git -C "$SOURCE" worktree remove --force "$stale" || rm -rf -- "$stale"
+      if python3 "$script_dir/candidate_sandbox.py" --prepare-removal "$stale" --snapshot-root "$snapshot_root"; then
+        git -C "$SOURCE" worktree remove --force "$stale" || rm -rf -- "$stale"
+      else
+        cleanup_warning 'cannot safely unseal stale snapshot directories'
+      fi
       rm -f -- "$stale.lock"
     fi
   )

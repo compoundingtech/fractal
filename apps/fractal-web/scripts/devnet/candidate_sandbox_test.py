@@ -31,6 +31,39 @@ class RunnerTest(unittest.TestCase):
         self.tools.start()
         self.addCleanup(self.tools.stop)
 
+    def test_snapshot_unsealing_preserves_payloads_and_symlink_targets(self):
+        root = self.root / 'snapshots'
+        snapshot = root / ('a' * 40 + '-123')
+        sealed = snapshot / 'published/child'
+        sealed.mkdir(parents=True)
+        payload = self.root / 'cache-payload'
+        payload.write_text('immutable dependency')
+        payload.chmod(0o444)
+        os.link(payload, sealed / 'payload')
+        outside = self.root / 'outside'
+        outside.mkdir()
+        outside.chmod(0o500)
+        (snapshot / 'outside-link').symlink_to(outside, target_is_directory=True)
+        sealed.chmod(0o000)
+        (snapshot / 'published').chmod(0o500)
+        sandbox.prepare_removal(snapshot, root)
+        self.assertEqual(payload.stat().st_mode & 0o777, 0o444)
+        self.assertEqual(outside.stat().st_mode & 0o777, 0o500)
+        self.assertEqual(sealed.stat().st_mode & 0o700, 0o700)
+        sandbox.shutil.rmtree(snapshot)
+        self.assertTrue(outside.exists())
+        outside.chmod(0o700)
+
+    def test_snapshot_unsealing_rejects_escaping_or_symlink_roots(self):
+        root = self.root / 'snapshots'
+        root.mkdir()
+        snapshot = root / ('a' * 40 + '-123')
+        snapshot.symlink_to(self.worktree, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, 'must not be a symlink'):
+            sandbox.prepare_removal(snapshot, root)
+        with self.assertRaisesRegex(RuntimeError, 'direct revision/PID child'):
+            sandbox.prepare_removal(self.worktree, root)
+
     def test_default_networkless_and_environment_allowlist(self):
         with patch.dict(os.environ, {'GH_CONFIG_DIR': '/secret', 'ST_SECRET': 'bad', 'SCG_SECRET': 'bad'}), \
                 patch.object(sandbox.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as execute:
