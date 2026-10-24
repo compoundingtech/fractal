@@ -395,7 +395,8 @@ def regenerate():
     # prepare_dependencies materializes locked members; the genie shell no longer does.
     run(['nice', '-n', '19', 'genie', '--defer-validation'], cwd=C,
         timeout=1800, sandbox_shell='genie')
-    run(['nice', '-n', '19', 'pnpm', 'install', '--lockfile-only', '--no-frozen-lockfile'],
+    run(['nice', '-n', '19', 'pnpm', 'install', '--store-dir', candidate_sandbox.PNPM_STORE_PATH,
+         '--lockfile-only', '--no-frozen-lockfile'],
         cwd=C, timeout=900, sandbox_shell='web', network=True)
     run(['nice', '-n', '19', 'genie'], cwd=C, timeout=1800, sandbox_shell='genie')
     install()  # license generator requires the frozen installed manifests
@@ -447,14 +448,15 @@ def digest(root):
 def stamp(private_hash):
     git('commit','--allow-empty','-m','live-r3: production integration','-m',f'Public client/private server; private overlay SHA256: {private_hash}')
 def install():
-    inputs=hashlib.sha256(str(DEPENDENCY_SANDBOX_VERSION).encode())
+    inputs=hashlib.sha256(f'{DEPENDENCY_SANDBOX_VERSION}:{candidate_sandbox.INSTALL_POLICY}'.encode())
     for path in ('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'megarepo.kdl',
                  'megarepo.lock', 'pnpm-source-inputs.json'):
         inputs.update(path.encode()); inputs.update((C/path).read_bytes())
     lockhash=inputs.hexdigest()
     state=L/f'{C.name}-lockhash'
     if not (C/'node_modules').exists() or not state.exists() or state.read_text()!=lockhash:
-        run(['nice','-n','19','pnpm','install','--prefer-offline','--frozen-lockfile'],
+        run(['nice','-n','19','pnpm','install','--store-dir',candidate_sandbox.PNPM_STORE_PATH,
+             '--prefer-offline','--frozen-lockfile'],
             cwd=C, timeout=900, sandbox_shell='web', network=True)
         state.write_text(lockhash)
 def build(name):

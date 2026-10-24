@@ -16,6 +16,8 @@ import tempfile
 
 
 DEPENDENCY_POLICY = 'bwrap-v1'
+INSTALL_POLICY = 'external-pnpm-store-v1'
+PNPM_STORE_PATH = '/sandbox/pnpm-store'
 TRUSTED_CHECKOUT = Path(__file__).resolve().parents[4]
 
 
@@ -189,7 +191,7 @@ def run(args, *, worktree, shell=None, network=False, output=None,
                     '--tmpfs', str(host_home),
                     '--dir', '/sandbox', '--ro-bind', str(script), '/sandbox/environment.sh',
                     '--bind', str(worktree), str(worktree),
-                    '--ro-bind' if readonly_dependencies else '--bind', str(store), str(store)]
+                    '--ro-bind' if readonly_dependencies else '--bind', str(store), PNPM_STORE_PATH]
         # Node/pnpm lifecycle scripts use /bin/sh, and workspace scripts commonly
         # use /usr/bin/env shebangs. Both resolve only to trusted pinned tools.
         command += ['--dir', '/bin', '--dir', '/usr/bin',
@@ -235,7 +237,7 @@ def run(args, *, worktree, shell=None, network=False, output=None,
             command += ['--bind', str(staged), str(output.parent)]
         environment = {'HOME': '/tmp/home', 'TMPDIR': '/tmp/work', 'LANG': 'C.UTF-8', 'CI': '1',
                        'PATH': ':'.join(sorted({str(Path(v).parent) for v in binaries.values()})),
-                       'PNPM_STORE_DIR': str(store), 'npm_config_store_dir': str(store),
+                       'PNPM_STORE_DIR': PNPM_STORE_PATH, 'npm_config_store_dir': PNPM_STORE_PATH,
                        'MEGAREPO_STORE': str(worktree / '.devenv' / 'candidate-members'),
                        'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_SYSTEM': '/dev/null',
                        'GIT_OPTIONAL_LOCKS': '0',

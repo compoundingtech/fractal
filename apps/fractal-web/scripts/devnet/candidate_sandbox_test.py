@@ -79,6 +79,9 @@ class RunnerTest(unittest.TestCase):
         self.assertIn(str(self.worktree / '.devenv/candidate-members'), argv)
         self.assertIn('--remount-ro', argv)
         self.assertIn('--chmod', argv)
+        position = argv.index(str(self.store))
+        self.assertEqual(argv[position + 1], sandbox.PNPM_STORE_PATH)
+        self.assertEqual(argv.count(str(self.store)), 1, 'host store path leaked into runtime environment')
         certificate = Path('/etc/ssl/certs/ca-certificates.crt')
         if certificate.exists():
             self.assertIn(str(certificate.resolve()), argv)
@@ -208,6 +211,53 @@ class ConfigurationTest(unittest.TestCase):
 
 @unittest.skipUnless(REAL, 'use --real for pinned bubblewrap isolation smoke')
 class IsolationTest(unittest.TestCase):
+    def test_install_uses_external_store_and_generation_has_no_local_store(self):
+        import io
+        import tarfile
+        import dependency_cache
+        with tempfile.TemporaryDirectory(prefix='external-store-') as fixture:
+            root = Path(fixture)
+            worktree = root / 'candidate'
+            worktree.mkdir()
+            (worktree / 'package.json').write_text(sandbox.json.dumps({
+                'name': 'sandbox-store-fixture', 'version': '1.0.0', 'private': True,
+                'packageManager': 'pnpm@12.7.0',
+                'dependencies': {'fixture-dependency': 'file:fixture.tgz'}}))
+            (worktree / 'pnpm-workspace.yaml').write_text('packages: []\n')
+            (worktree / 'pnpm-source-inputs.json').write_text('{"sourceInputPaths": []}')
+            with tarfile.open(worktree / 'fixture.tgz', 'w:gz') as archive:
+                for name, content in (
+                        ('package/package.json', '{"name":"fixture-dependency","version":"1.0.0","main":"index.js"}'),
+                        ('package/index.js', 'module.exports = "installed-from-external-store";')):
+                    payload = content.encode()
+                    entry = tarfile.TarInfo(name)
+                    entry.size = len(payload)
+                    archive.addfile(entry, io.BytesIO(payload))
+            store = root / 'pnpm'
+            sandbox.tools.cache_clear()
+            self.addCleanup(sandbox.tools.cache_clear)
+            with patch.dict(os.environ, {'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                    'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(root / 'state'),
+                    'FRACTAL_INTEGRATOR_PNPM_STORE': str(store)}):
+                command = ['pnpm', 'install', '--offline', '--ignore-scripts', '--no-frozen-lockfile']
+                sandbox.run([*command, '--store-dir', 'node_modules/.pnpm-store'],
+                            worktree=worktree, shell='web', check=True)
+                self.assertTrue((worktree / 'node_modules/.pnpm-store').is_dir())
+                sandbox.run([*command, '--store-dir', sandbox.PNPM_STORE_PATH],
+                            worktree=worktree, shell='web', check=True)
+                sandbox.run(['node', '-e', 'if(require("fixture-dependency") !== "installed-from-external-store") process.exit(1)'],
+                            worktree=worktree, shell='web', check=True)
+            self.assertTrue(any(store.rglob('*')), 'configured external store was not populated')
+            self.assertFalse((worktree / 'node_modules/.pnpm-store').exists())
+            for name in dependency_cache.INSTALL_INPUTS:
+                if not (worktree / name).exists():
+                    (worktree / name).write_text('fixture\n')
+            cache = root / sandbox.DEPENDENCY_POLICY
+            cache.mkdir()
+            key = dependency_cache.install_key(worktree)
+            dependency_cache.populate(worktree, cache, key)
+            self.assertFalse(list((cache / key).rglob('.pnpm-store')))
+
     def test_candidate_path_input_is_not_imported_or_exposed(self):
         with tempfile.TemporaryDirectory(prefix='sentinel-', dir=os.environ.get('TMPDIR')) as fixture:
             root = Path(fixture)
@@ -284,7 +334,7 @@ class IsolationTest(unittest.TestCase):
                          '[[ $("$1/lifecycle") == lifecycle-ok ]]\n'
                          'printf allowed > "$1/sandbox-write"\n'
                          'env\n')
-                result = sandbox.run([binaries['bash'], '-euc', probe, 'probe', str(worktree), str(private), str(modules), str(store), str(Path.home())],
+                result = sandbox.run([binaries['bash'], '-euc', probe, 'probe', str(worktree), str(private), str(modules), sandbox.PNPM_STORE_PATH, str(Path.home())],
                                      worktree=worktree, readonly_dependencies=True, capture_output=True, text=True, check=True)
             names = {line.partition('=')[0] for line in result.stdout.splitlines()}
             forbidden = ('GH_', 'ST_', 'FRACTAL_', 'AGENT_POLICY_', 'OP_PROXY', 'SCG_', 'SSH_')

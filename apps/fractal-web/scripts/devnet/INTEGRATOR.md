@@ -51,6 +51,17 @@ deployment-owned resources; scripts do not provision deployments or credentials.
 | `FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT` | Absolute, deployment-owned bootstrap scratch directory outside candidate clones and snapshots |
 | `FRACTAL_INTEGRATOR_PNPM_STORE` | Absolute, dedicated writable pnpm package cache outside candidate clones; must contain no credentials |
 
+The configured package store is mounted only in candidate children at
+`/sandbox/pnpm-store`; trusted install invocations pass that path with pnpm's
+explicit `--store-dir` option. Runtime store variables are child-only, never
+exported into the integrator, follower, trusted Nix realization, or ordinary
+developer builds. The store is shared between untrusted candidates and must
+never be configured as a trusted build's store. Existing install receipts are
+invalidated when the install policy changes, so candidate-local stores are not
+silently carried into new dependency generations. The immutable dependency cache
+remains in the `bwrap-v1` namespace and copies installed packages, not the external
+content-addressed package store.
+
 Run `python3 apps/fractal-web/scripts/devnet/integrator.py` for the five-minute
 loop, or append `--once` for one tick. `--dry-run` additionally requires
 `FRACTAL_DRY_RUN_CLONE`; it merges and regenerates dependencies without building
