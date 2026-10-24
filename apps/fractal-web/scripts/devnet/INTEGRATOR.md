@@ -8,11 +8,19 @@ members with the effect-utils revision from `flake.lock`, and installs changed
 workspace dependencies in the web shell. Both scripts write JSONL operational
 logs. The follower includes failed install output in its log.
 
-The integrator resolves the web dev-shell environment with Nix, then runs its
-shell hook and frozen install inside the candidate sandbox. The hook publishes
-`.devenv/pnpm-source-inputs` before `pnpm install --prefer-offline --frozen-lockfile`.
-The generated-metadata cache includes `pnpm-source-inputs.json`; the sandbox policy
-version invalidates old dependency caches when adopting this boundary.
+The integrator resolves web/genie dev shells **only from its trusted, pinned main
+launcher checkout**, never from the candidate's flake. Candidate shell definitions
+and flake inputs are not evaluated on the host. All hooks, generators, installs,
+and application builds run inside bubblewrap. A candidate that needs a new
+toolchain builds with the old pinned main toolchain until that change is merged
+and the launcher pin is updated. `build-receipt.json` records `devShell.source`,
+SHA256 pairs for `flake.nix` and `flake.lock`, `candidateDiffers`, and an explicit
+toolchain-mismatch note. This divergence is informational, not a fallback to
+candidate evaluation.
+The trusted hook publishes `.devenv/pnpm-source-inputs` before
+`pnpm install --prefer-offline --frozen-lockfile`. The generated-metadata cache
+includes `pnpm-source-inputs.json`; the sandbox policy version invalidates old
+dependency caches when adopting this boundary.
 
 ## Integrator inputs
 

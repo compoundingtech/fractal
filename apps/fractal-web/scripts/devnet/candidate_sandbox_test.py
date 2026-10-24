@@ -52,9 +52,34 @@ class RunnerTest(unittest.TestCase):
             sandbox.run(['pnpm', 'install'], worktree=self.worktree, shell='web', network=True)
         bootstrap, confined = execute.call_args_list
         self.assertIn('print-dev-env', bootstrap.args[0])
+        self.assertEqual(bootstrap.kwargs['cwd'], sandbox.TRUSTED_CHECKOUT)
+        self.assertNotEqual(bootstrap.kwargs['cwd'], self.worktree)
         self.assertNotIn('GH_CONFIG_DIR', bootstrap.kwargs['env'])
         self.assertIn('--share-net', confined.args[0])
         self.assertIn('source /sandbox/environment.sh', ' '.join(confined.args[0]))
+
+    def test_candidate_flake_is_never_evaluated_on_host(self):
+        (self.worktree / 'flake.nix').write_text('throw "candidate must never be evaluated"')
+        for shell in ('web', 'genie'):
+            with self.subTest(shell=shell), patch.object(sandbox.subprocess, 'run', side_effect=[
+                    subprocess.CompletedProcess([], 0, ''),
+                    subprocess.CompletedProcess([], 0)]) as execute:
+                sandbox.run(['true'], worktree=self.worktree, shell=shell)
+            host = execute.call_args_list[0]
+            self.assertEqual(host.kwargs['cwd'], sandbox.TRUSTED_CHECKOUT)
+            self.assertEqual(host.args[0][-1], f'.#{shell}')
+            self.assertNotIn(str(self.worktree), host.args[0])
+
+    def test_shell_provenance_reports_candidate_drift(self):
+        for name in ('flake.nix', 'flake.lock'):
+            (self.worktree / name).write_bytes((sandbox.TRUSTED_CHECKOUT / name).read_bytes())
+        self.assertFalse(sandbox.shell_provenance(self.worktree)['candidateDiffers'])
+        (self.worktree / 'flake.nix').write_text('throw "not evaluated"')
+        receipt = sandbox.shell_provenance(self.worktree)
+        self.assertTrue(receipt['candidateDiffers'])
+        self.assertIn('until merged', receipt['note'])
+        self.assertNotEqual(receipt['files']['flake.nix']['trustedSha256'],
+                            receipt['files']['flake.nix']['candidateSha256'])
 
     def test_output_is_promoted_only_after_success(self):
         output = self.root / 'production/builds/revision'
@@ -118,6 +143,39 @@ class ConfigurationTest(unittest.TestCase):
 
 @unittest.skipUnless(REAL, 'use --real for pinned bubblewrap isolation smoke')
 class IsolationTest(unittest.TestCase):
+    def test_candidate_path_input_is_not_imported_or_exposed(self):
+        with tempfile.TemporaryDirectory(prefix='sentinel-', dir=os.environ.get('TMPDIR')) as fixture:
+            root = Path(fixture)
+            secret = root / 'candidate-only-private-input'
+            secret.mkdir()
+            sentinel = 'candidate-secret-' + os.urandom(24).hex()
+            (secret / 'sentinel').write_text(sentinel)
+            worktree = root / 'candidate'
+            worktree.mkdir()
+            (worktree / 'flake.nix').write_text(
+                '{ inputs.secret = { url = "path:' + str(secret) + '"; flake = false; };'
+                ' outputs = { self, secret }: { devShells.x86_64-linux.web = '
+                'builtins.trace (builtins.readFile (secret + "/sentinel")) '
+                '(throw "candidate flake evaluated"); }; }')
+            # Compute the would-be store path without adding it to the store.
+            expected = subprocess.run(['nix-store', '--print-fixed-path', '--recursive', 'sha256',
+                                       subprocess.run(['nix', 'hash', 'path', '--type', 'sha256', '--base32', str(secret)],
+                                                      check=True, capture_output=True, text=True).stdout.strip(),
+                                       secret.name], check=True, capture_output=True, text=True).stdout.strip()
+            self.assertFalse(Path(expected).exists())
+            sandbox.tools.cache_clear()
+            self.addCleanup(sandbox.tools.cache_clear)
+            with patch.dict(os.environ, {'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                    'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(root / 'state'),
+                    'FRACTAL_INTEGRATOR_PNPM_STORE': str(root / 'pnpm')}):
+                result = sandbox.run(['bash', '-euc', '[[ ! -e "$1" && ! -e "$2" ]]; printf shell-ok',
+                                      'probe', str(secret), expected],
+                                     worktree=worktree, shell='web', capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('shell-ok', result.stdout)
+            self.assertNotIn(sentinel, result.stdout + result.stderr)
+            self.assertFalse(Path(expected).exists(), 'candidate-only path input imported into store')
+
     def test_real_filesystem_environment_and_readonly_dependencies(self):
         # Sentinels deliberately live under the operator HOME, outside the clone.
         with tempfile.TemporaryDirectory(prefix='.fractal-sandbox-secret-', dir=Path.home()) as private, \

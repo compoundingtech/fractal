@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed Linux confinement for candidate-controlled preparation and builds."""
 import argparse
+import hashlib
 import functools
 import json
 import os
@@ -13,6 +14,21 @@ import tempfile
 
 
 DEPENDENCY_POLICY = 'bwrap-v1'
+TRUSTED_CHECKOUT = Path(__file__).resolve().parents[4]
+
+
+def shell_provenance(worktree):
+    """Record toolchain drift without evaluating any candidate Nix expression."""
+    files = {}
+    for name in ('flake.nix', 'flake.lock'):
+        trusted = hashlib.sha256((TRUSTED_CHECKOUT / name).read_bytes()).hexdigest()
+        candidate_path = Path(worktree) / name
+        candidate = hashlib.sha256(candidate_path.read_bytes()).hexdigest() if candidate_path.is_file() else None
+        files[name] = {'trustedSha256': trusted, 'candidateSha256': candidate}
+    differs = any(item['trustedSha256'] != item['candidateSha256'] for item in files.values())
+    return {'source': 'trusted-launcher-checkout', 'files': files, 'candidateDiffers': differs,
+            'note': ('Candidate flake differs; using the integrator pinned main toolchain until merged.'
+                     if differs else 'Candidate flake matches the integrator pinned main toolchain.')}
 
 NIX_OPTIONS = ['--option', 'pure-eval', 'true', '--option', 'sandbox', 'true',
                '--option', 'builders', '', '--option', 'accept-flake-config', 'false']
@@ -48,7 +64,7 @@ def tools():
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     store.mkdir(parents=True, exist_ok=True)
     # This file belongs to the trusted launcher checkout, never the candidate.
-    lock = json.loads((Path(__file__).resolve().parents[4] / 'flake.lock').read_text())
+    lock = json.loads((TRUSTED_CHECKOUT / 'flake.lock').read_text())
     pin = lock['nodes']['nixpkgs']['locked']
     if pin.get('owner') != 'NixOS' or pin.get('repo') != 'nixpkgs' or not re.fullmatch(r'[0-9a-f]{40}', pin['rev']):
         raise RuntimeError('trusted launcher flake.lock must pin NixOS/nixpkgs')
@@ -115,7 +131,7 @@ def run(args, *, worktree, shell=None, network=False, output=None,
         script.write_text('')
         if shell:
             result = subprocess.run([shutil.which('nix'), 'print-dev-env', *NIX_OPTIONS,
-                                     '--no-write-lock-file', f'.#{shell}'], cwd=worktree,
+                                     '--no-write-lock-file', f'.#{shell}'], cwd=TRUSTED_CHECKOUT,
                                     env=bootstrap_env(scratch), check=True, capture_output=True, text=True)
             script.write_text(result.stdout)
         command = [binaries['bwrap'], '--die-with-parent', '--new-session', '--unshare-all',

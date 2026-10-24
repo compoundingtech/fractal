@@ -188,11 +188,14 @@ else
 fi
 cp "$P/overlay-manifest-$$" "$build/overlay-snapshot.json"
 reason=receipt-invalid
-python3 - "$build/build-receipt.json" "$sha" "$build/overlay-snapshot.json" <<'PY'
+python3 - "$build/build-receipt.json" "$sha" "$build/overlay-snapshot.json" "$script_dir" "$snapshot" <<'PY'
 import json,sys
+sys.path.insert(0, sys.argv[4])
+import candidate_sandbox
 r=json.load(open(sys.argv[1])); assert r['buildIdentity']['rev']==sys.argv[2] and r['buildIdentity']['dirty'] is False and r['stackHead']==sys.argv[2]
 manifest=json.load(open(sys.argv[3]))
 r.update(dependencyKey=manifest['dependencyKey'],dependencyFiles=manifest['dependencyFiles'])
+r['devShell'] = candidate_sandbox.shell_provenance(sys.argv[5])
 with open(sys.argv[1],'w') as f: f.write(json.dumps(r,indent=2)+'\n')
 PY
 chmod +x "$build/launch.sh"
