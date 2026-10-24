@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import type { AttachmentPort, Grants } from '../data/source.ts'
+import type { AttachmentPort, ConversationPortResult, Grants } from '../data/source.ts'
 import { composerSendBinding, imageUploadAdapter, sendFailureDetail } from './composerSend.ts'
-import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
+import { ActionResult, decodeUnknownSync, type BlobUpload } from '@fractal/client/schema'
 import { createComposerDraftSession, createLocalComposerDraftStore } from './composerDrafts.ts'
 import { createComposerDraftAdapter } from './composerDraftAdapter.ts'
 
@@ -133,8 +133,9 @@ describe('composer send contract', () => {
     const pending = await adapter.add({ file })
     // Drafting never uploads; only the send does.
     expect(upload).not.toHaveBeenCalled()
-    const complete = await adapter.send(pending)
-    expect(upload).toHaveBeenCalledWith({ bytes: file, mediaType: 'image/png' })
+    const controller = new AbortController()
+    const complete = await adapter.send(pending, { signal: controller.signal })
+    expect(upload).toHaveBeenCalledWith({ bytes: file, mediaType: 'image/png', signal: controller.signal })
     const binding = composerSendBinding({ source: { attachments: { capabilities: vi.fn(), upload, chunk: vi.fn(), send } }, agentRef: seat, grants, readable: true, items: [], onRefused: vi.fn(), attachmentAdapter: adapter })
     expect(binding.runtime.adapters?.attachments).toBe(adapter)
     expect(binding.imageAttachments).toEqual({ max: 4 })
@@ -147,6 +148,47 @@ describe('composer send contract', () => {
     const adapter = imageUploadAdapter(upload)
     const pending = await adapter.add({ file: new File([new Uint8Array([1])], 'screen.webp', { type: 'image/webp' }) })
     await expect(adapter.send(pending)).rejects.toThrow('This device is not granted attachment upload.')
+  })
+
+  it('does not start an upload when composer send is already canceled', async () => {
+    const upload = vi.fn<AttachmentPort['upload']>()
+    const adapter = imageUploadAdapter(upload)
+    const pending = await adapter.add({ file: new File(['image'], 'screen.png', { type: 'image/png' }) })
+    const controller = new AbortController()
+    controller.abort()
+    await expect(adapter.send(pending, { signal: controller.signal })).rejects.toBe(controller.signal.reason)
+    expect(upload).not.toHaveBeenCalled()
+  })
+
+  it('preserves a pending upload abort as cancellation instead of an upload failure', async () => {
+    const started = Promise.withResolvers<void>()
+    const result = Promise.withResolvers<ConversationPortResult<BlobUpload>>()
+    const upload = vi.fn<AttachmentPort['upload']>(({ signal }) => {
+      signal?.addEventListener('abort', () => result.reject(signal.reason), { once: true })
+      started.resolve()
+      return result.promise
+    })
+    const adapter = imageUploadAdapter(upload)
+    const pending = await adapter.add({ file: new File(['image'], 'screen.png', { type: 'image/png' }) })
+    const controller = new AbortController()
+    const sending = adapter.send(pending, { signal: controller.signal })
+    await started.promise
+    controller.abort()
+    await expect(sending).rejects.toBe(controller.signal.reason)
+  })
+
+  it.each(['Success', 'Refused'] as const)('does not attach or report a late %s upload result after cancellation', async (tag) => {
+    const result = Promise.withResolvers<ConversationPortResult<BlobUpload>>()
+    const upload = vi.fn<AttachmentPort['upload']>(() => result.promise)
+    const adapter = imageUploadAdapter(upload)
+    const pending = await adapter.add({ file: new File(['image'], 'screen.png', { type: 'image/png' }) })
+    const controller = new AbortController()
+    const sending = adapter.send(pending, { signal: controller.signal })
+    controller.abort()
+    result.resolve(tag === 'Success'
+      ? { _tag: 'Success', value: { blob: `blob/${'a'.repeat(64)}`, sha256: 'a'.repeat(64), size: 5, media_type: 'image/png' } }
+      : { _tag: 'Refused', reason: 'failed', detail: 'Late failure must not replace cancellation' })
+    await expect(sending).rejects.toBe(controller.signal.reason)
   })
 
   it('refuses images over 10 MiB before upload, including drafts staged before validation', async () => {

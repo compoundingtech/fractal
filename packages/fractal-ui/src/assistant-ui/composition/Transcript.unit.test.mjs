@@ -76,7 +76,9 @@ test('a sent image is a named file card unless the host resolves it, and never a
   const cards = render(undefined)
   assert.match(cards, /role="group" aria-label="Image: layout.png, PNG"/)
   assert.match(cards, /role="group" aria-label="Image: Unnamed image, WebP"/)
-  assert.match(cards, /PNG · Size unavailable/)
+  assert.match(cards, /· PNG image/)
+  assert.match(cards, /· WebP image/)
+  assert.doesNotMatch(cards, /Size unavailable/)
   assert.doesNotMatch(cards, /<img/)
   // Only an id the host resolves loads; the other stays a card.
   const resolved = render(id => id === 'blob/layout' ? { _tag: 'Load', src: 'data:image/png;base64,AA==' } : { _tag: 'Defer' })

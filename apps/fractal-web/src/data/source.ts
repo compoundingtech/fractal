@@ -272,6 +272,7 @@ export interface AttachmentPort {
   readonly upload: (request: {
     readonly bytes: Blob | ArrayBuffer | Uint8Array
     readonly mediaType: BlobUpload['media_type']
+    readonly signal?: AbortSignal
   }) => Promise<ConversationPortResult<BlobUpload>>
   readonly chunk: (request: {
     readonly sha256: string

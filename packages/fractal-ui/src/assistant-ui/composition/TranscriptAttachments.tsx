@@ -12,8 +12,8 @@ const deferred: MarkdownImageResolution = { _tag: 'Defer' }
 const typeLabels: Readonly<Record<string, string>> = { 'image/png': 'PNG', 'image/jpeg': 'JPEG', 'image/gif': 'GIF', 'image/webp': 'WebP' }
 
 /**
- * A sent message's attachments. The kit never fetches one. By default each is a quiet file card named
- * `Image: <name>, <type>`; attachments carry no byte size, so the card says so rather than estimating one.
+ * A sent message's attachments. The kit never fetches one. By default each is a quiet, non-interactive file card
+ * named `Image: <name>, <type>`; attachments carry no byte size, so the card shows only the name and kind.
  * A host that can show the bytes resolves the attachment id through the transcript's `resolveImage`: the image
  * then fits within 320×240 (in the narrow layout, the full column up to 240 tall) with its aspect ratio kept,
  * and opens full size in a dialog. Attachments carry no dimensions, so no space is reserved before it loads.
@@ -34,9 +34,9 @@ function TranscriptAttachment({ attachment }: { readonly attachment: Attachment 
   const type = typeLabels[attachment.mediaType] ?? attachment.mediaType
   const resolution = image ? resolveImage?.(attachment.id) ?? deferred : deferred
   if (resolution._tag === 'Defer') return <span role="group" aria-label={`${image ? 'Image' : 'File'}: ${name}, ${type}`} data-testid="transcript-attachment" data-attachment-state="deferred" {...stylex.props(styles.card)}>
-    <Icon name="attach" />
+    <Icon name={image ? 'image' : 'attach'} />
     <span {...stylex.props(styles.cardName)}>{name}</span>
-    <span {...stylex.props(styles.cardDetail)}>{type} · Size unavailable</span>
+    <span {...stylex.props(styles.cardDetail)}>{`· ${image && type !== attachment.mediaType ? `${type} image` : type}`}</span>
   </span>
   return <>
     <Button aria-label={`Open ${name}`} data-testid="transcript-attachment-open" onPress={() => setOpen(true)} {...stylex.props(styles.open, narrow && styles.openNarrow)}>

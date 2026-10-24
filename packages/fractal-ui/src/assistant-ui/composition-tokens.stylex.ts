@@ -144,6 +144,8 @@ export const geometryVars = stylex.defineVars({
   modalMax: '448px', tooltipMax: '320px', descriptionColumns: 'minmax(90px, auto) minmax(0, 1fr)',
   /** Fit-within box for a sent image in the transcript; it opens full size on press. */
   imageMaxWidth: '320px', imageMaxHeight: '240px',
+  /** Widest a staged attachment chip grows to fit its name: narrower on phones, where the tray scrolls. */
+  attachmentMax: { default: '180px', '@media (min-width: 600px)': '240px' },
   detailsValueMin: '120px',
   statusWord: '80px',
   switchWidth: '32px', switchHeight: '18px', iconSm: '12px', statusDot: '6px',

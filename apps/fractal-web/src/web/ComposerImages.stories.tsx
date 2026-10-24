@@ -11,14 +11,30 @@ function ComposerImages({ scheme, slow = false, previewImages = false }: { reado
   const [receipts, setReceipts] = React.useState<readonly string[]>([])
   const [messages, setMessages] = React.useState<readonly (TextItem & { readonly role: 'user' })[]>([])
   const [blobUrls] = React.useState(() => new Map<string, string>())
-  const [transportFinished, setTransportFinished] = React.useState(false)
+  const [transport, setTransport] = React.useState<{ readonly _tag: 'Idle' | 'Pending' | 'Complete' } | { readonly _tag: 'Aborted'; readonly signalAborted: boolean }>({ _tag: 'Idle' })
   const [upload] = React.useState(() => {
     let finish!: () => void
     const pending = new Promise<void>(resolve => { finish = resolve })
     return { pending, finish }
   })
-  const [adapter] = React.useState(() => imageUploadAdapter(async ({ bytes, mediaType }) => {
-    if (slow) await upload.pending
+  const [adapter] = React.useState(() => imageUploadAdapter(async ({ bytes, mediaType, signal }) => {
+    signal?.throwIfAborted()
+    if (slow) {
+      if (signal === undefined) throw new Error('The live composer must supply an upload AbortSignal.')
+      setTransport({ _tag: 'Pending' })
+      // This controlled transport behaves like fetch: abort rejects the pending operation, not just its consumer.
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { setTransport({ _tag: 'Aborted', signalAborted: signal.aborted }); reject(signal.reason) }
+        signal.addEventListener('abort', abort, { once: true })
+        if (signal.aborted) { abort(); return }
+        void upload.pending.then(() => {
+          signal.removeEventListener('abort', abort)
+          if (signal.aborted) reject(signal.reason)
+          else resolve()
+        }, reject)
+      })
+    }
+    signal?.throwIfAborted()
     const file = bytes instanceof Blob ? bytes : new Blob([bytes instanceof ArrayBuffer ? bytes : new Uint8Array(bytes).buffer], { type: mediaType })
     const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))].map(byte => byte.toString(16).padStart(2, '0')).join('')
     const blob = `blob/${sha256}`
@@ -28,8 +44,9 @@ function ComposerImages({ scheme, slow = false, previewImages = false }: { reado
       reader.onerror = () => reject(reader.error)
       reader.readAsDataURL(file)
     })
+    signal?.throwIfAborted()
     blobUrls.set(blob, url)
-    setTransportFinished(true)
+    setTransport({ _tag: 'Complete' })
     return { _tag: 'Success', value: { blob, sha256, size: file.size, media_type: mediaType } }
   }))
   const options: ConversationRuntimeOptions = {
@@ -55,7 +72,7 @@ function ComposerImages({ scheme, slow = false, previewImages = false }: { reado
       <EmbraceComposer variant="C1" readingColumn conversationLabel="Image review" imageAttachments={{ max: 4 }} />
     </EmbraceRuntimeProvider>
     {slow && <button onClick={upload.finish}>Complete fixture upload</button>}
-    {slow && transportFinished && <p data-testid="fixture-upload-completed">Fixture upload completed</p>}
+    {slow && <output data-testid="fixture-upload-transport" data-state={transport._tag} data-signal-aborted={transport._tag === 'Aborted' ? transport.signalAborted : undefined}>{transport._tag === 'Aborted' ? 'Upload transport aborted' : transport._tag === 'Complete' ? 'Fixture upload completed' : ''}</output>}
     <div role="log" aria-label="Fixture send receipts">{receipts.map((receipt, index) => <p key={index}>{receipt}</p>)}</div>
   </section>
 }
@@ -95,8 +112,11 @@ const showUploading = async (root: HTMLElement) => {
   await pasteImages(root, ['workspace-review.png'])
   await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
   await waitFor(() => expect(canvas.getByTestId('composer-upload')).toHaveTextContent('Uploading workspace-review.png'))
-  await expect(canvas.getByRole('button', { name: 'Cancel upload' })).toBeVisible()
+  await expect(canvas.getByRole('button', { name: 'Cancel upload of workspace-review.png' })).toBeVisible()
+  await expect(canvas.getByRole('img', { name: 'workspace-review.png' })).toBeVisible()
+  await expect(root.querySelector('[data-uploading="true"]')).not.toBeNull()
   await expect(canvas.getByRole('button', { name: 'Send' })).toBeDisabled()
+  await expect(canvas.getByTestId('fixture-upload-transport')).toHaveAttribute('data-state', 'Pending')
   await expect(canvas.getByRole('log', { name: 'Fixture send receipts' })).toBeEmptyDOMElement()
   // Leave the deterministic upload pending for the screenshot/a11y pass. Manual completion uses the fixture button.
 }
@@ -125,11 +145,14 @@ export const UploadCancelled: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await showUploading(canvasElement)
-    await userEvent.click(canvas.getByRole('button', { name: 'Cancel upload' }))
-    await waitFor(() => expect(canvas.getByRole('img', { name: 'workspace-review.png' })).toBeVisible())
-    await expect(canvas.getByRole('button', { name: 'Remove workspace-review.png' })).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: 'Cancel upload of workspace-review.png' }))
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'Remove workspace-review.png' })).toBeVisible())
+    await waitFor(() => expect(canvas.getByTestId('fixture-upload-transport')).toHaveAttribute('data-state', 'Aborted'))
+    await expect(canvas.getByTestId('fixture-upload-transport')).toHaveAttribute('data-signal-aborted', 'true')
+    await expect(canvas.getByTestId('fixture-upload-transport')).toHaveTextContent('Upload transport aborted')
+    await expect(canvas.queryByRole('alert')).toBeNull()
+    await expect(canvasElement.querySelector('[data-attachment-status="incomplete"]')).toBeNull()
     await userEvent.click(canvas.getByRole('button', { name: 'Complete fixture upload' }))
-    await waitFor(() => expect(canvas.getByTestId('fixture-upload-completed')).toBeVisible())
     await expect(canvas.getByRole('log', { name: 'Fixture send receipts' })).toBeEmptyDOMElement()
     await userEvent.click(canvas.getByRole('button', { name: 'Remove workspace-review.png' }))
     await expect(canvas.queryByTestId('composer-attachments')).toBeNull()

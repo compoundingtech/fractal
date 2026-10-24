@@ -5,7 +5,7 @@ import { geometryVars as g, motionVars as m } from '../composition-tokens.stylex
 export type IconName =
   | 'search' | 'plus' | 'pencil' | 'gear' | 'swap' | 'clock'
   | 'chevron-right' | 'chevron-down' | 'chevrons-left' | 'panel' | 'drawer'
-  | 'attach' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
+  | 'attach' | 'image' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
   | 'spinner' | 'folder' | 'message' | 'dot' | 'info'
   | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle' | 'thought'
   | 'person' | 'checklist' | 'gauge' | 'filter' | 'sort' | 'bell' | 'sliders'
@@ -24,6 +24,7 @@ const PATHS: Record<IconName, React.ReactNode> = {
   panel: <><rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M10 3v10" /></>,
   drawer: <><rect x="2" y="4" width="12" height="8" rx="1.5" /><path d="M2 7.5h12M4.5 9.75h.01M6.5 9.75h2" /></>,
   attach: <path d="M10.5 5.5 5.8 10.2a1.9 1.9 0 0 0 2.7 2.7l4.9-4.9a3.4 3.4 0 0 0-4.8-4.8L3.4 8.4a4.9 4.9 0 0 0 6.9 6.9l3.2-3.2" />,
+  image: <><rect x="2.5" y="3" width="11" height="10" rx="1.5" /><circle cx="6" cy="6.5" r="1" /><path d="m3 12.5 3.5-3.5 2.5 2.5 1.5-1.5 2.5 2.5" /></>,
   copy: <><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" /></>,
   send: <path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" />,
   stop: <rect x="2" y="2" width="12" height="12" rx="1" fill="currentColor" stroke="none" />,

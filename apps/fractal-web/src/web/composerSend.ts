@@ -29,11 +29,14 @@ export const imageUploadAdapter = (upload: AttachmentPort['upload']): Omit<Attac
     return { id: crypto.randomUUID(), type: 'image', name: file.name, contentType: file.type, file, status: { type: 'requires-action', reason: 'composer-send' } }
   },
   remove: async () => {},
-  send: async (attachment) => {
+  send: async (attachment, options) => {
+    const signal = options?.signal
+    signal?.throwIfAborted()
     const mediaType = attachment.contentType
     if (!isImageMediaType(mediaType)) throw new Error('Only PNG, JPEG, GIF and WebP images can be attached.')
     if (attachment.file.size > maxImageBytes) throw new Error(imageSizeRefusal)
-    const uploaded = await upload({ bytes: attachment.file, mediaType })
+    const uploaded = await upload({ bytes: attachment.file, mediaType, signal })
+    signal?.throwIfAborted()
     if (uploaded._tag === 'Refused') throw new Error(uploaded.detail)
     // The upload's blob reference is the attachment; message.send names it, the bytes stay with st.
     return { ...attachment, status: { type: 'complete' }, content: [{ type: 'file', data: uploaded.value.blob, mimeType: uploaded.value.media_type, filename: attachment.name, sourceType: 'id' }] }

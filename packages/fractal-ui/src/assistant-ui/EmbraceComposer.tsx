@@ -15,7 +15,7 @@ import {
   activeTrigger, defaultCommands, draftFromText, insertToken, serializeDraft,
   type Draft, type DraftToken, type MentionToken, type SerializedDraft, type SlashCommand,
 } from './embrace-composer/draft'
-import { ComposerAttachmentNotice, ComposerAttachmentTray, ComposerSendRefusal, composerControl, useAttachmentRefusals, type AttachmentRefusal } from './embrace-composer/AttachmentTray'
+import { ComposerAttachmentNotice, ComposerAttachmentTray, ComposerSendRefusal, ComposerUploadStatus, composerControl, useAttachmentRefusals, type AttachmentRefusal } from './embrace-composer/AttachmentTray'
 
 export interface EmbraceComposerProps {
   readonly variant: 'C1' | 'C2' | 'C3'
@@ -73,8 +73,9 @@ export interface EmbraceComposerProps {
    * longer send images here."): Attach stays unavailable with it, and while images remain the composer appends a
    * count-aware way out and an inline Remove, keeping Send withheld (focusable, described by the refusal) until the
    * draft can go out as text. Keep the runtime's attachment adapter while images are staged, since removal goes
-   * through it. While a send uploads its images, the composer names the upload and offers Cancel upload, which
-   * returns the text and images to the draft. Hosts that render their own tray and toolbar omit it.
+   * through it. While a send uploads its images, the tray shows them at once as uploading, and the composer offers
+   * Cancel upload (the image's ×, or one control for several), which stops the whole send and returns the text and
+   * images to the draft. Hosts that render their own tray and toolbar omit it.
    */
   readonly imageAttachments?: { readonly max: number; readonly disabledReason?: string }
 }
@@ -143,8 +144,6 @@ const styles = stylex.create({
     cursor: { default: 'pointer', ':is(:disabled, [aria-disabled="true"])': 'not-allowed' },
     opacity: 1,
   },
-  uploadRow: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', columnGap: s.md, rowGap: s.xs, minWidth: 0, paddingInline: s.xs },
-  uploadText: { flex: '1 1 16ch', minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fgMuted },
   submitIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlLg, minWidth: g.controlLg, height: g.controlLg, minHeight: g.controlLg, padding: 0, borderRadius: r.full },
   historyIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlMd, height: g.controlMd, minHeight: g.controlMd, padding: 0, borderRadius: r.full, backgroundColor: surface.transparent, borderColor: surface.transparent, ':hover': { backgroundColor: surface.rowHover } },
   // Narrow hosts: an icon-only control is never narrower than it is tall; menu and suggestion rows are touch rows.
@@ -392,11 +391,11 @@ function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar
   const aui = useAui()
   const canCancel = useAuiState(s => s.composer.canCancel)
   const isRunning = useAuiState(s => s.thread.isRunning)
-  // A send whose images are still uploading has left the draft; cancelling it returns its text and images to the
-  // draft, where each image is removable again. During a run the runtime's cancel also stops the run, so Stop owns it.
-  const uploading = useAuiState(s => imageAttachments === undefined ? undefined : s.composer.submission?.attachments)
-  const uploadingLabel = uploading === undefined || uploading.length === 0 ? undefined : uploading.length === 1 ? `Uploading ${uploading[0]!.name}…` : `Uploading ${uploading.length} images…`
-  const cancelsUpload = actions === undefined && canCancel && uploadingLabel !== undefined && !isRunning
+  // A send whose images are still uploading has left the draft; cancelling it stops the whole send and returns its
+  // text and images to the draft, where each image is removable again. During a run the runtime's cancel also stops
+  // the run, so Stop owns it.
+  const uploading = useAuiState(s => imageAttachments !== undefined && (s.composer.submission?.attachments.length ?? 0) > 0)
+  const cancelsUpload = actions === undefined && canCancel && uploading && !isRunning
   const canStop = actions === undefined && canCancel && !cancelsUpload
   const [stopping, setStopping] = React.useState(false)
   const stopPending = React.useRef(false)
@@ -439,13 +438,10 @@ function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar
       }}
     >
       {imageAttachments === undefined ? null : <>
-        <ComposerAttachmentTray />
+        <ComposerAttachmentTray onCancelUpload={cancelsUpload ? from => { aui.composer.cancel(); from.closest('form')?.querySelector<HTMLElement>('textarea, [role="textbox"]')?.focus() } : undefined} />
         <ComposerSendRefusal id={refusalId} message={sendRefusal} attempt={refusalAttempt}
-          action={imageCause !== undefined ? <Button onPress={event => { void aui.composer.clearAttachments(); event.target.closest('form')?.querySelector<HTMLElement>('textarea, [role="textbox"]')?.focus() }} {...stylex.props(composerControl.ghost, composerControl.touchHit)}>{attachmentCount === 1 ? 'Remove image' : `Remove ${imagesLabel(attachmentCount)}`}</Button> : undefined} />
-        {uploadingLabel !== undefined ? <div data-testid="composer-upload" {...stylex.props(styles.uploadRow)}>
-          <span role="status" {...stylex.props(styles.uploadText)}>{uploadingLabel}</span>
-          {cancelsUpload ? <Button onPress={event => { aui.composer.cancel(); event.target.closest('form')?.querySelector<HTMLElement>('textarea, [role="textbox"]')?.focus() }} {...stylex.props(composerControl.ghost, composerControl.touchHit)}>Cancel upload</Button> : null}
-        </div> : null}
+          action={imageCause !== undefined ? <Button onPress={event => { void aui.composer.clearAttachments(); event.target.closest('form')?.querySelector<HTMLElement>('textarea, [role="textbox"]')?.focus() }} {...stylex.props(composerControl.ghost, composerControl.outline, composerControl.touchHit)}>{attachmentCount === 1 ? 'Remove image' : `Remove ${imagesLabel(attachmentCount)}`}</Button> : undefined} />
+        <ComposerUploadStatus />
         <ComposerAttachmentNotice refusals={attachmentRefusals} />
       </>}
       <div {...stylex.props(styles.fieldWrap, fieldStyle, cold && styles.coldField)}>

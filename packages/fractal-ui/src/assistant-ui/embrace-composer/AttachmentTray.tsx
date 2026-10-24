@@ -1,21 +1,43 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { AttachmentPrimitive, ComposerPrimitive, useAui, useAuiEvent, useAuiState } from '@assistant-ui/react'
+import { AttachmentPrimitive, ComposerPrimitive, useAui, useAuiEvent, useAuiState, type Attachment } from '@assistant-ui/react'
 import { Button } from 'react-aria-components'
 import { interactionVars as interaction, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { Icon } from '../composition/Icons'
 
 /**
- * The composer's pending attachments, each removable before send, in one horizontally scrolling row of equal tiles,
- * so several images never push the field out of view above a phone keyboard. Renders nothing while the draft has
- * no attachment. Why a draft cannot be sent is the host's `ComposerSendRefusal`, not the tray's.
+ * The composer's attachments: those staged in the draft, each removable before send, and, while a send uploads its
+ * images, the submission's images, shown at once with an activity bar so the row keeps its height. Chips grow to fit
+ * their name up to `attachmentMax`; a longer name keeps its end and extension and shortens the middle. From 600px
+ * wide chips wrap; below it they share one horizontally scrolling row, so several images never push the field out of
+ * view above a phone keyboard. Renders nothing while there is neither. `onCancelUpload` stops the whole send (the
+ * runtime cancels a submission, not one of its images): one image's × cancels it, several share one Cancel upload.
+ * Why a draft cannot be sent is the host's `ComposerSendRefusal`, not the tray's.
  */
-export function ComposerAttachmentTray() {
+export function ComposerAttachmentTray({ onCancelUpload }: { readonly onCancelUpload?: ((from: Element) => void) | undefined }) {
   const count = useAuiState(state => state.composer.attachments.length)
-  if (count === 0) return null
+  const submitted = useAuiState(state => state.composer.submission?.attachments) ?? noAttachments
+  if (count === 0 && submitted.length === 0) return null
   return <div data-testid="composer-attachments" {...stylex.props(styles.tray)}>
+    {submitted.map(attachment => <div key={attachment.id} data-attachment-status={attachment.status.type} data-uploading="true" {...stylex.props(styles.attachment)}>
+      <AttachmentChip attachment={attachment} uploading />
+      {submitted.length === 1 && onCancelUpload !== undefined ? <Button aria-label={`Cancel upload of ${attachment.name}`} onPress={event => onCancelUpload(event.target)} {...stylex.props(composerControl.ghost, composerControl.icon, composerControl.touchHit)}><Icon name="x" /></Button> : null}
+    </div>)}
+    {submitted.length > 1 && onCancelUpload !== undefined ? <Button aria-label={`Cancel upload of ${submitted.length} images`} onPress={event => onCancelUpload(event.target)} {...stylex.props(composerControl.ghost, composerControl.outline, composerControl.touchHit, styles.trayAction)}>Cancel upload</Button> : null}
     <ComposerPrimitive.Attachments>{() => <AttachmentPreview />}</ComposerPrimitive.Attachments>
   </div>
+}
+
+const noAttachments: readonly Attachment[] = []
+
+/**
+ * Names a send's upload for assistive tech while the tray's chips show it. It stays mounted (visually hidden) so the
+ * first upload is announced.
+ */
+export function ComposerUploadStatus() {
+  const submitted = useAuiState(state => state.composer.submission?.attachments) ?? noAttachments
+  const label = submitted.length === 0 ? undefined : submitted.length === 1 ? `Uploading ${submitted[0]!.name}…` : `Uploading ${submitted.length} images…`
+  return <div role="status" data-testid="composer-upload" {...stylex.props(styles.noticeIdle)}>{label}</div>
 }
 
 /**
@@ -112,7 +134,27 @@ export function ComposerAttachmentNotice({ refusals }: { readonly refusals: read
 
 function AttachmentPreview() {
   const attachment = useAuiState(state => state.attachment)
-  const file = 'file' in attachment ? attachment.file : undefined
+  // An upload that failed returns the attachment to the draft with the reason; the draft keeps it until removed.
+  const problem = attachment.status.type === 'incomplete' ? attachment.status.message ?? 'This image could not be uploaded.' : undefined
+  return <AttachmentPrimitive.Root data-attachment-status={attachment.status.type} {...stylex.props(styles.attachment, problem !== undefined && styles.failed)}>
+    <AttachmentChip attachment={attachment} problem={problem} uploading={attachment.status.type === 'running'} announce />
+    <AttachmentPrimitive.Remove asChild><Button aria-label={`Remove ${attachment.name}`} {...stylex.props(composerControl.ghost, composerControl.icon, composerControl.touchHit)}><Icon name="x" /></Button></AttachmentPrimitive.Remove>
+  </AttachmentPrimitive.Root>
+}
+
+// Long names keep this many trailing characters (the end of the name and its extension) and shorten before them,
+// so screenshots that share a prefix stay distinguishable.
+const nameTail = 12
+
+/** A chip's thumbnail, name and state; the caller owns the chip and its trailing control. */
+function AttachmentChip({ attachment, problem, uploading, announce = false }: {
+  readonly attachment: Pick<Attachment, 'name' | 'file'>
+  readonly problem?: string | undefined
+  readonly uploading: boolean
+  /** Announce the upload from the chip; a submission's upload is announced once by `ComposerUploadStatus`. */
+  readonly announce?: boolean
+}) {
+  const file = attachment.file
   const [url, setUrl] = React.useState<string>()
   React.useEffect(() => {
     if (file === undefined) return
@@ -120,24 +162,32 @@ function AttachmentPreview() {
     setUrl(next)
     return () => URL.revokeObjectURL(next)
   }, [file])
-  // An upload that failed returns the attachment to the draft with the reason; the draft keeps it until removed.
-  const problem = attachment.status.type === 'incomplete' ? attachment.status.message ?? 'This image could not be uploaded.' : undefined
-  const uploading = attachment.status.type === 'running'
-  return <AttachmentPrimitive.Root data-attachment-status={attachment.status.type} {...stylex.props(styles.attachment, problem !== undefined && styles.failed)}>
-    {url !== undefined && <img src={url} alt={attachment.name} {...stylex.props(styles.image)} />}
+  const name = attachment.name
+  const split = name.length > nameTail + 4
+  return <>
+    {url !== undefined && <img src={url} alt={name} {...stylex.props(styles.image)} />}
     <span {...stylex.props(styles.text)}>
-      <span title={attachment.name} {...stylex.props(styles.name)}><AttachmentPrimitive.Name /></span>
-      {problem !== undefined ? <span role="alert" {...stylex.props(styles.problem, styles.line)}>{problem}</span> : uploading ? <span role="status" {...stylex.props(styles.detail)}>Uploading…</span> : null}
+      <span title={name} {...stylex.props(styles.name)}>
+        <span {...stylex.props(styles.nameHead)}>{split ? name.slice(0, -nameTail) : name}</span>
+        {split ? <span {...stylex.props(styles.nameTail)}>{name.slice(-nameTail)}</span> : null}
+      </span>
+      {problem !== undefined ? <span role="alert" {...stylex.props(styles.problem, styles.line)}>{problem}</span>
+        : uploading ? <>
+          <span role={announce ? 'status' : undefined} {...stylex.props(styles.detail)}>Uploading…</span>
+          <span aria-hidden="true" {...stylex.props(styles.activity)}><span {...stylex.props(styles.activitySegment)} /></span>
+        </> : null}
     </span>
-    <AttachmentPrimitive.Remove asChild><Button aria-label={`Remove ${attachment.name}`} {...stylex.props(composerControl.ghost, composerControl.icon, composerControl.touchHit)}><Icon name="x" /></Button></AttachmentPrimitive.Remove>
-  </AttachmentPrimitive.Root>
+  </>
 }
 
 const flash = stylex.keyframes({ from: { backgroundColor: tone.dangerMuted }, to: { backgroundColor: surface.transparent } })
+const sweep = stylex.keyframes({ from: { transform: 'translateX(-100%)' }, to: { transform: 'translateX(400%)' } })
 
 /**
  * The composer's secondary controls (Attach, Remove, inline recovery): one ghost treatment in both themes, with a
- * hover/pressed wash. `touchHit` extends the hit area to the 44px touch target around the visible 28px control.
+ * hover/pressed wash. `outline` gives a text action (Remove image, Cancel upload) the kit's outlined control fill so
+ * it reads as a button beside copy. `touchHit` extends the hit area to the 44px touch target around the visible 28px
+ * control.
  */
 export const composerControl = stylex.create({
   ghost: {
@@ -148,17 +198,22 @@ export const composerControl = stylex.create({
     ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
   },
   icon: { width: g.controlMd, height: g.controlMd, paddingInline: 0 },
+  outline: { borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: { default: surface.controlFill, ':hover': interaction.wash, ':active': interaction.wash } },
   touchHit: { '::before': { content: '""', position: 'absolute', inset: `min(0px, calc((100% - ${g.touchTarget}) / 2))` } },
   // Keeps its place and focus but reads as unavailable; activation is guarded by the caller.
   blocked: { color: ink.fgMuted, cursor: 'not-allowed', backgroundColor: { default: surface.transparent, ':hover': surface.transparent } },
 })
 
 const styles = stylex.create({
-  // Tiles align with the field's text inset; block padding keeps focus rings clear of the scroll clip.
+  // Tiles align with the field's text inset; block padding keeps focus rings clear of the scroll clip. From 600px
+  // tiles wrap so every one stays in view; narrower, one row scrolls and a cut-off tile shows there is more.
   tray: {
-    display: 'flex', gap: s.md, minWidth: 0, overflowX: 'auto', overflowY: 'hidden', paddingInline: s.xs, paddingBlock: s.xs2,
-    scrollSnapType: 'x mandatory', scrollPaddingInline: s.xs, overscrollBehaviorX: 'contain', scrollbarWidth: 'thin', scrollbarColor: `${tone.scrollThumb} transparent`,
+    display: 'flex', flexWrap: { default: 'nowrap', '@media (min-width: 600px)': 'wrap' }, gap: s.md, minWidth: 0,
+    overflowX: { default: 'auto', '@media (min-width: 600px)': 'visible' }, overflowY: { default: 'hidden', '@media (min-width: 600px)': 'visible' },
+    paddingInline: s.xs, paddingBlock: s.xs2,
+    scrollSnapType: { default: 'x mandatory', '@media (min-width: 600px)': 'none' }, scrollPaddingInline: s.xs, overscrollBehaviorX: 'contain', scrollbarWidth: 'thin', scrollbarColor: `${tone.scrollThumb} transparent`,
   },
+  trayAction: { alignSelf: 'center' },
   notice: { display: 'flex', flexDirection: 'column', gap: s.xs, minWidth: 0, paddingInline: s.xs },
   // Out of flow while empty, so the pill keeps its row; still in the accessibility tree as a live region.
   noticeIdle: { position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap' },
@@ -166,15 +221,28 @@ const styles = stylex.create({
   refusal: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', columnGap: s.md, rowGap: s.xs, minWidth: 0, paddingInline: s.xs },
   refusalText: { flex: '1 1 16ch', minWidth: 0 },
   flash: { borderRadius: r.keyboard, marginInline: `calc(${s.xs} * -1)`, paddingInline: s.xs, animationName: flash, animationDuration: m.reveal, animationTimingFunction: 'ease-out' },
+  // Sized to its name up to `attachmentMax`. In the scrolling row a tile never shrinks, and the 75% cap keeps the next one peeking.
   attachment: {
-    display: 'flex', alignItems: 'center', gap: s.md, flex: `0 0 ${g.fileMax}`, maxWidth: '75%', boxSizing: 'border-box', minWidth: 0,
+    display: 'flex', alignItems: 'center', gap: s.md, boxSizing: 'border-box', minWidth: 0,
+    flex: { default: '0 0 auto', '@media (min-width: 600px)': '0 1 auto' },
+    maxWidth: { default: `min(${g.attachmentMax}, 75%)`, '@media (min-width: 600px)': `min(${g.attachmentMax}, 100%)` },
     padding: s.md, borderRadius: r.sm, backgroundColor: surface.rowActive, scrollSnapAlign: 'start',
   },
   failed: { outlineWidth: g.hairline, outlineStyle: 'solid', outlineColor: tone.dangerFg, outlineOffset: `calc(${g.hairline} * -1)` },
   // Inner radius = tile radius − padding, floored at 4px; the inset hairline separates white or black edges from the tile.
   image: { width: g.band, height: g.band, flexShrink: 0, objectFit: 'cover', borderRadius: r.keyboard, outlineWidth: g.hairline, outlineStyle: 'solid', outlineColor: border.rail, outlineOffset: `calc(${g.hairline} * -1)` },
   text: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minWidth: 0, marginInlineEnd: s.xs },
-  name: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fg },
+  // Head and tail split a long name so the ellipsis falls in its middle; `pre` keeps a space at the split.
+  name: { display: 'flex', minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fg },
+  nameHead: { flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'pre' },
+  nameTail: { flexShrink: 0, whiteSpace: 'pre' },
   detail: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   problem: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: tone.dangerFg },
+  // Indeterminate: the upload reports no byte progress. A still segment under reduced motion.
+  activity: { display: 'block', height: g.progressSm, marginBlockStart: s.xs, overflow: 'hidden', borderRadius: r.full, backgroundColor: interaction.wash },
+  activitySegment: {
+    display: 'block', width: '25%', height: '100%', borderRadius: r.full, backgroundColor: ink.fgMuted,
+    animationName: sweep, animationDuration: m.pulse, animationTimingFunction: m.ease, animationIterationCount: 'infinite',
+    '@media (prefers-reduced-motion: reduce)': { animationName: 'none', transform: 'translateX(150%)' },
+  },
 })
