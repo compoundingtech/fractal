@@ -37,13 +37,17 @@ const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
 // Scheme-only aliases remain available in Storybook; the gate already overrides their scheme.
 // The filter benchmark itself renders 240/440 × dark/light probes, so repeat its measurements
 // in only one outer browser case. FilterBehavior retains functional coverage in all four cases.
-export const FULL_CASE_OVERRIDES = new Map([
+export const KIT_CASE_OVERRIDES = new Map([
   ['fractal-ui-transcript--no-green-all-states-light', []],
   ['fractal-ui-composer--footer-width-budget-light', []],
   ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
+])
+export const APP_CASE_OVERRIDES = new Map([
   // Collapse removes the production sidebar separator while a drag is held at this measured viewport.
   ['fractal-narrow-layout--sidebar-drag-unmount-cleanup', [['dark', 1100], ['light', 1100]]],
 ])
+// The production build includes both inventories; every named story remains required.
+export const FULL_CASE_OVERRIDES = new Map([...KIT_CASE_OVERRIDES, ...APP_CASE_OVERRIDES])
 
 // Validate against the complete index before selecting tags or shards, so stale policy cannot
 // silently remove coverage. An omitted scheme alias must share its kept base story's source.

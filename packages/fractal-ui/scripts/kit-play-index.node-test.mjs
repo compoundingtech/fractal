@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
-import { commitSetCases, diagonalCase, fullCases, BOTH_WIDTHS, MERGE_ONLY, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
+import { commitSetCases, diagonalCase, fullCases, BOTH_WIDTHS, MERGE_ONLY, KIT_CASE_OVERRIDES, APP_CASE_OVERRIDES, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { aggregateShards, shardStories } from './kit-play-shards.mjs'
 
 const story = { type: 'story', id: 'kit--sample', importPath: './Sample.stories.tsx' }
@@ -153,6 +153,13 @@ test('the intermediate-width resize regression runs at its declared real viewpor
   const expected = [{ id: freezeId, scheme: 'dark', width: 1100 }, { id: freezeId, scheme: 'light', width: 1100 }]
   assert.deepEqual(fullCases([freezeId]), expected)
   assert.deepEqual(commitSetCases([freezeId], { mergeOnlyIds: [], bothWidthsIds: [] }).cases, expected)
+})
+test('kit-only fixtures scope their policy explicitly without making app cases optional in production', () => {
+  const ids = [benchmarkId, ...aliasIds, ...baseIds]
+  const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
+  assert.deepEqual([...APP_CASE_OVERRIDES.keys()], [freezeId])
+  assert.doesNotThrow(() => validateCaseOverrides(entries, KIT_CASE_OVERRIDES))
+  assert.throws(() => validateCaseOverrides(entries), /names fractal-narrow-layout--sidebar-drag-unmount-cleanup, which is not a known story/)
 })
 test('strict case policy rejects unknown stories and aliases without a kept same-source base', () => {
   const ids = [benchmarkId, functionalId, freezeId, ...aliasIds, ...baseIds]

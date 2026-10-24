@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { KIT_CASE_OVERRIDES } from './kit-play-commit-set.mjs'
 
 // A fixture build with the strict policy's aliases and kept bases. Like Storybook's addon-a11y,
 // it reports an a11y result unless the a11y.manual global is set; `report` overrides that report.
@@ -49,7 +50,7 @@ const policyFixtureIds = [
   'fractal-ui-sidebar-tree--filter-keystroke-to-paint',
 ]
 
-const runGate = async ({ env = {}, report, probes, fixtureOverrides } = {}) => {
+const runGate = async ({ env = {}, report, probes, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false } = {}) => {
   const directory = await mkdtemp(join(tmpdir(), 'kit-play-gate-test-'))
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
@@ -64,7 +65,7 @@ const runGate = async ({ env = {}, report, probes, fixtureOverrides } = {}) => {
     await writeFile(join(build, 'iframe.html'), iframe(report, probes))
     // The job's own KIT_PLAY_* options (CI sets them per event) must not reach the fixture runs.
     const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('KIT_PLAY_')))
-    const args = fixtureOverrides === undefined
+    const args = productionPolicy
       ? [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output]
       : ['--input-type=module', '--eval', `
           import { runKitPlayGate } from ${JSON.stringify(new URL('./kit-play-gate-runner.mjs', import.meta.url).href)}
@@ -112,6 +113,13 @@ test('fixture code can inject its policy through the runner parameter, not proce
   assert.equal(receipt.pass, true)
   assert.deepEqual(receipt.caseOverrides, {})
   assert.equal(receipt.cases, 28)
+})
+
+test('the production policy still requires the app cleanup story in the complete build', { timeout: 60000 }, async () => {
+  const { code, receipt } = await runGate({ productionPolicy: true })
+  assert.equal(code, 1)
+  assert.equal(receipt.cases, 0)
+  assert.match(receipt.fatalError, /names fractal-narrow-layout--sidebar-drag-unmount-cleanup, which is not a known story/)
 })
 
 test('a11y on rejects a case whose axe report is missing', { timeout: 60000 }, async () => {
