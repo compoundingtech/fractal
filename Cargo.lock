@@ -2336,6 +2336,7 @@ dependencies = [
  "fractal-client",
  "fractal-drivers",
  "fractal-kernel",
+ "fractal-schema",
  "fractal-secrets",
  "fractal-telemetry",
  "fractal-terminal-direct",

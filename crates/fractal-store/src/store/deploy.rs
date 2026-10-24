@@ -7,7 +7,7 @@ use fractal_schema::deploy::{VerifyGoRequest, VerifyGoReceipt};
 
 type Checked<T> = std::result::Result<T, St3Error>;
 const UNREPAIRED_REPLICA: &str = "NOT EXISTS (SELECT 1 FROM replica_records WHERE replica_records.claim_id=claims.id AND replica_records.state='repaired')";
-fn refuse(code: &str, message: impl Into<String>) -> St3Error { St3Error::new(code, message) }
+fn refuse(code: &'static str, message: impl Into<String>) -> St3Error { St3Error::new(code, message) }
 fn fields(claim: &ClaimRecord) -> Checked<BTreeMap<String, Value>> {
     let fields = serde_json::from_value(claim.body.get("fields").cloned().unwrap_or(Value::Null))
         .map_err(|e| refuse("deploy-invalid-record", format!("{}: {e}", claim.id)))?;
