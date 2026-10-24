@@ -72,10 +72,10 @@ export type ClientOptions = {
     messagesPaging?: boolean;
 };
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-export const TERMINAL_SUBPROTOCOL = 'st3.client.terminal.v0';
-export const CONVERSATION_SUBPROTOCOL = 'st3.client.conversation.v0';
-export const COLLECTIONS_SUBPROTOCOL = 'st3.client.collections.v0';
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; HTTP names stay unchanged; sunset 2026-11-01.
+export const TERMINAL_SUBPROTOCOL = 'fractal.client.terminal.v0';
+export const CONVERSATION_SUBPROTOCOL = 'fractal.client.conversation.v0';
+export const COLLECTIONS_SUBPROTOCOL = 'fractal.client.collections.v0';
 
 /** The WebSocket surface a terminal stream uses. React Native's WebSocket accepts headers. */
 export type TerminalSocket = {
@@ -475,7 +475,7 @@ export class FractalClient {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [TERMINAL_SUBPROTOCOL, `st3.cap.${options.streamCapability}`], headers);
+        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [TERMINAL_SUBPROTOCOL, `fractal.cap.${options.streamCapability}`], headers);
         let ended = false;
         const stop = () => { ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; };
         const end = (error?: Error) => { if (ended) return; stop(); options.onEnd?.(error); };
