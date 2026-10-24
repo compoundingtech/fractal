@@ -390,6 +390,8 @@ mod tests {
     #[test]
     fn non_dumpable_marked_owner_child_remains_a_typed_refusal() {
         const CHILD: &str = "FRACTAL_PROOF_NON_DUMPABLE_CHILD";
+        const READER: &str = "FRACTAL_PROOF_UNPRIVILEGED_READER";
+        const TEST: &str = "pty::legacy_start_closure::tests::non_dumpable_marked_owner_child_remains_a_typed_refusal";
         const OPERATION: &str = "legacy-proof-unreadable-producer";
         if std::env::var_os(CHILD).is_some() {
             // SAFETY: these prctl operations affect only this dedicated child.
@@ -401,13 +403,45 @@ mod tests {
             std::thread::sleep(Duration::from_secs(60));
             return;
         }
+        fn assert_denied(pid: u32) -> Result<()> {
+            let error = owner_process_has_operation(
+                Path::new(&format!("/proc/{pid}")), OPERATION, pid,
+            ).err().context("unreadable producer was incorrectly excluded")?;
+            let refusal = error.downcast_ref::<LegacyStartProofUnavailable>().unwrap();
+            assert_eq!(refusal.stage, "proc-environ");
+            assert_eq!(refusal.pid, pid);
+            assert_eq!(refusal.errno, Some(libc::EACCES));
+            Ok(())
+        }
+        if let Ok(pid) = std::env::var(READER) {
+            // SAFETY: only this isolated reader enters a new user namespace.
+            // The producer stays in the parent's namespace, where this reader
+            // consequently has no CAP_SYS_PTRACE. No capset is needed.
+            if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EINVAL | libc::ENOSPC)) {
+                    eprintln!("{TEST}: SKIP EACCES assertion: privileged reader; user namespace forbidden or unavailable ({error})");
+                    return;
+                }
+                panic!("create isolated reader user namespace: {error}");
+            }
+            assert_denied(pid.parse().unwrap()).unwrap();
+            eprintln!("{TEST}: EACCES assertion exercised by user-namespace reader");
+            return;
+        }
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let effective = u64::from_str_radix(
+            status.lines().find_map(|line| line.strip_prefix("CapEff:")).unwrap().trim(),
+            16,
+        ).unwrap();
+        const CAP_SYS_PTRACE: u32 = 19;
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact",
                 "pty::legacy_start_closure::tests::non_dumpable_marked_owner_child_remains_a_typed_refusal",
                 "--nocapture"])
             .env(CHILD, "1").env("ST3_START_OPERATION", OPERATION)
             .stdout(std::process::Stdio::piped()).spawn().unwrap();
-        let result = (|| -> Result<anyhow::Error> {
+        let result = (|| -> Result<()> {
             use std::io::BufRead as _;
             let output = child.stdout.take().context("child stdout")?;
             let mut ready = false;
@@ -415,71 +449,25 @@ mod tests {
                 if line? == "proof-child-ready" { ready = true; break; }
             }
             anyhow::ensure!(ready, "non-dumpable child did not become ready");
-            // PR_SET_DUMPABLE does not deny a reader with CAP_SYS_PTRACE.
-            // Hosted runners may grant that capability. Remove it only from
-            // this test thread while exercising the real kernel denial, then
-            // restore the reader before checking the result; never skip the
-            // unreadable-producer assertion or weaken production enumeration.
-            #[repr(C)]
-            struct Header { version: u32, pid: i32 }
-            #[repr(C)]
-            #[derive(Clone, Copy, Default)]
-            struct Capabilities { effective: u32, permitted: u32, inheritable: u32 }
-            struct RestoreCapabilities {
-                header: Header,
-                original: [Capabilities; 2],
-                armed: bool,
-                _thread: std::marker::PhantomData<std::rc::Rc<()>>,
-            }
-            impl RestoreCapabilities {
-                fn restore(&mut self) -> Result<()> {
-                    // SAFETY: both ABI-sized buffers are owned by this
-                    // thread-bound guard; pid=0 addresses the calling thread.
-                    let restored = unsafe {
-                        libc::syscall(libc::SYS_capset, &self.header, self.original.as_ptr())
-                    };
-                    anyhow::ensure!(restored == 0, "restore test reader capabilities: {}", std::io::Error::last_os_error());
-                    self.armed = false;
-                    Ok(())
+            if effective & (1 << CAP_SYS_PTRACE) == 0 {
+                assert_denied(child.id())?;
+                eprintln!("{TEST}: EACCES assertion exercised directly (CAP_SYS_PTRACE not effective)");
+            } else {
+                use std::os::unix::process::ExitStatusExt as _;
+                let reader = Command::new(std::env::current_exe()?)
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(READER, child.id().to_string()).status()?;
+                if reader.signal() == Some(libc::SIGSYS) {
+                    eprintln!("{TEST}: SKIP EACCES assertion: privileged reader; user namespace forbidden by sandbox (SIGSYS)");
+                } else {
+                    anyhow::ensure!(reader.success(), "isolated EACCES reader failed: {reader}");
                 }
             }
-            impl Drop for RestoreCapabilities {
-                fn drop(&mut self) {
-                    if self.armed {
-                        // Best-effort unwind fallback must not double-panic.
-                        // The normal path below always checks restoration.
-                        let _ = self.restore();
-                    }
-                }
-            }
-            // Linux capability ABI v3 contains two 32-bit words.
-            let mut header = Header { version: 0x2008_0522, pid: 0 };
-            let mut capabilities = [Capabilities::default(); 2];
-            // SAFETY: the ABI-sized buffers remain alive for each syscall;
-            // pid=0 addresses only the calling test thread.
-            let read = unsafe { libc::syscall(libc::SYS_capget, &mut header, capabilities.as_mut_ptr()) };
-            anyhow::ensure!(read == 0, "read test reader capabilities: {}", std::io::Error::last_os_error());
-            let original = capabilities;
-            const CAP_SYS_PTRACE: u32 = 19;
-            capabilities[0].effective &= !(1 << CAP_SYS_PTRACE);
-            let dropped = unsafe { libc::syscall(libc::SYS_capset, &header, capabilities.as_ptr()) };
-            anyhow::ensure!(dropped == 0, "restrict test reader capabilities: {}", std::io::Error::last_os_error());
-            let mut restore = RestoreCapabilities {
-                header, original, armed: true, _thread: std::marker::PhantomData,
-            };
-            let observed = owner_process_has_operation(
-                Path::new(&format!("/proc/{}", child.id())), OPERATION, child.id(),
-            );
-            restore.restore()?;
-            observed.err().context("unreadable producer was incorrectly excluded")
+            Ok(())
         })();
         let _ = child.kill();
         let _ = child.wait();
-        let error = result.unwrap();
-        let refusal = error.downcast_ref::<LegacyStartProofUnavailable>().unwrap();
-        assert_eq!(refusal.stage, "proc-environ");
-        assert_eq!(refusal.pid, child.id());
-        assert_eq!(refusal.errno, Some(libc::EACCES));
+        result.unwrap();
     }
 
     #[cfg(target_os = "linux")]
