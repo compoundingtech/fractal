@@ -1183,7 +1183,7 @@ pub struct ReplicationSnapshot {
     pub inventory_generation: i64,
     pub inventory: CompactReplicationInventory,
     pub buckets: Vec<ReplicationInventoryBucket>,
-    /// The inventory digest state before each range in `buckets`.
+    /// The inventory digest state before each range in `buckets`, then its terminal state.
     pub digest_prefixes: Vec<Sha256>,
     pub authority_digest: String,
     pub graph_generation: i64,
