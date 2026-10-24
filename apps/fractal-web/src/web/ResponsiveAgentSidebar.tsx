@@ -3,10 +3,24 @@ import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import { ResizableSplit } from '@fractal/ui/assistant-ui/shell'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
+import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import { touchPointerQuery } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/useTouchLayout.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 export const sidebarMinimumWidth = 240
 export const sidebarDrawerBreakpoint = 900
+
+const subscribeTouchPointer = (onChange: () => void) => {
+  const media = window.matchMedia(touchPointerQuery)
+  media.addEventListener('change', onChange)
+  return () => media.removeEventListener('change', onChange)
+}
+/**
+ * The sidebar's touch density: a coarse primary pointer, never the window width. The dock and the drawer provide it
+ * as their `NarrowLayoutContext`, so a fine pointer at 899px keeps the dock's rows and controls and a coarse pointer
+ * at 900px gets the drawer's touch targets.
+ */
+export const useCoarsePointer = (): boolean => React.useSyncExternalStore(subscribeTouchPointer, () => window.matchMedia(touchPointerQuery).matches, () => false)
 
 export type ResponsiveAgentSidebarProps = {
   readonly viewport: number
@@ -31,17 +45,16 @@ const renderModalDialog = (props: React.ComponentPropsWithRef<'section'>) => <se
 export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, drawerOpen, drawerId, onDrawerOpenChange, onToggleCollapsed, onWidthChange, onWidthCommit, onWidthReset, headerActions, children }: ResponsiveAgentSidebarProps) => {
   const portalContainer = React.useRef<HTMLDivElement>(null)
   const narrow = viewport < sidebarDrawerBreakpoint
+  const coarse = useCoarsePointer()
   const focusDrawerClose = React.useCallback((button: HTMLButtonElement | null) => {
     if (narrow) button?.focus()
   }, [narrow])
-  const sidebar = <aside aria-label="Agents" data-sidebar-presentation={narrow ? 'drawer' : 'dock'} style={{ width: Math.max(sidebarMinimumWidth, width) }} {...stylex.props(styles.sidebar)}>
-    <header {...stylex.props(styles.brand)}>
-      <ChromeControl ref={focusDrawerClose} icon="chevrons-left" label={narrow ? 'Close agents' : 'Collapse agents'} onPress={() => narrow ? onDrawerOpenChange(false) : onToggleCollapsed()} />
-      <strong {...stylex.props(styles.wordmark)}>Fractal</strong>
-      {headerActions}
-    </header>
-    {children}
-  </aside>
+  const sidebar = <NarrowLayoutContext.Provider value={coarse}>
+    <aside aria-label="Agents" data-sidebar-presentation={narrow ? 'drawer' : 'dock'} data-sidebar-density={coarse ? 'touch' : 'dock'} style={{ width: Math.max(sidebarMinimumWidth, width) }} {...stylex.props(styles.sidebar)}>
+      <SidebarHeader ref={focusDrawerClose} label={narrow ? 'Close agents' : 'Collapse agents'} onCollapse={() => narrow ? onDrawerOpenChange(false) : onToggleCollapsed()} actions={headerActions} />
+      {children}
+    </aside>
+  </NarrowLayoutContext.Provider>
   if (!narrow) return collapsed ? null : <>{sidebar}<ResizableSplit id="live-agent-sidebar" value={width} min={sidebarMinimumWidth} max={maxWidth} collapsed={false} label="Agent sidebar width" onChange={onWidthChange} onCommit={onWidthCommit} onToggle={onToggleCollapsed} onReset={onWidthReset} /></>
   return <div ref={portalContainer} {...stylex.props(styles.portal)}>
     <Aria.ModalOverlay isOpen={drawerOpen} onOpenChange={onDrawerOpenChange} isDismissable UNSTABLE_portalContainer={portalContainer.current ?? undefined} {...stylex.props(styles.overlay)}>
@@ -51,6 +64,18 @@ export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, d
     </Aria.ModalOverlay>
   </div>
 }
+
+/** The dock's header, reused by the phone drawer: collapse at the leading edge, the wordmark, then the alerts. */
+export const SidebarHeader = ({ ref, label, onCollapse, actions }: {
+  readonly ref?: React.Ref<HTMLButtonElement>
+  readonly label: string
+  readonly onCollapse: () => void
+  readonly actions?: React.ReactNode
+}) => <header data-sidebar-header="" {...stylex.props(styles.brand)}>
+  <ChromeControl {...(ref === undefined ? {} : { ref })} icon="chevrons-left" label={label} edge="lead" onPress={onCollapse} />
+  <strong {...stylex.props(styles.wordmark)}>Fractal</strong>
+  {actions}
+</header>
 
 /** One sidebar chord for the dock and drawer, without stealing text or terminal input. */
 export const useSidebarShortcut = (toggle?: () => void): void => {
@@ -70,7 +95,8 @@ export const useSidebarShortcut = (toggle?: () => void): void => {
 
 const styles = stylex.create({
   sidebar: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: sidebarMinimumWidth, minHeight: 0, height: '100%', overflow: 'hidden', backgroundColor: c.sidebar, color: c.fg },
-  brand: { height: g.band, paddingInline: s.md, display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
+  // A minimum, not a fixed height: a touch layout's 44px collapse target stays inside the band.
+  brand: { minHeight: g.band, boxSizing: 'border-box', paddingInline: s.md, display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
   wordmark: { fontWeight: 500 },
   portal: { display: 'contents' },
   overlay: { position: 'fixed', insetInline: 0, insetBlockStart: 0, insetBlockEnd: 'var(--wf-devbar-space, 0px)', zIndex: 90, display: 'flex', backgroundColor: 'rgba(0, 0, 0, 0.4)' },

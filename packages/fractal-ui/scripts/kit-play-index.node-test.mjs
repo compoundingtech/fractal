@@ -113,6 +113,9 @@ test('the per-commit set rejects a listed story that is not critical, so a renam
 const benchmarkId = 'fractal-ui-sidebar-tree--filter-keystroke-to-paint'
 const functionalId = 'fractal-ui-sidebar-tree--filter-behavior'
 const freezeId = 'fractal-narrow-layout--sidebar-drag-unmount-cleanup'
+const densityIds = ['fractal-narrow-layout--breakpoint-density', 'fractal-narrow-layout--breakpoint-density-coarse']
+const focusReturnId = 'fractal-narrow-layout--drawer-focus-return'
+const nativeOverlayId = 'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed'
 const aliasIds = [
   'fractal-ui-transcript--no-green-all-states-light',
   'fractal-ui-composer--footer-width-budget-light',
@@ -126,7 +129,10 @@ test('the strict case set measures the filter once, keeps functional corners, an
     ['fractal-ui-transcript--no-green-all-states-light', []],
     ['fractal-ui-composer--footer-width-budget-light', []],
     ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
+    [nativeOverlayId, [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]],
     [freezeId, [['dark', 1100], ['light', 1100]]],
+    ...densityIds.map(id => [id, [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]]),
+    [focusReturnId, [['dark', 899], ['light', 440]]],
   ])
   const omittedBenchmarkCases = [
     { id: 'fractal-ui-sidebar-tree--filter-keystroke-to-paint', scheme: 'dark', width: 440 },
@@ -154,15 +160,25 @@ test('the intermediate-width resize regression runs at its declared real viewpor
   assert.deepEqual(fullCases([freezeId]), expected)
   assert.deepEqual(commitSetCases([freezeId], { mergeOnlyIds: [], bothWidthsIds: [] }).cases, expected)
 })
+test('drawer density and focus-return regressions retain real breakpoint viewports in both gate sets', () => {
+  for (const id of densityIds) {
+    const expected = [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]].map(([scheme, width]) => ({ id, scheme, width }))
+    assert.deepEqual(fullCases([id]), expected)
+    assert.deepEqual(commitSetCases([id], { mergeOnlyIds: [], bothWidthsIds: [] }).cases, expected)
+  }
+  const expected = [{ id: focusReturnId, scheme: 'dark', width: 899 }, { id: focusReturnId, scheme: 'light', width: 440 }]
+  assert.deepEqual(fullCases([focusReturnId]), expected)
+  assert.deepEqual(commitSetCases([focusReturnId], { mergeOnlyIds: [], bothWidthsIds: [] }).cases, expected)
+})
 test('kit-only fixtures scope their policy explicitly without making app cases optional in production', () => {
-  const ids = [benchmarkId, ...aliasIds, ...baseIds]
+  const ids = [benchmarkId, nativeOverlayId, ...aliasIds, ...baseIds]
   const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
-  assert.deepEqual([...APP_CASE_OVERRIDES.keys()], [freezeId])
+  assert.deepEqual([...APP_CASE_OVERRIDES.keys()], [freezeId, ...densityIds, focusReturnId])
   assert.doesNotThrow(() => validateCaseOverrides(entries, KIT_CASE_OVERRIDES))
   assert.throws(() => validateCaseOverrides(entries), /names fractal-narrow-layout--sidebar-drag-unmount-cleanup, which is not a known story/)
 })
 test('strict case policy rejects unknown stories and aliases without a kept same-source base', () => {
-  const ids = [benchmarkId, functionalId, freezeId, ...aliasIds, ...baseIds]
+  const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...aliasIds, ...baseIds]
   const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
   assert.doesNotThrow(() => validateCaseOverrides(entries))
   assert.throws(() => validateCaseOverrides(entries, new Map([['kit--unknown', []]])), /not a known story/)
@@ -236,7 +252,7 @@ test('the gate receipt declares the intended benchmark corner and alias omission
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
     await mkdir(build)
-    const ids = [benchmarkId, functionalId, freezeId, ...aliasIds, ...baseIds]
+    const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...aliasIds, ...baseIds]
     await writeFile(join(build, 'index.json'), JSON.stringify({ entries: Object.fromEntries(ids.map(id => [id, { ...story, id }])) }))
     const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
       env: { ...process.env, KIT_PLAY_SET: 'all', PLAYWRIGHT_MODULE: 'must-not-import-browser-for-case-contract' },
@@ -248,8 +264,8 @@ test('the gate receipt declares the intended benchmark corner and alias omission
     })
     assert.equal(code, 1)
     const receipt = JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8'))
-    assert.equal(receipt.expectedCases, 15)
-    assert.equal(receipt.omitted.cases, 13)
+    assert.equal(receipt.expectedCases, 29)
+    assert.equal(receipt.omitted.cases, 15)
     assert.deepEqual(receipt.omitted.stories, aliasIds.toSorted())
     assert.deepEqual(receipt.caseOverrides[benchmarkId], [['dark', 1440]])
     assert.match(receipt.fatalError, /must-not-import-browser-for-case-contract/)

@@ -594,6 +594,18 @@ describe('responsive agent navigation', () => {
     expect(within(host).getByRole('separator', { name: 'Agent sidebar width' }).getAttribute('aria-valuemin')).toBe('240')
     expect(host.querySelector('[role="dialog"]')).toBeNull()
   })
+
+  it.each([[899, 'Close agents'], [900, 'Collapse agents']] as const)('gives the drawer and the dock one header at %ipx', async (width, collapse) => {
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(width)
+    if (width < 900) await act(async () => within(host).getByRole('button', { name: 'Expand sidebar' }).click())
+    const header = sidebar().querySelector<HTMLElement>('[data-sidebar-header]')!
+    expect(header).not.toBeNull()
+    // Collapse leads, then the wordmark, then the alerts: no separate drawer title or trailing close.
+    expect(header.querySelector('button')!.getAttribute('aria-label')).toBe(collapse)
+    expect(header.querySelector('strong')!.textContent).toBe('Fractal')
+    expect(sidebar().querySelectorAll(':scope > header').length).toBe(1)
+  })
 })
 
 // Remembered machines live in module state shared across tests; keep these after the suites that expect an unfiltered roster.

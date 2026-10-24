@@ -48,6 +48,7 @@ const policyFixtureIds = [
   'fractal-ui-composer--footer-width-budget-light',
   'fractal-ui-composer--footer-width-budget',
   'fractal-ui-sidebar-tree--filter-keystroke-to-paint',
+  'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed',
 ]
 
 const runGate = async ({ env = {}, report, probes, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false } = {}) => {
@@ -94,7 +95,7 @@ test('full set with a11y requires one passed a11y report per case', { timeout: 6
   const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: '', KIT_PLAY_A11Y: '', KIT_PLAY_MAX_SECONDS: '' } })
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
-  assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 7, 17])
+  assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 8, 21])
   assert.ok(receipt.cpu.count > 0 && receipt.cpu.busyCoreMinutes >= 0 && receipt.cpu.loadavgEnd.length === 3)
   for (const row of receipt.rows) {
     assert.ok(row.timings.playMilliseconds > 0)
@@ -103,7 +104,7 @@ test('full set with a11y requires one passed a11y report per case', { timeout: 6
     assert.ok(Math.abs(sum - row.timings.readinessAfterDomMilliseconds) < 0.001)
   }
   assert.equal(receipt.phaseMilliseconds.a11yMilliseconds.samples, receipt.cases)
-  assert.equal(receipt.topCases.length, 17)
+  assert.equal(receipt.topCases.length, 20)
   assert.equal(receipt.storyFamilies.reduce((sum, family) => sum + family.cases, 0), receipt.cases)
 })
 
@@ -112,7 +113,7 @@ test('fixture code can inject its policy through the runner parameter, not proce
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
   assert.deepEqual(receipt.caseOverrides, {})
-  assert.equal(receipt.cases, 28)
+  assert.equal(receipt.cases, 32)
 })
 
 test('the production policy still requires the app cleanup story in the complete build', { timeout: 60000 }, async () => {

@@ -41,10 +41,17 @@ export const KIT_CASE_OVERRIDES = new Map([
   ['fractal-ui-transcript--no-green-all-states-light', []],
   ['fractal-ui-composer--footer-width-budget-light', []],
   ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
+  // Portal theme inheritance must run in light as well as dark on every commit.
+  ['fractal-ui-sidebar-milestone-agent-row--native-overlays-themed', FULL],
 ])
 export const APP_CASE_OVERRIDES = new Map([
   // Collapse removes the production sidebar separator while a drag is held at this measured viewport.
   ['fractal-narrow-layout--sidebar-drag-unmount-cleanup', [['dark', 1100], ['light', 1100]]],
+  // Drawer density follows pointer input on both sides of the actual dock breakpoint.
+  ['fractal-narrow-layout--breakpoint-density', [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]],
+  ['fractal-narrow-layout--breakpoint-density-coarse', [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]],
+  // Pointer and Escape dismissal restore the opening trigger in tablet and phone drawers.
+  ['fractal-narrow-layout--drawer-focus-return', [['dark', 899], ['light', 440]]],
 ])
 // The production build includes both inventories; every named story remains required.
 export const FULL_CASE_OVERRIDES = new Map([...KIT_CASE_OVERRIDES, ...APP_CASE_OVERRIDES])
