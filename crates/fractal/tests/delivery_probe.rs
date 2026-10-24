@@ -6,6 +6,12 @@
 /// Run the named unittest selectors of the probe script in an isolated, process-supervised child.
 #[cfg(target_os = "linux")]
 fn probe(selectors: &[&str]) {
+    probe_with_temp(selectors, None);
+}
+
+/// [`probe`], with the probe script's own temporary directories below `temp`.
+#[cfg(target_os = "linux")]
+fn probe_with_temp(selectors: &[&str], temp: Option<&std::path::Path>) {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -16,7 +22,11 @@ fn probe(selectors: &[&str]) {
         .prefix("delivery-probe-scratch-")
         .tempdir_in(test_env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
-    let result = fractal_daemon::test_support::command("setsid")
+    let mut command = fractal_daemon::test_support::command("setsid");
+    if let Some(temp) = temp {
+        command.env("TMPDIR", temp);
+    }
+    let result = command
         .args(["-f", "env", "-u", "ST_AGENT", "python3"])
         .arg(repo.join("scripts/st3-delivery-probe-test"))
         .arg("--binary")
@@ -44,7 +54,9 @@ fn probe(selectors: &[&str]) {
 #[cfg(target_os = "linux")]
 #[test]
 fn the_probe_against_a_fake_api_alerts_and_recovers() {
-    probe(&["ProbeTests"]);
+    // Its fake-API cases write only small stores, which on a disk spend most of their time in fsync.
+    let temp = fractal_daemon::test_support::memory_tempdir();
+    probe_with_temp(&["ProbeTests"], Some(temp.path()));
 }
 
 #[cfg(target_os = "linux")]
