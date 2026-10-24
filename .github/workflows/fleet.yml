@@ -3301,7 +3301,7 @@ jobs:
               "apps/fractal-web/src/web/SidebarChrome.stories.tsx",
               "apps/fractal-web/src/web/SidebarChromeFooter.tsx",
               "apps/fractal-web/src/web/SidebarEmptyState.tsx",
-              "apps/fractal-web/src/web/SidebarLayoutC.stories.tsx",
+              "apps/fractal-web/src/web/SidebarTreeBinding.stories.tsx",
               "apps/fractal-web/src/web/sidebarRow.ts",
               "apps/fractal-web/src/web/useNativeDetails.ts",
               "apps/fractal-web/src/web/workspaceView.ts",
