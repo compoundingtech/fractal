@@ -1071,7 +1071,7 @@ class PerCrate(StTest):
         self.assertEqual(self.run_crates('--push', 'origin')[0], 0)
         fields = self.gate()
         # Satisfied, in shadow: the committed rust-tests entry does not enforce, so the decision is still run.
-        self.assertEqual((fields['outcome'], fields['members'], fields['missing'], fields['decision']), ('satisfied', '2', '-', 'run'), fields)
+        self.assertEqual((fields['outcome'], fields['members'], fields['missing'], fields['decision']), ('satisfied', '2', '0', 'run'), fields)
         self.assertIn(fields['members_fetch'], ('ok', 'none'))
         self.commit('crates/top/src/lib.rs', '// changed\n')
         fields = self.gate()

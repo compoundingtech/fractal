@@ -174,6 +174,10 @@ stage scripts). So about half the merges re-run a handful of crates and one in s
   - asks `--members`.
   A base whose verifier lacks `--members`, or that has no `scripts/rust-test-keys`, makes the outcome `unavailable`, and the check runs.
 - The decision line adds `members` (workspace members), `missing` (how many have no satisfying note), `manifests_fetch` and `members_fetch`.
+- The evidence log's view (`log`, `log_head`, `log_age_s`, `log_missing`) covers every member at once: the log head is judged once, then
+  each member's own key file in the log. `missing` when the log lists a record under any member's key that is not here, else
+  `unlogged_pass` when some member's chosen note is not listed yet, else `ok`. Without it every line said `log=-`, and the flip trigger's
+  24 h log window could never start.
 - The test jobs are wired to it: `linux-tests` and its shards (and through them `linux-test-build`) skip when linux-gate's note OR every
   crate's per-crate note covers the tree; clippy and fleet compatibility still need linux-gate's own note. The linux-gate verdict accepts
   a skipped stage only when one of those gates decided skip and that stage's own rule says skip. Nothing changes while the rust-tests entry is
