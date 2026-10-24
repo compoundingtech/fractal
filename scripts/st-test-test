@@ -30,6 +30,7 @@ LOCAL = dict(st_test.LOCAL)  # the real commands, before a test replaces them
 
 DATE = '2026-10-14T12:00:00Z'
 GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI')}, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
+               GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='gc.auto', GIT_CONFIG_VALUE_0='0', GIT_CONFIG_KEY_1='maintenance.auto', GIT_CONFIG_VALUE_1='false',
                GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t',
                GIT_COMMITTER_EMAIL='t@example.invalid', GIT_AUTHOR_DATE=DATE, GIT_COMMITTER_DATE=DATE)
 POLICY = {'version': 1, 'checks': {'demo': {'trust_levels': ['host'], 'kinds': {'wrapper': {
