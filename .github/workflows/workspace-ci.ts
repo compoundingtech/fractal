@@ -878,6 +878,7 @@ export const fractalWebJobs = {
           EVENT: '${{ github.event_name }}',
           REMOTE: '${{ github.server_url }}/${{ github.repository }}.git',
           BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
+          BASE_REF: "${{ github.event.merge_group.base_ref || 'refs/heads/main' }}",
           HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
         },
         run: embeddedPython('ci-fractal-web-changes'),
