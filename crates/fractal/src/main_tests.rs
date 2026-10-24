@@ -2527,7 +2527,7 @@ fn web_state_directory_preserves_every_legacy_value_form() {
         let cli = Cli::try_parse_from(["fractal", "web", "--state-dir", directory]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Web { state_dir: Some(path) } if path == PathBuf::from(directory)
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new(directory)
         ), "{directory:?}");
     }
     #[cfg(unix)]
@@ -2539,7 +2539,7 @@ fn web_state_directory_preserves_every_legacy_value_form() {
         ]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Web { state_dir: Some(path) } if path == PathBuf::from(directory)
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new(&directory)
         ));
     }
 }
@@ -2568,7 +2568,7 @@ fn web_uses_clap_option_delimiters_and_equals_values() {
     ] {
         assert!(matches!(
             Cli::try_parse_from(arguments).unwrap().command,
-            Command::Web { state_dir: Some(path) } if path == PathBuf::from("relative")
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new("relative")
         ));
     }
     assert!(matches!(
