@@ -50,15 +50,16 @@ pub fn inputs(
     facts: &Value,
     subscriptions: &[(String, SubscriptionSpec)],
 ) -> Result<Inputs, St3Error> {
-    inputs_with_actuals(transaction, Observation {
+    fractal_store::store::completion_state::flush(transaction).map_err(internal)?;
+    read_inputs(transaction, Observation {
         observer, desired_revision, attempt, resource, facts, subscriptions,
-    }, &mut |subject| latest_actual(transaction, subject))
+    })
 }
 
-pub fn inputs_with_actuals(
+/// Read prepared inputs from the connection's committed snapshot, without mutating that cut.
+pub fn read_inputs(
     transaction: &Connection,
     observation: Observation<'_>,
-    actual: &mut dyn FnMut(&str) -> Result<Option<Value>>,
 ) -> Result<Inputs, St3Error> {
     let Observation { observer, desired_revision, attempt, resource, facts, subscriptions } = observation;
     let mut active_subscriptions = Vec::new();
@@ -175,7 +176,7 @@ pub fn inputs_with_actuals(
         discovered.extend(items.into_iter().map(|item| (field, item)));
     }
     let changed_fields = changed_fields.into_iter().collect::<Vec<_>>();
-    let observer_health_is_current = actual(observer)
+    let observer_health_is_current = fractal_store::store::completion_state::actual(transaction, observer)
         .map_err(internal)?
         .is_some_and(|actual| {
             actual.get("state").and_then(Value::as_str) == Some("healthy")
@@ -198,7 +199,7 @@ pub fn inputs_with_actuals(
             true
         };
         let status = if target_exists { "active" } else { "pending" };
-        let current_status = actual(subscription_subject)
+        let current_status = fractal_store::store::completion_state::actual(transaction, subscription_subject)
             .map_err(internal)?
             .and_then(|actual| {
                 actual

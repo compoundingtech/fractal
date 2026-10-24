@@ -1,0 +1,17 @@
+{
+  "name": "@fractal/storybook-deploy",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.7.0",
+  "scripts": {
+    "deploy": "alchemy deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.5",
+    "@types/node": "26.6.4",
+    "alchemy": "2.0.0-beta.83",
+    "effect": "4.0.5",
+    "typescript": "6.0.3"
+  }
+}

@@ -203,6 +203,12 @@ impl Fence {
         }) {
             return prepared;
         }
+        #[cfg(test)]
+        BEFORE_SNAPSHOT.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
         #[cfg(any(test, feature = "test-support"))]
         let read_started = std::time::Instant::now();
         #[cfg(any(test, feature = "test-support"))]
@@ -210,6 +216,11 @@ impl Fence {
         let value = store.read_snapshot(|_| {
             let connection = store.readers.get();
             if connection.path() != prepared.cut.as_ref().map(|cut| cut.file.as_str()) {
+                return Ok(None);
+            }
+            // Check at the same pinned cut as the inputs, not at the earlier writer seed:
+            // another connection can commit raw changes between those two boundaries.
+            if !completion_state::current(&connection)? {
                 return Ok(None);
             }
             let dirty: bool =
@@ -287,6 +298,12 @@ pub struct Counts {
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     pub static COUNTS: std::cell::RefCell<Counts> = std::cell::RefCell::new(Counts::default());
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static BEFORE_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(any(test, feature = "test-support"))]

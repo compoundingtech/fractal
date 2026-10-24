@@ -4,6 +4,7 @@ use super::*;
 #[path = "resources_preparation.rs"]
 mod preparation;
 pub use preparation::{PreparationObservation, preparation_observation, rebuild_preparation};
+pub(crate) use preparation::sort_key as preparation_sort_key;
 
 pub(super) fn flush_preparation(transaction: &Transaction<'_>) -> Result<()> {
     preparation::flush_if_pending(transaction)
