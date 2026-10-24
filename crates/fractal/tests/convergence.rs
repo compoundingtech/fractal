@@ -77,7 +77,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v7.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v8.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -107,6 +107,41 @@ fn the_corpus_generates_each_client_diagnostic_input() {
                 assert!(input.fields.contains_key(name), "{kind} requires {name}");
             }
         }
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_deployment_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in fractal_schema::deploy::KINDS {
+        let input = world.claim_of(&corpus()[kind], 0).unwrap();
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        world.nodes[0].store.append_claim(&input).unwrap();
+    }
+}
+
+/// Deployment records need valid nested identities and time bounds, not generic empty objects.
+fn deployment_fields(kind: &str) -> Option<Map<String, Value>> {
+    let value = match kind {
+        "deploy.go" => json!({
+            "version": 1, "host": "host-a", "actor": "agent/example-executor",
+            "operation": "install", "trainId": "train/example",
+            "old": {"packagePath": "/nix/store/old-example", "narHash": "sha256-example-old", "commit": "a".repeat(40)},
+            "new": {"packagePath": "/nix/store/new-example", "narHash": "sha256-example-new", "commit": "b".repeat(40)},
+            "issuedAt": "2100-01-01T12:30:00Z", "expiresAt": "2100-01-01T16:30:00Z",
+            "failureRestore": false, "previewDigest": "example-preview-digest",
+            "compatSignoffId": "example-signoff-claim"
+        }),
+        "deploy.go-revoked" => json!({"version":1,"goId":"example-go-claim"}),
+        "deploy.go-consumed" => json!({"version":1,"goId":"example-go-claim","operation":"install","result":"succeeded"}),
+        "deploy.stop" => json!({"version":1,"stopId":"example-stop","scope":"installer-entry","hosts":["host-a","host-b"],"liftCondition":"example release"}),
+        "deploy.stop-lifted" => json!({"version":1,"stopId":"example-stop","releaseGoId":"example-release-go-claim"}),
+        "deploy.compat-signoff" => json!({"version":1,"trainId":"train/example","oldCommit":"a".repeat(40),"newCommit":"b".repeat(40)}),
+        _ => return None,
+    };
+    match value {
+        Value::Object(fields) => Some(fields),
+        _ => unreachable!("deployment fixtures are objects"),
     }
 }
 
@@ -913,17 +948,27 @@ impl World {
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
         let family = self.rng.pick(&spec.subjects).clone();
         let subject = self.subject_of(&family, index)?;
-        let mut fields = Map::new();
-        for (name, field) in &spec.fields {
-            if field.required || self.rng.chance(40) {
-                fields.insert(name.clone(), self.value_of(field, index));
+        let deployment = deployment_fields(&spec.kind);
+        let (fields, actor) = if let Some(mut fields) = deployment {
+            if spec.kind == "deploy.go" && self.rng.chance(40) {
+                fields.insert("combined".into(), json!({"stopId":"example-stop","planId":"example-plan"}));
             }
-        }
-        let actor = match self.rng.below(4) {
-            0 => None,
-            1 => Some(PERSON.to_owned()),
-            2 if subject.starts_with("agent/") => Some(subject.clone()),
-            _ => Some("agent/run-0/worker-0".to_owned()),
+            let actor = if spec.kind == "deploy.go-consumed" { "agent/example-executor" } else { "agent/example-manager" };
+            (fields, Some(actor.to_owned()))
+        } else {
+            let mut fields = Map::new();
+            for (name, field) in &spec.fields {
+                if field.required || self.rng.chance(40) {
+                    fields.insert(name.clone(), self.value_of(field, index));
+                }
+            }
+            let actor = match self.rng.below(4) {
+                0 => None,
+                1 => Some(PERSON.to_owned()),
+                2 if subject.starts_with("agent/") => Some(subject.clone()),
+                _ => Some("agent/run-0/worker-0".to_owned()),
+            };
+            (fields, actor)
         };
         Some(ClaimInput {
             subject,
@@ -1684,16 +1729,16 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v7 (v6 plus the SLO
-/// breach transition kind) and canonical mission publication inputs, seeds 2 and 34 never reach a
-/// trim; every other fixed seed must. Measured across all 17 fixed seeds; claim generation
-/// consumes the same RNG as the schedule.
-const NEVER_TRIMS: &[u64] = &[2, 34];
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v8 and
+/// schema-valid deployment inputs, seeds 13, 34, 144 and 987 never reach a trim;
+/// every other fixed seed must. Measured across all 17 fixed seeds; claim generation
+/// consumes the same RNG as the schedule. Keep the exact per-seed equality below.
+const NEVER_TRIMS: &[u64] = &[13, 34, 144, 987];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v7 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v8 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -1907,7 +1952,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v7.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v8.json"
         }))
         .unwrap(),
     )
