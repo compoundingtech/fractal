@@ -27,28 +27,51 @@ snapshot_lock=
 build=
 previous=
 activated=0
+cleanup_warnings=
 mkdir -p "$P/builds"
 log_run() {
-  TS=$(date -u +%FT%TZ) SHA=$sha OUTCOME=$outcome REASON=$reason MS=$(($(date +%s%3N)-started)) python3 -c 'import json,os; print(json.dumps({"ts":os.environ["TS"],"sha":os.environ["SHA"],"outcome":os.environ["OUTCOME"],"reason":os.environ["REASON"],"ms":int(os.environ["MS"])}))' >> "$P/builds.jsonl"
+  TS=$(date -u +%FT%TZ) SHA=$sha OUTCOME=$outcome REASON=$reason MS=$(($(date +%s%3N)-started)) CLEANUP_WARNINGS=$cleanup_warnings python3 -c 'import json,os; print(json.dumps({"ts":os.environ["TS"],"sha":os.environ["SHA"],"outcome":os.environ["OUTCOME"],"reason":os.environ["REASON"],"ms":int(os.environ["MS"]),"cleanupWarnings":os.environ["CLEANUP_WARNINGS"].splitlines()}))' >> "$P/builds.jsonl"
+}
+cleanup_warning() {
+  printf 'WARNING: cleanup: %s\n' "$1" >&2
+  cleanup_warnings+="$1"$'\n'
 }
 finish() {
   local rc=$?
   trap - EXIT
+  set +e
+  # Command wrappers may need getcwd even with absolute arguments. Leave the
+  # snapshot before deleting it, including on failed/partial builds.
+  if ! cd -- "$ROOT" && ! cd /; then
+    printf 'ERROR: cleanup cannot enter a stable working directory\n' >&2
+    exit 1
+  fi
   if [[ $outcome == failed ]]; then
     echo "$(date -u +%FT%TZ) failed sha=$sha reason=$reason exit=$rc" >&2
     if ((activated)); then
       if [[ -n $previous ]]; then
-        ln -s "$previous" "$P/.current-rollback-$$"
-        mv -Tf "$P/.current-rollback-$$" "$P/current"
-      else rm -f "$P/current"; fi
+        if ! ln -s "$previous" "$P/.current-rollback-$$" ||
+            ! mv -Tf "$P/.current-rollback-$$" "$P/current"; then
+          cleanup_warning 'unsafe rollback failure: current may reference a failed build'
+          rc=1
+        fi
+      elif ! rm -f "$P/current"; then
+        cleanup_warning 'unsafe rollback failure: cannot remove failed current pointer'
+        rc=1
+      fi
     fi
-    [[ -z $build ]] || rm -rf -- "$build"
+    [[ -z $build ]] || rm -rf -- "$build" || cleanup_warning 'cannot remove failed build directory'
   fi
-  rm -f "$P/admitted-$$" "$P/overlay-manifest-$$"
-  if [[ -n $snapshot ]]; then git -C "$SOURCE" worktree remove --force "$snapshot" || true; fi
-  [[ -z $snapshot_lock ]] || rm -f -- "$snapshot_lock"
-  log_run
-  [[ $outcome != failed ]]
+  rm -f "$P/admitted-$$" "$P/overlay-manifest-$$" || cleanup_warning 'cannot remove temporary admission/overlay files'
+  if [[ -n $snapshot ]]; then
+    git -C "$SOURCE" worktree remove --force "$snapshot" || cleanup_warning 'cannot remove snapshot worktree; later stale reclamation can retry'
+  fi
+  [[ -z $snapshot_lock ]] || rm -f -- "$snapshot_lock" || cleanup_warning 'cannot remove snapshot lock file'
+  log_run || cleanup_warning 'cannot append build log'
+  # Temporary-file/worktree/log cleanup is recoverable and must not undo a
+  # successful build status. Unsafe rollback above remains a hard failure.
+  if [[ $outcome == failed && $rc == 0 ]]; then rc=1; fi
+  exit "$rc"
 }
 trap finish EXIT
 exec 9>"$P/build.lock"

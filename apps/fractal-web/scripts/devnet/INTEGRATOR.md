@@ -98,10 +98,12 @@ the immutable dependency cache must share it.
 `dependency_cache.py` first computes the original public digest by hashing each
 relative path followed by its bytes, in this exact order: `pnpm-lock.yaml`,
 `pnpm-workspace.yaml`, `megarepo.kdl`, `megarepo.lock`, `pnpm-source-inputs.json`.
-The generation key is now `sha256("fractal-dependency-key-v2\0" + public_hex +
-"\0" + private_hex)` (UTF-8 text, literal NUL separators). The public five-file
-digest remains the first component; the private digest prevents replaying old
-private dependencies when only the deployment-owned overlay changes.
+The generation key is `sha256("fractal-dependency-key-v3\0" + public_hex +
+"\0" + private_hex + "\0" + installed_hex)` (UTF-8 text, literal NUL separators).
+The public five-file digest remains the first component. Public/private source
+digests provide early invalidation; the **installed-tree stat fingerprint is the
+authoritative ordinary-staleness guard**, including installs configured through
+workspace overrides or other input formats not traversed by manifest inspection.
 The private digest conservatively hashes **every source file** beneath
 `apps/fractal-web/private` and `apps/fractal-web/vendor`, not a filename allowlist.
 Arbitrary lifecycle scripts can read non-manifest files, so a minimal static
@@ -123,6 +125,20 @@ All collected entries are sorted by source-clone-relative path. Each contributes
 big-endian path length, UTF-8 relative path, 8-byte big-endian content length, then
 exact content/target bytes. Empty overlays produce SHA256 of empty bytes. Private
 source contents are never committed; only the derived key enters deployment state.
+
+The installed fingerprint inventories exactly the non-overlapping `node_modules`
+trees that population copies, using one shared root-selection function. It hashes
+compact JSON (`separators=(",", ":")`, default ASCII escaping) of a path-sorted list
+of tuples: source-relative path, `S_IFMT(mode)`, size, `mtime_ns`, `S_IMODE(mode)`,
+and literal symlink target (null for non-links), including root directories.
+It performs stat/lstat/readlink only, not payload reads, and excludes inode/nlink
+so incidental source hardlinks do not invalidate it. Unchanged installed metadata
+keeps the key; ordinary reinstallation changing bytes changes mtimes/sizes and
+therefore the key. This is not a content proof against hostile same-UID edits that
+restore all metadata; the sandbox boundary remains required for hostile code.
+Population checks the source key before copying, after copying, and after sealing/
+prune waits immediately before publication. Drift discards staging rather than
+publishing a generation selected from a stale fingerprint.
 Under an exclusive `<cache>/.cache.lock`, initial population copies installed
 dependency trees from the mutable clone into a staging directory and atomically
 renames it into place. Source-to-cache copying never hardlinks mutable source files.
@@ -141,8 +157,8 @@ Workspace symlinks are normalized in staging to clone-independent relative topol
 an absolute link into clone A's `packages/` becomes a relative workspace link, so
 the same-key generation reused by clone B cannot retain A's mutable path.
 Published generations with incompatible integrity metadata or absolute/escaping
-links require a fresh cache root. The v2 key intentionally does not select legacy
-five-file-only generations; no generation is migrated in place.
+links require a fresh cache root. The v3 key intentionally does not select earlier
+key formats; no generation is migrated in place.
 These directories are disposable copies of the clone's installed dependencies;
 a fresh population rebuilds their contents from that source, not application data.
 
@@ -179,6 +195,15 @@ Production state, manifests, snapshots, private overlay and credentials remain
 deployment-owned. The helper stages `current`; it never prunes immutable builds
 or publishes Devnet. The integrator alone prunes current plus one rollback build
 after the published edge confirms activation.
+
+The EXIT trap changes to the stable build root (or `/`) before removing any
+snapshot. Deployment command wrappers can require a valid cwd even for absolute
+arguments. Recoverable temporary-file, snapshot/lock removal and log-append
+failures emit warnings without turning a successful build into a failed tick;
+warnings available before the JSONL append appear in `cleanupWarnings`. A failed
+log append is necessarily stderr-only. Failed-build rollback failure or inability
+to enter any stable cwd remains an error because cleanup cannot establish safe
+state. Artifact/current-pointer validation remains a hard build failure.
 
 The helper uses `gate-slot` admission by default; `FRACTAL_BUILD_ADMISSION=fallback`
 explicitly reuses a caller's admission timeout and builds with `nice -n 19`.

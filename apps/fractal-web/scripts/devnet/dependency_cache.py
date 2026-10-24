@@ -132,11 +132,44 @@ def private_install_key(source):
     return digest.hexdigest()
 
 
+def dependency_roots(source):
+    """The exact non-overlapping source trees copied into each generation."""
+    for root, dirs, files in os.walk(source):
+        dirs[:] = sorted(name for name in dirs if name != '.git')
+        if 'node_modules' not in dirs and 'node_modules' not in files:
+            continue
+        if 'node_modules' in dirs:
+            dirs.remove('node_modules')
+        relative = (Path(root) / 'node_modules').relative_to(source)
+        yield relative, _dependency_root(source, relative)
+
+
+def installed_tree_key(source):
+    """Stat-only identity of installed entries; not a hostile-code content proof."""
+    source = Path(os.path.abspath(source))
+    entries = []
+    for _, root in dependency_roots(source):
+        paths = [root]
+        for directory, dirs, files in os.walk(root):
+            paths.extend(Path(directory) / name for name in dirs + files)
+        for path in paths:
+            info = path.lstat()
+            kind = stat.S_IFMT(info.st_mode)
+            if kind not in (stat.S_IFREG, stat.S_IFDIR, stat.S_IFLNK):
+                raise ValueError('unsupported source dependency file type')
+            entries.append((path.relative_to(source).as_posix(), kind, info.st_size,
+                            info.st_mtime_ns, stat.S_IMODE(info.st_mode),
+                            os.readlink(path) if kind == stat.S_IFLNK else None))
+    entries.sort()
+    return hashlib.sha256(json.dumps(entries, separators=(',', ':')).encode()).hexdigest()
+
+
 def install_key(source):
-    """Versioned public-first/private-second dependency install identity."""
+    """Public/private inputs plus authoritative installed-tree freshness identity."""
     return hashlib.sha256(
-        b'fractal-dependency-key-v2\0' + public_install_key(source).encode()
-        + b'\0' + private_install_key(source).encode()).hexdigest()
+        b'fractal-dependency-key-v3\0' + public_install_key(source).encode()
+        + b'\0' + private_install_key(source).encode()
+        + b'\0' + installed_tree_key(source).encode()).hexdigest()
 
 
 def _regular_file(path):
@@ -518,14 +551,7 @@ def populate(source, cache, expected):
         return result
 
     try:
-        for root, dirs, files in os.walk(source):
-            dirs[:] = sorted(d for d in dirs if d != '.git')
-            if 'node_modules' not in dirs and 'node_modules' not in files:
-                continue
-            if 'node_modules' in dirs:
-                dirs.remove('node_modules')
-            relative = (Path(root) / 'node_modules').relative_to(source)
-            original = _dependency_root(source, relative)
+        for relative, original in dependency_roots(source):
             inventory.append(relative.as_posix())
             shutil.copytree(original, staging / relative, symlinks=True, copy_function=copy_file)
         _normalize_generation_links(source, staging)
@@ -539,6 +565,10 @@ def populate(source, cache, expected):
         # Selection references are removed before a generation is retired into
         # garbage; interrupted cleanup never leaves a damaged public key.
         _prune(cache, expected, previous)
+        # Include changes during sealing or a wait for an obsolete build lease.
+        # Never publish bytes selected using a stale source-tree fingerprint.
+        if install_key(source) != expected:
+            raise ValueError('source install key changed before cache publication')
         staging.rename(generation)
         _record_selection(cache, expected, previous)
     finally:

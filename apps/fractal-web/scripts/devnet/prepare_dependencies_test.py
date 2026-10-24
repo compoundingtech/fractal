@@ -70,7 +70,6 @@ class PrepareDependenciesTest(unittest.TestCase):
 
     def test_cli_links_cache_files_and_preserves_overlay_manifest(self):
         source_file = self.source / 'node_modules/fixture/index.js'
-        source_file.write_text('mutable source changed after cache population\n')
         result = subprocess.run([sys.executable, str(HELPER), str(self.source), str(self.snapshot),
                                  str(self.manifest), str(self.generation), self.key],
                                 text=True, capture_output=True, timeout=15)
@@ -138,8 +137,16 @@ else:
     def test_reuses_clone_a_generation_with_clone_b_pinned_workspace(self):
         source_a = self.source
         source_b = self.root / 'source-b'
-        shutil.copytree(source_a, source_b, symlinks=True,
-                        ignore=shutil.ignore_patterns('node_modules'))
+        # Clone reuse requires the same literal links and installed-tree stats.
+        absolute = source_a / 'node_modules/absolute-workspace'
+        absolute.unlink()
+        absolute.symlink_to('../packages/workspace')
+        self.key = install_key(source_a)
+        with (self.cache / '.cache.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            populate(source_a, self.cache, self.key)
+        self.generation = self.cache / self.key
+        shutil.copytree(source_a, source_b, symlinks=True, copy_function=shutil.copy2)
         (source_a / 'packages/workspace/index.js').write_text('clone A mutable workspace\n')
         (source_b / 'packages/workspace/index.js').write_text('clone B mutable workspace\n')
         (self.snapshot / 'packages/workspace/index.js').write_text('clone B pinned workspace\n')
@@ -195,6 +202,36 @@ else:
             self.prepare()
         self.assertFalse((self.snapshot / 'node_modules').exists())
         self.assertFalse((self.snapshot / 'apps').exists())
+
+    def test_source_mutation_rejects_stale_key_and_refreshes_independently(self):
+        old_key, old_generation = self.key, self.generation
+        old_file = old_generation / 'node_modules/fixture/index.js'
+        old_info = old_file.stat()
+        self.write_source('node_modules/fixture/index.js', 'refreshed installed dependency\n')
+        with self.assertRaisesRegex(ValueError, 'source install key'):
+            self.prepare()
+        self.assertFalse((self.snapshot / 'node_modules').exists())
+        self.assertFalse(self.manifest.exists())
+        self.assertEqual(old_file.read_text(), 'immutable root dependency\n')
+        self.assertEqual((old_file.stat().st_ino, old_file.stat().st_mtime_ns,
+                          old_file.stat().st_mode, old_file.stat().st_size),
+                         (old_info.st_ino, old_info.st_mtime_ns, old_info.st_mode, old_info.st_size))
+        self.key = install_key(self.source)
+        self.assertNotEqual(self.key, old_key)
+        with (self.cache / '.cache.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            populate(self.source, self.cache, self.key)
+        self.generation = self.cache / self.key
+        self.prepare()
+        snapshot_file = self.snapshot / 'node_modules/fixture/index.js'
+        self.assertEqual(snapshot_file.read_text(), 'refreshed installed dependency\n')
+        self.assertTrue(os.path.samefile(
+            snapshot_file, self.generation / 'node_modules/fixture/index.js'))
+        self.assertEqual(old_file.read_text(), 'immutable root dependency\n')
+        self.assertEqual((old_file.stat().st_ino, old_file.stat().st_mtime_ns,
+                          old_file.stat().st_mode, old_file.stat().st_size),
+                         (old_info.st_ino, old_info.st_mtime_ns, old_info.st_mode, old_info.st_size))
+        self.assertEqual(json.loads(self.manifest.read_text())['dependencyKey'], self.key)
 
     def test_rejects_unsafe_inventory(self):
         (self.generation / '.node-modules.json').chmod(0o644)

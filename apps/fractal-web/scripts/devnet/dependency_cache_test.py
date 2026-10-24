@@ -77,8 +77,9 @@ class DependencyCacheTest(unittest.TestCase):
         self.assertEqual(dependency_cache.INSTALL_INPUTS, names)
         public_key = expected.hexdigest()
         expected_key = hashlib.sha256(
-            b'fractal-dependency-key-v2\0' + public_key.encode()
-            + b'\0' + hashlib.sha256(b'').hexdigest().encode()).hexdigest()
+            b'fractal-dependency-key-v3\0' + public_key.encode()
+            + b'\0' + hashlib.sha256(b'').hexdigest().encode()
+            + b'\0' + dependency_cache.installed_tree_key(self.source).encode()).hexdigest()
         self.assertEqual(dependency_cache.public_install_key(self.source), public_key)
         self.assertEqual(dependency_cache.install_key(self.source), expected_key)
         result = subprocess.run([sys.executable, str(HELPER), 'key', str(self.source)],
@@ -91,6 +92,150 @@ class DependencyCacheTest(unittest.TestCase):
             (self.source / name).write_bytes(original + b'changed')
             self.assertNotEqual(dependency_cache.install_key(self.source), expected_key)
             (self.source / name).write_bytes(original)
+
+    def test_unchanged_installed_tree_keeps_key_without_reading_payload(self):
+        tree_key = dependency_cache.installed_tree_key(self.source)
+        key = dependency_cache.install_key(self.source)
+        self.assertRegex(tree_key, r'^[0-9a-f]{64}$')
+        with mock.patch.object(Path, 'read_bytes',
+                               side_effect=AssertionError('fingerprint read installed bytes')):
+            self.assertEqual(dependency_cache.installed_tree_key(self.source), tree_key)
+        self.assertEqual(dependency_cache.install_key(self.source), key)
+        outside_install = self.source / 'packages/uninstalled/index.js'
+        outside_install.parent.mkdir(parents=True)
+        outside_install.write_text('source package not installed\n')
+        self.assertEqual(dependency_cache.install_key(self.source), key)
+        outside_install.write_text('changed noninstalled package source\n')
+        self.assertEqual(dependency_cache.install_key(self.source), key)
+
+    def test_private_workspace_override_refreshes_actual_installed_tree_key(self):
+        private = self.source / 'apps/fractal-web/private'
+        private.mkdir(parents=True)
+        external = self.fixture / 'external-local-package'
+        external.mkdir()
+        (external / 'package.json').write_text('{"name":"external-tool","version":"1.0.0"}\n')
+        external_source = external / 'index.js'
+        external_source.write_text('original external source\n')
+        (private / 'package.json').write_text('{"dependencies":{"external-tool":"1.0.0"}}\n')
+        (private / 'pnpm-workspace.yaml').write_text(
+            "overrides:\n  external-tool: 'file:" + str(external) + "'\n")
+        installed = private / 'node_modules/external-tool/index.js'
+        installed.parent.mkdir(parents=True)
+        shutil.copy2(external_source, installed)
+        public = dependency_cache.public_install_key(self.source)
+        early_private = dependency_cache.private_install_key(self.source)
+        first = self.populate()
+        old_file = self.cache / first / installed.relative_to(self.source)
+        before = self.fingerprint(self.cache / first)
+        external_source.write_text('refreshed external source with changed bytes\n')
+        self.assertEqual(dependency_cache.private_install_key(self.source), early_private)
+        self.assertEqual(dependency_cache.install_key(self.source), first)
+        # Emulate the refreshed install's copied local-package payload.
+        shutil.copy2(external_source, installed)
+        self.assertEqual(dependency_cache.public_install_key(self.source), public)
+        self.assertEqual(dependency_cache.private_install_key(self.source), early_private)
+        second = self.populate()
+        self.assertNotEqual(second, first)
+        self.assertEqual((self.cache / second / installed.relative_to(self.source)).read_text(),
+                         external_source.read_text())
+        self.assertEqual(old_file.read_text(), 'original external source\n')
+        self.assertEqual(self.fingerprint(self.cache / first), before)
+        self.assertEqual(self.generations(), {first, second})
+
+    def test_source_mutation_during_copy_or_seal_refuses_publication(self):
+        original = self.populate()
+        generation = self.cache / original
+        before = self.fingerprint(generation)
+        selection = (self.cache / '.selection.json').read_bytes()
+        for phase in ('copy', 'seal'):
+            with self.subTest(phase=phase):
+                self.change_key('new inputs for ' + phase)
+                expected = dependency_cache.install_key(self.source)
+                if phase == 'copy':
+                    operation = dependency_cache.shutil.copytree
+                    hook = 'copytree'
+                    target = dependency_cache.shutil
+                else:
+                    operation = dependency_cache._seal_generation
+                    hook = '_seal_generation'
+                    target = dependency_cache
+
+                def mutate(*args, **kwargs):
+                    result = operation(*args, **kwargs)
+                    self.dependency.write_text('source mutated during ' + phase + '\n')
+                    return result
+
+                with mock.patch.object(target, hook, side_effect=mutate):
+                    with self.assertRaisesRegex(ValueError, 'source install key'):
+                        with (self.cache / '.cache.lock').open('a') as lock:
+                            fcntl.flock(lock, fcntl.LOCK_EX)
+                            dependency_cache.populate(self.source, self.cache, expected)
+                self.assertEqual(self.generations(), {original})
+                self.assertFalse((self.cache / expected).exists())
+                self.assertEqual(list(self.cache.glob('.staging-*')), [])
+                self.assertEqual(self.fingerprint(generation), before)
+                self.assertEqual((self.cache / '.selection.json').read_bytes(), selection)
+
+
+    def test_installed_tree_fingerprint_covers_metadata_roots_and_nested_entries(self):
+        nested = self.source / 'node_modules/package/node_modules/inner/index.js'
+        nested.parent.mkdir(parents=True)
+        nested.write_text('inner installed dependency\n')
+        for change in ('path', 'mode', 'size', 'mtime', 'symlink', 'root', 'nested', 'type'):
+            with self.subTest(change=change):
+                clone = self.fixture / ('metadata-' + change)
+                shutil.copytree(self.source, clone, symlinks=True, copy_function=shutil.copy2)
+                before = dependency_cache.installed_tree_key(self.source)
+                self.assertEqual(dependency_cache.installed_tree_key(clone), before)
+                payload = clone / self.dependency.relative_to(self.source)
+                if change == 'path':
+                    payload.rename(payload.with_name('renamed.js'))
+                elif change == 'mode':
+                    payload.chmod(0o700)
+                elif change == 'size':
+                    info = payload.stat()
+                    payload.write_text('a different sized installed payload\n')
+                    os.utime(payload, ns=(info.st_atime_ns, info.st_mtime_ns))
+                elif change == 'mtime':
+                    info = payload.stat()
+                    os.utime(payload, ns=(info.st_atime_ns, info.st_mtime_ns + 1))
+                elif change == 'symlink':
+                    link = clone / 'node_modules/workspace'
+                    link.unlink()
+                    link.symlink_to('../apps/other')
+                elif change == 'root':
+                    root = clone / 'node_modules'
+                    info = root.stat()
+                    os.utime(root, ns=(info.st_atime_ns, info.st_mtime_ns + 1))
+                elif change == 'nested':
+                    (clone / nested.relative_to(self.source)).write_text('changed nested bytes\n')
+                else:
+                    payload.unlink()
+                    payload.mkdir()
+                self.assertNotEqual(dependency_cache.installed_tree_key(clone), before)
+
+    def test_installed_tree_ignores_inode_link_count_and_payload_content(self):
+        before = dependency_cache.installed_tree_key(self.source)
+        held = self.fixture / 'installed-hardlink'
+        os.link(self.dependency, held)
+        self.assertEqual(dependency_cache.installed_tree_key(self.source), before)
+        info = self.dependency.stat()
+        original = self.dependency.read_bytes()
+        self.dependency.write_bytes(b'x' * len(original))
+        os.utime(self.dependency, ns=(info.st_atime_ns, info.st_mtime_ns))
+        self.assertEqual(dependency_cache.installed_tree_key(self.source), before)
+        parent_info = self.dependency.parent.stat()
+        replacement = self.fixture / 'replacement'
+        shutil.copy2(self.dependency, replacement)
+        replacement.replace(self.dependency)
+        os.utime(self.dependency.parent,
+                 ns=(parent_info.st_atime_ns, parent_info.st_mtime_ns))
+        self.assertNotEqual(self.dependency.stat().st_ino, info.st_ino)
+        self.assertEqual(dependency_cache.installed_tree_key(self.source), before)
+        ignored = self.source / '.git/node_modules/ignored/index.js'
+        ignored.parent.mkdir(parents=True)
+        ignored.write_text('VCS metadata is not an installed source tree\n')
+        self.assertEqual(dependency_cache.installed_tree_key(self.source), before)
 
     def test_private_install_inputs_change_key_without_public_changes(self):
         original = dependency_cache.install_key(self.source)
@@ -113,10 +258,13 @@ class DependencyCacheTest(unittest.TestCase):
             changed = dependency_cache.install_key(self.source)
             self.assertNotEqual(changed, second)
             second = changed
-        ignored = private / 'node_modules/tool/package.json'
-        ignored.parent.mkdir(parents=True)
-        ignored.write_text('installed output is not an input')
-        self.assertEqual(dependency_cache.install_key(self.source), second)
+        private_key = dependency_cache.private_install_key(self.source)
+        installed = private / 'node_modules/tool/package.json'
+        installed.parent.mkdir(parents=True)
+        installed.write_text('installed output is part of the tree fingerprint')
+        self.assertEqual(dependency_cache.private_install_key(self.source), private_key)
+        self.assertNotEqual(dependency_cache.install_key(self.source), second)
+        second = dependency_cache.install_key(self.source)
         vendor = self.source / 'apps/fractal-web/vendor/tool/package.json'
         vendor.parent.mkdir(parents=True)
         vendor.write_text('{"dependencies":{"vendor-tool":"1"}}\n')
@@ -182,15 +330,21 @@ class DependencyCacheTest(unittest.TestCase):
                          ['node_modules', 'apps/web/node_modules'])
         self.assertEqual(os.readlink(generation / 'node_modules/workspace'), '../apps/web')
         before = self.fingerprint(generation)
-        self.dependency.write_text('mutated source dependency\n')
-        self.assertEqual(installed.read_text(), 'original dependency\n')
         self.assertEqual(self.populate(), key)
-        self.assertEqual(self.fingerprint(generation), before)
         result = subprocess.run([sys.executable, str(HELPER), 'populate', str(self.source),
                                  str(self.cache), key], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, '')
         self.assertIn('reused key=' + key, result.stderr)
+        self.assertEqual(self.fingerprint(generation), before)
+        self.dependency.write_text('mutated source dependency\n')
+        self.assertEqual(installed.read_text(), 'original dependency\n')
+        with self.assertRaisesRegex(ValueError, 'source install key'):
+            dependency_cache.populate(self.source, self.cache, key)
+        refreshed = self.populate()
+        self.assertNotEqual(refreshed, key)
+        self.assertEqual((self.cache / refreshed / 'node_modules/package/index.js').read_text(),
+                         'mutated source dependency\n')
         self.assertEqual(self.fingerprint(generation), before)
 
     def test_publication_removes_write_bits_preserving_reads_and_execution(self):
@@ -238,7 +392,6 @@ class DependencyCacheTest(unittest.TestCase):
                 else:
                     installed.parent.chmod(0o755)
                 old_mode = held.stat().st_mode
-                self.dependency.write_text(f'fresh source for {change}\n')
                 with mock.patch.object(dependency_cache, '_sha256',
                                        wraps=dependency_cache._sha256) as hashing:
                     self.assertEqual(self.populate(), key)
@@ -248,7 +401,7 @@ class DependencyCacheTest(unittest.TestCase):
                 self.assertFalse(os.path.samefile(held, installed))
                 self.assertEqual(held.stat().st_mode, old_mode,
                                  'garbage cleanup chmodded a payload hardlink')
-                self.assertEqual(installed.read_text(), f'fresh source for {change}\n')
+                self.assertEqual(installed.read_text(), self.dependency.read_text())
                 self.assertEqual(dependency_cache.verify_generation(generation, key),
                                  ['node_modules', 'apps/web/node_modules'])
                 self.assertEqual(self.selection(), {'current': key, 'previous': None})
@@ -363,12 +516,16 @@ class DependencyCacheTest(unittest.TestCase):
         generation = self.cache / key
         self.assertEqual(os.readlink(generation / 'node_modules/pkg'), '../packages/pkg')
         self.assertFalse((generation / 'node_modules/pkg').exists())
+        # Absolute literal targets differ between clones. Reuse is tested with
+        # identical relative topology and copy2-preserved installed-tree stats.
+        (self.source / 'node_modules/pkg').unlink()
+        (self.source / 'node_modules/pkg').symlink_to('../packages/pkg')
+        key = self.populate()
+        generation = self.cache / key
         before = self.fingerprint(generation)
 
         clone = self.fixture / 'clone-b'
-        shutil.copytree(self.source, clone, symlinks=True)
-        (clone / 'node_modules/pkg').unlink()
-        (clone / 'node_modules/pkg').symlink_to(clone / 'packages/pkg')
+        shutil.copytree(self.source, clone, symlinks=True, copy_function=shutil.copy2)
         (clone / 'packages/pkg/index.js').write_text('clone B workspace\n')
         self.assertEqual(dependency_cache.install_key(clone), key)
         with (self.cache / '.cache.lock').open('a') as lock:
@@ -380,8 +537,6 @@ class DependencyCacheTest(unittest.TestCase):
                 self.assertFalse(Path(os.readlink(link)).is_absolute())
                 self.assertNotIn(str(self.source), os.readlink(link))
         # The same stored topology points into whichever clone supplies files.
-        (clone / 'node_modules/pkg').unlink()
-        (clone / 'node_modules/pkg').symlink_to(os.readlink(generation / 'node_modules/pkg'))
         self.assertEqual((clone / 'node_modules/pkg/index.js').read_text(),
                          'clone B workspace\n')
 

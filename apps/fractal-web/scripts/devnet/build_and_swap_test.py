@@ -6,8 +6,10 @@ import os
 from pathlib import Path
 import select
 import signal
+import shutil
 import subprocess
 import tempfile
+import sys
 import unittest
 
 from dependency_cache import INSTALL_INPUTS, install_key
@@ -70,6 +72,20 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
 ''')
             git.chmod(0o755)
             node.chmod(0o755)
+            # Emulate the deployment wrapper's getcwd guard. The old EXIT trap
+            # removed its own cwd before this command and therefore failed.
+            rm = binary / 'rm'
+            rm.write_text(f'''#!{sys.executable}
+import os, pathlib, sys
+try:
+    os.getcwd()
+except FileNotFoundError:
+    raise SystemExit("command wrapper refuses deleted cwd")
+if os.environ.get("SNAPSHOT_CLEANUP_FAIL_LOCK") == "1" and sys.argv[-1].endswith(".lock"):
+    raise SystemExit("injected recoverable lock-file cleanup failure")
+os.execv({shutil.which('rm')!r}, ["rm", *sys.argv[1:]])
+''')
+            rm.chmod(0o755)
             release = fixture / 'release'
             os.mkfifo(release)
             base_env = {
@@ -107,8 +123,11 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 (source / 'node_modules/fixture/index.js').write_text('mutable source changed\n')
+                second_key = install_key(source)
+                self.assertNotEqual(second_key, key)
                 second_env = {**base_env, 'FRACTAL_BUILD_ROOT': str(fixture / 'build-root-b'),
-                              'SNAPSHOT_LEASE_SHA': second_sha, 'SNAPSHOT_LEASE_HOLD': '0'}
+                              'SNAPSHOT_LEASE_SHA': second_sha, 'SNAPSHOT_LEASE_HOLD': '0',
+                              'SNAPSHOT_CLEANUP_FAIL_LOCK': '1'}
                 second = subprocess.run(['bash', str(HELPER), str(source), second_sha, 'shared'],
                                         env=second_env, capture_output=True, text=True, timeout=15)
                 self.assertEqual(second.returncode, 0, second.stderr)
@@ -117,8 +136,11 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
                 self.assertEqual(dependency.stat().st_ino, original_stat.st_ino)
                 self.assertEqual(dependency.stat().st_mtime_ns, original_stat.st_mtime_ns)
                 receipt = json.loads((fixture / 'build-root-b/shared/builds' / second_sha / 'build-receipt.json').read_text())
-                self.assertEqual(receipt['dependencyKey'], key)
+                self.assertEqual(receipt['dependencyKey'], second_key)
                 self.assertEqual(receipt['dependencyFiles'], {'linked': 1, 'copied': 0})
+                logged = json.loads((fixture / 'build-root-b/shared/builds.jsonl').read_text())
+                self.assertEqual(logged['outcome'], 'built')
+                self.assertIn('cannot remove snapshot lock file', logged['cleanupWarnings'])
                 calls = [json.loads(line) for line in (fixture / 'git-calls.jsonl').read_text().splitlines()]
                 self.assertFalse(any(args[:2] == ['worktree', 'remove'] and args[3] == str(live_snapshot)
                                      for args in calls))
@@ -142,7 +164,7 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
                 self.assertEqual((fixture / 'relative-build-root/shared/current').resolve(), relative_build)
                 receipt = json.loads((relative_build / 'build-receipt.json').read_text())
                 self.assertEqual(receipt['buildIdentity']['rev'], relative_sha)
-                self.assertEqual(receipt['dependencyKey'], key)
+                self.assertEqual(receipt['dependencyKey'], second_key)
                 self.assertTrue((fixture / 'relative-build-root/shared/builds.jsonl').is_file())
                 self.assertEqual(list((fixture / 'relative-snapshot-root/shared').iterdir()), [])
             finally:

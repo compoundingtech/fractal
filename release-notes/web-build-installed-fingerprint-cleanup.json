@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fingerprint copied installed trees for cache freshness and leave snapshots before EXIT cleanup.",
+  "replay": { "status": "none", "detail": "No application-data replay." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Developer-only v3 generation key keeps public/private input digests and adds an authoritative stat fingerprint of installed dependencies. Source drift during population refuses publication. Earlier key formats are not migrated in place." },
+  "downtime": { "status": "none", "detail": "No service activation or restart." },
+  "manual": { "status": "none", "detail": "No released-product manual step." },
+  "recovery": { "status": "none", "detail": "Cleanup enters a stable cwd before snapshot removal. Recoverable cleanup errors are warnings and preserve a successful build status; unsafe rollback or inability to enter a stable cwd remains an error." }
+}
