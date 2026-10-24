@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import type { AttachmentPort } from '../data/source.ts'
+import type { AttachmentPort, Grants } from '../data/source.ts'
 import { composerSendBinding, imageUploadAdapter, sendFailureDetail } from './composerSend.ts'
 import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
 import { createComposerDraftSession, createLocalComposerDraftStore } from './composerDrafts.ts'
@@ -152,7 +152,7 @@ describe('composer send contract', () => {
   it('offers image attachments only while both send and upload are granted', () => {
     const attachments = { capabilities: vi.fn(), upload: vi.fn<AttachmentPort['upload']>(), chunk: vi.fn(), send: vi.fn<AttachmentPort['send']>() }
     const adapter = imageUploadAdapter(attachments.upload)
-    const bind = (overrides: Partial<typeof grants>, readable = true) => composerSendBinding({ source: { attachments }, agentRef: seat, grants: { ...grants, ...overrides }, readable, items: [], onRefused: vi.fn(), attachmentAdapter: adapter })
+    const bind = (overrides: Partial<Grants>, readable = true) => composerSendBinding({ source: { attachments }, agentRef: seat, grants: { ...grants, ...overrides }, readable, items: [], onRefused: vi.fn(), attachmentAdapter: adapter })
     for (const binding of [bind({ attachmentUpload: 'ungranted' }), bind({ messageSend: 'ungranted' }), bind({}, false)]) {
       expect(binding.runtime.adapters).toBeUndefined()
       expect(binding.imageAttachments).toBeUndefined()

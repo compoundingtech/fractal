@@ -52,6 +52,8 @@ export const scenarioExemptionIds: readonly string[] = [
   './ChromeControls.stories.tsx#QuietIcons:primitive',
   './ChromeControls.stories.tsx#QuietIconsFlow:primitive',
   './ChromeControls.stories.tsx#QuietIconsLight:primitive',
+  './Composer.stories.tsx#PlainImageAttachments:contract-fixture',
+  './Composer.stories.tsx#PlainImageAttachmentsLight:contract-fixture',
   './ContentNetwork.stories.tsx#EmbraceAllowedAttachment:contract-fixture',
   './ContentNetwork.stories.tsx#EmbraceData:contract-fixture',
   './ContentNetwork.stories.tsx#EmbraceHostOpensMetadata:contract-fixture',

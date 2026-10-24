@@ -18,7 +18,7 @@ const isImageMediaType = (value: string | undefined): value is ImageMediaType =>
  * Composer images upload when the message is sent, never while drafting. A refused upload rejects, so the
  * runtime returns the draft with the attachment marked failed and its reason; nothing is sent.
  */
-export const imageUploadAdapter = (upload: AttachmentPort['upload']): AttachmentAdapter & { readonly add: (state: { readonly file: File }) => Promise<PendingAttachment> } => ({
+export const imageUploadAdapter = (upload: AttachmentPort['upload']): Omit<AttachmentAdapter, 'add'> & { readonly add: (state: { readonly file: File }) => Promise<PendingAttachment> } => ({
   accept: imageMediaTypes.join(','),
   add: async ({ file }) => {
     if (!isImageMediaType(file.type)) throw new Error('Only PNG, JPEG, GIF and WebP images can be attached.')
