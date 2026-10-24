@@ -47,6 +47,7 @@ deployment-owned resources; scripts do not provision deployments or credentials.
 | `FRACTAL_INTEGRATOR_PRIORITY_JSON` | Ordered JSON array of required PR numbers; `[]` explicitly selects none |
 | `FRACTAL_INTEGRATOR_TRUST_MODE` | Required: `authors` or `collaborator-permission`; no default |
 | `FRACTAL_INTEGRATOR_TRUSTED_AUTHORS` | Conditional: explicit JSON array of trusted GitHub logins, required in `authors` mode; no built-in authors |
+| `FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS` | Optional positive finite seconds for the entire selection phase, including permission checks and required-PR queries; defaults to `60` |
 | `FRACTAL_INTEGRATOR_SANDBOX` | Required: `bwrap`; no default or unsandboxed fallback |
 | `FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT` | Absolute, deployment-owned bootstrap scratch directory outside candidate clones and snapshots |
 | `FRACTAL_INTEGRATOR_PNPM_STORE` | Absolute, dedicated writable pnpm package cache outside candidate clones; must contain no credentials |
@@ -90,6 +91,48 @@ require an author allowlist. Missing or unknown trust modes fail before a tick.
 Rejected PRs log `fork-head` or `untrusted-author`, including required PRs.
 After fetching, a moved head logs `head-moved`; merges use only the exact selected
 and verified SHA. Recorded semantic stacks cannot restore rejected or moved heads.
+
+## Bounded selection and PR file cache
+
+Fractal Web 2 uses `live/metadata-cache/pr-files/<digest>.json` to cache complete
+PR path lists. The digest covers the PR number, selected `headRefOid` and
+`baseRefOid`. A base move or retarget invalidates the entry even if the head is
+unchanged. Trust and collaborator permission are still checked on every tick;
+the cache does not preserve admission decisions or skip unchanged PRs.
+
+Cache misses first request the small GraphQL path list; when its count differs
+from GitHub's `changedFiles`, they fetch every REST file page. The final unique
+path count must match. A subsequent metadata query fences the head, base and count
+before an atomic cache write. Failed, truncated or changing responses are never
+cached. Both GitHub file connections cap results at 3000 files. Larger PRs are
+skipped fail-closed without fetching files (`fetchedFiles: 0`); any other incomplete
+list is also skipped without caching. Both the tick log and selection receipt
+record `reason: "files-incomplete"`, `changedFiles` and `fetchedFiles` for that PR.
+Other PRs continue through selection. These exclusions may remove previously
+integrated PRs that the old script admitted from a truncated list.
+Hits need no per-PR files or fence API call: the current tick's metadata snapshot
+selects the exact cached identity.
+
+The default total selection budget is 60 seconds, not 60 seconds per API call.
+Each selection API subprocess receives at most the remaining budget. Expiration
+records `build: "skipped"`, `reason: "selection-deadline"`,
+`selectionFailure: true` and `selectionComplete: false` in the tick JSONL, before
+any clone mutation, build or activation. The served build stays selected and the
+next tick retries normally. Observers and alerts must count this explicit outcome
+as a **selection failure**, not a snapshot/build failure. Ordinary upstream API
+errors retain their error/detail diagnostics.
+
+A cold cache can require several ticks to fill under the budget; completed entries
+survive a deadline, while the unfinished PR entry does not. Advancing the base
+invalidates file lists, so frequent base changes can still exhaust a small budget.
+Deployment owners can raise the budget with
+`FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS`. Deployments with consecutive
+selection-failure rollback gates must pre-populate the cache or explicitly allow
+a measured larger startup budget before enforcing 60 seconds; cold-cache
+deadlines must not accidentally consume the rollout failure allowance.
+No production setting is changed by checking out these scripts. Cache files
+contain public metadata only. Production state, credentials and the private
+overlay remain outside the repository.
 
 ## Publication recovery and retention
 

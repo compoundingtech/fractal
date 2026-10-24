@@ -117,7 +117,7 @@ and a stale pass is reused. Four controls, in order of when they bite:
   `scripts/rust-test-inputs-scan` (the textual first pass of the extras: `--write` produced the committed file, a policy test fails when a
   crate's scan names a path its entry does not cover). `.st/rust-test-inputs.json` starts from that scan; the daily trace of section 5
   is what lets a crate's extras shrink or grow after review. Test file: `scripts/rust-test-keys-test`.
-- `scripts/st-test --check rust-tests` (opt-in; `--all` still signs `linux-gate` until the gate accepts per-crate notes): computes the keys,
+- `scripts/st-test --check rust-tests` (in the default suite since step 5a, after `linux-gate`; see section 10): computes the keys,
   fetches the per-crate index refs in one fetch, asks the verifier (`evidence-verify --crate-key CRATE=KEY`) for each crate, runs ONE
   `scripts/ci-local tests` for the missing crates (`CI_TEST_PACKAGES`, `CI_TEST_JUNIT`; the workspace build, so features unify as in CI), and
   signs each crate with `scripts/evidence-wrap --check rust-tests` over `scripts/ci-rust-test-result`, which reads that crate's part of the
@@ -161,6 +161,26 @@ Measured with the committed extras over the last 57 first-parent merges of main 
 crates; 29 merges change at most 5, 5 change 6 to 20, 14 change 21 to 49, and 9 change 50 or more (global paths: a manifest, the lock, the
 stage scripts). So about half the merges re-run a handful of crates and one in six re-runs everything.
 
+## 8a. As built in step 3 (the gate job, shadow)
+
+- `evidence-gate-rust-tests` is one of the evidence gate jobs (`evidenceGateChecks` in `.github/workflows/fleet.yml.genie.ts`), and the
+  aggregate note job waits for it as for the others. With the policy entry in shadow (`enforce` false) it decides nothing: it reports a
+  decision line on every run, and no job skips on it yet.
+- `scripts/ci-evidence-gate`, for a check in `MEMBER_CHECKS` (`rust-tests`):
+  - copies the base's `scripts/rust-test-keys` beside the base's verifier;
+  - fetches the tree's `Cargo.toml` blobs and the base's `.st/rust-test-inputs.json` that the clone lacks, in ONE fetch by object id. A
+    head tree's clone has trees but no blobs, and the verifier reads them without fetching;
+  - fetches every member's note refs in ONE fetch built from `--members --project`;
+  - asks `--members`.
+  A base whose verifier lacks `--members`, or that has no `scripts/rust-test-keys`, makes the outcome `unavailable`, and the check runs.
+- The decision line adds `members` (workspace members), `missing` (how many have no satisfying note), `manifests_fetch` and `members_fetch`.
+- The test jobs are wired to it: `linux-tests` and its shards (and through them `linux-test-build`) skip when linux-gate's note OR every
+  crate's per-crate note covers the tree; clippy and fleet compatibility still need linux-gate's own note. The linux-gate verdict accepts
+  a skipped stage only when one of those gates decided skip and that stage's own rule says skip. Nothing changes while the rust-tests entry is
+  shadow (its gate never says skip). The enforce step is then the policy flip alone (`enforce: true`, `events: ["pull_request"]`,
+  sampled 1 in 5, merge queue unchanged), on its own trigger; before it, scripts/evidence-flip-ready must count the jobs that read
+  rust-tests' skip as its members, so a red they would hide is seen.
+
 ## 9. Signing time (measured 2026-10-24)
 
 The first full run on main's tree signed 52 crates in 671 s (07:52:51Z to 08:04:02Z), as long as the tests (nextest 941.6 s): each
@@ -174,3 +194,23 @@ A full run once sat 30 minutes in the megarepo member step (`mr apply`, whose `g
 the network was fine). The step now has a limit (`ST_TEST_MEMBERS_LIMIT`, default 1200 s), writes its output to a file, and is killed with
 everything it started when the limit passes; the run then reports "NOT RUN" with the reason. The `ST_TEST_*` settings are read before the seat
 environment scrub, which would otherwise remove them.
+
+## 10. Step 5a: rust-tests in the default suite, signed from linux-gate's own run
+
+While the per-crate gate is in shadow, `linux-gate` still runs the tests stage. Running the tests a second time for `rust-tests` would double the
+test time of every push, so when both are selected (the default) `st-test` asks linux-gate's run for nextest's JUnit report (`CI_TEST_JUNIT`, an
+absolute path in its scratch: the same `--workspace` build and the whole selection, `conversation_model` included) and `rust-tests` then signs the
+crates that have no passing note for their key from that report, running nothing. Each such record says `filterset=workspace` and carries the
+sha256 of linux-gate's command as `run_command_sha256`, so it is told apart from a filtered run. When linux-gate did not run (a lane edit) or left no
+whole report, `rust-tests` runs the crates it lacks itself, as before. When the enforce step has landed (linux-gate's test jobs skip on
+`evidence-gate-rust-tests`), linux-gate's local command shrinks to clippy and fleet-compat and `rust-tests` is the only run of the tests.
+
+## 11. Seeding main's tree: `st-test --seed`
+
+A merge that moves a crate's key, or the lane's definition (anything under `scripts/` or `.st`), leaves main's tree with crates that have no note, so
+the gate asks for them again on the next pull request. `scripts/st-test --seed [REF]` is the entry point a merge-queue signer runs after such a merge,
+from any checkout and whatever HEAD is: it signs the per-crate `rust-tests` notes of REF's tree (default: the base, `origin/main`, fetched first)
+for the crates that lack one, runs only those crates, and pushes the notes (to `origin` unless `--push` says otherwise). It takes no other check; it
+exits 0 when every crate is covered or signed, and `--crate NAME` narrows it. Measured: a full seeding of 52 crates is about 12 minutes on this host
+(prep 158 s, nextest 480 s, signing 53 s); after a merge that touched 2 crates it runs only those 2.
+
