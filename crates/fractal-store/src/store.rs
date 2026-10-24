@@ -4068,7 +4068,7 @@ impl Store {
         &self,
         token: &str,
     ) -> Result<OperationalRepairResult, St3Error> {
-        self.apply_operational_repair_with_legacy_starts(token, &[])
+        self.apply_operational_repair_with_legacy_starts(token, &[], None)
     }
 
     /// Rechecks the complete evidence-bound plan inside the normal writer fence.
@@ -4076,6 +4076,7 @@ impl Store {
         &self,
         token: &str,
         native_evidence: &[Value],
+        bound_actor: Option<&str>,
     ) -> Result<OperationalRepairResult, St3Error> {
         let (digest, filter) = decode_repair_token(token)?;
         let repair_subject = format!("repair/{digest}");
@@ -4303,12 +4304,18 @@ impl Store {
                 "operation_id": item.details["operation"]["id"],
                 "native_evidence": item.details["native_evidence"],
             })).collect::<Vec<_>>();
-        let reason = if closures.is_empty() {
-            "applied the exact graph-authorized operational repair plan".to_owned()
-        } else {
-            format!("applied the exact graph-authorized operational repair plan; legacy runtime start closures: {}",
-                serde_json::to_string(&closures).map_err(internal)?)
-        };
+        // Keep the legacy four-field receipt and daemon author: old peers classify
+        // repair.applied as SystemOnly. Caller attribution is JSON inside reason,
+        // before the existing trailing closures JSON consumed by older readers.
+        let mut reason = "applied the exact graph-authorized operational repair plan".to_owned();
+        if let Some(actor) = bound_actor {
+            use std::fmt::Write as _;
+            write!(&mut reason, "; bound caller: {}", json!({"actor": actor})).map_err(internal)?;
+        }
+        if !closures.is_empty() {
+            reason.push_str("; legacy runtime start closures: ");
+            reason.push_str(&serde_json::to_string(&closures).map_err(internal)?);
+        }
         let receipt = append_claim_tx(
             &transaction,
             &self.origin,

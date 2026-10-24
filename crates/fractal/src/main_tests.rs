@@ -17,12 +17,13 @@ fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
 #[test]
 fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     let cli = Cli::try_parse_from([
-        "st", "repair", "dry-run", "--subject", "agent/example-first",
+        "st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/example-first",
         "--subject", "agent/example-second", "--class", "revoked-legacy-runtime-start",
     ]).unwrap();
-    let Command::Repair { command: RepairCommand::DryRun { subjects, classes } } = cli.command else {
+    let Command::Repair { command: RepairCommand::DryRun { subjects, classes, ignored_actor } } = cli.command else {
         panic!("expected filtered repair dry-run");
     };
+    assert_eq!(ignored_actor.as_deref(), Some("agent/own"));
     assert_eq!(subjects, ["agent/example-first", "agent/example-second"]);
     assert_eq!(classes, ["revoked-legacy-runtime-start"]);
     let path = repair_plan_path(&subjects, &classes).unwrap();
@@ -31,6 +32,77 @@ fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     assert!(path.contains(&format!("classes={}",
         urlencoding::encode(r#"["revoked-legacy-runtime-start"]"#))));
     assert_eq!(repair_plan_path(&[], &[]).unwrap(), "/v1/repair");
+}
+
+#[test]
+fn repair_actor_path_binds_the_literal_seat_before_requests() {
+    for arguments in [
+        vec!["st", "repair", "apply", "--as", "agent/own", "orpv0:token"],
+        vec!["st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/target",
+            "--class", "revoked-legacy-runtime-start"],
+        vec!["st", "conversations", "status", "--as", "agent/own", "--idempotency-key", "key"],
+    ] {
+        let own = Cli::try_parse_from(&arguments).unwrap();
+        assert!(guard_mutating_cli_actor(&own.command, Some("agent/own"), None).is_ok());
+        assert!(guard_mutating_cli_actor(&own.command, Some("agent/peer"), None).is_err());
+        for actor in ["agent/peer", "person/other", "own", "requester"] {
+            let mut mismatched = arguments.clone();
+            let index = mismatched.iter().position(|arg| *arg == "--as").unwrap() + 1;
+            mismatched[index] = actor;
+            let cli = Cli::try_parse_from(mismatched).unwrap();
+            assert!(guard_mutating_cli_actor(&cli.command, Some("agent/own"), None).is_err());
+        }
+    }
+    let absent = Cli::try_parse_from(["st", "repair", "apply", "orpv0:token"]).unwrap();
+    assert!(guard_mutating_cli_actor(&absent.command, Some("agent/own"), None).is_err());
+    assert!(guard_mutating_cli_actor(&absent.command, None, None).is_ok());
+    let read = Cli::try_parse_from(["st", "repair", "dry-run"]).unwrap();
+    assert!(guard_mutating_cli_actor(&read.command, Some("agent/own"), None).is_ok());
+}
+
+#[test]
+fn repair_actor_path_keeps_unrelated_subjects_and_classes_out() {
+    let store = Store::open_memory("repair-actor-test").unwrap();
+    let subjects = vec!["agent/target".to_owned()];
+    let classes = vec!["revoked-legacy-runtime-start".to_owned()];
+    let mut plan = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &[], &subjects, &classes,
+    ).unwrap();
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_ok());
+    let mut item: fractal_daemon::model::OperationalRepairItem = serde_json::from_value(
+        serde_json::json!({
+            "id": "repair/test", "class": classes[0], "subject": "agent/unrelated",
+            "affected_subjects": [], "reason": "test"
+        })
+    ).unwrap();
+    plan.items.push(item.clone());
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_err());
+    item.subject = subjects[0].clone();
+    item.class = "unrelated-class".into();
+    plan.items = vec![item];
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_err());
+}
+
+#[test]
+fn repair_apply_guidance_preserves_actorless_humans_and_effective_agent_aliases() {
+    let human = fractal_drivers::contracts::env_with("ST_AGENT", &|_| None);
+    assert_eq!(repair_apply_guidance("orpv0:token", human.as_deref()),
+        "st repair apply orpv0:token");
+    for variable in ["ST_AGENT", "FRACTAL_AGENT"] {
+        let own = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
+            (name == variable).then(|| "agent/own".to_owned())
+        });
+        let read = Cli::try_parse_from(["st", "repair", "dry-run"]).unwrap();
+        guard_mutating_cli_actor(&read.command, own.as_deref(), None).unwrap();
+        assert_eq!(repair_apply_guidance("orpv0:token", own.as_deref()),
+            "st repair apply --as agent/own orpv0:token", "{variable}");
+    }
+}
+
+#[test]
+fn repair_apply_actor_requests_use_only_the_new_attributed_route() {
+    assert_eq!(repair_apply_path(None), "/v1/repair/apply");
+    assert_eq!(repair_apply_path(Some("agent/own")), "/v1/repair/apply-attributed");
 }
 
 #[test]

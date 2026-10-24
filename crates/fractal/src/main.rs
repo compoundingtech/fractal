@@ -2178,6 +2178,9 @@ struct RecorderReportArgs {
 enum RepairCommand {
     /// Compute the exact read-only repair plan and approval token.
     DryRun {
+        /// Compatibility actor for guarded callers; this GET does not require an actor.
+        #[arg(long = "as")]
+        ignored_actor: Option<String>,
         /// Restrict repair items to these exact subjects (repeatable).
         #[arg(long = "subject")]
         subjects: Vec<String>,
@@ -2186,7 +2189,13 @@ enum RepairCommand {
         classes: Vec<String>,
     },
     /// Apply exactly the plan identified by a dry-run token.
-    Apply { token: String },
+    Apply {
+        token: String,
+        /// Caller identity. Agent seats must explicitly name their literal seat identity.
+        /// The daemon verifies the authenticated harness binding and records the caller.
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4230,6 +4239,9 @@ struct MessageStatusArgs {
     /// Whether a send or reply that st did not confirm landed, by the key its error printed.
     #[arg(long, conflicts_with = "reference")]
     idempotency_key: Option<String>,
+    /// Compatibility actor for guarded callers; this GET does not require an actor.
+    #[arg(long = "as")]
+    ignored_actor: Option<String>,
 }
 
 #[derive(Args)]
@@ -5455,6 +5467,21 @@ fn guard_mutating_cli_actor(
     let Some(own) = own.filter(|own| own.starts_with("agent/")) else {
         return Ok(());
     };
+    // Bind explicit repair actors locally as well as at the daemon's authenticated
+    // harness boundary; possession of a repair token is not a caller identity.
+    let repair_actor = match command {
+        Command::Repair { command: RepairCommand::Apply { actor, .. } } => {
+            Some(actor.as_deref().ok_or_else(|| anyhow::anyhow!(
+                "an agent repair apply needs explicit --as {own}"
+            ))?)
+        }
+        Command::Repair { command: RepairCommand::DryRun { ignored_actor, .. } } => ignored_actor.as_deref(),
+        Command::Conversations { command: MessageCommand::Status(args) } => args.ignored_actor.as_deref(),
+        _ => None,
+    };
+    if let Some(actor) = repair_actor {
+        anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
+    }
     let actor = match command {
         Command::Apply(args) => Some(args.actor.as_str()),
         Command::Missions { command } => match command {
@@ -10514,9 +10541,22 @@ fn validate_repair_plan_filters(
     Ok(())
 }
 
+fn repair_apply_path(actor: Option<&str>) -> &'static str {
+    if actor.is_some() { "/v1/repair/apply-attributed" } else { "/v1/repair/apply" }
+}
+
+fn repair_apply_guidance(token: &str, own: Option<&str>) -> String {
+    let token = presentation::shell_argument(token);
+    match own.filter(|own| own.starts_with("agent/") && own.len() > "agent/".len()) {
+        Some(own) => format!("st repair apply --as {} {token}", presentation::shell_argument(own)),
+        None => format!("st repair apply {token}"),
+    }
+}
+
 async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) -> Result<()> {
     match command {
-        RepairCommand::DryRun { subjects, classes } => {
+        RepairCommand::DryRun { subjects, classes, ignored_actor } => {
+            notice_ignored_read_actor(ignored_actor.as_deref());
             let path = repair_plan_path(&subjects, &classes)?;
             let plan: OperationalRepairPlan = client.get(&path).await?;
             validate_repair_plan_filters(&plan, &subjects, &classes)?;
@@ -10544,12 +10584,14 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                         println!("  evidence\t{}", serde_json::to_string(&item.details)?);
                     }
                 }
-                println!("Apply this exact plan with: st repair apply {}", plan.token);
+                let own = fractal_drivers::contracts::env("ST_AGENT");
+                println!("Apply this exact plan with: {}", repair_apply_guidance(&plan.token, own.as_deref()));
             }
         }
-        RepairCommand::Apply { token } => {
+        RepairCommand::Apply { token, actor } => {
+            let path = repair_apply_path(actor.as_deref());
             let result: OperationalRepairResult = client
-                .post("/v1/repair/apply", &OperationalRepairApplyRequest { token })
+                .post(path, &OperationalRepairApplyRequest { token, actor })
                 .await?;
             if json_output {
                 print_value(&result, true)?;
