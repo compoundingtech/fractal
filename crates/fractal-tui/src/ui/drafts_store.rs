@@ -2,7 +2,7 @@
 //! never loses it (Nathan, 2026-10-11: "I was just typing a big message and the tui crashed and
 //! lost it"). One file beside the prefs, never synced through st: a draft is the person's own
 //! words until they send them. Every change to the boxes is written at once, by key (the agent
-//! whose box it is), and only the keys this stui changed, so two stuis on one device do not
+//! whose box it is), and only the keys this Fractal TUI changed, so two stuis on one device do not
 //! undo each other.
 
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ fn read(path: &Path) -> File {
         .unwrap_or_default()
 }
 
-/// The drafts a previous stui left, by key.
+/// The drafts a previous Fractal TUI left, by key.
 pub fn load(path: &Path) -> HashMap<String, String> {
     read(path)
         .into_iter()
@@ -54,7 +54,7 @@ pub fn load(path: &Path) -> HashMap<String, String> {
         .collect()
 }
 
-/// Write what changed between `before` (what this stui last wrote or read) and `now`: a key
+/// Write what changed between `before` (what this Fractal TUI last wrote or read) and `now`: a key
 /// with new text is set, a key gone or empty is removed. Other keys in the file stay as they are.
 pub fn save(
     path: &Path,
@@ -89,7 +89,7 @@ pub fn save(
     std::fs::rename(partial, path)
 }
 
-/// What typing has changed since the last write: the file, what it holds as this stui last wrote
+/// What typing has changed since the last write: the file, what it holds as this Fractal TUI last wrote
 /// it, and the boxes now. Kept so a panic can write it on the way out (`flush_unsaved`).
 type Unsaved = (PathBuf, HashMap<String, String>, HashMap<String, String>);
 static UNSAVED: std::sync::Mutex<Option<Unsaved>> = std::sync::Mutex::new(None);
@@ -127,7 +127,7 @@ pub fn flush_unsaved() {
 }
 
 /// The file holds the person's unsent words: only they read it. Not flushed to disk: a crash of
-/// stui leaves the write with the operating system, and only a power cut could lose it.
+/// Fractal TUI leaves the write with the operating system, and only a power cut could lose it.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();
@@ -180,7 +180,7 @@ mod tests {
         let path = dir.path().join("drafts.json");
         let first = map(&[("a", "from the first")]);
         save(&path, &HashMap::new(), &first).unwrap();
-        // A second stui, started before the first typed, writes only its own key.
+        // A second Fractal TUI, started before the first typed, writes only its own key.
         save(&path, &HashMap::new(), &map(&[("b", "from the second")])).unwrap();
         assert_eq!(
             load(&path),

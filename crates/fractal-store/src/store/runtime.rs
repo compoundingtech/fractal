@@ -1,4 +1,4 @@
-//! smalltalk as a runtime on the graph: the claim kinds it knows, the tables it projects them
+//! Fractal as a runtime on the graph: the claim kinds it knows, the tables it projects them
 //! into, its checkpoint rules, and the caches of its projections. `smallclaims` reaches all of
 //! these only through [`smallclaims::store::Runtime`].
 
@@ -11,10 +11,10 @@ pub struct PreviousRoster {
     pub page_refs: Option<AgentResourcesEntry>,
 }
 
-/// smalltalk's half of the store. The graph holds it as its runtime, and `Store` keeps it beside
+/// Fractal's half of the store. The graph holds it as its runtime, and `Store` keeps it beside
 /// the graph for the caches its reads use.
 #[derive(Default)]
-pub struct SmalltalkRuntime {
+pub struct FractalRuntime {
     /// Source-owned observation fencing only; no canonical sample log or timer.
     pub(super) slo_source: Mutex<slo_breaches::SourceState>,
     /// Committed launch-source invalidation, independent of append frontiers.
@@ -165,11 +165,11 @@ pub struct AgentResourcesEntry {
 impl Store {
     /// The domain state of type `T` kept on this store, created empty on first use.
     pub fn extension<T: std::any::Any + Send + Sync + Default>(&self) -> Arc<T> {
-        self.smalltalk.extensions.get::<T>()
+        self.fractal.extensions.get::<T>()
     }
 }
 
-impl SmalltalkRuntime {
+impl FractalRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
         push_registrations::create_schema(connection)?;
@@ -229,7 +229,7 @@ impl SmalltalkRuntime {
     }
 }
 
-impl Runtime for SmalltalkRuntime {
+impl Runtime for FractalRuntime {
     fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
         Some(self.observer_actuals.clone())
     }
@@ -620,7 +620,7 @@ impl Runtime for SmalltalkRuntime {
     }
 }
 
-/// The version of smalltalk's shared projection layout, beside the claim vocabulary. Nodes whose
+/// The version of Fractal's shared projection layout, beside the claim vocabulary. Nodes whose
 /// layouts differ keep exchanging claim authority but do not compare projection maps.
 /// How recently an agents list read must have asked for the roster for a forget to refold it
 /// at once rather than on the next read.
@@ -655,7 +655,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
 }
 
 
-impl SmalltalkRuntime {
+impl FractalRuntime {
     /// Drop every reduction kept by graph cut: statuses, views, conversation owners, agent
     /// cards and the roster built from them, usage folds and agent page order.
     fn forget_reductions(&self) {
@@ -741,7 +741,7 @@ mod schema_install_tests {
             .unwrap();
         connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('preserved');").unwrap();
         assert!(
-            SmalltalkRuntime::default()
+            FractalRuntime::default()
                 .create_schema(&connection)
                 .is_err()
         );
@@ -764,7 +764,7 @@ mod schema_install_tests {
             .unwrap();
         // This damaged table fails after the runtime's early claim indexes were created.
         connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('existing');").unwrap();
-        let error = SmalltalkRuntime::default()
+        let error = FractalRuntime::default()
             .create_schema_for_fresh_store(&connection)
             .unwrap_err();
         assert!(error.to_string().contains("mission_id"), "{error:#}");
@@ -802,7 +802,7 @@ mod schema_install_tests {
     fn failed_late_fresh_install_rolls_back_only_its_chunk() {
         use rusqlite::hooks::{AuthContext, Authorization};
         let (connection, reached) = late_install_error_fixture();
-        SmalltalkRuntime::default()
+        FractalRuntime::default()
             .create_schema_for_fresh_store(&connection)
             .unwrap_err();
         connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
@@ -846,7 +846,7 @@ mod schema_install_tests {
     fn failed_late_populated_install_keeps_completed_ddl() {
         use rusqlite::hooks::{AuthContext, Authorization};
         let (connection, reached) = late_install_error_fixture();
-        SmalltalkRuntime::default()
+        FractalRuntime::default()
             .create_schema(&connection)
             .unwrap_err();
         connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
@@ -918,7 +918,7 @@ mod schema_install_tests {
             }
             Authorization::Allow
         }));
-        SmalltalkRuntime::default()
+        FractalRuntime::default()
             .create_schema_for_fresh_store(&connection)
             .unwrap();
         // SQLite silently ignores this connection change within a transaction. The
@@ -1081,7 +1081,7 @@ mod schema_install_tests {
                 .execute_batch(smallclaims::store::FRESH_SCHEMA)
                 .unwrap();
         } else {
-            SmalltalkRuntime::default()
+            FractalRuntime::default()
                 .create_schema_for_fresh_store(&connection)
                 .unwrap();
         }

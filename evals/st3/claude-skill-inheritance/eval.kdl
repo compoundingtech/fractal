@@ -50,7 +50,7 @@ version 2
         }
         step "report-skill-check" {
           title "The requester receives the skill union result"
-          goal "Send person/eval-requester exactly one Small Talk message. State which project and plugin skills you invoked. Do not include either secret token. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/skill-report resource.observed --actor agent/${ST_MISSION_RUN}/si.agent --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send person/eval-requester exactly one Fractal message. State which project and plugin skills you invoked. Do not include either secret token. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/skill-report resource.observed --actor agent/${ST_MISSION_RUN}/si.agent --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "verify-skill-effects" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/skill-report" { kind "custom.st3.message-receipt"; state "published" } }
         }

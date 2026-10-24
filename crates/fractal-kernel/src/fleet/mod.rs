@@ -1,4 +1,4 @@
-//! Fleet membership as smalltalk uses it. Keys, the membership fold, the join handshake, joining
+//! Fleet membership as Fractal uses it. Keys, the membership fold, the join handshake, joining
 //! from `fleet.toml` and the transports live in `smallclaims::fleet`. See `docs/fleet-join.md`
 //! for the design.
 

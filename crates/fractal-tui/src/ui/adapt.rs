@@ -74,7 +74,7 @@ fn loaded_or_why<T>(snapshot: bool, items: Vec<T>, why: Option<&String>) -> Load
     }
 }
 
-/// The host this stui talks to, from whichever window has loaded.
+/// The host this Fractal TUI talks to, from whichever window has loaded.
 fn gateway(model: &Model) -> Option<String> {
     [&model.missions, &model.agents, &model.now, &model.sessions]
         .into_iter()
@@ -1178,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn small_talk_in_the_timeline_draws_as_mail_and_step_pings_as_events() {
+    fn fractal_in_the_timeline_draws_as_mail_and_step_pings_as_events() {
         let timeline: Vec<TimelineEntry> = serde_json::from_value(serde_json::json!([
             {"id":"e1","sequence":4,"revision":1,"timestamp":"2026-09-29T10:00:00Z","role":"user","type":"message","final":true,
              "body":{"message_id":"message/one","from":"agent/example/harbor","to":"agent/example/cos","title":"A question"}},
@@ -1216,7 +1216,7 @@ mod tests {
         assert!(
             matches!(&entries[1].body, Body::Event(title) if title == "Mission step ready: review")
         );
-        // A harness turn's own message header is not Small Talk.
+        // A harness turn's own message header is not Fractal.
         assert!(matches!(&entries[2].body, Body::Assistant(text) if text == "On it."));
     }
 

@@ -1,4 +1,4 @@
-# Small Talk repository guidance
+# Fractal repository guidance
 
 Read [README.md](README.md) before changing the product surface.
 

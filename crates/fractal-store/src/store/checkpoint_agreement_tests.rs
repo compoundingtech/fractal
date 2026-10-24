@@ -1,4 +1,4 @@
-//! Tests of `smallclaims::store::checkpoint_agreement` through smalltalk's store.
+//! Tests of `smallclaims::store::checkpoint_agreement` through Fractal's store.
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::checkpoint_agreement_tests_shared_attention_tests::{FLEET, claim_ids, context, kinds, observe, stable_cuts, step, sync};

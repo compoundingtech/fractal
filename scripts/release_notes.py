@@ -246,7 +246,7 @@ def check_pull_request(repo, base, source, pr_number=None, queue_ref=None):
             'version_changes': version_changes, 'exemptions': exemptions}
 
 
-def render(repo, previous, source, tag, repository='compoundingtech/smalltalk', since=None):
+def render(repo, previous, source, tag, repository='compoundingtech/fractal', since=None):
     report = collect(repo, since or previous, source)
     source, since = report['source'], report['previous_source']
     lines = [f'Fractal {tag} at `{source}`. Artifacts identify this exact source in RELEASE.json.', '',
@@ -297,7 +297,7 @@ def main():
     parser.add_argument('--output', type=Path, help='Notes file; default stdout')
     parser.add_argument('--manifest', type=Path, help='Optional machine-readable impact report')
     parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parent.parent)
-    parser.add_argument('--repository', default='compoundingtech/smalltalk')
+    parser.add_argument('--repository', default='compoundingtech/fractal')
     args = parser.parse_args()
     previous = args.previous or subprocess.check_output(
         ['gh', 'release', 'view', '--repo', args.repository, '--json', 'tagName', '--jq', '.tagName'], text=True

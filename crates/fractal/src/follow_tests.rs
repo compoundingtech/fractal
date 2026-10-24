@@ -247,7 +247,7 @@ async fn trace_follow_refuses_an_endpoint_version_transition_without_entering_le
     assert!(message.contains("2026-10-16 13:50 UTC"));
     assert!(
         message.contains(
-            "https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh"
+            "https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh"
         )
     );
     assert!(message.contains("--edge --no-run"));

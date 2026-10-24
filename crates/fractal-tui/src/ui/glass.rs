@@ -211,7 +211,7 @@ pub(crate) struct Glasses {
     home: bool,
     /// The floating Usage surface; retained separately from its visibility.
     usage: bool,
-    /// The Ctrl+S sidebar: the old stui list beside the splits, to browse and open from.
+    /// The Ctrl+S sidebar: the old Fractal TUI list beside the splits, to browse and open from.
     pub(crate) sidebar: Sidebar,
     /// A tab being dragged with the mouse, from its press until the button is let go.
     drag: Option<TabDrag>,
@@ -1387,7 +1387,7 @@ impl Ui {
             })
             .collect::<Vec<_>>();
         self.frame.borrow_mut().glass_leaves = contents.clone();
-        // The focused group draws first, through stui's own tab and selection, so it is the
+        // The focused group draws first, through Fractal TUI's own tab and selection, so it is the
         // pane scrolling keys reach; the others draw from their keys.
         let order = std::iter::once(glass.focus)
             .chain((0..rects.len()).filter(|index| *index != glass.focus));
@@ -2139,7 +2139,7 @@ impl Ui {
                 buf.set_stringn(
                     content.x + 1,
                     content.y + 1,
-                    format!("This stui does not know {key}. Ctrl+W closes it."),
+                    format!("This Fractal TUI does not know {key}. Ctrl+W closes it."),
                     content.width.saturating_sub(2) as usize,
                     theme::dim(),
                 );
@@ -2161,13 +2161,13 @@ impl Ui {
                 self.draw_pane(buf, content, &Pane::Agent(Some(id)))
             }
             // A terminal tab that is not the attached one says so, rather than drawing whatever
-            // stui's own tab has selected.
+            // Fractal TUI's own tab has selected.
             Some(Pane::Terminal(id))
                 if self.terminal.as_ref().is_none_or(|view| view.agent != id) =>
             {
                 self.draw_pane(buf, content, &Pane::Terminal(id))
             }
-            // While Home floats over the glass, stui's own tab is Home: the focused group draws
+            // While Home floats over the glass, Fractal TUI's own tab is Home: the focused group draws
             // its pane like the others, not Home's selection (Nathan, 2026-10-02).
             Some(_) if focused && !self.home_open() => self.draw_main(buf, content),
             Some(pane) => self.draw_pane(buf, content, &pane),
@@ -3520,7 +3520,7 @@ impl Ui {
                 glasses.save();
             }
             Err(error) if current => self.flash(format!(
-                "st did not keep a space yet ({error}); stui will try again"
+                "st did not keep a space yet ({error}); Fractal TUI will try again"
             )),
             Err(_) => {}
         }
@@ -4024,7 +4024,7 @@ impl Ui {
         ("h", "Home"),
         ("k", "the palette"),
         ("?", "help"),
-        ("q", "quit stui"),
+        ("q", "quit Fractal TUI"),
         ("esc", "put this away"),
     ];
 
@@ -4267,7 +4267,7 @@ fn ratios_on_the_wire() -> bool {
     GLASSES_VERSION.load(std::sync::atomic::Ordering::Relaxed) >= 2
 }
 
-/// A layout as st's client types spell it. stui splits two at a time; a longer split nests, and
+/// A layout as st's client types spell it. Fractal TUI splits two at a time; a longer split nests, and
 /// only a two-way split's own ratio travels.
 fn to_wire(layout: &Layout) -> GlassLayout {
     match layout {
@@ -5251,7 +5251,7 @@ mod tests {
         typed(&mut ui, "atlas builder");
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(tabs(&ui), (0, 0, vec![vec![ATLAS.to_owned()]]));
-        // The tab points stui's own selection at the agent, so its keys act on it.
+        // The tab points Fractal TUI's own selection at the agent, so its keys act on it.
         assert_eq!(
             (ui.tab(), ui.selected_id().as_deref()),
             (1, Some("agent/example/atlas/builder"))
@@ -5849,7 +5849,7 @@ mod tests {
         ctrl(&mut ui, '\\');
         assert!(ui.leader);
         let shown = screen(&ui);
-        for wanted in ["Ctrl+\\ then", "close this tab", "the conversation", "a new tab", "quit stui"] {
+        for wanted in ["Ctrl+\\ then", "close this tab", "the conversation", "a new tab", "quit Fractal TUI"] {
             assert!(shown.contains(wanted), "{wanted}: {shown}");
         }
         assert!(ui.terminal_focused());
@@ -8253,7 +8253,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The glass writes stui asked to send, leaving other effects.
+    /// The glass writes Fractal TUI asked to send, leaving other effects.
     fn writes(ui: &mut Ui) -> Vec<GlassWrite> {
         std::mem::take(&mut ui.effects)
             .into_iter()

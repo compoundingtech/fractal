@@ -83,7 +83,7 @@ chmod -R u+w "$work/$package/share/fractal-web"
 
 # Keep the immutable runtime source at a stable Cargo-home path. A random temporary
 # checkout invalidates its fingerprints on every job even when the pin is unchanged.
-pty_source="${CARGO_HOME:-$HOME/.cargo}/git/smalltalk-release-pty/$pty_rev"
+pty_source="${CARGO_HOME:-$HOME/.cargo}/git/fractal-release-pty/$pty_rev"
 if [ ! -d "$pty_source/.git" ]; then
   mkdir -p "$pty_source"
   git init -q "$pty_source"

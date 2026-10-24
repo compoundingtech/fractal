@@ -751,7 +751,7 @@ sys.exit({exit_code})
                     self.f.note(commit, tree, self.ci, 'machine/ci1', exit_code=(n + k) % 2, seconds=-int(days * DAY))
             if name in ('old', 'pr'):
                 self.index('unit', tree, self.f.git('for-each-ref', '--format=%(objectname)', '--count=1', f'refs/notes/evidence/{tree}/'))
-        rules = evidence_verify.policy_rules(support.policy_text(inputs=['src']), 'unit', 'compoundingtech/smalltalk')
+        rules = evidence_verify.policy_rules(support.policy_text(inputs=['src']), 'unit', 'compoundingtech/fractal')
         verdicts = lambda: {name: self.f.verify(tree, rules=rules)[1].get('reason', 'satisfied') for name, (_, tree) in trees.items()}
         before = verdicts()
         code, result, _ = self.run_gc('--head', pr[0], '--retention', self.retention(soft_records=5), '--apply')

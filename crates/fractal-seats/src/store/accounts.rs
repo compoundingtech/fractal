@@ -1,4 +1,4 @@
-//! The part of `store::accounts` that moved up from st3-store.
+//! The part of `store::accounts` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::LimitsStore;
 use super::*;

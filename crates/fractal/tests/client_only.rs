@@ -1,4 +1,4 @@
-//! The actual stui binary on a daemon-less device, talking only to isolated members.
+//! The actual Fractal TUI binary on a daemon-less device, talking only to isolated members.
 use fractal_daemon::PersonWorkStore;
 use fractal_daemon::SeatsStoreCore;
 use alacritty_terminal::{
@@ -342,7 +342,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
             },
             MessageSendParameters {
                 to: "agent/alder".into(),
-                content: "Signed after stui pairing".into(),
+                content: "Signed after Fractal TUI pairing".into(),
                 title: None,
                 in_reply_to: None,
                 session_id: None,
@@ -478,7 +478,7 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
         "offline keys must queue no mutation"
     );
     assert!(!device.path().join("absent.sock").exists());
-    // stui keeps this device's spaces and preferences under state/st3/stui; nothing else.
+    // Fractal TUI keeps this device's spaces and preferences under state/st3/stui; nothing else.
     let kept = device.path().join("state/st3/stui");
     let others = files_under(&device.path().join("state"))
         .into_iter()
@@ -654,7 +654,7 @@ async fn the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_
     .await;
 }
 
-/// One screen of the real stui client. The two screens run as two tests, so they idle their
+/// One screen of the real Fractal TUI client. The two screens run as two tests, so they idle their
 /// minute side by side instead of one after the other.
 async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute(
     key: &str,

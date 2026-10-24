@@ -1,4 +1,4 @@
-//! Tests of `smallclaims::store::checkpoint` through smalltalk's store.
+//! Tests of `smallclaims::store::checkpoint` through Fractal's store.
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::checkpoint_tests_shared_seats::*;

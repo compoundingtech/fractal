@@ -1,4 +1,4 @@
-//! The part of `store::conversation_reads` that moved up from st3-store.
+//! The part of `store::conversation_reads` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -215,8 +215,7 @@ impl ConversationReadsStore for Store {
     fn conversation_owners_at(&self, through: u64) -> Result<Arc<Owners>> {
         selected_index(self.index()?, Some(through)).map_err(anyhow::Error::new)?;
         let (generation, previous) = {
-            let cache = self
-                .smalltalk
+            let cache = self.fractal
                 .conversation_owners
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
@@ -229,7 +228,7 @@ impl ConversationReadsStore for Store {
                 .max_by_key(|(at, _)| *at)
                 .map(|(at, owners)| (*at, Arc::clone(owners)));
             (
-                self.smalltalk
+                self.fractal
                     .conversation_owner_generation
                     .load(std::sync::atomic::Ordering::Relaxed),
                 previous,
@@ -295,15 +294,13 @@ impl ConversationReadsStore for Store {
                 pause();
             }
         });
-        let mut cache = self
-            .smalltalk
+        let mut cache = self.fractal
             .conversation_owners
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         // A repair may have cleared the cache while this build released its SQL readers.
         // The generation is changed under this same lock, so an older build cannot republish.
-        if self
-            .smalltalk
+        if self.fractal
             .conversation_owner_generation
             .load(std::sync::atomic::Ordering::Relaxed)
             != generation

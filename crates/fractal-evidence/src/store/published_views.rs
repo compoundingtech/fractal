@@ -1,4 +1,4 @@
-//! The part of `store::published_views` that moved up from st3-store.
+//! The part of `store::published_views` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_attention::store::published_views::*;
@@ -18,15 +18,15 @@ pub trait PublishedViewsStore {
 impl PublishedViewsStore for Store {
 
     fn hold_collection_view(&self, collection: &str) {
-        self.smalltalk.published_views.hold(collection);
+        self.fractal.published_views.hold(collection);
     }
 
     fn collection_view_published(&self, collection: &str) -> bool {
-        self.smalltalk.published_views.published(collection)
+        self.fractal.published_views.published(collection)
     }
 
     fn subscribe_collection_views(&self) -> tokio::sync::watch::Receiver<Revisions> {
-        self.smalltalk.published_views.subscribe()
+        self.fractal.published_views.subscribe()
     }
 }
 

@@ -1,4 +1,4 @@
-//! The part of `store` that moved up from st3-store.
+//! The part of `store` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 pub use fractal_missions::store::identities;
 #[cfg(any(test, feature = "test-support"))]
@@ -99,7 +99,7 @@ pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{
     EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView,
 };
-pub use fractal_missions::store::runtime::SmalltalkRuntime;
+pub use fractal_missions::store::runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;
@@ -314,8 +314,7 @@ impl SeatsStoreCore for Store {
             // a snapshot can see a commit a moment before the writer publishes its index.
             let current = current_index(&self.readers.get())?;
             let index = selected_index(current, at_index).map_err(anyhow::Error::new)?;
-            let mut cache = self
-                .smalltalk
+            let mut cache = self.fractal
                 .agent_status_cache
                 .lock()
                 .expect("agent status cache poisoned");

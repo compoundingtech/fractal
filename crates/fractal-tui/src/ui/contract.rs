@@ -1,6 +1,6 @@
-//! The shared client contract in `fixtures/clients`: what every Small Talk client shows.
+//! The shared client contract in `fixtures/clients`: what every Fractal client shows.
 //!
-//! stui writes these files and the iOS app tests against them, so both apps clean the same
+//! Fractal TUI writes these files and the iOS app tests against them, so both apps clean the same
 //! transcripts the same way, use the same words and colours, draw a conversation's entries
 //! by the same rules, and share one demo world.
 //! Run `STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract` after an intended change.
@@ -212,7 +212,7 @@ fn the_shared_client_contract_matches_stui() {
             .unwrap_or_else(|_| panic!("{name} is missing; run with STUI_UPDATE_CONTRACT=1"));
         assert!(
             current == text,
-            "{name} no longer matches stui; if the change is intended, run STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract and update the iOS app"
+            "{name} no longer matches Fractal TUI; if the change is intended, run STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract and update the iOS app"
         );
     }
 }

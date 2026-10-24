@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// Why a conversation cannot be shown whole, when st could not read the harness's transcript.
-/// st then sends only the Small Talk around it, which reads as a conversation with the agent's
+/// st then sends only the Fractal around it, which reads as a conversation with the agent's
 /// side missing; Nathan's rule (2026-10-01) is to show neither half then, and say why, with the
 /// transcript's path so it can be reported.
 pub fn unreadable_transcript(timeline: &[TimelineEntry]) -> Option<String> {
@@ -38,8 +38,8 @@ fn not_yet(error: &fractal_client::TimelineErrorBody) -> bool {
     error.details.get("not_yet").and_then(Value::as_bool) == Some(true)
 }
 
-/// One conversation: the harness transcript and Small Talk messages, in time order.
-/// Draw one conversation as st joined it: the harness's turns and the agent's Small Talk, in
+/// One conversation: the harness transcript and Fractal messages, in time order.
+/// Draw one conversation as st joined it: the harness's turns and the agent's Fractal, in
 /// the order st sent them.
 /// How a message's signature reads beside its sender: the device that signed it and whether
 /// that checks ("✓ example phone (secure enclave)"). A message st holds no signature for is usually
@@ -125,9 +125,9 @@ fn conversation_with_output_mode(
     let mut delivery: BTreeMap<String, bool> = BTreeMap::new();
     // Graph messages the agent's harness received, from its own transcript.
     let mut delivered: BTreeSet<String> = BTreeSet::new();
-    // A Small Talk message is two entries: who wrote to whom, then what they wrote. A
+    // A Fractal message is two entries: who wrote to whom, then what they wrote. A
     // harness transcript heads its own turns with message entries too; only a graph message,
-    // `message/…`, is Small Talk.
+    // `message/…`, is Fractal.
     let mut mail: Option<(&TimelineEntry, &fractal_client::TimelineMessageBody)> = None;
     // A harness that wraps a delivery in its own prompt repeats mail the stream may already show.
     let shown = timeline

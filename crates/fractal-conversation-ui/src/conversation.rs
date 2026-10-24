@@ -3,7 +3,7 @@
 //! Each entry renders to its own lines once and is cached by (id, content, width, options),
 //! so a refresh that changes nothing changes no pixel, and a new entry only adds lines at the
 //! bottom. The person's own messages are tinted blocks; replies are plain markdown; tool
-//! calls are small boxes tinted by outcome and collapsed to their last lines; Small Talk
+//! calls are small boxes tinted by outcome and collapsed to their last lines; Fractal
 //! messages sit in the same stream with a bar, not in a separate section.
 
 use super::text::{self, run};
@@ -947,7 +947,7 @@ mod tests {
             entry("a", Body::User("check the build".into())),
             call("t1", "$ cargo build", ToolState::Ok),
             call("t2", "$ cargo test", ToolState::Failed),
-            call("t3", "$ cargo test -p stui", ToolState::Ok),
+            call("t3", "$ cargo test -p fractal-tui", ToolState::Ok),
             entry("b", Body::Assistant("One test failed; fixed.".into())),
             call("t4", &format!("$ cat {}", "src/".repeat(40)), ToolState::Ok),
         ];
@@ -963,7 +963,7 @@ mod tests {
         let folded = text(&HashSet::new());
         let joined = folded.join("\n");
         assert!(
-            joined.contains("▸ 3 tool calls · ✓2 · ✕1 · last: $ cargo test -p stui"),
+            joined.contains("▸ 3 tool calls · ✓2 · ✕1 · last: $ cargo test -p fractal-…"),
             "{joined}"
         );
         assert!(

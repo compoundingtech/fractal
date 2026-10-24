@@ -2,7 +2,7 @@
 # Source: .buckconfig.genie.ts
 
 [cells]
-  smalltalk = .
+  fractal = .
   rules = .buck2/rules
   capabilities = .buck2/capabilities
   prelude = .buck2/rules/prelude
@@ -11,10 +11,10 @@
   config = prelude
   ovr_config = prelude
   fbsource = prelude
-  toolchains = smalltalk
+  toolchains = fractal
 
 [parser]
-  target_platform_detector_spec = target:smalltalk//...->rules//buck2/platforms:host_platform
+  target_platform_detector_spec = target:fractal//...->rules//buck2/platforms:host_platform
 
 [build]
   execution_platforms = rules//buck2/platforms:host_execution_platform

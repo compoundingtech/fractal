@@ -1,7 +1,7 @@
 //! The claim store: the claim log and its batches, replica envelopes and their admission,
 //! replication between members, documents and blobs, and checkpoints.
 //!
-//! A runtime built on the graph, such as smalltalk, keeps its projections in the same database
+//! A runtime built on the graph, such as Fractal, keeps its projections in the same database
 //! and plugs them in through [`Runtime`]: the store calls it to create its tables, to validate a
 //! replicated claim's kind and fields, and to project admitted claims.
 

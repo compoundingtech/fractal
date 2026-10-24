@@ -1,4 +1,4 @@
-//! The part of `store::publication_facts` that moved up from st3-store.
+//! The part of `store::publication_facts` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::PublicationStore;
 use super::*;
@@ -267,7 +267,7 @@ mod tests {
                     let root = tempfile::tempdir().unwrap();
                     let path = root.path().join("delete.db");
                     let baseline = (!after).then(|| {
-                        GraphStore::open(&path, "node", Arc::new(SmalltalkRuntime::default()))
+                        GraphStore::open(&path, "node", Arc::new(FractalRuntime::default()))
                             .unwrap()
                     });
                     let revised = after.then(|| Store::open(&path, "node").unwrap());

@@ -1,7 +1,7 @@
 //! st3 store: the claims store, its domains (missions, mailbox, github, seats' rollout and suspension,
-//! sekrets) and the modules they need. st3-daemon re-exports each module at its old path.
+//! sekrets) and the modules they need. fractal-daemon re-exports each module at its old path.
 
-// Test helpers widened for st3-daemon's tests are unused when only the feature is on.
+// Test helpers widened for fractal-daemon's tests are unused when only the feature is on.
 #![cfg_attr(all(feature = "test-support", not(test)), allow(dead_code))]
 
 #[cfg(any(test, feature = "test-support"))]

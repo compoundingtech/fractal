@@ -1,4 +1,4 @@
-//! stui's mission semantics, independent of its collection model and terminal UI.
+//! Fractal TUI's mission semantics, independent of its collection model and terminal UI.
 
 use fractal_client::MissionStep;
 use std::collections::BTreeMap;

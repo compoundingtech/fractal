@@ -52,10 +52,10 @@ TypeScript client.
 
 The first implementation mission should end with two deliberately small, real artifacts:
 
-- `st`: a Rust binary that opens, renders build/endpoint information and “Hello, Smalltalk”,
+- `st`: a Rust binary that opens, renders build/endpoint information and “Hello, Fractal”,
   restores the terminal exactly, and can be installed or rolled back from a versioned release.
 - `apps/ios`: an Expo development/internal-distribution build on Alex's physical iPhone that
-  opens, renders the same build/endpoint information and “Hello, Smalltalk”, has crash reporting,
+  opens, renders the same build/endpoint information and “Hello, Fractal”, has crash reporting,
   and can receive a compatible EAS Update.
 
 The shell gate also creates the release machinery before feature work:

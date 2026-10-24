@@ -1148,7 +1148,7 @@ fn terminal_resource_status_never_warms_full_harness_or_provenance() {
     assert_eq!(lean.subjects[0].claims.len(), 1);
     assert!(
         store
-            .smalltalk
+            .fractal
             .subject_cache
             .lock()
             .unwrap()

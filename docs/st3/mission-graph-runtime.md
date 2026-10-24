@@ -1257,7 +1257,7 @@ Back-off: a step gets at most one nudge per idle period. After a nudge, the next
 the seat has taken a turn and gone idle again, and a quiet nudge comes no sooner than 2 hours after
 the step's last nudge. An action nudge is not held by the 2 hours, but each action nudges a step at
 most once. Every nudge is recorded on the step as a `work.nudged` claim that names the message,
-the idle period and the waits. `st work show` prints `Nudged:` while the step is held, and stui
+the idle period and the waits. `st work show` prints `Nudged:` while the step is held, and Fractal TUI
 shows `nudged … ago` under the working step.
 
 Two daemon settings in `[reconcile]` tune this, and are read again without a restart:

@@ -50,7 +50,7 @@ mod work_signal {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    const NAME: &std::ffi::CStr = c"smalltalk.resource-preparation-work";
+    const NAME: &std::ffi::CStr = c"fractal.resource-preparation-work";
 
     fn state(connection: &Connection) -> Option<&AtomicBool> {
         // SAFETY: this private name holds only an Arc<AtomicBool> transferred below.

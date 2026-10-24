@@ -9,10 +9,10 @@ const catalog = defineCatalog({
 })
 const client = {
   data: { name: '@fractal/client' },
-  meta: { workspace: { repoName: 'smalltalk', memberPath: 'clients/typescript/fractal-client', deps: [] } },
+  meta: { workspace: { repoName: 'fractal', memberPath: 'clients/typescript/fractal-client', deps: [] } },
 }
 const deps = catalog.compose({
-  workspace: { repoName: 'smalltalk', memberPath: 'packages/fractal-sdk' },
+  workspace: { repoName: 'fractal', memberPath: 'packages/fractal-sdk' },
   dependencies: { workspace: [client], external: catalog.pick('effect') },
   devDependencies: { external: catalog.pick('@effect/vitest', '@types/node', 'typescript', 'vitest') },
 })

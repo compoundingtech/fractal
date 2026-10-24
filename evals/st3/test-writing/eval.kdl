@@ -49,7 +49,7 @@ version 2
         }
         step "send-test-brief" {
           title "The developer receives one complete test brief"
-          goal "Send agent/${ST_MISSION_RUN}/tw.dev exactly one Small Talk message. Require tests for exact values, boundaries, range edges, aggregation, empty input, and error paths. State that src must not change. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/test-brief resource.observed --actor agent/${ST_MISSION_RUN}/tw.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send agent/${ST_MISSION_RUN}/tw.dev exactly one Fractal message. Require tests for exact values, boundaries, range edges, aggregation, empty input, and error paths. State that src must not change. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/test-brief resource.observed --actor agent/${ST_MISSION_RUN}/tw.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "inspect-module-read-only" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/test-brief" { kind "custom.st3.message-receipt"; state "published" } }
         }
@@ -91,7 +91,7 @@ version 2
         }
         step "report-test-result" {
           title "The supervisor receives the committed test result"
-          goal "Send agent/${ST_MISSION_RUN}/tw.sup exactly one Small Talk message. Include the revision, test count, covered behavior, green command, and unchanged src evidence. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/developer-report resource.observed --actor agent/${ST_MISSION_RUN}/tw.dev --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send agent/${ST_MISSION_RUN}/tw.sup exactly one Fractal message. Include the revision, test count, covered behavior, green command, and unchanged src evidence. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/developer-report resource.observed --actor agent/${ST_MISSION_RUN}/tw.dev --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "publish-test-revision" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/developer-report" { kind "custom.st3.message-receipt"; state "published" } }
         }
@@ -117,7 +117,7 @@ version 2
         }
         step "confirm-requester" {
           title "The requester receives one verified assessment"
-          goal "Send person/eval-requester exactly one Small Talk message. Include the revision, test count, coverage summary, green command, unchanged src result, and your assessment. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/final-assessment resource.observed --actor agent/${ST_MISSION_RUN}/tw.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send person/eval-requester exactly one Fractal message. Include the revision, test count, coverage summary, green command, unchanged src result, and your assessment. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/final-assessment resource.observed --actor agent/${ST_MISSION_RUN}/tw.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "verify-read-only" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/final-assessment" { kind "custom.st3.message-receipt"; state "published" } }
         }

@@ -251,7 +251,7 @@ or projection parity on older members.
 The generated agent-state type is an open string. Consumers requiring `running` treat
 `restarting` as not yet ready. `agents new --wait` keeps waiting (first starts are unchanged);
 `agents restart` also requires a different incarnation before completing. CLI prints the state;
-its unrecognized-state help remains the starting explanation. stui/phone/web rendering is not
+its unrecognized-state help remains the starting explanation. Fractal TUI/phone/web rendering is not
 qualified by this daemon PR and must not be described as verified.
 
 An agent's `harness_state` describes activity independently of its optional `blocked_on`, `ask`,
@@ -2554,7 +2554,7 @@ limited to 32 MiB, with explicit errors. Transcript URLs are never fetched by th
 payloads show an 8 KiB UTF-8 prefix labelled as truncated JSON text, and a reference
 recovers the full valid JSON. The existing 1 MB page bound still applies.
 
-Current stui and phone views use these existing references for explicit full-content
+Current Fractal TUI and phone views use these existing references for explicit full-content
 loading. Expansion starts at offset zero and follows `next_offset` until it is null;
 the assembled JSON is the complete original value, not a suffix to splice into the
 clipped preview. A ref may cover a payload, an open metadata/view subtree, or the
@@ -2564,7 +2564,7 @@ typed output adapter without its preview line limit. Identifiable view-only refs
 are reattached to the original block and use that same adapter, including written
 content and compaction summaries. Metadata and unknown values keep a lossless raw
 JSON fallback. Loading non-image content is explicit for that block or through
-stui's expand-all keypress. Expand-all loads only visible
+Fractal TUI's expand-all keypress. Expand-all loads only visible
 clipped tool values, with one owner content read active at a time; newly visible
 rows load next without prefetching offscreen rows. Loaded values remain in memory
 when scrolled away and are released on collapse. Restoring saved expansion state
@@ -2577,9 +2577,9 @@ memory only, scoped to the conversation and reference. Loading does not create a
 temporary file, persistent cache, stored conversation history or outbox.
 
 Native images load automatically when their image box is visible on the phone, or
-their image label is visible in a graphics-capable stui terminal. Phone overscan,
+their image label is visible in a graphics-capable Fractal TUI terminal. Phone overscan,
 inactive screens, offscreen terminal entries and covered panes do not authorize
-automatic reads. stui uses the same one-read-at-a-time queue, and Ctrl+U explicitly
+automatic reads. Fractal TUI uses the same one-read-at-a-time queue, and Ctrl+U explicitly
 hides/shows a tool's images; hidden images stay hidden through redraws and scrolls.
 Unsupported terminals retain explicit loading instead of automatic fetching.
 Phone shows a Load/Retry action only after failure. Its viewport owns one sequential
@@ -2693,5 +2693,5 @@ and text), history and release note expose the same cold-standby limitation:
 
 If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
 
-Hosted validation must run `cargo run -p st3-client-codegen -- --check`. Generated
+Hosted validation must run `cargo run -p fractal-client-codegen -- --check`. Generated
 files remain generated; do not hand-edit clients for open JSON observation detail.

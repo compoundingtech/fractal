@@ -46,7 +46,7 @@ pub use crate::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest
 pub use crate::store::limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
 pub use crate::store::limits::ACCOUNT_READING_WINDOW_MS;
 pub use crate::store::subagents::{SUBAGENT_KINDS, SubagentView};
-pub use crate::store::runtime::SmalltalkRuntime;
+pub use crate::store::runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;

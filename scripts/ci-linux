@@ -43,7 +43,7 @@ clippy_and_codegen() {
 }
 
 conversation_model() {
-  # A workspace build unifies stui/st's ratatui feature, which would hide model dependencies.
+  # A workspace build unifies fractal-tui/fractal's ratatui feature, which would hide model dependencies.
   cargo test -p fractal-conversation-ui --no-default-features --locked || return
   local dependencies
   dependencies=$(cargo tree -p fractal-conversation-ui --no-default-features --locked -e normal --prefix none) || return

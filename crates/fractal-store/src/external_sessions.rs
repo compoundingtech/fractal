@@ -124,7 +124,7 @@ pub enum TimelineOrder {
     TimestampSequence,
 }
 
-/// Native entries have rank 0; Small Talk messages have rank 1.
+/// Native entries have rank 0; Fractal messages have rank 1.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineKey {
     pub timestamp: String,
@@ -1492,7 +1492,7 @@ fn normalize_claude(
         Some("user") => "user",
         Some("assistant") => "assistant",
         Some("attachment") => {
-            // A prompt that arrives while Claude is busy, including a Small Talk delivery, is
+            // A prompt that arrives while Claude is busy, including a Fractal delivery, is
             // recorded as a queued command rather than as a user entry. The other attachments
             // are context Claude injects for itself.
             if value.pointer("/attachment/type").and_then(Value::as_str) == Some("queued_command") {

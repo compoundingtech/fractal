@@ -19,7 +19,7 @@ system = output('nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentS
 # Only the fixture's nixpkgs input is needed. Archiving the whole graph also downloads
 # unused historical inputs, even when their package outputs already exist in the store.
 nixpkgs = output('nix', 'eval', '--impure', '--raw', '--expr',
-                 f'(builtins.getFlake {json.dumps(str(repo))}).inputs.nixpkgs.outPath')
+                 f'(builtins.getFlake {json.dumps("git+file:" + str(repo))}).inputs.nixpkgs.outPath')
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
     fixture = root / 'example'
@@ -57,7 +57,7 @@ with tempfile.TemporaryDirectory() as temporary:
     contents = {Path(path).read_text().strip() for result in report['results']
                 for path in result['outputs'].values()}
     assert contents == {'example-one', 'example-check'}, contents
-    assert list((cache / 'smalltalk-nix-release').glob('result*'))
+    assert list((cache / 'fractal-nix-release').glob('result*'))
     subprocess.run([str(script), 'verify-cache'], cwd=fixture, env=env, check=True)
 
     (root / 'summary').write_text('')

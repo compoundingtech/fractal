@@ -1,9 +1,9 @@
-//! The part of `store::runtime` that moved up from st3-store.
+//! The part of `store::runtime` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::EvidenceStore;
 use super::*;
 pub use fractal_attention::store::runtime::*;
-pub use fractal_attention::store::runtime::{AgentResourcesEntry, AgentRosterFaultRetries, Extensions, SmalltalkRuntime, compatibility_digest};
+pub use fractal_attention::store::runtime::{AgentResourcesEntry, AgentRosterFaultRetries, Extensions, FractalRuntime, compatibility_digest};
 
 #[cfg(test)]
 mod ivm_attachment_tests {
