@@ -586,6 +586,32 @@ contract/schema tests and both compiler projects, the views' tests and typecheck
 6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
 for generated-client consumers. The main ruleset requires `typescript-client`.
 
+### Storybook deployment
+
+The separate [Storybook deployment workflow](../.github/workflows/storybook-deploy.yml),
+authored with `githubWorkflow` in `storybook-deploy.yml.genie.ts`, is not a required
+check and does not change Workspace CI or its gates. It builds
+`packages/fractal-ui/storybook-static` and deploys the Alchemy v2 stack
+`@fractal/storybook-deploy` with Cloudflare remote state in stage `main` for the
+canonical [Storybook](https://storybook.compounding.tech). Every push to `main`
+deploys; there is no change-detection job, pull-request trigger, per-PR stage or
+close-cleanup job. The checkout is the push's immutable `github.sha`.
+Deployment credentials are exposed only to code merged into `main`, never to
+PR-head infrastructure code. This is outside the PR admission path, so it needs
+no draft-policy exception and is not a draft-transition cancellation target.
+Infrastructure updates to the canonical site are serialized without cancellation.
+
+The deployment URL is written to the GitHub Actions job summary; the workflow
+does not need repository write permissions or post PR comments. An administrator
+must configure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` before deployment.
+If either secret is absent, a credential preflight writes a skip summary and all
+checkout, setup, build and deploy steps are skipped successfully.
+The `STORYBOOK_DOMAIN` repository variable overrides the canonical custom domain;
+unset uses `storybook.compounding.tech`, while an explicitly empty value disables
+the custom domain in favor of `workers.dev`. The workflow preserves this
+unset-versus-empty distinction. See [Storybook deployment setup](development.md#storybook-deployment)
+for account permissions, state bootstrap and manual deployment commands.
+
 ### Fractal web
 
 The non-required Fractal web jobs run on GitHub-hosted `ubuntu-latest` without
