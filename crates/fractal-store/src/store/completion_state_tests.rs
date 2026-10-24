@@ -13,7 +13,7 @@ fn parity(connection: &Connection, subject: &str) {
     assert_eq!(actual(connection, subject).unwrap(), narrow(latest_actual(connection, subject).unwrap()));
 }
 
-fn append(connection: &Connection, origin: &str, subject: &str, kind: &str, fields: Value) -> String {
+fn append(connection: &Transaction<'_>, origin: &str, subject: &str, kind: &str, fields: Value) -> String {
     append_claim_tx(connection, origin, subject, kind, None, &json!({"fields":fields}), &[], None)
         .unwrap().id
 }
