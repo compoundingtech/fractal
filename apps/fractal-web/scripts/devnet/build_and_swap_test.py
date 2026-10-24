@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import sys
 import unittest
 
 from dependency_cache import INSTALL_INPUTS, install_key

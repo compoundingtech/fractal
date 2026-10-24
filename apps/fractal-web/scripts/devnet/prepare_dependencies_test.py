@@ -362,10 +362,18 @@ else:
         self.write_source(unselected / 'secret', 'not selected\n')
         self.write_source(unselected / 'node_modules/secret/index.js', 'not selected dependency\n')
         self.populate_members({'member': {}})
-        # A mutable source install must never leak into the selected snapshot,
-        # either via a member source copy or via a dependency hardlink.
+        # Refreshed member installs invalidate the old fingerprint before any
+        # snapshot copying; the immutable old generation remains untouched.
+        old_generation, old_key = self.generation, self.key
         self.write_source(relative / 'node_modules/dependency/index.js', 'changed source dependency\n')
         self.write_source(relative / 'packages/late/node_modules/uncached/index.js', 'not cached\n')
+        with self.assertRaisesRegex(ValueError, 'source install key'):
+            self.prepare()
+        self.assertFalse(self.manifest.exists())
+        self.assertEqual((old_generation / relative / 'node_modules/dependency/index.js').read_text(),
+                         'cached member dependency\n')
+        self.populate_members({'member': {}})
+        self.assertNotEqual(self.key, old_key)
 
         self.prepare()
 
@@ -374,12 +382,16 @@ else:
         self.assertEqual((copied / 'package.json').read_text(), source_package.read_text())
         self.assertFalse(os.path.samefile(copied / 'package.json', source_package))
         for dependency, content in (
-                ('node_modules/dependency/index.js', 'cached member dependency\n'),
+                ('node_modules/dependency/index.js', 'changed source dependency\n'),
                 ('packages/workspace/node_modules/nested/index.js', 'cached nested member dependency\n')):
             self.assertEqual((copied / dependency).read_text(), content)
             self.assertTrue(os.path.samefile(copied / dependency, self.generation / relative / dependency))
             self.assertFalse(os.path.samefile(copied / dependency, member / dependency))
-        self.assertFalse((copied / 'packages/late/node_modules').exists())
+        self.assertEqual((copied / 'packages/late/node_modules/uncached/index.js').read_text(),
+                         'not cached\n')
+        self.assertTrue(os.path.samefile(
+            copied / 'packages/late/node_modules/uncached/index.js',
+            self.generation / relative / 'packages/late/node_modules/uncached/index.js'))
         for git in (copied / '.git', copied / 'packages/workspace/.git'):
             self.assertFalse(git.exists())
             self.assertFalse(git.is_symlink())
@@ -396,7 +408,7 @@ else:
             self.assertEqual(link.resolve(), target)
         report = json.loads(self.manifest.read_text())
         self.assertEqual(report['dependencyKey'], self.key)
-        self.assertEqual(report['dependencyFiles'], {'linked': 5, 'copied': 0})
+        self.assertEqual(report['dependencyFiles'], {'linked': 6, 'copied': 0})
         self.assertIn('apps/fractal-web/private/build-live.mjs', report['copiedIgnoredOverlayFiles'])
 
     def test_external_member_is_rejected_before_copying(self):
