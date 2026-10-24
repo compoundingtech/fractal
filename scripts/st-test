@@ -70,11 +70,12 @@ LOCAL = {
     'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat'],
     # The web lane as ONE shard that covers every kit play and app test (scripts/ci-local-web); it runs only when a web input changed.
     'fractal-web': ['nix', 'develop', '.#web', '-c', 'bash', 'scripts/ci-local-web'],
+    # One signature per workspace crate (docs/per-crate-test-signing.md): the recorded command is the small script that reads one crate's
+    # result out of the run's JUnit report; the run itself is RUN_TESTS, for the crates that have no passing note for their key.
+    'rust-tests': ['python3', 'scripts/ci-rust-test-result'],
 }
-# One signature per workspace crate (docs/per-crate-test-signing.md): the recorded command is the small script that reads one crate's
-# result out of the run's JUnit report, and the run itself is RUN_TESTS, for the crates that have no passing note for their key.
 RUST_TESTS = 'rust-tests'
-RUST_TESTS_COMMAND = ['python3', 'scripts/ci-rust-test-result']
+RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]
 # The tests stage, run as CI runs it with the crates to test in CI_TEST_PACKAGES and the report in CI_TEST_JUNIT.
 RUN_TESTS = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']
 # nextest: 0 every test passed, 100 some test failed (the report is complete either way), 4 the selection matched no test.
@@ -510,13 +511,16 @@ def judged_by_policy(base):
 
 
 def crate_keys(base, directory, tree, scratch):
-    """{crate: key} for `tree`, from the accepted base's scripts/rust-test-keys and inputs file when it has them (a verifier must use
-    the base's), else from the tree's own: the change that introduces them is judged by itself. Returns (keys, error)."""
+    """{crate: key} for `tree`, from the accepted base's scripts/rust-test-keys and inputs file (a verifier must use the base's). Only
+    while the base's policy does not name rust-tests, so nothing judges a note yet, are the tree's own used: the change that introduces them
+    is judged by itself. Once the base's policy names it, a base without them is an error, never a fallback. Returns (keys, error)."""
     tool = Path(scratch) / 'rust-test-keys'
     shown = git('show', f'{base}:{RUST_TEST_KEYS}', check=False)
     inputs_at = base
     if shown.returncode == 0 and git('cat-file', '-e', f'{base}:{RUST_TEST_INPUTS}', check=False).returncode == 0:
         tool.write_bytes(shown.stdout)
+    elif judged_by_policy(base):
+        return None, f'the accepted base judges rust-tests but has no {RUST_TEST_KEYS} and {RUST_TEST_INPUTS}: only the base\'s tool and inputs may key a note'
     else:
         tool.write_bytes((Path(directory) / RUST_TEST_KEYS).read_bytes())
         inputs_at = tree
@@ -588,7 +592,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     # Exactly the expression scripts/ci-linux builds from CI_TEST_PACKAGES: the record says which crates the run was filtered to.
     filterset = ' or '.join(f'package(={crate})' for crate in selected)
     run_sha = hashlib.sha256(json.dumps([RUN_TESTS, selected]).encode()).hexdigest()
-    rows, failed, signed_count = [], False, 0
+    rows, failed, signed_count, empty = [], False, 0, []
     for crate in selected:
         facts = json.loads(subprocess.run([sys.executable, str(directory / 'scripts/ci-rust-test-result'), '--summary'], capture_output=True,
                                           text=True, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate)).stdout or 'null')
@@ -615,11 +619,16 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         failed = failed or not ok
         if ok:
             signed_count += 1
+            if not int(facts['tests_run']):
+                empty.append(crate)
         else:
             detail = (signed.stderr.strip().splitlines() or ['failed'])[-1][:160]
             rows.append((f'rust-tests:{crate}', f'FAILED ({signed.returncode})', round(time.monotonic() - started), detail))
-    rows.insert(0, ('rust-tests', 'passed' if not failed else 'FAILED', ran_seconds,
-                    f'{signed_count} of {len(selected)} crates run and signed ({have} of {len(keys)} already had a passing note); one nextest run on the workspace build'))
+    detail = f'{signed_count} of {len(selected)} crates run and signed ({have} of {len(keys)} already had a passing note); one nextest run on the workspace build'
+    if empty:
+        # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).
+        detail += f'; {len(empty)} ran no test (list under no_tests if they have none): {", ".join(empty[:8])}' + (' ...' if len(empty) > 8 else '')
+    rows.insert(0, ('rust-tests', 'passed' if not failed else 'FAILED', ran_seconds, detail))
     return rows, failed
 
 
@@ -644,13 +653,13 @@ def main(argv):
     args = parser.parse_args(argv)
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._/-]*', args.base):
         raise Failure(f'--base {args.base!r} must be a branch or ref name (it may not start with "-")')
-    unknown = [name for name in args.check if name not in LOCAL and name != RUST_TESTS]
+    unknown = [name for name in args.check if name not in LOCAL]
     if unknown:
-        raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join([*LOCAL, RUST_TESTS])}')
+        raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join(LOCAL)}')
     checks = args.check or [name for name in LOCAL if name not in OPT_IN]
     if args.list:
         for name in checks:
-            print(f'{name}: {" ".join(RUST_TESTS_COMMAND if name == RUST_TESTS else LOCAL[name])}')
+            print(f'{name}: {" ".join(LOCAL[name])}')
         return 0
 
     remote, _, branch = args.base.partition('/')

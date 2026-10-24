@@ -505,8 +505,8 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness')
 # The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
-HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'linux-gate', 'fractal-web'})
-HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web'})
+HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests'})
+HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests'})
 
 
 def policy_text(**overrides):
@@ -1346,7 +1346,8 @@ class CommittedPolicy(unittest.TestCase):
     def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
         modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
-        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'fractal-web': 'off'})
+        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'fractal-web': 'off',
+                                 'rust-tests': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
             if mode != 'off':
@@ -1587,6 +1588,44 @@ class CommittedPolicy(unittest.TestCase):
                          {'count': 'kit_shard_count', 'results': 'shard_results', 'pull_request_count': 1})
         # A note made without kit plays covers only a run whose own change detection says the kit did not change either.
         self.assertEqual(web['kinds']['wrapper']['input_order'], {'kit_inputs': ['true', 'false']})
+
+
+class PerCrateNotes(unittest.TestCase):
+    """What counts as a note for one crate (docs/per-crate-test-signing.md): the crate, the key, and, once a policy judges it, a run that ran a test."""
+
+    def statement(self, **inputs):
+        return {'predicate': {'observed': {'inputs': dict({'crate': 'base', 'source_inputs': 'k' * 40}, **inputs)}}}
+
+    def test_a_note_counts_for_its_crate_and_key_only(self):
+        note = self.statement(tests_run='3')
+        self.assertTrue(evidence_verify.signed_for_crate(note, 'base', 'k' * 40))
+        self.assertFalse(evidence_verify.signed_for_crate(note, 'top', 'k' * 40))
+        self.assertFalse(evidence_verify.signed_for_crate(note, 'base', 'j' * 40))
+
+    def test_a_run_that_ran_no_test_does_not_count_when_tests_are_needed(self):
+        for ran in ('0', '', 'many', '-1', None):
+            note = self.statement(tests_run=ran) if ran is not None else self.statement()
+            self.assertTrue(evidence_verify.signed_for_crate(note, 'base', 'k' * 40), ran)  # no policy judges it
+            self.assertFalse(evidence_verify.signed_for_crate(note, 'base', 'k' * 40, True), ran)
+        self.assertTrue(evidence_verify.signed_for_crate(self.statement(tests_run='1'), 'base', 'k' * 40, True))
+        self.assertTrue(evidence_verify.signed_for_crate(self.statement(tests_run=2), 'base', 'k' * 40, True))
+
+    def test_the_no_tests_list_is_the_bases_and_must_be_an_array_of_names(self):
+        f = Fixture()
+        self.addCleanup(f.tmp.cleanup)
+        def at_base(text):
+            (f.repo / '.st').mkdir(exist_ok=True)
+            (f.repo / '.st/rust-test-inputs.json').write_text(text)
+            f.git('add', '-A')
+            f.git('commit', '-q', '-m', text)
+            return f.git('rev-parse', 'HEAD')
+        repo = str(f.repo)
+        self.assertEqual(evidence_verify.zero_test_crates(repo, at_base('{"global": []}')), set())
+        self.assertEqual(evidence_verify.zero_test_crates(repo, at_base('{"no_tests": ["a", "b"]}')), {'a', 'b'})
+        for bad in ('{"no_tests": "a"}', '{"no_tests": [1]}', 'not json', '[]'):
+            with self.assertRaises(evidence_verify.Failure) as caught:
+                evidence_verify.zero_test_crates(repo, at_base(bad))
+            self.assertEqual(caught.exception.reason, 'error', bad)
 
 
 class ValueRules(unittest.TestCase):
