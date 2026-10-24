@@ -298,7 +298,7 @@ class QueueSigner(unittest.TestCase):
     def test_seed_waits_while_another_seed_runs_or_the_host_is_busy(self):
         # Another seat's st-test --seed on the host: this tick starts nothing, and the next one, once it ended, seeds the tip.
         (self.proc / '4242').mkdir()
-        (self.proc / '4242/cmdline').write_bytes(b'python3\0-I\0/home/someone/fractal/scripts/st-test\0--seed\0')
+        (self.proc / '4242/cmdline').write_bytes(b'python3\0-I\0/srv/fractal/scripts/st-test\0--seed\0')
         (self.proc / '4243').mkdir()
         (self.proc / '4243/cmdline').write_bytes(b'python3\0-I\0/tmp/st-test\0--push\0origin\0')  # st-test, but no seed
         self.run_signer('seed')
