@@ -416,7 +416,12 @@ print(json.dumps(results))
                 self.assertEqual([(operation, name) for operation, name, _ in results], attempts)
                 for operation, name, error in results:
                     with self.subTest(linked=linked, operation=operation, path=name):
-                        self.assertIn(error, (errno.EROFS, errno.EBUSY, errno.EACCES, errno.EPERM),
+                        denied = (errno.EROFS, errno.EBUSY, errno.EACCES, errno.EPERM)
+                        # Replacement crosses the candidate/metadata bind mounts;
+                        # Linux may reject it before checking destination writeability.
+                        if operation == 'replace':
+                            denied += (errno.EXDEV,)
+                        self.assertIn(error, denied,
                                       'metadata mutation succeeded or failed for a non-protection reason')
                 self.assertEqual((worktree / 'sandbox-write').read_text(), 'allowed')
 
