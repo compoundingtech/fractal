@@ -598,14 +598,18 @@ function PlainImages({ scheme }: { readonly scheme: Scheme }) {
     <div aria-label="Accepted fixture messages" role="log" {...stylex.props(styles.receipts)}>{snapshot.receipts.map((receipt, index) => <p key={index} {...stylex.props(styles.receipt)}>Attachments: {receipt.message.attachments?.map(attachment => attachment.name).join(', ')}</p>)}</div>
   </div></Surface>
 }
-const pngFile = (name: string) => new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], name, { type: 'image/png' })
+const pngFiles = (...names: string[]) => {
+  const data = new DataTransfer()
+  for (const name of names) data.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], name, { type: 'image/png' }))
+  return data
+}
 export const PlainImageAttachments: Story = { tags: ['critical'],
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Attachment limit and send probes require a local runtime with an image adapter and fixture receipts.' } },
   render: args => <PlainImages scheme={args.scheme} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.getByRole('button', { name: 'Attach image' })).toBeVisible()
-    fireEvent.paste(textbox(canvasElement), { clipboardData: { files: [pngFile('first.png'), pngFile('second.png')] } })
+    fireEvent.paste(textbox(canvasElement), { clipboardData: pngFiles('first.png', 'second.png') })
     await waitFor(() => expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible())
     // Over the limit: the excess is named, Send and Attach are withheld instead of a later refusal.
     await expect(canvas.getByRole('alert')).toHaveTextContent('A message can carry at most 1 image. Remove 1 to send.')
