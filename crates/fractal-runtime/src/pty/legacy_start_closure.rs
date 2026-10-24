@@ -395,6 +395,15 @@ mod tests {
         const OPERATION: &str = "legacy-proof-unreadable-producer";
         const CONTROL: &str = "FRACTAL_PROOF_DUMPABLE_CONTROL";
         const CONTROL_PID: &str = "FRACTAL_PROOF_CONTROL_PROCFS_PID";
+        struct ControlChild(Option<std::process::Child>);
+        impl Drop for ControlChild {
+            fn drop(&mut self) {
+                if let Some(mut child) = self.0.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
         fn reader_diagnostics() -> String {
             let status = std::fs::read_to_string("/proc/self/status");
             let fields = status.as_ref().map(|text| text.lines()
@@ -437,13 +446,14 @@ mod tests {
             let proc_pid = std::fs::read_link("/proc/self").expect("producer readiness: readlink /proc/self");
             let proc_pid: u32 = proc_pid.to_str().expect("producer readiness: UTF-8 /proc/self")
                 .parse().expect("producer readiness: numeric /proc/self pid");
-            let status = std::fs::read_to_string("/proc/self/status").expect("producer readiness: status");
-            let nspid = status.lines().find_map(|line| line.strip_prefix("NSpid:"))
-                .unwrap_or("missing").split_whitespace().collect::<Vec<_>>().join(":");
+            let status = std::fs::read_to_string("/proc/self/status");
+            let nspid = status.as_ref().map(|status| status.lines()
+                .find_map(|line| line.strip_prefix("NSpid:")).unwrap_or("missing")
+                .split_whitespace().collect::<Vec<_>>().join(":"))
+                .unwrap_or_else(|error| format!("unavailable(errno={:?})", error.raw_os_error()));
             println!("proof-child-ready pid={} proc_pid={proc_pid} dumpable={dumpable} NSpid={nspid}", std::process::id());
-            eprintln!("producer readiness diagnostics: proc_pid={proc_pid} {}; {}",
-                status.lines().find(|line| line.starts_with("NSpid:")).unwrap_or("NSpid: missing"),
-                reader_diagnostics());
+            eprintln!("producer readiness diagnostics: proc_pid={proc_pid} NSpid={nspid} status_error={:?}; {}",
+                status.as_ref().err(), reader_diagnostics());
             // Keep the producer alive until the parent completes its scan.
             // A fixed sleep can expire under a heavily loaded CI scheduler.
             use std::io::Read as _;
@@ -517,16 +527,17 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped()).spawn()
             .with_context(|| format!("spawn producer test binary {}", executable.display())).unwrap();
-        let mut control = None;
+        let mut control = ControlChild(None);
         let mut control_pid = None;
         let mut readiness = String::new();
         let result = (|| -> Result<()> {
             use std::io::BufRead as _;
-            let mut sibling = Command::new(&executable).args(["--exact", TEST, "--nocapture"])
+            let sibling = Command::new(&executable).args(["--exact", TEST, "--nocapture"])
                 .env(CONTROL, "1").stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped()).spawn().context("spawn dumpable control child")?;
-            let output = sibling.stdout.take().context("control readiness: acquire stdout")?;
-            control = Some(sibling);
+            control.0 = Some(sibling);
+            let output = control.0.as_mut().context("control child missing")?
+                .stdout.take().context("control readiness: acquire stdout")?;
             for line in std::io::BufReader::new(output).lines() {
                 let line = line.context("control readiness: read stdout")?;
                 if let Some(pid) = line.strip_prefix("proof-control-ready ") {
@@ -629,9 +640,11 @@ mod tests {
             reader_diagnostics(), control_pid.map(process_diagnostics));
         child.kill().with_context(|| format!("cleanup: kill producer pid={}", child.id())).unwrap();
         child.wait().with_context(|| format!("cleanup: wait producer pid={}", child.id())).unwrap();
-        if let Some(mut sibling) = control {
-            sibling.kill().context("cleanup: kill dumpable control").unwrap();
-            sibling.wait().context("cleanup: wait dumpable control").unwrap();
+        if let Some(mut sibling) = control.0.take() {
+            let killed = sibling.kill();
+            let waited = sibling.wait();
+            killed.context("cleanup: kill dumpable control").unwrap();
+            waited.context("cleanup: wait dumpable control").unwrap();
         }
         result.context(final_diagnostics).unwrap();
     }
