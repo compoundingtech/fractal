@@ -299,19 +299,7 @@ pub(super) async fn run_agents(
         AgentsCommand::Start(args) => {
             let client = cli_client(endpoint);
             let (subject, tokens, existing, mission) =
-                agent_start_declaration(&client, &args).await?;
-            if existing.is_some() && !args.print_kdl
-                && let ClientResource::Agent(agent) = generated_client(endpoint, None)?.agents_get(&subject).await?.value
-                && let Some(suspension) = agent.suspension
-                && matches!(suspension.phase.as_str(),
-                    "quiescing" | "snapshotting" | "suspended" | "fencing-source" | "transferring" | "restoring" | "verifying")
-            {
-                return Err(fractal_daemon::St3Error::new(
-                    "start-suspended",
-                    format!("`{subject}` is {}; use `st agents resume {subject}` to resume its recorded native session",
-                        suspension.phase),
-                ).into());
-            }
+                agent_start_declaration(endpoint, &client, &args).await?;
             anyhow::ensure!(!args.source_offline || existing.is_some(),
                 "--source-offline needs an existing seat with a pending placement handoff");
             let response = if let Some(mission) = mission {
@@ -714,6 +702,7 @@ async fn agent_start_status(
 }
 
 async fn agent_start_declaration(
+    endpoint: &Endpoint,
     client: &Client,
     args: &AgentStartArgs,
 ) -> Result<(
@@ -757,6 +746,19 @@ async fn agent_start_declaration(
     loop {
         let desired: fractal_daemon::model::DesiredSubject = serde_json::from_value(claim.body)?;
         if desired.kind == "agent" {
+            // A prior declaration reconstructed through a stop is not a currently held seat.
+            if current.kind.as_deref() == Some("agent") && claim.id == *token && !args.print_kdl
+                && let ClientResource::Agent(agent) = generated_client(endpoint, None)?.agents_get(&subject).await?.value
+                && let Some(suspension) = agent.suspension
+                && matches!(suspension.phase.as_str(),
+                    "quiescing" | "snapshotting" | "suspended" | "fencing-source" | "transferring" | "restoring" | "verifying")
+            {
+                return Err(fractal_daemon::St3Error::new(
+                    "start-suspended",
+                    format!("`{subject}` is {}; use `st agents resume {subject}` to resume its recorded native session",
+                        suspension.phase),
+                ).into());
+            }
             // A mission seat starts on its run's own declaration, never as a new root seat.
             let mission = desired.owner_run.clone().map(|run| {
                 if claim.id == *token {

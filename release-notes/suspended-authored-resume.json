@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No projection or launch replay."},
   "schema": {"status": "none", "detail": "No storage changes."},
   "rules": {"status": "none", "detail": "No replicated claim changes."},
-  "compatibility": {"status": "changed", "detail": "Strict OMP resume accepts an authored absolute transcript selector when its filename and header identify the recorded native session, including when a pinned resume path is present. Both paths must identify the recorded session; mismatches remain refused. agents start refuses held suspended seats with start-suspended and directs callers to agents resume instead of successfully publishing a declaration that cannot start."},
+  "compatibility": {"status": "changed", "detail": "Strict OMP resume accepts an authored absolute transcript selector when its filename and header identify the recorded native session, including when a pinned resume path is present. Both paths must identify the recorded session; mismatches remain refused. agents start refuses currently declared held suspended seats with start-suspended and directs callers to agents resume instead of successfully publishing a declaration that cannot start. A prior agent declaration reconstructed from a stop is not a held seat: stop-then-start and restoration of stopped or retired mission, step and one-shot seats retain their existing behavior."},
   "downtime": {"status": "none", "detail": "No additional downtime."},
   "manual": {"status": "none", "detail": "Use agents resume for an existing suspended seat; agents start does not lift a suspension."},
   "recovery": {"status": "none", "detail": "No migration or state rewrite is required."}
