@@ -234,7 +234,8 @@ fn scratch_dir() -> tempfile::TempDir {
             Err(error) => eprintln!("convergence tmpfs refused: {error}; trying ordinary temp"),
         }
     }
-    let directory = tempfile::tempdir().unwrap();
+    // The ordinary temporary directory may itself be tmpfs in a test lane; this is the disk.
+    let directory = fractal_daemon::test_support::disk_tempdir();
     scratch_headroom(directory.path()).unwrap_or_else(|error| {
         panic!("no convergence scratch device can admit a checkpoint proof: {error}")
     });
