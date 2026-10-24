@@ -487,7 +487,7 @@ pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
 
 // Unlike ClaimKey's numeric wire-time representation, canonical SQL deliberately orders the
 // stored text by length then text. Preserve that order even for legacy unparseable timestamps.
-fn sort_key(connection: &Connection, id: &str) -> Result<Vec<u8>> {
+pub(crate) fn sort_key(connection: &Connection, id: &str) -> Result<Vec<u8>> {
     fn integer(output: &mut Vec<u8>, value: i64) {
         output.extend_from_slice(&((value as u64) ^ (1_u64 << 63)).to_be_bytes());
     }
