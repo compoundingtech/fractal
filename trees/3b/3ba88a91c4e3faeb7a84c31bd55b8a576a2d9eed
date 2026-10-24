@@ -10,3 +10,5 @@ record e5bb27f43e38f2d1a641f3b432c94574809e2123 typescript-client 0 fleet/ci 202
 record 1d9850ff2f3948c7629ef59d04de7a250286d8d9 typescript-client 0 host/anvil 2026-10-24T12:30:15Z
 record a802ce7913b254ed61bbff393f7b2302d3893dd3 genie-freshness 0 host/anvil 2026-10-24T12:34:27Z
 record b065044bdf5ba6fc0912452dbc5b42bd06e78328 linux-gate 0 host/anvil 2026-10-24T12:42:33Z
+record 7e2b56f36582d4ac38dc252427b7b3f1b2c4a367 rust-tests 0 host/anvil 2026-10-24T12:43:36Z
+record a48c27f266d588919cfd090efb8883feeb8498e6 rust-tests 0 host/anvil 2026-10-24T12:43:29Z
