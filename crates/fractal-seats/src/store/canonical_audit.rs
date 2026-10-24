@@ -131,6 +131,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_preparation_claims",
         "local_resource_preparation_pending",
         "local_resource_preparation_dirty",
+        // Member-local completion-health candidates and hydration progress, rebuilt from claims.
+        "local_completion_health_v1_claims",
+        "local_completion_health_v1_fields",
+        "local_completion_health_v1_pending",
+        "local_completion_health_v1_backfill",
         "local_glass_head_pending",
         "local_glass_head_dirty",
         "local_directive_note_pending",

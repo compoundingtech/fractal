@@ -139,6 +139,14 @@ impl Daemon {
 
     /// Every `gate.result` claim so far, oldest first.
     fn gate_results(&self) -> Vec<Value> {
+        self.trace()
+            .into_iter()
+            .filter(|claim| claim["kind"] == "gate.result")
+            .collect()
+    }
+
+    /// Every claim so far, oldest first.
+    fn trace(&self) -> Vec<Value> {
         let mut results = Vec::new();
         let mut after = 0;
         loop {
@@ -166,11 +174,7 @@ impl Daemon {
                 .filter_map(|claim| claim["store_index"].as_u64())
                 .max()
                 .unwrap_or(after);
-            results.extend(
-                claims
-                    .into_iter()
-                    .filter(|claim| claim["kind"] == "gate.result"),
-            );
+            results.extend(claims);
             if !full {
                 return results;
             }
@@ -217,10 +221,17 @@ fn executable(path: &Path, source: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-fn wait_for(label: &str, mut condition: impl FnMut() -> bool) {
+fn wait_for(label: &str, condition: impl FnMut() -> bool) {
+    wait_for_explained(label, condition, String::new);
+}
+
+/// [`wait_for`], adding `explain` to the timeout message.
+fn wait_for_explained(label: &str, mut condition: impl FnMut() -> bool, explain: impl FnOnce() -> String) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !condition() {
-        assert!(Instant::now() < deadline, "timed out waiting for {label}");
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for {label}\n{}", explain());
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -724,11 +735,37 @@ mission "orchid/replay" state="ready" {
     assert!(daemon.run()["stuck_gates"].is_null());
     assert_eq!(check()["status"], "pass");
     std::fs::write(root.path().join("release"), "go").unwrap();
-    wait_for("the terminal exec diagnostic", || {
-        daemon.run()["stuck_gates"]
-            .as_array()
-            .is_some_and(|gates| !gates.is_empty())
-    });
+    wait_for_explained(
+        "the terminal exec diagnostic",
+        || {
+            daemon.run()["stuck_gates"]
+                .as_array()
+                .is_some_and(|gates| !gates.is_empty())
+        },
+        // The diagnostic needs both a step still at work and the exec's newest observation
+        // saying it ended; say which one is missing.
+        || {
+            let step = daemon.step("prepare");
+            let exec = daemon
+                .trace()
+                .into_iter()
+                .filter(|claim| claim["subject"] == "exec/orchid/replay/prepare")
+                .map(|claim| {
+                    let fields = &claim["body"]["fields"];
+                    format!(
+                        "  #{} {} at {}: status {} exit_code {} incarnation {}",
+                        claim["store_index"], claim["kind"], claim["accepted_at_unix_ms"],
+                        fields["status"], fields["exit_code"], fields["incarnation_id"],
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "step prepare: status {} attempt {}\nexec/orchid/replay/prepare claims, oldest first:\n{exec}",
+                step["status"], step["attempt"],
+            )
+        },
+    );
     let run = daemon.run();
     assert_eq!(run["status"], "running");
     let stuck = run["stuck_gates"][0].as_str().unwrap();

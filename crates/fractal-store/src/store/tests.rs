@@ -9868,6 +9868,61 @@ fn a_codex_permission_prompt_is_answered_and_records_its_driver() {
 }
 
 #[test]
+fn runtime_status_generation_includes_authored_work_activity() {
+    for kind in ["work.claimed", "work.progress"] {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/node.worker";
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running", "runtime_id":"node.worker",
+                "terminal":true, "incarnation_id":"current"})),
+            ("harness.observed", json!({"state":"idle", "driver":"codex",
+                "incarnation_id":"current"})),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let before_cut = store.index().unwrap();
+        let before = store.status_for_claim_kind_at(
+            "runtime.observed", Some(before_cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        assert_eq!(before.subjects[0].harness.as_ref().unwrap().state, "idle");
+        let work = {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            let work = append_claim_tx(
+                &tx, "node", "step-run/activity/work", kind, Some(subject),
+                &json!({"fields":{"status":"working", "attempt":1, "readiness_epoch":1,
+                    "claimant":subject, "claim_incarnation":"current",
+                    "claim_expires_at_unix_ms":now_ms().saturating_add(60_000)}}),
+                &[], None,
+            ).unwrap();
+            tx.commit().unwrap();
+            work
+        };
+        let cut = store.index().unwrap();
+        let warm = store.status_for_claim_kind_at(
+            "runtime.observed", Some(cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        *store.smalltalk.subject_cache.lock().unwrap_or_else(PoisonError::into_inner) = SubjectCache::default();
+        let cold = store.status_for_claim_kind_at(
+            "runtime.observed", Some(cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        let harness = cold.subjects[0].harness.as_ref().unwrap();
+        assert_eq!(harness.state, "working", "{kind}");
+        assert_eq!(harness.claim, work.id, "{kind}");
+        assert_eq!(serde_json::to_value(warm).unwrap(), serde_json::to_value(cold).unwrap(),
+            "a warm runtime reduction must observe authored {kind}");
+        let historical = store.status_for_claim_kind_at(
+            "runtime.observed", Some(before_cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        assert_eq!(serde_json::to_value(historical).unwrap(), serde_json::to_value(before).unwrap());
+    }
+}
+
+#[test]
 fn current_incarnation_work_activity_recovers_a_stale_harness_projection() {
     let store = Store::open_memory("node").unwrap();
     let subject = "agent/node.worker";
