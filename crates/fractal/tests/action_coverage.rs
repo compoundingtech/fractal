@@ -763,12 +763,15 @@ impl Daemon {
     }
 
     fn cli_command(&self, actor: &str, args: &[&str]) -> tokio::process::Command {
+        self.cli_command_format(actor, args, true)
+    }
+
+    fn cli_command_format(&self, actor: &str, args: &[&str], json_output: bool) -> tokio::process::Command {
         let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
         command
             .args([
                 "--endpoint",
                 self.socket().to_str().unwrap(),
-                "--json",
                 "--daemon-wait",
                 "0",
             ]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_INCARNATION").env_remove("FRACTAL_INCARNATION")
@@ -782,6 +785,8 @@ impl Daemon {
             .env("XDG_DATA_HOME", self.root.path().join("data"))
             .env("HOME", self.root.path().join("home"))
             .env("ST3_PERSON", actor)
+            .env("NO_COLOR", "1")
+            .args(json_output.then_some("--json"))
             .args(args);
         if actor.starts_with("agent/") {
             command.env("ST_AGENT", actor);
@@ -2568,6 +2573,87 @@ schedule "b" { host "action-coverage"; at "2100-01-02T00:00:00Z"; work { mission
         if pass == 0 {
             daemon.restart().await;
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_list_rendering_is_unchanged_by_quarantined_deploy_claims() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    let daemon = Daemon::new_member("host-b").await;
+    let mut registry = fractal_schema::registry().clone();
+    for kind in fractal_schema::deploy::KINDS {
+        assert!(registry.claims.remove(kind).is_some());
+    }
+    daemon.store().set_claim_registry(registry);
+    daemon.store().bind_fleet(FLEET).unwrap();
+    daemon.apply(
+        &format!("version 2\nagent \"example-reader\" {{ host \"host-b\"; workspace {:?}; harness \"claude\" {{}} }}\nmission \"example/inspect\" state=\"ready\" {{ goal \"Inspect the graph.\"; step \"work\" {{ assigned-to \"agent/example-reader\" }} }}\n", daemon.root.path().display().to_string()),
+        "deploy-reader-baseline",
+    );
+    let commands: &[&[&str]] = &[
+        &["agents", "ls"], &["missions", "ls"], &["work", "ls"],
+        &["alerts", "ls", "--as", PERSON], &["terminals", "ls"],
+        &["launch", "ls"], &["lanes", "ls"], &["sets", "ls"],
+        &["documents", "ls"],
+    ];
+    let mut baseline = Vec::new();
+    for arguments in commands {
+        let output = daemon.cli_command_format(PERSON, arguments, false).output().await.unwrap();
+        assert!(output.status.success(), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(!output.stdout.is_empty(), "{arguments:?}");
+        baseline.push((output.stdout, output.stderr));
+    }
+    assert!(String::from_utf8_lossy(&baseline[0].0).contains("example-reader"));
+    assert!(String::from_utf8_lossy(&baseline[1].0).contains("example/inspect"));
+    let source = Store::open_memory("host-a").unwrap();
+    source.bind_fleet(FLEET).unwrap();
+    let examples = [
+        json!({
+            "version": 1, "host": "host-a", "actor": "agent/example-executor",
+            "operation": "install", "trainId": "train/example",
+            "old": {"packagePath": "/nix/store/old-example", "narHash": "sha256-example-old", "commit": "a".repeat(40)},
+            "new": {"packagePath": "/nix/store/new-example", "narHash": "sha256-example-new", "commit": "b".repeat(40)},
+            "issuedAt": "2026-10-24T10:00:00Z", "expiresAt": "2026-10-24T14:00:00Z",
+            "failureRestore": false, "previewDigest": "example-preview-digest",
+            "compatSignoffId": "example-signoff"
+        }),
+        json!({"version": 1, "goId": "example-go"}),
+        json!({"version": 1, "goId": "example-go", "operation": "install", "result": "succeeded"}),
+        json!({"version": 1, "stopId": "example-stop", "scope": "installer-entry", "hosts": ["host-a", "host-b"], "liftCondition": "example release"}),
+        json!({"version": 1, "stopId": "example-stop", "releaseGoId": "example-release"}),
+        json!({"version": 1, "trainId": "train/example", "oldCommit": "a".repeat(40), "newCommit": "b".repeat(40)}),
+    ];
+    for (kind, fields) in fractal_schema::deploy::KINDS.into_iter().zip(examples) {
+        source.append_claim(&ClaimInput {
+            subject: "resource/deploy/example".into(), kind: kind.into(),
+            actor: Some("agent/example-executor".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+    let exchange = source.export_replication_exchange(
+        FLEET, &daemon.store().replication_inventory().unwrap(),
+    ).unwrap();
+    assert_eq!(exchange.envelopes.len(), 6);
+    daemon.store().receive_replication_exchange("host-a", FLEET, &exchange).unwrap();
+    let admission = daemon.store().validate_replication_backlog().unwrap();
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (0, 6, 0));
+    daemon.store().project_replication_backlog().unwrap();
+    let records = daemon.store().replica_records(true).unwrap();
+    assert_eq!(records.len(), 6);
+    for kind in fractal_schema::deploy::KINDS {
+        assert!(records.iter().any(|record| record.kind.as_deref() == Some(kind)
+            && record.state == "unknown"
+            && record.error_code.as_deref() == Some("unknown-claim-kind")));
+    }
+    for (arguments, (stdout, stderr)) in commands.iter().zip(baseline) {
+        let output = daemon.cli_command_format(PERSON, arguments, false).output().await.unwrap();
+        assert!(output.status.success(), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.stdout, stdout, "{arguments:?}: list rendering changed");
+        assert_eq!(output.stderr, stderr, "{arguments:?}: list diagnostics changed");
     }
 }
 

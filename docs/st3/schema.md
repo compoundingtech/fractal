@@ -91,6 +91,12 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `daemon.diagnostic` | `daemon` | `system-only` | `append` | `durable` | `code!:string`, `reason!:string`, `severity!:string`, `status:string` |  |
 | `daemon.started` | `daemon` | `system-only` | `append` | `durable` | `features:object`, `pid:integer`, `schema:string`, `schema_digest:string`, `status!:string`, `version:string` | `reset` |
 | `delivery.hold` | `agent` | `authorized-requester` | `state-transition` | `durable` | `held!:boolean`, `legacy_adoption:boolean`, `reason!:string`, `until_unix_ms!:integer` |  |
+| `deploy.compat-signoff` | `resource` | `system-only` | `append` | `durable` | `newCommit!:string`, `oldCommit!:string`, `trainId!:string`, `version!:integer` |  |
+| `deploy.go` | `resource` | `system-only` | `append` | `durable` | `actor!:subject-reference(agent)`, `combined:object`, `compatSignoffId!:string`, `expiresAt!:string`, `failureRestore!:boolean`, `host!:string`, `issuedAt!:string`, `new!:object`, `old!:object`, `operation!:string`, `previewDigest!:string`, `trainId!:string`, `version!:integer` |  |
+| `deploy.go-consumed` | `resource` | `system-only` | `append` | `durable` | `goId!:string`, `operation!:string`, `result!:string`, `version!:integer` |  |
+| `deploy.go-revoked` | `resource` | `system-only` | `append` | `durable` | `goId!:string`, `version!:integer` |  |
+| `deploy.stop` | `resource` | `system-only` | `append` | `durable` | `hosts!:array`, `liftCondition!:string`, `scope!:string`, `stopId!:string`, `version!:integer` |  |
+| `deploy.stop-lifted` | `resource` | `system-only` | `append` | `durable` | `releaseGoId!:string`, `stopId!:string`, `version!:integer` |  |
 | `doc.bound` | `doc` | `authorized-requester` | `append` | `durable` | `executable:boolean`, `hash:string`, `name:string`, `size:integer` | `doc` |
 | `eval.verdict` | `mission-run` | `system-only` | `once` | `durable` | `reason:string`, `residue:array`, `verdict!:string` |  |
 | `file.observed` | `file` | `system-only` | `append` | `durable` | `blob_hash:string`, `content:string`, `content_hash:string`, `mode:integer`, `path!:string`, `reason:string`, `status!:string` | `gate` |

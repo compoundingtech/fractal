@@ -4158,6 +4158,121 @@ fn one_invalid_or_unknown_claim_does_not_block_its_valid_sibling_or_later_envelo
 }
 
 #[test]
+fn deploy_reader_old_peer_quarantines_all_kinds_without_changing_projection() {
+    let current = Store::open_memory("host-a").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("deploy.sqlite");
+    let older = Store::open(&path, "host-b").unwrap();
+    let mut registry = fractal_schema::registry().clone();
+    for kind in fractal_schema::deploy::KINDS {
+        assert!(registry.claims.remove(kind).is_some());
+    }
+    older.set_claim_registry(registry);
+    let observe = |status: &str| {
+        current.append_claim(&ClaimInput {
+            subject: "host/host-a".into(),
+            kind: "transport.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([("status".into(), json!(status))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap()
+    };
+    observe("up");
+    receive_and_project(
+        &older, "host-a", &exchange_from(&current, &ReplicationInventory::default()),
+    );
+    let before_digest = graph_digest_of(&older);
+    let before_subjects = serde_json::to_value(older.status(None).unwrap().subjects).unwrap();
+    FULL_REPLAYS.with(|count| count.set(0));
+    let examples = [
+        json!({
+            "version": 1, "host": "host-a", "actor": "agent/example-executor",
+            "operation": "install", "trainId": "train/example",
+            "old": {"packagePath": "/nix/store/old-example", "narHash": "sha256-example-old", "commit": "a".repeat(40)},
+            "new": {"packagePath": "/nix/store/new-example", "narHash": "sha256-example-new", "commit": "b".repeat(40)},
+            "issuedAt": "2026-10-24T10:00:00Z", "expiresAt": "2026-10-24T14:00:00Z",
+            "failureRestore": false, "previewDigest": "example-preview-digest",
+            "compatSignoffId": "example-signoff",
+            "combined": {"stopId": "example-stop", "planId": "example-plan"}
+        }),
+        json!({"version": 1, "goId": "example-go"}),
+        json!({"version": 1, "goId": "example-go", "operation": "install", "result": "succeeded"}),
+        json!({"version": 1, "stopId": "example-stop", "scope": "installer-entry", "hosts": ["host-a", "host-b"], "liftCondition": "example release"}),
+        json!({"version": 1, "stopId": "example-stop", "releaseGoId": "example-release"}),
+        json!({"version": 1, "trainId": "train/example", "oldCommit": "a".repeat(40), "newCommit": "b".repeat(40)}),
+    ];
+    let claims = fractal_schema::deploy::KINDS.into_iter().zip(examples).map(|(kind, fields)| {
+        current.append_claim(&ClaimInput {
+            subject: "resource/deploy/example".into(), kind: kind.into(),
+            actor: Some("agent/example-executor".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    }).collect::<Vec<_>>();
+    let exchange = exchange_from(&current, &older.replication_inventory().unwrap());
+    assert_eq!(exchange.envelopes.len(), 6);
+    let admission = receive_and_project(&older, "host-a", &exchange);
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (0, 6, 0));
+    assert_eq!(graph_digest_of(&older), before_digest);
+    assert_eq!(serde_json::to_value(older.status(None).unwrap().subjects).unwrap(), before_subjects);
+    let records = older.replica_records(true).unwrap();
+    assert_eq!(records.len(), 6);
+    let raw = claims.iter().map(|claim| {
+        let record = records.iter().find(|record| record.claim_id.as_deref() == Some(claim.id.as_str())).unwrap();
+        assert_eq!(record.state, "unknown");
+        assert_eq!(record.error_code.as_deref(), Some("unknown-claim-kind"));
+        assert!(older.claims_for(&claim.subject, Some(&claim.kind)).unwrap().is_empty());
+        older.readers.get().query_row(
+            "SELECT raw FROM replica_records WHERE claim_id=?1", [&claim.id],
+            |row| row.get::<_, Vec<u8>>(0),
+        ).unwrap()
+    }).collect::<Vec<_>>();
+    assert!(raw.iter().all(|bytes| !bytes.is_empty()));
+    let later = observe("down");
+    let admission = receive_and_project(
+        &older, "host-a", &exchange_from(&current, &older.replication_inventory().unwrap()),
+    );
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (1, 0, 0));
+    assert_eq!(older.latest_claim("host/host-a", Some("transport.observed")).unwrap().unwrap().id, later.id);
+    assert_eq!(older.replica_records(true).unwrap().len(), 6);
+    assert!(!older.replication_projection_needs_recovery().unwrap());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    drop(older);
+
+    // Upgrading retries the quarantined records, without rewriting their bytes
+    // or losing the unrelated known claim that followed them in the writer chain.
+    let upgraded = Store::open(&path, "host-b").unwrap();
+    let admission = upgraded.validate_replication_backlog().unwrap();
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (6, 0, 0));
+    upgraded.project_replication_backlog().unwrap();
+    for (claim, original_raw) in claims.iter().zip(raw) {
+        let retained = upgraded.claims_for(&claim.subject, Some(&claim.kind)).unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id, claim.id);
+        assert_eq!(retained[0].body, claim.body);
+        let retried_raw = upgraded.readers.get().query_row(
+            "SELECT raw FROM replica_records WHERE claim_id=?1", [&claim.id],
+            |row| row.get::<_, Vec<u8>>(0),
+        ).unwrap();
+        assert_eq!(retried_raw, original_raw);
+    }
+    assert!(upgraded.replica_records(true).unwrap().is_empty());
+    assert_eq!(upgraded.latest_claim("host/host-a", Some("transport.observed")).unwrap().unwrap().id, later.id);
+    let relay = exchange_from(&upgraded, &ReplicationInventory::default());
+    for original in exchange.envelopes {
+        let retained = relay.envelopes.iter().find(|envelope| {
+            envelope.writer == original.writer && envelope.sequence == original.sequence
+        }).unwrap();
+        assert_eq!(retained.hash, original.hash);
+        assert_eq!(retained.payload.bytes().unwrap(), original.payload.bytes().unwrap());
+    }
+    assert!(!upgraded.replication_projection_needs_recovery().unwrap());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+}
+
+#[test]
 fn review_reader_old_peer_quarantines_and_retries_original_bytes() {
     for kind in std::iter::once("gate.requested").chain(fractal_schema::review::KINDS) {
         let current = Store::open_memory("ada").unwrap();

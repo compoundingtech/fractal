@@ -38,6 +38,47 @@ kind validation, local writes, projection and replay, cache invalidation, the di
 the checkpoint rules and proof answers. A runtime may call the graph freely; the graph reaches a
 runtime only through that trait.
 
+### Deployment audit records
+
+The `deploy.*` claim family records deployment receipts on `resource/` subjects without
+adding a projection, command, installer entry, signing key, or trust root. Its receipt ID
+is the content-addressed claim ID. Every body requires integer `version: 1`; readers
+reject unsupported versions. The authoritative fields and nested validation live in
+[`fractal-schema::deploy`](../../crates/fractal-schema/src/deploy.rs) and the schema registry.
+
+- `deploy.go` binds `host`, executing `actor`, `operation` (`install` or `rollback`),
+  `trainId`, exact `old` and `new` package tuples (`packagePath`, `narHash`, `commit`),
+  RFC3339 `issuedAt` and `expiresAt`, `failureRestore`, required `previewDigest`, and
+  `compatSignoffId`. Expiry must be after issue and no more than four hours later.
+  Optional `combined` binds both `stopId` and `planId`; the preview digest remains
+  mandatory whether or not the GO is combined.
+- `deploy.go-revoked` references `goId`; `deploy.go-consumed` records `goId`,
+  `operation`, and a nonempty `result`.
+- `deploy.stop` records `stopId`, `scope`, explicit nonempty `hosts`, and
+  `liftCondition`; `deploy.stop-lifted` binds `stopId` to `releaseGoId`.
+- `deploy.compat-signoff` binds `trainId`, `oldCommit`, and `newCommit`. A GO's
+  `compatSignoffId` denotes this typed claim, not a message or an untyped approval.
+
+Schema admission is not authorization. Deployment authorization requires the existing
+`smallclaims::principal::judge` signature/delegation verification and policy-approved
+signers, a matching typed compatibility sign-off, and consumption signed by the GO's
+actor on the GO's host. Revocation, consumption, STOP coverage, expiry and caller facts
+must also be checked. Replica freshness is measured against the GO claim's origin node,
+not a configured issuer node. These are verifier requirements, not capabilities exposed
+by the claim registry.
+
+The deployment policy contract has one schema with integer `version: 1`,
+`refusedVerifierHosts`, `consumptionSigners` and `compatSignoffSigners`. Its path is injected by
+the package wrapper at build time, with no runtime, environment or CLI override.
+Missing, unreadable or unknown-version policy refuses all authorization. Example policy
+and test identities use `host-a`, `host-b` and `agent/example-*`.
+
+Claims reuse the daemon-held agent keys and admitted node delegation chains. This is
+an auditable cooperative same-user boundary, not isolation from code running as the
+owner Unix user. All six kinds are durable. Older registries quarantine authenticated
+unknown kinds with their original bytes, excluding them from existing projections and
+list output while allowing unrelated known records to progress.
+
 ## KDL publication
 
 Every document starts with `version 2`. Declarations follow that node directly. There is no wrapper
