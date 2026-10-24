@@ -10,6 +10,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         "Everyday use",
         &[
             "ui",
+            "web",
             "now",
             "agents",
             "conversations",
@@ -34,7 +35,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         &["work", "changes", "gh", "claim", "diagnostic", "trace", "skill"],
     ),
     (
-        "Running st on a machine or fleet",
+        "Running fractal on a machine or fleet",
         &[
             "setup",
             "up",
@@ -99,7 +100,7 @@ pub(super) fn all_help_requested(arguments: &[std::ffi::OsString]) -> bool {
 pub(super) fn root_help(all: bool) -> String {
     let command = Cli::command();
     let mut output = String::from(
-        "See what needs you:\n  st now\n\nRun st in a terminal to open the interface:\n  st\n  st ui --space NAME\n\nStart an agent and talk to it:\n  st agents new NAME --harness claude --attach\n\nSee what is running:\n  st missions ls\n  st agents ls\n\nFrom an agent seat:\n  st skill\n  st work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or st work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: st [OPTIONS] <COMMAND>\n",
+        "See what needs you:\n  fractal now\n\nRun fractal in a terminal to open the interface:\n  fractal\n  fractal ui --space NAME\n\nStart an agent and talk to it:\n  fractal agents new NAME --harness claude --attach\n\nSee what is running:\n  fractal missions ls\n  fractal agents ls\n\nFrom an agent seat:\n  fractal skill\n  fractal work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or fractal work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: fractal [OPTIONS] <COMMAND>\n",
     );
     for (heading, names) in GROUPS {
         if *heading == "Plumbing" && !all {
@@ -119,9 +120,9 @@ pub(super) fn root_help(all: bool) -> String {
     let mut options = command.clone().help_template("\nOptions:\n{options}");
     output.push('\n');
     output.push_str(&options.render_help().to_string());
-    output.push_str("\nUse st help COMMAND for command help; st help --all also lists plumbing.\n");
+    output.push_str("\nUse fractal help COMMAND for command help; fractal help --all also lists plumbing.\n");
     output.push_str(
-        "\nIssues and suggestions are welcome. Please file an upstream issue:\n  gh issue create --repo compoundingtech/smalltalk\nPull requests are welcome too: https://github.com/compoundingtech/smalltalk\n",
+        "\nIssues and suggestions are welcome. Please file an upstream issue:\n  gh issue create --repo compoundingtech/fractal\nPull requests are welcome too: https://github.com/compoundingtech/fractal\n",
     );
     output
 }
@@ -324,20 +325,20 @@ mod tests {
     fn root_help_groups_every_public_command_once_and_opens_with_examples() {
         let default = root_help(false);
         let all = root_help(true);
-        assert!(default.starts_with("See what needs you:\n  st now\n"));
-        assert!(default.contains("st agents new NAME --harness claude --attach"));
-        assert!(default.contains("st missions ls\n  st agents ls"));
+        assert!(default.starts_with("See what needs you:\n  fractal now\n"));
+        assert!(default.contains("fractal agents new NAME --harness claude --attach"));
+        assert!(default.contains("fractal missions ls\n  fractal agents ls"));
         assert!(default.find("Everyday use:") < default.find("Inside an agent seat:"));
         assert!(
             default.find("Inside an agent seat:")
-                < default.find("Running st on a machine or fleet:")
+                < default.find("Running fractal on a machine or fleet:")
         );
         assert!(!default.contains("Plumbing:"));
         assert!(all.contains("Plumbing:"));
         let migration_row = format!("  {:14} ", "migrate");
         assert!(default.contains(&migration_row));
         assert!(GROUPS.iter().any(|(title, names)| {
-            *title == "Running st on a machine or fleet" && names.contains(&"migrate")
+            *title == "Running fractal on a machine or fleet" && names.contains(&"migrate")
         }));
         let sender_guidance = fractal_daemon::skill::message_sender_guidance();
         assert_eq!(default.matches(sender_guidance).count(), 1);
