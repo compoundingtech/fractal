@@ -45,7 +45,7 @@ fn repair_actor_path_binds_the_literal_seat_before_requests() {
         let own = Cli::try_parse_from(&arguments).unwrap();
         assert!(guard_mutating_cli_actor(&own.command, Some("agent/own"), None).is_ok());
         assert!(guard_mutating_cli_actor(&own.command, Some("agent/peer"), None).is_err());
-        for actor in ["agent/peer", "person/johannes", "own", "requester"] {
+        for actor in ["agent/peer", "person/other", "own", "requester"] {
             let mut mismatched = arguments.clone();
             let index = mismatched.iter().position(|arg| *arg == "--as").unwrap() + 1;
             mismatched[index] = actor;
