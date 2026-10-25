@@ -506,7 +506,7 @@ async fn a_terminal_attachment_reconnects_across_a_temporary_gateway_restart() {
             get(move |websocket: WebSocketUpgrade| {
                 let attempt = route_stream_attempts.fetch_add(1, Ordering::SeqCst);
                 async move {
-                    websocket.protocols(["st3.terminal.v1"]).on_upgrade(
+                    websocket.protocols(["fractal.terminal.v1"]).on_upgrade(
                         move |mut socket| async move {
                             if attempt == 0 {
                                 let _ = socket.close().await;
