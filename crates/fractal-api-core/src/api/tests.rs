@@ -6375,6 +6375,89 @@ async fn message_claim_peer_binding_preserves_unbound_local_sender_selection() {
 }
 
 #[tokio::test]
+async fn message_intent_peer_binding_accepts_own_sender_and_rejects_spoofing_before_write_or_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(Extension(BoundAgent("agent/sender".into())));
+    let identity = public_identity(
+        &state.store, crate::store::identities::IdentityKind::Agent, "agent/sender",
+    ).unwrap().identity;
+    for (key, from) in [("own-label", "agent/sender"), ("own-short", "sender"), ("own-identity", identity.as_str())] {
+        let source = format!(
+            "version 2\nagent \"example/receiver\" {{ workspace \"/tmp\"; command \"true\"; }}\nmessage {key:?} {{ from {from:?}; to \"agent/example/receiver\"; content \"Hello\"; }}",
+        );
+        let request = apply_request(&state, &source, "agent/sender", key);
+        let (status, body) = json_request(
+            app.clone(), "/v1/intent/apply", serde_json::to_value(request).unwrap(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{from}: {body}");
+        let message = state.store.message(&format!("message/{key}")).unwrap().unwrap();
+        assert_eq!(message.from, identity);
+        assert_eq!(message.status, "sent");
+        let (mailbox, _) = state.store.messages_page_for_delivery(
+            "agent/example/receiver", None, state.store.index().unwrap(), 100,
+        ).unwrap();
+        assert!(mailbox.iter().any(|message| message.subject == format!("message/{key}") && message.from == identity));
+    }
+    for (name, from) in [
+        ("agent", Some("agent/other")),
+        ("person", Some("person/alex")),
+        ("requester", Some("requester")),
+        ("daemon", Some("daemon/runtime")),
+        ("missing", None),
+    ] {
+        for (subject, key) in [
+            (format!("refused-{name}"), format!("refused-{name}")),
+            ("own-label".into(), "own-label".into()),
+        ] {
+            let sender = from.map(|from| format!("from {from:?};")).unwrap_or_default();
+            // An earlier valid declaration must not write before a later invalid sender.
+            let source = format!(
+                "version 2\nmessage \"atomic-companion\" {{ from \"agent/sender\"; to \"agent/example/receiver\"; content \"Hello\"; }}\nmessage {subject:?} {{ {sender} to \"agent/example/receiver\"; content \"Forged\"; }}",
+            );
+            let request = apply_request(&state, &source, "agent/sender", &key);
+            for _ in 0..2 {
+                let before = state.store.index().unwrap();
+                let (status, body) = json_request(
+                    app.clone(), "/v1/intent/apply", serde_json::to_value(&request).unwrap(),
+                ).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{name}: {body}");
+                assert_eq!(body["code"], "foreign-agent-actor", "{name}: {body}");
+                assert_eq!(state.store.index().unwrap(), before);
+            }
+        }
+        assert!(state.store.claims_for(&format!("message/refused-{name}"), None).unwrap().is_empty());
+        assert!(state.store.message(&format!("message/refused-{name}")).unwrap().is_none());
+    }
+    assert!(state.store.message("message/atomic-companion").unwrap().is_none());
+    assert_eq!(state.store.claims_for("message/own-label", Some("intent.desired")).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn message_intent_peer_binding_preserves_unbound_local_sender_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (index, from) in [
+        Some("agent/sender"), Some("agent/other"), Some("person/alex"),
+        Some("requester"), Some("daemon/runtime"), None,
+    ].into_iter().enumerate() {
+        let sender = from.map(|from| format!("from {from:?};")).unwrap_or_default();
+        let source = format!(
+            "version 2\nagent \"example/receiver\" {{ workspace \"/tmp\"; command \"true\"; }}\nmessage \"unbound-{index}\" {{ {sender} to \"agent/example/receiver\"; content \"Hello\"; }}",
+        );
+        let request = apply_request(&state, &source, "person/operator", &format!("unbound-{index}"));
+        let (status, body) = json_request(
+            app.clone(), "/v1/intent/apply", serde_json::to_value(request).unwrap(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{from:?}: {body}");
+        let message = state.store.message(&format!("message/unbound-{index}")).unwrap().unwrap();
+        assert_eq!(message.status, "sent");
+        assert_eq!(message.content, "Hello");
+    }
+}
+
+#[tokio::test]
 async fn message_ingress_rejects_empty_content_before_it_enters_the_fifo() {
     let root = tempfile::tempdir().unwrap();
     let app = router(state(root.path()));

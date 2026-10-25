@@ -8841,6 +8841,27 @@ async fn apply_with_authority(
         ))
     })?;
     let intent = parse_intent(&request.intent.kdl, &state.node).map_err(ApiError::bad)?;
+    if let Some(bound) = bound
+        && intent.subjects.values().any(|subject| subject.kind == "message")
+    {
+        let identity = public_identity(
+            &state.store, crate::store::identities::IdentityKind::Agent, bound,
+        )?.identity;
+        for declaration in intent.subjects.values().filter(|subject| subject.kind == "message") {
+            let from = crate::model::canonical_child_string(&declaration.desired, "from")
+                .ok_or_else(|| ApiError::bad(St3Error::new(
+                    "foreign-agent-actor",
+                    format!("this harness is `{bound}` and must name its own message sender"),
+                )))?;
+            let from = normalize_message_party(&from);
+            if !is_bound_actor(&state.store, &from, &identity)? {
+                return Err(ApiError::bad(St3Error::new(
+                    "foreign-agent-actor",
+                    format!("this harness is `{bound}` and cannot act as `{from}`"),
+                )));
+            }
+        }
+    }
     if !intent.direct_message_registrations.is_empty()
         && bound.is_some_and(|bound| normalized_agent_actor(actor).as_deref() != Some(bound))
     {
