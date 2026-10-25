@@ -1020,7 +1020,7 @@ is a reviewed change to the list (policy, `.st/required-lanes.json`, and the lis
 `crates/`, `apps/` or the whole tree (`evidence-verify-test`, `check-ci-test-paths`, `ci-fractal-web-test`, `rust-test-keys-test`) stay in `genie-freshness` with the lints, the
 licenses and `genie --check`; its key is still the whole tree and its run is about a minute. Both scripts run their tests in parallel
 (`scripts/ci-parallel-tests`, `GENIE_FRESHNESS_JOBS`, default 6). The new check has a gate job, a workflow job, a lane, a `scripts/st-test` entry and the
-same levels as `genie-freshness`; it becomes a required check in the ruleset only after the change has merged and its job has run green on `main`.
+same levels as `genie-freshness`; it is **not a required context of its own** (a head from before the check existed has no run of it, and a required context would block every such head): the `linux-gate` job, which every head reports and which always waits for the long stages, needs it and fails the gate when it failed or was cancelled (`skipped` counts only when its own gate decided to skip), so new heads enforce it and old heads are unaffected.
 
 `isolation-vm` and `mail-redelivery-canaries` had entries of their own with the same list until 2026-10-23, when they moved to the daily
 run; they have no policy entry now, so nothing on a pull request or in the queue waits on them.
@@ -1140,6 +1140,16 @@ trusted note, 254 of which would have skipped (the rest were sampled or touched 
 real job; the published notes' shadow verification (`evidence-shadow v1`) was `ok` for every lane in every merge-group run since it landed. The
 sampled one in five keeps comparing the note with a real run. Each further check is its own reviewed change to this table, the policy and the
 `enforced` lists in `ci-evidence-gate-test` and `evidence-verify-test`.
+
+### Which checks our pull requests skipped (`scripts/evidence-skip-report`)
+
+`scripts/evidence-skip-report [--hours 24] [--actor LOGIN]... [--receipts FILE]... [--markdown]` counts, for the pull request runs in the
+window (started by the given accounts), each check as `skipped` or as run, and why it ran: `lane_edit` (the pull request changes a file
+of the check's lane, so a local run could not sign it), `merge_tree` (the gate asked about the merge tree, `tree_of=merge`, because a
+protected file changed since the branch point, an author is not listed or the branch is too far behind, and no note covered it), `not_signed` (no note covered the tree although the lane is untouched: pushed
+unsigned), `failed` (the note recorded a failure), `protected` (a file that decides skipping changed), `sampled` (the one-in-five canary),
+`shadow` (the skip is not turned on) or `other`. It lists the not-signed pull requests with their branch and, from pre-push receipts
+(JSON lines with `branch` and `agent`), the seat that pushed them. Read only; it reuses `scripts/evidence-flip-ready`'s GitHub reads.
 
 ### When a check is ready to flip (`scripts/evidence-flip-ready`)
 
@@ -1386,8 +1396,9 @@ many commits behind the base the branch is. It no longer signs the merge tree (t
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a clean
 worktree of that commit, so untracked or ignored files in your checkout cannot change the result. The worktree is one of a small pool
 of persistent ones per repository (`~/.cache/st-test/<hash of the git common dir>/tree-N`), each held by an flock while a run uses it
-(a run waits for a free one and never shares one with a concurrent run); before each run the tree is reset to the commit, stripped of
-untracked and ignored files, and checked clean (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
+(a run waits for a free one and never shares one with a concurrent run); before each run the tree is reset to the commit and stripped of
+untracked and ignored files except the inputs that cost minutes to fetch again (the megarepo members under `repos/`, every `node_modules/`
+and `target/compat-baselines/`), and its tracked files must equal the commit (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
 fingerprints and sccache's absolute-path keys stay valid and a second run is warm. `ST_TEST_TREES` sets the pool size (default: the
 host's heavy slots from `~/.config/cargo-heavy-slots`, plus one; `off` runs in a fresh throwaway worktree as before) and `ST_TEST_POOL`
 its directory. When that tree has a
@@ -1403,6 +1414,30 @@ run with `--push` then starts that unit without waiting (`systemctl --user start
 `ST_EVIDENCE_LOG_NUDGE`): a pass counts only once the log lists it, so the agent's record is logged in seconds instead of at the next
 2-minute pull. The pull itself is the unit's, with the log key's grant; st-test never signs the log. Asking is best effort and never
 changes the result.
+A check the tree already has a passing signature for (the verifier's answer, the same one `st-test` asks after a run) is not run again:
+it prints `already signed` and, with `--push`, pushes that note as it is, so re-running on an unchanged tree is near instant. A failed
+record is not a signature. `--rerun` runs the check anyway. The megarepo members are fetched only once a check has to run.
+Every check runs with one fixed `PATH` (`~/.local/bin`, `~/.cargo/bin`, `/run/current-system/sw/bin`, `/nix/var/nix/profiles/default/bin`, `/usr/bin`,
+`/bin` and the directory of `nix`, those that exist) instead of the caller's (`~/.cargo/bin` stays because the clippy ratchet's baseline holds
+the `clippy 0.1.97` that `cargo clippy -V` prints with it, not the longer one it prints without): cargo's build scripts record `PATH`, so two seats whose
+PATHs differ would otherwise rebuild nearly the whole workspace in the same pool tree. `ST_EVIDENCE_PATH=keep` leaves the caller's `PATH`.
+All the repositories' pools together are kept under `ST_TEST_POOL_MAX_GB` (default 60; `0` or `off` for no cap): before a run starts, with its own
+tree already held, `st-test` removes the least recently used trees and their targets whose lock is free, oldest first, until the pool directory
+(`~/.cache/st-test`) fits, never one in use, and says on stderr what it removed. The per-target guard (below) stays. A run can exceed the cap by its own growth (one run's tests, clippy and fleet-compat builds end near 60 GB with incremental
+compilation, which the checks now turn off as CI does), so size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus about 60. Where cargo's
+`build-dir` points elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`), the intermediates live there, not in the pool, and the cap does not count them.
+`scripts/ci-local` (what the Linux gate stages run through) measures and prints every time: the setup before the stages, each stage's start,
+end and seconds, and the time it spent waiting in the build admission queue (the shim's `cargo: waiting in order` / `got build slot` lines
+get a UTC stamp, and the waits are counted and added up per stage), in a table at the end. Each stage's output is also kept in
+`~/.cache/ci-local-logs/run-TIME-PID/STAGE.log` (`CI_LOCAL_LOG_DIR` names another place; the latest 10 runs stay), because the scratch home
+of the stages is removed afterwards.
+**The tree it signs is the tree the CI gate will judge.** Usually that is the pushed head. But when protected files moved on main since the branch
+point (or the branch is more than `HEAD_TREE_MAX_BEHIND` commits behind), the gate falls back to the MERGE tree (`head_tree=fallback:...` in its
+output), which a signature on the head does not cover. `st-test` asks the base's own `scripts/ci-evidence-gate` (`branch_point_verdict`, the function
+`choose_tree` calls: one rule, not a copy). When it says fallback, `st-test` makes the merge of the head with the base as a commit (`git merge-tree`,
+nothing is checked out in your clone), signs and tests THAT tree in its pool tree, and says so; if the branch does not merge cleanly it refuses and tells
+you to merge the base into the branch first. `st-test --status`, which the pre-push hook asks, judges the same tree, so a push is refused when the tree CI
+will judge is not covered even if the head tree is.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
 counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); unless `--check` names checks, every check of the skip
 policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
@@ -1424,7 +1459,7 @@ The check that builds the Rust workspace (`linux-gate`) builds in one cargo targ
 trees instead, which one run at a time builds and tests in: its lock is exclusive for the whole run, because two runs on different
 trees sharing it once tested each other's binaries; `off` builds in the tree itself; a `CARGO_TARGET_DIR` you set is left alone), so a run does not start cold: a tree's path
 is the same every run, so the dependencies, build scripts and unchanged workspace crates are reused.
-Operations' terms: it is removed before a run once it passes 25 GB (the run holds the tree's lock, so nobody else uses it), it is never
+Operations' terms: it is removed before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it), it is never
 pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
 no longer used by default and can be deleted.
 **The host's build cap governs the checks that build.** Each runs inside a `builds.slice` scope (`systemd-run --user --scope
@@ -1593,7 +1628,7 @@ how many ticks did not start (for disk or load) and how many runs were stopped, 
 
 **The shadow merge-queue signer (`scripts/evidence-queue-signer`).** It measures whether a signer could keep the merge queue from
 rebuilding what is already built, without changing anything: a host note never covers a `merge_group` run, so it skips, waits for and
-blocks nothing. Two systemd user timers run it through `scripts/evidence-queue-timer`, which reads it (and the pre-sign worker, whose host
+blocks nothing (`seed`, below, is the exception: its notes are the per-crate ones pull requests reuse). Three systemd user timers run it through `scripts/evidence-queue-timer`, which reads it (and the pre-sign worker, whose host
 rules it uses) from `origin/main` of a clone per command. `observe` (every minute, seconds) reads the merge queue, fetches each group
 commit while its `gh-readonly-queue` branch exists (so a dropped entry is measured too), and records the group tree, whether `git
 merge-tree` of the pull request head onto the entry's base gives the same tree, and, depth 1, the tree predicted for the next pull
@@ -1612,8 +1647,17 @@ points under the stop), at least 165 GiB free and 20 GiB of available memory, wi
 (`~/.config/evidence-queue-signer/start.json` overrides them, agreed with operations). Each
 run appends a line to `attempts.jsonl` (wait from first seen to start, seconds per check, and each note's time, read back from the
 pushed notes' `observed_at`, or estimated from the start and the per-check seconds when none can be read, as `signed_at_source`
-says). A tree is run once whatever the outcome, so a tree stopped for load is not retried. `evidence-queue-signer report` sums a window, and
-`~/.config/evidence-queue-signer/off` stops both.
+says). A tree is run once whatever the outcome, so a tree stopped for load is not retried. `seed` (every minute, one run at a time)
+runs `st-test --seed COMMIT` on each new tip of main, which signs and pushes the per-crate `rust-tests` notes of that tree for the crates
+whose key has none yet, so a pull request branched from main reuses them; most merges move a handful of crates, one that moves the lane
+all of them. Main's code is merged code, the code every run on the host already builds under a pull request, so no author rule applies.
+It starts on the same terms as `sign`, and not while another `st-test --seed` runs on the host (that tick is skipped; the next tries
+again); its nextest takes the build slots through the admission shim like any `st-test` build. A tip is seeded once whatever the outcome
+(the next merge's seed covers what one left missing), except that a seed load stopped before its tests started (waiting for a build
+slot, or building; nextest's `Starting N tests` line is the boundary) tries the same tip again on the next tick, up to six tries, until
+a newer merge replaces it. Each try appends a line to `seeds.jsonl` (wait from the merge to the start, seconds, the try number, whether
+the tests had started, the pool cap `ST_TEST_POOL_MAX_GB` it ran with, and the crates that did not sign). `evidence-queue-signer report` sums a window, and `~/.config/evidence-queue-signer/off` stops
+all three.
 
 ### When the gate says skip
 
