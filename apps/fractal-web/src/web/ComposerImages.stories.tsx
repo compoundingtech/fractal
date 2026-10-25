@@ -197,7 +197,7 @@ export const SentImage: Story = {
   tags: ['critical'],
   play: async ({ canvasElement }) => showSentImage(canvasElement),
 }
-/** Follow-up target only: the live app does not yet supply an authorized blob resolver (#3778). */
+/** Kit viewer fixture; authorized transcript chunk retrieval is covered by TranscriptImages. */
 export const ResolvedImageFollowup: Story = {
   tags: ['critical'], args: { previewImages: true },
   play: async ({ canvasElement }) => {
