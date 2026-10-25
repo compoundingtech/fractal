@@ -3589,6 +3589,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("gate", string()),
             ("key", string()),
             ("input_number", integer()),
+            ("owner_run", string()),
         ],
         "runtime.readiness-deadline-reached" => &[
             ("runtime_id", required_string()),

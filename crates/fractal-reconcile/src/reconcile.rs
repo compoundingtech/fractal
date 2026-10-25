@@ -8789,6 +8789,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                 expected_subject: None,
                 idempotency_key: Some(format!("{key}:{}:{}", subject.subject, retries.len())),
             })?;
+            if let Some(run) = subject.owner_run.as_deref()
+                && let Err(error) = self.tell_seat_down(
+                    &subject.subject,
+                    run,
+                    token,
+                    &format!("its launch failed after {CRASH_LOOP_RETRIES} retries and stays stopped"),
+                )
+            {
+                eprintln!("st3: seat down report for {}: {error:#}", subject.subject);
+            }
             return Ok(false);
         }
         let wait = u128::from(CRASH_LOOP_RETRY_BASE_MS.load(std::sync::atomic::Ordering::SeqCst))

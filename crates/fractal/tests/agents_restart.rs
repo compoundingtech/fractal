@@ -3596,3 +3596,50 @@ async fn a_parked_launch_of_a_seat_that_does_not_restart_always_is_not_retried()
     assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1);
     assert!(retry_decisions(&fixture, &subject).is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_that_stays_down_after_its_retries_is_reported_once_to_its_runs_reporter() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    fractal_daemon::reconcile::CRASH_LOOP_RETRY_BASE_MS.store(5, std::sync::atomic::Ordering::SeqCst);
+    let (fixture, subject) = Fixture::claude(Shape::Mission, "always").await;
+    let source = "version 2\nagent \"example/reporter\" { workspace \"/tmp\"; command \"true\" }";
+    let intent = fractal_daemon::graph::parse_intent(source, fixture.store.origin()).unwrap();
+    fixture.store.apply_internal(&intent, "reporter").unwrap();
+    let run = subject.trim_start_matches("agent/").trim_end_matches("/worker").to_owned();
+    let _: Value = fixture
+        .client()
+        .post(
+            &format!("/v1/mission-runs/{run}/report-to"),
+            &json!({"actor": "person/avery", "report_to": "agent/example/reporter", "idempotency_key": "report"}),
+        )
+        .await
+        .unwrap();
+    park(&fixture, &subject, "claude");
+    *fixture.runtime.refuse_start.lock().unwrap() = true;
+    hang_up(&fixture);
+    let told = |fixture: &Fixture| {
+        fixture
+            .store
+            .messages(Some("agent/example/reporter"), true)
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.tags.iter().any(|tag| tag == "st3-run-report:seat-down"))
+            .collect::<Vec<_>>()
+    };
+    for _ in 0..3 {
+        wait_ms(20);
+        fresh_passes(&fixture, 2);
+    }
+    assert!(told(&fixture).is_empty(), "a seat still being retried is not reported");
+    for _ in 0..40 {
+        wait_ms(20);
+        fresh_passes(&fixture, 2);
+    }
+    let messages = told(&fixture);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0].from, "daemon/runtime");
+    assert!(messages[0].content.contains(&subject), "{}", messages[0].content);
+    assert!(fractal_daemon::silent::always_wakes(&messages[0].from, &messages[0].tags));
+}
