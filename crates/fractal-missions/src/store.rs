@@ -175,6 +175,8 @@ pub mod schedule_active_run_tests;
 pub mod step_wait_tests;
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+mod terminal_step_guard_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared_seats;
 #[cfg(test)]

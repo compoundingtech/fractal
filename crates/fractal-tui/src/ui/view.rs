@@ -262,6 +262,9 @@ pub enum AttentionKind {
         seat_id: String,
         /// What st says it is about; the call it would make is in the seat's conversation.
         text: String,
+        /// Native question identity, independent of whether a client may submit an answer.
+        #[serde(skip)]
+        question: bool,
         /// Answers a client may send (`allow`, `deny`); empty when the prompt is answered in
         /// the seat's terminal.
         answers: Vec<String>,
@@ -448,6 +451,8 @@ impl Subagent {
 /// What the details pane shows about an agent. Every field is optional: st may not say.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct AgentDetails {
+    /// Pending mailbox custody shown on retired agents.
+    pub mail_custody: Option<String>,
     /// The goal of the step it holds now.
     pub goal: Option<String>,
     pub claimed: Option<String>,

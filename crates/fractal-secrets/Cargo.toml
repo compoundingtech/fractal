@@ -30,6 +30,7 @@ smallclaims = { path = "../smallclaims" }
 fractal-client = { path = "../fractal-client", features = ["trace-propagation"] }
 fractal-terminal-direct = { path = "../fractal-terminal-direct" }
 fractal-drivers = { path = "../fractal-drivers" }
+fractal-tiles-registry = { path = "../fractal-tiles-registry" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.27"

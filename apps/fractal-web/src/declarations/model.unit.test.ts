@@ -7,7 +7,7 @@ import { observed, unavailable, waiting } from '../data/source.ts'
 import { gatewaySubjectReads } from '../data/subjectReadPort.ts'
 import { REDACTED, WITHHELD_DECLARATIONS, agentDeclarationState, declarationSubject, missionDeclarationState, redactMissionDefinition } from './model.ts'
 
-const envelope = (value: unknown) => ({ api_version: 'st3.client.v0', snapshot: { id: 'snapshot/test' }, value })
+const envelope = (value: unknown) => ({ api_version: 'st3.client.v0', snapshot: { id: 'snapshot/test', created_at: '2026-10-04T12:00:00.000Z' }, value })
 
 const kdl = 'version 2\nagent "builder" {\n    env {\n        GH_TOKEN "<redacted>"\n    }\n}\n'
 const agentWire = { id: 'agent/builder', kdl, revision: 'rev-7', revisions: ['rev-6', 'rev-7'], tree: {} }

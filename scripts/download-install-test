@@ -18,6 +18,8 @@ with tempfile.TemporaryDirectory() as d:
         p.write_text('#!/bin/sh\nprintf "' + name + '-fixture\\n"\n'); p.chmod(0o755)
     (payload / 'bin/st').symlink_to('st3')
     (payload / 'bin/fractal').symlink_to('st3')
+    (payload / 'share/fractal-web').mkdir(parents=True)
+    (payload / 'share/fractal-web/index.html').write_text('<!doctype html><title>Fractal</title>')
     shutil.copy(repo / 'scripts/install-release', payload / 'install.sh')
     archive = root / (payload.name + '.tar.gz')
     with tarfile.open(archive, 'w:gz') as t: t.add(payload, arcname=payload.name)
@@ -54,6 +56,7 @@ fi
     assert (installed / 'st').readlink() == Path('st3')
     assert (installed / 'fractal').readlink() == Path('st3')
     assert sorted(p.name for p in installed.iterdir()) == ['fractal', 'pty', 'st', 'st3']
+    assert (installed.parent / 'share/fractal-web/index.html').read_text() == '<!doctype html><title>Fractal</title>'
     result = install('--tag', 'v0.3.18')
     assert result.returncode == 0 and result.stdout == 'st3-fixture\n' and result.stderr == '', result
     (installed / 'fractal').unlink()

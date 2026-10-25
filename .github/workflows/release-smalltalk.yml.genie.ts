@@ -165,7 +165,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
           }
         },
         buildSnapshotPrepare,
-        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }).map(step => ({ ...step, if: "runner.os == 'Linux'" })),
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         {
           name: 'Provide the pinned Linux host C compiler',
           if: "runner.os == 'Linux'",

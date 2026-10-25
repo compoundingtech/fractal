@@ -200,6 +200,7 @@ fn read_page(
             page: ClientPageInfo {
                 limit, has_more, next_cursor,
                 cursor_expires_at: has_more.then(|| client_timestamp(expires)),
+                omitted_items: None,
             },
             sync: client_sync_notice(state), replicated: None,
         })

@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory() as scratch:
     at_base = decisions(repo, base, base)
     assert set(at_base) == {"fractal-web", "fractal-web-kit"}
     for line in at_base.values():
-        # The real policy declares no web check yet: a key, no trusted record, so the check runs.
+        # The real policy declares fractal-web in shadow and no fractal-web-kit: a key, no trusted record, so both run.
         assert line["decision"] == "run" and line["reason"] == "no-record" and line["proof"] == "none", line
         assert len(line["key"]) == 40 and len(line["inputs_sha256"]) == 64, line
 
@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory() as scratch:
     policy["checks"]["fractal-web-kit"] = {"trust_levels": ["fleet"], "enforce": False, "inputs": ["packages/fractal-ui", "pnpm-lock.yaml"]}
     stub = '#!/usr/bin/env python3\nimport json, sys\nargs = sys.argv[1:]\n' \
            'if "--project" in args: print(json.dumps({"source_inputs": "a" * 40}))\n' \
-           'elif "fractal-web-kit" in args: print(json.dumps({"satisfied": True, "record": "b" * 40}))\n' \
+           'elif "fractal-web-kit" in args: print(json.dumps({"satisfied": True, "record": "b" * 40, "enforce": True}))\n' \
            'else: print(json.dumps({"satisfied": False, "reason": "stale_tree"})); sys.exit(1)\n'
     declared = commit(repo, "declare the kit check", {".st/evidence-skip-policy.json": json.dumps(policy), "scripts/evidence-verify": stub})
     os.chmod(repo / "scripts/evidence-verify", 0o755)
@@ -93,6 +93,13 @@ with tempfile.TemporaryDirectory() as scratch:
     assert lines["fractal-web-kit"]["decision"] == "skip" and lines["fractal-web-kit"]["proof"] == "b" * 40 and lines["fractal-web-kit"]["reason"] == "match", lines
     assert lines["fractal-web"]["decision"] == "run" and lines["fractal-web"]["reason"] == "no-record", lines
     print("passed: a declared check skips only on the verifier's signed record; an undeclared one runs")
+
+    # A shadow policy (enforce not true): the same record is named, but the check still runs.
+    shadow = commit(repo, "the kit check in shadow", {"scripts/evidence-verify": stub.replace(', "enforce": True', '')})
+    os.chmod(repo / "scripts/evidence-verify", 0o755)
+    lines = decisions(repo, shadow, shadow)
+    assert lines["fractal-web-kit"]["decision"] == "run" and lines["fractal-web-kit"]["proof"] == "b" * 40 and lines["fractal-web-kit"]["reason"] == "shadow", lines
+    print("passed: a matching record under a shadow policy is reported, never a skip")
 
     # --fetch brings the head tree's records and each keyed check's input-indexed records from origin, as tags or notes, and nothing else.
     clone = Path(scratch) / "clone"

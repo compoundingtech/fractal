@@ -185,6 +185,24 @@ test('pairing challenge object siblings constrain every union branch in both dec
     assert.throws(() => Rich.decodeUnknownSync(Rich.PairingChallenge, 'strict')(future));
 });
 
+test('prompt answers keep ordinary text bounds and optional delegation across the main carry', async () => {
+    const [{ Schema }, Rich] = await modules;
+    for (const mode of ['strict', 'tolerant']) {
+        const decode = Rich.decodeUnknownSync(Rich.PromptRespondParameters, mode);
+        for (const answer of ['allow', 'deny', 'dismiss', 'approve', 'use-all', 'trust', '{"0":[1],"1":[0,2]}', 'x'.repeat(16384)]) {
+            const wire = { target_id: 'agent/example/worker', episode: 'claim/prompt', answer };
+            assert.deepEqual(Schema.encodeSync(Rich.PromptRespondParameters)(decode(wire)), wire);
+        }
+        for (const answer of ['', 'x'.repeat(16385)]) {
+            assert.throws(() => decode({ target_id: 'agent/example/worker', episode: 'claim/prompt', answer }));
+        }
+        const wire = { target_id: 'agent/example/worker', episode: 'claim/prompt', answer: 'dismiss',
+            delegation: { person: 'person/avery', policy: 'claim/policy', message: 'message/instruction',
+                quote: 'Dismiss that notice.', episode: 'claim/prompt' } };
+        assert.deepEqual(Schema.encodeSync(Rich.PromptRespondParameters)(decode(wire)), wire);
+    }
+});
+
 test('queued mission deadlines decode null and admission timestamps', async () => {
     const [{ Option, Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');
@@ -741,4 +759,14 @@ test('message provenance retains its serving model and reads historical absence 
     assert.throws(() => decode({ ...historical, authorization_model: 'unqualified-model' }));
     assert.throws(() => decode({ ...historical, authorization_model: null }));
     assert.throws(() => decode({ ...historical, undeclared_authority: true }));
+});
+
+
+test('schedule schema tolerates future state strings and retains raw declaration fields', async () => {
+    const fs = require('node:fs'); const path = require('node:path');
+    const [{ Schema }, Rich] = await modules;
+    const wire = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../docs/st3/client-v0/fixtures/schedules-page.json'), 'utf8')).value;
+    const decoded = Rich.decodeUnknownSync(Rich.SchedulesPage, 'tolerant')(wire);
+    // PageInfo.omitted_items is optional on the wire and encodes as null when the daemon leaves it out.
+    assert.deepEqual(Schema.encodeSync(Rich.SchedulesPage)(decoded), { ...wire, page: { omitted_items: null, ...wire.page } });
 });
