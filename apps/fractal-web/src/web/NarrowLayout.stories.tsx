@@ -457,7 +457,8 @@ export const TerminalToggle: Story = { parameters: { scenario: { _tag: 'contract
   await assertPhoneTabRow(canvasElement)
   // A long agent name at 390px: the title truncates inside the breadcrumb, which still keeps its share beside four controls.
   await userEvent.click(header.getByRole('button', { name: 'Expand sidebar' }))
-  await userEvent.click(within(await canvas.findByRole('dialog', { name: 'Agents' })).getByRole('row', { name: new RegExp(`^${longName},`) }))
+  const agents = await canvas.findByRole('dialog', { name: 'Agents' })
+  await userEvent.click(await within(agents).findByRole('row', { name: new RegExp(`^${longName},`) }))
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
   await waitFor(() => expect(within(canvasElement).getByTestId('thread-header')).toHaveTextContent(longName))
   const { breadcrumb } = await assertPhoneHeader(canvasElement, longName)
