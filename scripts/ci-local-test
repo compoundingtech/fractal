@@ -4,8 +4,10 @@ exit status is the first failure's. cargo and the stage scripts are stubs that r
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import time
 import tempfile
 import unittest
 
@@ -47,13 +49,15 @@ class CiLocal(unittest.TestCase):
         (self.home / '.local/bin/cargo').chmod(0o755)
         self.stage_exits = []
         self.umask = 0o022
+        self.tmp_root = root / 'short-tmp'
+        self.tmp_root.mkdir()
 
-    def run_local(self, *stages, **extra):
+    def run_local(self, *stages, ci_linux=None, **extra):
         # The stage stub exits with the next code of stage_exits on each call (0 when they run out).
         counter = Path(self.tmp.name) / 'calls'
         counter.write_text('0')
         codes = ' '.join(str(code) for code in self.stage_exits)
-        (self.work / 'scripts/ci-linux').write_text(RECORD + f'n=$(cat {counter}); echo $((n + 1)) > {counter}\n'
+        (self.work / 'scripts/ci-linux').write_text(ci_linux or RECORD + f'n=$(cat {counter}); echo $((n + 1)) > {counter}\n'
                                                     f'codes=({codes}); exit "${{codes[$n]:-0}}"\n')
         recorder = self.home / '.local/state/st3/recorder/bin'
         env = {'PATH': f'{recorder}:{self.bin}:{self.home}/.local/bin:{self.devshell}:{os.environ["PATH"]}:{self.home}/.local/state/st3', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
@@ -63,14 +67,46 @@ class CiLocal(unittest.TestCase):
                'GH_TOKEN': 'secret', 'GITHUB_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x', 'EVIDENCE_PUSH_TOKEN': 'secret',
                'SEKRETS_PROFILE': 'p', 'XDG_STATE_HOME': str(self.home / '.local/state'),
                'ST2_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite', 'FRACTAL_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite',
-               'ST3_OTELITE_BIN': '/nix/store/../escape/bin/otelite', **extra}
+               'ST3_OTELITE_BIN': '/nix/store/../escape/bin/otelite', 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), **extra}
+        self.last_env = env
         done = subprocess.run(['bash', 'scripts/ci-local', *stages], cwd=self.work, env=env, capture_output=True, text=True,
                               preexec_fn=lambda: os.umask(self.umask))
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
 
+    def test_the_host_build_admission_is_named_from_the_account_s_home(self):
+        # Without the account's admission program the stages' HOME hides nothing to name: no variable is set.
+        done, calls = self.run_local('mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for name in ('BUILD_ADMISSION_BIN', 'BUILD_ADMISSION_CONFIG', 'BUILD_ADMISSION_STATE', 'BUILD_ADMISSION_FALLBACK_LOCK',
+                     'CARGO_PRIORITY_FILE', 'CARGO_HEAVY_SLOTS'):
+            self.assertNotIn(name, calls[-1]['env'])
+        program = self.home / '.local/bin/build-admission'
+        program.write_text('#!/bin/sh\n')
+        program.chmod(0o755)
+        (self.home / '.config').mkdir(exist_ok=True)
+        (self.home / '.config/cargo-priority').write_text('010 agent/*\n')
+        (self.home / '.config/cargo-heavy-slots').write_text('2\n')
+        self.log.unlink(missing_ok=True)
+        done, calls = self.run_local('mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        env = calls[-1]['env']
+        self.assertNotEqual(env['HOME'], str(self.home))  # the stages still run in a home of their own
+        self.assertEqual({name: env.get(name) for name in ('BUILD_ADMISSION_BIN', 'BUILD_ADMISSION_CONFIG', 'BUILD_ADMISSION_STATE',
+                                                         'BUILD_ADMISSION_FALLBACK_LOCK', 'CARGO_PRIORITY_FILE', 'CARGO_HEAVY_SLOTS')},
+                         {'BUILD_ADMISSION_BIN': str(program),
+                          'BUILD_ADMISSION_CONFIG': f'{self.home}/.config/build-admission',
+                          'BUILD_ADMISSION_STATE': f'{self.home}/.local/state/st3/operations',
+                          'BUILD_ADMISSION_FALLBACK_LOCK': f'{self.home}/.local/state/st3/operations/build-admission-fallback.lock',
+                          'CARGO_PRIORITY_FILE': f'{self.home}/.config/cargo-priority',
+                          'CARGO_HEAVY_SLOTS': '2'})
+        self.log.unlink(missing_ok=True)
+        done, calls = self.run_local('mail-redelivery-canaries', CARGO_HEAVY_SLOTS='1', BUILD_ADMISSION_STATE='/elsewhere')
+        self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
+
     def test_the_stages_run_in_a_home_of_their_own_without_the_account_s_variables(self):
-        done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2')
+        done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2',
+                                     RUSTC_WRAPPER='/nix/store/x-sccache/bin/sccache', CARGO_BUILD_RUSTC_WRAPPER='sccache')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([call['argv'] for call in calls],
                          [['build', '--locked', '-p', 'fractal-drivers', '--bin', 'ci-hooks-install'], [], ['mail-redelivery-canaries']])
@@ -79,12 +115,17 @@ class CiLocal(unittest.TestCase):
             scratch = Path(env['HOME'])
             self.assertNotEqual(scratch, self.home)
             self.assertTrue(str(scratch).startswith(self.tmp.name), scratch)
-            for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY', 'TMPDIR'):
+            for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY'):
                 self.assertTrue(env[name].startswith(str(scratch.parent)), (name, env[name]))
-            # The scratch and the stages' TMPDIR are on the account's disk, never the caller's TMPDIR (a dev shell's, under /tmp).
+            # The scratch is on the account's disk, never the caller's TMPDIR (a dev shell's, under /tmp).
             self.assertTrue(str(scratch).startswith(f'{self.home}/.cache/ci-local/run.'), scratch)
-            self.assertEqual(env['TMPDIR'], str(scratch.parent / 'tmp'))
+            # The TMPDIR is short and on disk (Unix socket paths below it are limited to 108 bytes): under CI_LOCAL_TMP_ROOT.
+            self.assertEqual(Path(env['TMPDIR']).parent, self.tmp_root)
+            self.assertTrue(Path(env['TMPDIR']).name.startswith('cl.'), env['TMPDIR'])
             self.assertNotIn('LD_PRELOAD', env)  # a host's preloaded allocator: CI preloads nothing
+            # no compiler cache server: one started here would keep this run's HOME and TMPDIR, removed at exit, for every build
+            self.assertNotIn('RUSTC_WRAPPER', env)
+            self.assertNotIn('CARGO_BUILD_RUSTC_WRAPPER', env)
             for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
                          'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST3_OTELITE_BIN'):
                 self.assertNotIn(name, env)
@@ -96,8 +137,98 @@ class CiLocal(unittest.TestCase):
                              (f'{self.home}/.cargo', f'{self.home}/.rustup', str(self.devshell / 'cargo'), '/run/user/test'))
             self.assertFalse([entry for entry in env['PATH'].split(':') if entry.startswith(f'{self.home}/.local/state/st3')], env['PATH'])
             self.assertEqual(env['PATH'].split(':')[0], str(self.bin), 'the other entries keep their order')
-        self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '6', 'a shared host: six test threads, not nproc')
+            # Last, so cargo finds the dev shell's clippy before the rustup proxy there.
+            self.assertEqual(env['PATH'].split(':')[-1], f'{self.home}/.cargo/bin')
+        self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '12', 'a shared host: twelve test threads, not nproc')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
+
+    def test_every_time_is_printed_and_each_stage_s_output_is_kept(self):
+        logs = Path(self.tmp.name) / 'logs'
+        said = '#!/usr/bin/env bash\necho "out of $1"; echo "err of $1" >&2; [ "$1" = tests ] || exit 3\n'
+        done, calls = self.run_local('tests', 'fleet-compat', ci_linux=said, CI_LOCAL_LOG_DIR=str(logs))
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertIn(f'ci-local: stage logs in {logs}/run-', done.stdout)
+        table = [line for line in done.stdout.splitlines() if line.startswith('ci-local:   ')]
+        self.assertEqual([line.split()[1] for line in table], ['setup', 'tests', 'fleet-compat'])
+        stamp = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
+        self.assertRegex(table[0], rf'setup +{stamp} +{stamp} +\d+s')
+        self.assertRegex(table[1], rf'tests +{stamp} +{stamp} +\d+s +exit 0 +queue: 0 waits, 0s')
+        self.assertRegex(table[2], rf'fleet-compat +{stamp} +{stamp} +\d+s +exit 3 +queue: 0 waits, 0s')
+        run, = logs.glob('run-*')
+        self.assertEqual(sorted(path.name for path in run.glob('*.log')), ['fleet-compat.log', 'tests.log'])
+        self.assertEqual(sorted((run / 'tests.log').read_text().split('\n')[:2]), ['err of tests', 'out of tests'])
+        self.assertEqual(done.stdout.count('out of tests'), 1)  # passed on as before, once
+        self.assertEqual(done.stdout.count('err of fleet-compat'), 1)
+
+    def test_the_time_a_stage_waits_in_the_build_admission_queue_is_stamped_and_added_up(self):
+        logs = Path(self.tmp.name) / 'logs'
+        queue = ('#!/usr/bin/env bash\necho "cargo: waiting in order for a host build slot (all 6 busy)"\nsleep 1.2\n'
+                 'echo "cargo: got build slot 0 and a heavy slot"\necho compiling\n'
+                 'echo "cargo: waiting in order for a host build slot (all 6 busy)" >&2\nsleep 1.1\necho "cargo: got build slot 1" >&2\n')
+        done, _ = self.run_local('tests', ci_linux=queue, CI_LOCAL_LOG_DIR=str(logs))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(re.findall(r'ci-local: \[\d{4}-\S+Z\] tests: waiting for a build slot', done.stdout)), 2)
+        self.assertEqual(len(re.findall(r'ci-local: \[\d{4}-\S+Z\] tests: got a build slot', done.stdout)), 2)
+        row, = [line for line in done.stdout.splitlines() if line.startswith('ci-local:   tests')]
+        waits, seconds = re.search(r'queue: (\d+) waits, (\d+)s', row).groups()
+        self.assertEqual(waits, '2')
+        self.assertGreaterEqual(int(seconds), 2)
+        run, = logs.glob('run-*')
+        self.assertIn('compiling', (run / 'tests.log').read_text())
+
+    def test_only_the_latest_ten_runs_keep_their_logs(self):
+        home_logs = self.home / '.cache/ci-local-logs'
+        for n in range(12):
+            old = home_logs / f'run-2020010{n % 10}T00000{n // 10}Z-{n}'
+            old.mkdir(parents=True)
+            os.utime(old, (1_000_000 + n, 1_000_000 + n))
+        done, _ = self.run_local('tests')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        kept = sorted(path.name for path in home_logs.glob('run-*'))
+        self.assertEqual(len(kept), 10)
+        self.assertNotIn('run-20200100T000000Z-0', kept)  # the oldest went
+        self.assertTrue(any(not name.startswith('run-2020') for name in kept))  # this run's
+
+    def test_the_tmpdir_is_in_ram_when_dev_shm_has_room_and_on_disk_otherwise(self):
+        if not (os.path.isdir('/dev/shm') and os.access('/dev/shm', os.W_OK)):
+            self.skipTest('no writable /dev/shm here')
+        for free_kb, root in ((30 * 1024 * 1024, '/dev/shm'), (19 * 1024 * 1024, '/var/tmp')):
+            with self.subTest(free_kb=free_kb):
+                (self.bin / 'df').write_text(f'#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "tmpfs 1 1 {free_kb} 1% /dev/shm"\n')
+                (self.bin / 'df').chmod(0o755)
+                self.log.unlink(missing_ok=True)
+                done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TMP_ROOT='')
+                self.assertEqual(done.returncode, 0, done.stderr)
+                tmpdir = Path(calls[-1]['env']['TMPDIR'])
+                self.assertEqual((str(tmpdir.parent), tmpdir.name[:3]), (root, 'cl.'))
+                self.assertFalse(tmpdir.exists(), 'removed when the run ends')
+
+    def test_each_test_process_gets_a_tmpdir_of_its_own_through_the_cargo_target_runner(self):
+        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TARGET_TRIPLE='x86_64-unknown-linux-gnu')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for call in calls:
+            env = call['env']
+            self.assertEqual(env['CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER'], str(self.work / 'scripts/ci-test-tmpdir'))
+            self.assertEqual(env['CI_TEST_TMPDIR_ROOT'], env['TMPDIR'])  # the run's own short TMPDIR, removed with it
+
+    def test_the_runner_gives_every_start_a_fresh_tmpdir_and_runs_the_command_in_its_place(self):
+        root = Path(self.tmp.name) / 'root'
+        root.mkdir()
+        runner = ROOT / 'scripts/ci-test-tmpdir'
+        seen = []
+        for _ in range(2):
+            child = subprocess.Popen([str(runner), 'sh', '-c', 'echo "$TMPDIR $$"; mkdir "$TMPDIR/.git"'], stdout=subprocess.PIPE, text=True,
+                                     env={'PATH': os.environ['PATH'], 'CI_TEST_TMPDIR_ROOT': str(root), 'TMPDIR': '/elsewhere'})
+            out, _ = child.communicate()
+            self.assertEqual(child.returncode, 0)
+            directory, pid = out.split()
+            self.assertEqual(int(pid), child.pid)  # exec: no extra process between the caller and the test
+            self.assertEqual(Path(directory).parent, root)
+            seen.append(directory)
+        self.assertNotEqual(seen[0], seen[1])
+        self.assertFalse((root / '.git').exists())  # what one start leaves at the top of its TMPDIR stays there
+        done = subprocess.run([str(runner), 'true'], env={'PATH': os.environ['PATH']}, capture_output=True, text=True)
+        self.assertNotEqual(done.returncode, 0)  # outside scripts/ci-local it refuses rather than guess a directory
 
     def test_on_a_host_whose_umask_is_002_the_stages_get_ci_s_022_and_no_group_writable_scratch(self):
         self.umask = 0o002
@@ -115,11 +246,60 @@ class CiLocal(unittest.TestCase):
         (self.devshell / 'cargo').unlink()
         self.log.unlink()
         # The tools the script needs, from directories that hold no cargo.
-        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'touch', 'env', 'python3')}
+        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'chmod', 'grep', 'touch', 'env', 'python3')}
         tools = [entry for entry in sorted(tools) if not (Path(entry) / 'cargo').exists()]
         done, calls = self.run_local('mail-redelivery-canaries', PATH=':'.join([str(self.bin), f'{self.home}/.local/bin', *tools]))
         self.assertEqual((done.returncode, calls), (2, []), done.stderr)
         self.assertIn('no cargo executable of the dev shell', done.stderr)
+
+    def test_clippy_and_fleet_compat_run_alongside_the_tests_and_report_in_the_given_order(self):
+        logs = Path(self.tmp.name) / 'logs'
+        # The tests stage waits until both lane stages have started: they really run alongside it.
+        said = ('#!/usr/bin/env bash\necho "out of $1"\n'
+                'if [ "$1" = tests ]; then for i in $(seq 100); do [ -e "$CI_LOCAL_TEST_LOG.clippy" ] && break; sleep 0.05; done; '
+                '[ -e "$CI_LOCAL_TEST_LOG.clippy" ] || exit 9; fi\n'
+                '[ "$1" = clippy ] && touch "$CI_LOCAL_TEST_LOG.clippy"\n'
+                '[ "$1" = fleet-compat ] && exit 4\n[ "$1" = clippy ] && exit 6\nexit 0\n')
+        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', ci_linux=said, CI_LOCAL_LOG_DIR=str(logs), CLIPPY_BASE_SHA='f' * 40)
+        self.assertEqual(done.returncode, 6, done.stdout + done.stderr)  # the first failure in the given order: clippy's, not fleet-compat's
+        self.assertIn('ci-local: clippy fleet-compat run alongside the other stages', done.stdout)
+        # The lane's output follows the foreground's, whole, never interleaved.
+        out = done.stdout
+        self.assertLess(out.index('ci-local: tests exit 0'), out.index('----- ci-local: clippy output -----'))
+        self.assertLess(out.index('----- ci-local: clippy output -----'), out.index('out of clippy'))
+        self.assertIn('ci-local: clippy exit 6', out)
+        self.assertIn('ci-local: fleet-compat exit 4', out)
+        table = [line.split()[1] for line in out.splitlines() if line.startswith('ci-local:   ')]
+        self.assertEqual(table, ['setup', 'tests', 'clippy', 'fleet-compat'])
+        run, = logs.glob('run-*')
+        self.assertEqual(sorted(path.name for path in run.glob('*.log')), ['clippy.log', 'fleet-compat.log', 'tests.log'])
+
+    def test_a_stopped_run_stops_the_stage_its_lane_is_running(self):
+        # clippy (in the lane) records its pid and keeps running; the tests stage ends at once, so the run waits for its lane.
+        said = ('#!/usr/bin/env bash\n'
+                'if [ "$1" = clippy ]; then echo $$ > "$CI_LOCAL_TEST_LOG.clippy"; sleep 60; fi\n'
+                'if [ "$1" = tests ]; then for i in $(seq 100); do [ -s "$CI_LOCAL_TEST_LOG.clippy" ] && break; sleep 0.05; done; fi\n')
+        (self.work / 'scripts/ci-linux').write_text(said)
+        env = {'PATH': f'{self.bin}:{self.devshell}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
+               'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
+        run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(lambda: run.poll() is None and run.kill())
+        marker = Path(f'{self.log}.clippy')
+        for _ in range(200):
+            if marker.exists() and marker.read_text().strip():
+                break
+            time.sleep(0.05)
+        clippy = int(marker.read_text())
+        time.sleep(0.5)  # the tests stage is done; the run is waiting for its lane
+        run.terminate()
+        run.wait(timeout=20)
+        for _ in range(100):
+            if not Path(f'/proc/{clippy}').exists():
+                break
+            time.sleep(0.05)
+        self.assertFalse(Path(f'/proc/{clippy}').exists(), 'the lane\'s running stage outlived the run')
+        self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
         self.stage_exits = [0, 3, 5]
@@ -154,10 +334,18 @@ class CiLocal(unittest.TestCase):
         git('remote', 'add', 'origin', str(origin))
         git('commit', '-q', '--allow-empty', '-m', 'local only')
         git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD'))  # a local ref that is not the remote's main
-        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries')
+        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries', CI_LOCAL_SERIAL='1')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([call['argv'] for call in calls][2:], [['tests'], ['clippy'], ['fleet-compat'], ['mail-redelivery-canaries']])
         self.assertEqual(calls[-1]['env']['CLIPPY_BASE_SHA'], fetched_tip, 'main as fetched now, not the local origin/main')
+        # By default clippy and fleet compatibility run alongside the others, one after the other: every stage once, clippy first of the two.
+        self.log.unlink()
+        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        ran = [' '.join(call['argv']) for call in calls][2:]
+        self.assertEqual(sorted(ran), ['clippy', 'fleet-compat', 'mail-redelivery-canaries', 'tests'])
+        self.assertLess(ran.index('clippy'), ran.index('fleet-compat'))
+        self.assertEqual({call['env']['CLIPPY_BASE_SHA'] for call in calls[2:]}, {fetched_tip})
         self.log.unlink()
         done, calls = self.run_local('clippy', CLIPPY_BASE_SHA='f' * 40)
         self.assertEqual(calls[-1]['env']['CLIPPY_BASE_SHA'], 'f' * 40, 'a given base wins and nothing is fetched')
@@ -193,6 +381,23 @@ class CiLocal(unittest.TestCase):
         done, calls = self.run_local('mail-redelivery-canaries')
         self.assertEqual(done.returncode, 9)
         self.assertEqual([call['argv'] for call in calls], [['build', '--locked', '-p', 'fractal-drivers', '--bin', 'ci-hooks-install']])
+
+    def test_the_isolation_vm_stage_runs_its_own_script_in_the_stage_s_home_and_scratch(self):
+        (self.work / 'scripts/ci-local-isolation-vm').write_text(RECORD)
+        done, calls = self.run_local('mail-redelivery-canaries', 'isolation-vm')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        stage_calls = calls[-2:]  # after cargo's hook build and the hook install: ci-linux, then the VM script
+        self.assertEqual([call['argv'] for call in stage_calls], [['mail-redelivery-canaries'], []])
+        vm = stage_calls[-1]
+        self.assertNotEqual(vm['env']['HOME'], str(self.home))
+        self.assertTrue(vm['env']['RUNNER_TEMP'].startswith(self.tmp.name))
+        self.assertIn('ci-local: isolation-vm exit 0', done.stdout)
+
+    def test_the_isolation_vm_script_runs_only_under_ci_local(self):
+        done = subprocess.run(['bash', str(ROOT / 'scripts/ci-local-isolation-vm')], capture_output=True, text=True,
+                              env={k: v for k, v in os.environ.items() if k != 'RUNNER_TEMP'})
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('ci-local-isolation-vm runs under scripts/ci-local', done.stderr)
 
     def test_no_stage_or_a_stage_without_a_local_lane_is_refused_before_anything_runs(self):
         for stages in ((), ('conversation-model',), ('mail-redelivery-canaries', 'nonesuch')):

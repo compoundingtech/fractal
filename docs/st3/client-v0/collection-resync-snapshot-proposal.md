@@ -160,14 +160,14 @@ entry in `docs/st3/client-v0/schemas/operations.json`, examples and
 compatibility text in `docs/st3/client-v0/collections.md`, contract fixtures
 and `docs/st3/client-v0/fixtures/manifest.json`, generated TypeScript,
 Swift, and Rust client models/schemas (including
-`crates/st3-client/src/generated.rs`), and a `release-notes/*.json` entry. Regenerate
+`crates/fractal-client/src/generated.rs`), and a `release-notes/*.json` entry. Regenerate
 and check generated clients rather than hand-editing generated files. Queue
 the implementation PR alone with schema/codegen and old-client compatibility
 proofs because it changes the client-v0 wire contract.
 
 Add `cursor-gap-loop` and `collection-snapshot-too-large` to the schema's
 `ErrorCode` set and regenerated typed clients. Add safe user-facing text for
-both to `st3-client`'s `plain_message`/error-code registry. The existing
+both to `fractal-client`'s `plain_message`/error-code registry. The existing
 `internal` code remains available for serialization failure. Opted-in
 `changes` frames carry both `from_cursor` and `cursor` throughout the
 subscription, including after the gap recovery; this is part of this contract,
@@ -175,9 +175,9 @@ not an optional later enhancement. A non-opted old client receives neither
 field and never receives `resync-snapshot`.
 
 Consumers that recognize the new frame include the TypeScript client, Swift
-client, `st3-client` Rust collection follower, `st3-feed`/stui, and the iOS
+client, `fractal-client` Rust collection follower, `fractal-feed`/Fractal TUI, and the iOS
 and web collection adapters that use them. Their handling must be updated or
-explicitly remain on v1. Coordinate `st3-feed`/stui with concurrent #3166;
+explicitly remain on v1. Coordinate `fractal-feed`/Fractal TUI with concurrent #3166;
 this isolated worktree does not edit those files. A new client talking to an
 old daemon follows the v1 path. An old client talking to a v2 daemon never
 opts in and keeps the current path.

@@ -33,7 +33,7 @@ Each publication increments the turn entry's revision (mirrored by its body revi
 Mark `phase: provisional` and `final: false`; only the settled endpoint pair becomes `phase: complete | interrupted`, `final: true`. Until a usable baseline/current capture exists, live state remains Unknown.
 Persist snapshot identities and bounded content on the owner, not patch bodies in replicated claims; daemon projections are derived and client state is only a subscribed view.
 
-Reuse the canonical `turn_id` proposed by [#1824](https://github.com/compoundingtech/smalltalk/pull/1824), bound to conversation/session, runtime incarnation, owner generation, and workspace declaration.
+Reuse the canonical `turn_id` proposed by [#1824](https://github.com/compoundingtech/fractal/pull/1824), bound to conversation/session, runtime incarnation, owner generation, and workspace declaration.
 Map native turn IDs once in the driver; no client-generated IDs, timestamps, message text, tool IDs, or independent changes-turn counter.
 Queued messages do not create turns until consumed; steering inside an active turn retains that turn's identity.
 Start/end snapshot refs survive daemon restart within retention; an interrupted turn lacking a provable endpoint is Unknown, never silently finalized or assigned to its successor.
@@ -103,7 +103,7 @@ Branch switches/rebase/reset advance the revision and invalidate active scope re
 
 Run capture and Git diff on the workspace owner; route summaries/patches through authenticated client relay reads and fence session/workspace/owner generation.
 A remote owner loss changes scoped support to Unknown/`owner-unavailable`, while owner-dependent reads return the error above; never run Git against a coincidentally matching gateway path or present a replica as current authority.
-Reuse bounded relay cancellation from [#1826](https://github.com/compoundingtech/smalltalk/pull/1826); relocation requires snapshot continuity or explicit expired/Unknown history.
+Reuse bounded relay cancellation from [#1826](https://github.com/compoundingtech/fractal/pull/1826); relocation requires snapshot continuity or explicit expired/Unknown history.
 Proposed measurable budgets, not measurements: warm summary read/serialization p95 ≤16 ms; capturing frame ≤100 ms after boundary; complete bounded summary p95 ≤100 ms after endpoint capture.
 Bounded patch fetch p95 <300 ms end-to-end on a reachable owner, including a one-hop relay. Benchmark cold and warm paths separately; deadline exhaustion is a typed `read-deadline` error, not a successful Unknown patch, stalled frame, or partial success.
 Git/snapshot work runs outside frame serialization, the Store writer, and the lifecycle reconciler; coalesce per-root invalidations, stream/drain subprocess output, and bound worker slots/queues with cancellation and explicit busy responses.
@@ -112,16 +112,16 @@ Over-limit/binary files keep bounded metadata and explicit unavailable/truncated
 Propose owner-local retention of seven days with a 256 MiB per-workspace content cap; deterministic eviction keeps small summaries with expired patch state. Pin in-flight pairs only within the same bound; deletion/revocation releases content.
 Reuse `read.projections` authorization only if Nathan approves that it extends from transcript content to captured workspace files; a declared workspace path alone grants no arbitrary file read.
 Capture registered roots only; exclude Git metadata and ignored untracked files, never follow symlinks outside roots, and expose relative paths/opaque IDs rather than absolute source paths.
-No secret/token scrubbing of admitted patch content, consistent with [#1561](https://github.com/compoundingtech/smalltalk/issues/1561); authorization, explicit capture scope, passive text rendering, and size limits are the privacy boundary.
+No secret/token scrubbing of admitted patch content, consistent with [#1561](https://github.com/compoundingtech/fractal/issues/1561); authorization, explicit capture scope, passive text rendering, and size limits are the privacy boundary.
 Unlike today's native-conversation reads, this proposal adds owner-local historical file capture; approve retention and access explicitly rather than treating it as already authorized behavior.
 
 ## Overlap and implementation split
 
-Searched open issues and PRs with `gh ... list --repo=compoundingtech/smalltalk --search` for diff/file changes/git status/turn_id and exact turn-diff/changed-files/numstat terms; no dedicated end-to-end turn-diff contract was found.
-- [#705](https://github.com/compoundingtech/smalltalk/issues/705) requests workspace projection for changed-file browsing: reuse the now-present host-scoped Agent fields; do not duplicate workspace discovery.
-- [#1824](https://github.com/compoundingtech/smalltalk/pull/1824) proposes exact-turn identity/cancellation: share its turn lifecycle and fences.
-- [#1313](https://github.com/compoundingtech/smalltalk/issues/1313) covers typed harness state; [#933](https://github.com/compoundingtech/smalltalk/issues/933) covers declared interests/shared projections: compose support state and subscriptions, not another parser/poller.
-- [#1665](https://github.com/compoundingtech/smalltalk/pull/1665) incrementally folds native conversations; [#1561](https://github.com/compoundingtech/smalltalk/issues/1561) sets owner-content/no-scrubbing policy; [#1826](https://github.com/compoundingtech/smalltalk/pull/1826) bounds forwarded reads. None establishes historical Git snapshots.
+Searched open issues and PRs with `gh ... list --repo=compoundingtech/fractal --search` for diff/file changes/git status/turn_id and exact turn-diff/changed-files/numstat terms; no dedicated end-to-end turn-diff contract was found.
+- [#705](https://github.com/compoundingtech/fractal/issues/705) requests workspace projection for changed-file browsing: reuse the now-present host-scoped Agent fields; do not duplicate workspace discovery.
+- [#1824](https://github.com/compoundingtech/fractal/pull/1824) proposes exact-turn identity/cancellation: share its turn lifecycle and fences.
+- [#1313](https://github.com/compoundingtech/fractal/issues/1313) covers typed harness state; [#933](https://github.com/compoundingtech/fractal/issues/933) covers declared interests/shared projections: compose support state and subscriptions, not another parser/poller.
+- [#1665](https://github.com/compoundingtech/fractal/pull/1665) incrementally folds native conversations; [#1561](https://github.com/compoundingtech/fractal/issues/1561) sets owner-content/no-scrubbing policy; [#1826](https://github.com/compoundingtech/fractal/pull/1826) bounds forwarded reads. None establishes historical Git snapshots.
 
 **Daemon/drivers:** authoritative turn admission/end capture, root registry, owner-local snapshot lifecycle, Git summaries/patches, invalidation, authenticated relay, tri-state errors, and bounded shared projections. Nathan reviews schema/operation manifest/capabilities/fixtures and contract tests before implementation.
 **SDK/client:** regenerate Rust/Swift/TypeScript from that contract; expose typed reads, refs, frames, and errors. A web client renders per-turn files/counts, lazy patches, and branch Changes, with explicit Unknown/Unsupported/truncation; no client Git or independent stale cache.

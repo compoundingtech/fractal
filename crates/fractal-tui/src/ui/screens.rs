@@ -35,10 +35,6 @@ fn alerts_out_of_date(world: &World) -> Option<String> {
     Some(why.join("; "))
 }
 
-/// The tabs everyone sees. Worktrees stays hidden until the graph models worktrees: its screens
-/// only have invented data to show (Nathan, 2026-09-28).
-pub const TABS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
-
 pub enum Item {
     Header {
         title: String,
@@ -465,7 +461,7 @@ fn structured_request(
             ));
         }
     }
-    // The images it carries: a line each that opens it; where stui keeps image state, the line
+    // The images it carries: a line each that opens it; where Fractal TUI keeps image state, the line
     // also loads it inline (`Content::expand_requests`).
     if !images.is_empty() {
         card.blank();
@@ -2380,7 +2376,7 @@ pub fn fleet_detail(world: &World, id: Option<&str>, width: usize, spinner: &'st
     if links.lines.is_empty() {
         links.line(Line::from(span(
             if machine.you_are_here {
-                "This is the machine stui is talking to."
+                "This is the machine Fractal TUI is talking to."
             } else {
                 "st reports no link to this machine."
             },
@@ -2869,7 +2865,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
             theme::dim(),
         )));
         doc.blank();
-        doc.buttons(&[("g", "Open in Now", Hit::Key('g'), theme::PERSON)]);
+        doc.buttons(&[("g", "Open in Inbox", Hit::Key('g'), theme::PERSON)]);
     } else {
         doc.wrap(
             &[run(
@@ -3264,7 +3260,7 @@ pub fn new_mission_form(fields: &[String; 4], focus: usize, cursor: usize, width
     inner.blank();
     inner.wrap(
         &[run(
-            "Say what you want. A planner turns it into a proposed mission, which appears in Now for you to approve; nothing runs before that.",
+            "Say what you want. A planner turns it into a proposed mission, which appears in Inbox for you to approve; nothing runs before that.",
             theme::soft(),
         )],
         w,
@@ -3459,8 +3455,8 @@ mod tree_tests {
     fn a_folder_holding_only_a_folder_joins_it_on_one_line() {
         let path = |text: &str| text.split('/').map(str::to_owned).collect::<Vec<_>>();
         let compact = compact_folders(&[
-            path("fleet/smalltalk/operations/2026-10-01/operator"),
-            path("fleet/smalltalk/ci/watcher"),
+            path("fleet/fractal/operations/2026-10-01/operator"),
+            path("fleet/fractal/ci/watcher"),
             path("fleet/cos/standing/cos"),
             path("solo"),
         ]);
@@ -3469,10 +3465,10 @@ mod tree_tests {
             [
                 vec![
                     "fleet".to_owned(),
-                    "smalltalk".into(),
+                    "fractal".into(),
                     "operations/2026-10-01".into()
                 ],
-                vec!["fleet".to_owned(), "smalltalk".into(), "ci".into()],
+                vec!["fleet".to_owned(), "fractal".into(), "ci".into()],
                 vec!["fleet".to_owned(), "cos/standing".into()],
                 Vec::<String>::new(),
             ]

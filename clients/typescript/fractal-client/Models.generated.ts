@@ -890,6 +890,7 @@ export type Attention = ResourceHeader & {
   mission_id?: Id;
   mission_run_id?: Id;
   person_id: Id;
+  presentation?: AttentionPresentation;
   preview?: (LaunchPreview | null);
   preview_token?: string | null;
   priority: "critical" | "high" | "normal" | "low";
@@ -909,6 +910,11 @@ export type Attention = ResourceHeader & {
   what?: string;
 };
 
+export type AttentionActor = {
+  id: Id;
+  label: string;
+};
+
 export type AttentionBlocked = {
   attempt: number;
   goal: string;
@@ -916,10 +922,48 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionPresentation = {
+  agent: (AttentionActor | null);
+  kind: 
+  "review"
+  | "feedback"
+  | "request"
+  | "update"
+  | "launch"
+  | "revision"
+  | "prompt"
+  | "login"
+  | "fault"
+  | null
+;
+  raised_by: (AttentionActor | null);
+  revision?: AttentionRevision;
+  tier: "stopped" | "alert" | "today" | "later" | null;
+  waiting: (AttentionWaiting | null);
+};
+
+export type AttentionRevision = {
+  from_revision: string;
+  lines: Array<AttentionRevisionLine>;
+  reason: string;
+  to_revision: string;
+  truncated: boolean;
+};
+
+export type AttentionRevisionLine = {
+  op: "+" | "-" | "~";
+  text: string;
+};
+
 export type AttentionTargetState = {
   id: Id;
   since?: Timestamp;
   state: string;
+};
+
+export type AttentionWaiting = {
+  path: string;
+  step: StepRunId;
 };
 
 export type BlobChunk = {
@@ -1316,6 +1360,14 @@ export type DecisionResponse = ({
   type: "rank";
   value: Array<string>;
 });
+
+export type DelegationProof = {
+  episode: string;
+  message: string;
+  person: string;
+  policy: string;
+  quote: string;
+};
 
 export type Device = ResourceHeader & {
   expires_at: Timestamp;
@@ -2191,6 +2243,7 @@ export type PageInfo = {
   has_more: boolean;
   limit: number;
   next_cursor?: string | null;
+  omitted_items?: number | null;
 };
 
 export type PairedSession = (PersonPairedSession | AssistantPairedSession);
@@ -2363,6 +2416,7 @@ export type ProjectionEvent = Omit<{
 
 export type PromptRespondParameters = {
   answer: string;
+  delegation?: DelegationProof;
   episode: string;
   target_id: Id;
 };

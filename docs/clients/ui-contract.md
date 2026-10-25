@@ -140,6 +140,23 @@ wrong until the host is repaired; exchanges cannot fix it.
 The terminal UI's sidebar and palette expose Now, Agents, Missions, Fleet, and Usage.
 The phone tabs are Now, Resources, Fleet, and Spaces.
 
+Terminal workspace tabs derive presentation identity from their existing pane keys,
+like the web strip's `data-tab-kind` (never from the displayed or custom title).
+`A`, `M`, and `I` identify agent, mission, and Inbox/alert panes. Agent tabs show
+reported activity (`>` working/compacting, `-` idle, `x` down/stopped/retired,
+`◆` needs a person or a login, `!` fault, `~` starting/unknown). `◆N` is the number of
+open alerts in that subject's attention window, excluding informational updates and
+recently closed items; zero is omitted, and an unavailable window shows `◆?`.
+A separate `?` means live attention reports an open question prompt. Native question
+kind or an exact question-tool call identity establishes its type, independently of
+available client-answer actions (whose submission window can expire). Cached calls
+without an open live prompt never establish that a question is still pending.
+Mission tabs include current question prompts of agents assigned to that mission;
+Inbox includes all current question prompts. Counts disappear before
+type/activity/question identity when space is tight. Subject membership indexes are
+rebuilt on observation updates, not per tab per frame; none of this chrome is persisted.
+
+
 ### Now: what needs you
 
 - Grouped by tier (`words.json` → `tier`): somebody is stopped on you, something broke, today,
@@ -192,7 +209,7 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
 - Grouped by the mission word (`words.json` → `mission`), in this order: needs you, stalled,
   unstaffed, unclaimed, queued, working, watching, held, idle, done, failed, cancelled, not started. Each group heading
   explains itself through the word's `explain` text in the detail view.
-- Tree view (toggle): the mission path as folders (`fleet/smalltalk/ci/watch/…`).
+- Tree view (toggle): the mission path as folders (`fleet/fractal/ci/watch/…`).
 - Detail: word pill, title, explanation; goals; **the decision card embedded** when a person is
   needed (the same card as Now, answerable in place); a **what you can do** card for stalled,
   failed and unstaffed missions (the stuck step, its blockers, restart the agent, retry the step,
@@ -256,7 +273,7 @@ Today only Rust and the phone run the fixtures; `noise` and `claude-skill` run o
 and only the phone runs `conversation-style.json`. Fractal cleans conversations in
 `apps/fractal-web/src/conversation/` without `st3-views` and runs none of them. Adding that
 test is the first step of this rule
-([#2647](https://github.com/compoundingtech/smalltalk/issues/2647)).
+([#2647](https://github.com/compoundingtech/fractal/issues/2647)).
 Once the [conversation projection](#conversation-stream) is served, it is the derivation the
 fixtures pin, and a Fractal PR that changes the fixtures changes the projection with them.
 
@@ -353,7 +370,7 @@ Today the terminal UI derives mission words, agent states and Now cards in Rust,
 derives its own copies in TypeScript, and the web app would need a third. The copies already
 disagree. st serves each of these once, as a presentation projection, so every client reads the
 same answer and one place is measured and optimized
-([#2646](https://github.com/compoundingtech/smalltalk/issues/2646)).
+([#2646](https://github.com/compoundingtech/fractal/issues/2646)).
 
 ### Rules for every projection
 
@@ -510,10 +527,10 @@ never infer it.
 
 | Field | Meaning |
 |---|---|
-| `tier` | The Now group: `stopped`, `alert`, `today`, `later` (`words.json` `tier`), or `null` for a row that is not a Now card (an unread message stays in its conversation). |
-| `kind` | The card: `review`, `feedback`, `request`, `update`, `launch`, `revision`, `prompt`, `login` or `fault`. |
-| `agent` | Who **Chat about this** reaches, `{id, label}`: the conversation, else the step's claimant, else an agent working in the mission, else the requester. `null` means the chief of staff. |
-| `raised_by`, `waiting` | Who raised it, with st's own actors named "st"; and the step it holds, `{step, path}`. |
+| `tier` | The Now group: `stopped`, `alert`, `today`, `later` (`words.json` `tier`), or `null` for a row that is not on Now (an unread message stays in its conversation; a fault goes to its agent). `null` means not on Now, never "unknown". No card is in `alert` yet. |
+| `kind` | The card: `review`, `feedback`, `request`, `update`, `launch`, `revision`, `prompt`, `login` or `fault`, or `null` for a row that is no card at all (an unread message). |
+| `agent` | Who **Chat about this** reaches, `{id, label}`: the conversation, else the step's claimant, else an agent working in the mission (the first in the agents roster's order, when several are), else the requester. `null` means the chief of staff. |
+| `raised_by`, `waiting` | Who raised it, `{id, label}`: the requester, else the agent behind it, with st's own actors (`daemon/…`, `agent/st3/reconciler`) labeled "st", else "the … mission" it came from; and the step it holds, `{step, path}`. A person's label is their id. |
 | `launch` | On a launch card: the newest variant's mission as `{variant, goals[], steps[], agents[], asks_you}`. Each step is `{path, title, assignee, after[], asks_you}`, in display order without `finally` steps. `assignee` is `{kind, agent, label}`, with `kind` one of `agent`, `any`, `st` or `none`. Each agent is `{id, label, harness, host}`. `asks_you` counts the steps that stop for a person. With no previewable variant it is `{unavailable: {reason, diagnostics[]}}`, with up to three diagnostics. |
 | `revision` | On a revision card: the changes (see [Revision changes](#revision-changes)). |
 | `prompt` | On a harness-prompt card: `{calls[], answers[], allow}`. Each call is a tool call without a result in the seat's conversation: `{call_id, tool, input, input_complete}`, at most five, each input within 4 KiB. `answers` come from `action_parameters["prompt.respond"]`. `allow` is true only when exactly one call is pending and its input is complete. When st cannot read the timeline, `calls` is `null` with `unknown_reason` and `allow` is false: the card says to answer in the terminal. |
@@ -522,7 +539,16 @@ Kinds come from `attention_kind`: a human gate is `stopped` · `review` (`feedba
 mode); a person step or agent request is `stopped` · `request`, or `later` · `update` when it
 carries an update; a launch approval is `today` · `launch`; a revision approval is `today` ·
 `revision`; a `custom.*` kind is `today` · `request`; a harness prompt is `stopped` · `prompt`;
-a harness login is `stopped` · `login`.
+a harness login is `stopped` · `login`. A fault is a `fault` card with no tier: st sends each
+fault to the agent that owns it, and neither client shows one on Now. An unread message has
+neither.
+
+An agent's label is its name's last segment in title case, without its own host's prefix
+(`fractal_ui_model::agents::label`, which the terminal UI also uses); an agent st does not know reads
+as its id without `agent/`. The refresher presents each row when it folds the list, and again
+when the agents roster it reads changes; while no roster is available it keeps the agents it
+last read. Every route copies the row's presentation from that list. A `history` read returns the
+same open rows (st keeps no resolved attention rows), so it carries the same presentations.
 
 **Inputs:** the attention row; for a launch, its newest variant; for a prompt, the seat's
 conversation timeline at the observation; for `agent`, the step's claimant and the mission's
@@ -542,12 +568,14 @@ Settled: `custom.*` kinds are Today requests, as in the terminal UI. Allow depen
 On a revision card, `Attention.presentation.revision` is
 `{from_revision, to_revision, reason, lines[], truncated}`. Each line is `{op, text}`: `+` adds a
 step or a field, `-` removes one, and `~` changes one, naming the step and the fields that
-changed in plain words (`~ review: goal, assignee`). There are at most 200 lines; beyond that,
-`truncated` is true. The refresher computes the lines from the declaration diff between the
-current and the candidate revision, the comparison `st apply --dry-run` already makes.
+changed in plain words (`+ step publish`, `~ review: goal, assignee`, `+ review: timeout`). The
+mission's own fields come first as `mission: …`, then the steps by path. Fields st derives (a
+step's definition hash) are not named; what they derive from is. There are at most 200 lines;
+beyond that, `truncated` is true. The attention refresher computes the lines from the published
+revision the run runs now and the candidate (`crates/st3/src/api/revision_changes.rs`). A card
+whose proposal or revisions st no longer has carries no `revision`.
 
-Today no client has these lines live: the terminal UI's revision card is always empty outside
-the demo, and the phone and Fractal show no changes.
+The terminal UI's revision card reads them in its own PR; until then no client shows them.
 
 ### Mission declaration
 
@@ -583,7 +611,7 @@ rule.
 
 Each person has one Sidebar arrangement, at the reserved subject
 `arrangement/person/NAME/00000000-0000-7000-8000-000000000001`
-([#2043](https://github.com/compoundingtech/smalltalk/issues/2043)). The generated Rust, Swift
+([#2043](https://github.com/compoundingtech/fractal/issues/2043)). The generated Rust, Swift
 and TypeScript clients expose that UUID as `SIDEBAR_ARRANGEMENT_UUID` (Swift:
 `st3SidebarArrangementUuid`), from `constants` in `operations.json`. Every client picks the same
 Sidebar:
@@ -626,7 +654,7 @@ small PRs. The daemon PR carries the schema and regenerated clients, the refresh
 `words.json` check, the SLO entries and the `daemon_load` window. Separate PRs then move the
 terminal UI and the phone onto the projection and delete their derivations. When a projection
 merges, its route and collection are posted on
-[#2646](https://github.com/compoundingtech/smalltalk/issues/2646) for Fractal to adopt; Fractal
+[#2646](https://github.com/compoundingtech/fractal/issues/2646) for Fractal to adopt; Fractal
 asks there for any field it needs that is not listed here.
 
 ## iOS, the Expo way

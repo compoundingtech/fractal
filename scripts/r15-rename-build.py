@@ -34,7 +34,7 @@ def source_paths(text: str) -> str:
                   lambda match: "crates/" + package(match[1]), text)
     text = re.sub(r"clients/typescript/st3-(client|views|scenarios)",
                   r"clients/typescript/fractal-\1", text)
-    text = text.replace("apps/fractal-web/packages/st3-sdk", "apps/fractal-web/packages/fractal-sdk")
+    text = text.replace("apps/fractal-web/packages/st3-sdk", "packages/fractal-sdk")
     text = text.replace("clients/swift/St3Client", "clients/swift/FractalClient")
     text = text.replace("Sources/St3Client", "Sources/FractalClient")
     return text

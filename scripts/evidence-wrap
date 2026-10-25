@@ -207,6 +207,8 @@ def main(argv):
             name, sep, value = item.partition('=')
             if not sep or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name) or not value or name in inputs or name in WRAP_INPUTS:
                 raise Failure(f'--input {item!r}: NAME=VALUE with a lower-case name this script does not set itself, and a value')
+            if name == 'source_inputs' and not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value):
+                raise Failure('--input source_inputs must be a git tree id')
             inputs[name] = value
         if args.aggregate:
             facts = json.loads(Path(args.aggregate).read_text())
@@ -253,7 +255,13 @@ def main(argv):
             return 0 if exit_code == 0 else exit_code
         git('index-pack', '--stdin', stdin=base64.b64decode(answer['object_pack_base64'], validate=True))
         ref, tag = f'refs/notes/evidence/{tree}/{record}', f'refs/tags/evidence/{tree}/{record}'
-        for name in (tag, ref):
+        indexes = []
+        key = inputs.get('source_inputs')
+        if key is not None:
+            # A record that signs the input key it was measured for is also indexed under it, as the CI signer's records are
+            # (docs/per-crate-test-signing.md): another tree with the same key finds it by one prefix.
+            indexes = [f'refs/tags/evidence/input/{args.check}/{key}/{record}', f'refs/notes/evidence-input/{args.check}/{key}/{record}']
+        for name in (tag, ref, *indexes):
             if not git('for-each-ref', '--format=%(objectname)', name).stdout.strip():
                 git('update-ref', name, record, '0' * len(record))
         result = {'record': record, 'ref': ref, 'tag': tag, 'tree': tree, 'check': args.check, 'exit_code': exit_code,
@@ -267,8 +275,12 @@ def main(argv):
                     path.write_bytes(shown.stdout)
                     keys = ['--keys', str(path)]
             if keys:
+                # A per-crate record (one crate, one input key) is checked as that crate's: the tree's newest record of the check may be
+                # another crate's, and once one crate's failed record is on the tree it answered "not verified" for every crate signed after.
+                crate = inputs.get('crate', '')
+                per_crate = ['--crate-key', f'{crate}={key}'] if key is not None and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]*', crate) else []
                 checked = subprocess.run([sys.executable, args.verifier, '--repo', '.', '--tree', tree,
-                                          '--check', args.check, *keys], capture_output=True)
+                                          '--check', args.check, *keys, *per_crate], capture_output=True)
                 result['verified'] = checked.returncode == 0
                 if checked.returncode != 0:
                     result['verification'] = checked.stdout.decode(errors='replace')[-500:]
@@ -282,7 +294,7 @@ def main(argv):
                 header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
                 extra = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader',
                          'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
-            pushed = git('push', '--quiet', args.push, f'{tag}:{tag}', f'{ref}:{ref}', check=False, env_extra=extra)
+            pushed = git('push', '--quiet', args.push, f'{tag}:{tag}', f'{ref}:{ref}', *(f'{name}:{name}' for name in indexes), check=False, env_extra=extra)
             if pushed.returncode != 0:
                 text = pushed.stderr.decode(errors='replace').replace(token, '***') if token else pushed.stderr.decode(errors='replace')
                 raise Failure(f'push failed: {text.strip()[-500:]}')

@@ -142,7 +142,7 @@ class Machine:
                 "stderr":(e.stderr or b"").decode(errors="replace"),"seconds":round(time.monotonic()-start,3)}
 
     def send(self, data, path):
-        r=command(self.prefix()+["bash","-c","mkdir -p ~/smalltalk-install; cat > "+shlex.quote(path)],input=data,timeout=60)
+        r=command(self.prefix()+["bash","-c","mkdir -p ~/fractal-install; cat > "+shlex.quote(path)],input=data,timeout=60)
         if r.returncode: raise RuntimeError(r.stderr.decode(errors="replace"))
 
     def start(self):
@@ -313,11 +313,11 @@ class Run:
         if not self.check("guest-release",f'VERSION_ID="{self.m.ubuntu}"' in r["stdout"],"actual guest matches requested Ubuntu release"): return False
         tools=self.execute("No developer tools or harnesses", "for t in gh cargo rustc mold sccache nix claude codex opencode pi omp; do command -v \"$t\" || true; done")
         self.check("clean-tool-path",not tools["stdout"].strip(),"no gh, developer tools or provider binaries initially installed")
-        self.m.send(self.archive.read_bytes(),"/home/ada/smalltalk-install/candidate.tar.gz")
+        self.m.send(self.archive.read_bytes(),"/home/ada/fractal-install/candidate.tar.gz")
         pkg=self.metadata["package"]
-        r=self.execute("Extract verified archive", "set -e\ncd ~/smalltalk-install\nsha256sum candidate.tar.gz\ntar -xzf candidate.tar.gz\ncat "+shlex.quote(pkg+"/BUILD.json"))
+        r=self.execute("Extract verified archive", "set -e\ncd ~/fractal-install\nsha256sum candidate.tar.gz\ntar -xzf candidate.tar.gz\ncat "+shlex.quote(pkg+"/BUILD.json"))
         if not self.check("archive-extracted",r["exit"]==0 and r["stdout"].split()[0]==self.metadata["sha256"],"copied bytes match recorded archive; BUILD.json captured"): return False
-        self.pkg="/home/ada/smalltalk-install/"+pkg
+        self.pkg="/home/ada/fractal-install/"+pkg
         self.st=self.pkg+"/bin/st"
         if baseline:
             r=self.execute("Guide installer",shlex.join([self.pkg+"/install.sh","--bin-dir","/home/ada/.local/bin"]))
@@ -379,8 +379,8 @@ class Run:
             r=self.execute("Seed existing store",shlex.join(argv))
             if not self.check("seed-store",r["exit"]==0,"first setup creates real state before the second run"): return
             source='version 2\nmission "fixture/fleet-existing" state="ready" {\n goal "Preserve an existing fleet run."\n step "hold" { assigned-to "person/ada" goal "Manual fixture hold." }\n}\n'
-            self.m.send(source.encode(),"/home/ada/smalltalk-install/existing.kdl")
-            r=self.cli("Publish existing fleet mission","apply","/home/ada/smalltalk-install/existing.kdl","--as","person/ada")
+            self.m.send(source.encode(),"/home/ada/fractal-install/existing.kdl")
+            r=self.cli("Publish existing fleet mission","apply","/home/ada/fractal-install/existing.kdl","--as","person/ada")
             if not self.check("existing-mission-published",r["exit"]==0,"unrelated mission published to the existing store"): return
             r=self.cli("Start existing fleet run","missions","start","fixture/fleet-existing","--id","fixture-existing","--as","person/ada")
             if not self.check("existing-fleet-run",r["exit"]==0,"real unrelated run exists before setup repeats"): return
@@ -496,12 +496,12 @@ class Run:
             with tarfile.open(bundle,"w") as t:
                 for name in ("stub-claude.py","stub-codex.py","stubmodel.py","codex-schemas"):
                     t.add(fixtures/name,arcname=name)
-            self.m.send(bundle.read_bytes(),"/home/ada/smalltalk-install/fixtures.tar")
-        self.execute("Native provider fixture install","mkdir -p ~/.local/lib/onboarding-stubs ~/.local/bin; tar -xf ~/smalltalk-install/fixtures.tar -C ~/.local/lib/onboarding-stubs")
+            self.m.send(bundle.read_bytes(),"/home/ada/fractal-install/fixtures.tar")
+        self.execute("Native provider fixture install","mkdir -p ~/.local/lib/onboarding-stubs ~/.local/bin; tar -xf ~/fractal-install/fixtures.tar -C ~/.local/lib/onboarding-stubs")
         adapter=Path(__file__).resolve().parent/"onboarding-fixtures/claude.py"
         if not adapter.is_file(): raise RuntimeError("harness scenarios require scripts/onboarding-fixtures/claude.py")
-        self.m.send(adapter.read_bytes(),"/home/ada/smalltalk-install/claude-adapter.py")
-        self.execute("Claude plugin/dialog adapter","cp ~/smalltalk-install/claude-adapter.py ~/.local/lib/onboarding-stubs/claude-adapter.py")
+        self.m.send(adapter.read_bytes(),"/home/ada/fractal-install/claude-adapter.py")
+        self.execute("Claude plugin/dialog adapter","cp ~/fractal-install/claude-adapter.py ~/.local/lib/onboarding-stubs/claude-adapter.py")
         harnesses=["claude","codex"] if scenario=="both" else ["claude" if scenario.startswith("claude-") else "codex"]
         for h in harnesses:
             entry="claude-adapter.py" if h=="claude" else "stub-codex.py"

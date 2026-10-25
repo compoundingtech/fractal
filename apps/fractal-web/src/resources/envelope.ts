@@ -1,4 +1,4 @@
-// moves to smalltalk/clients/typescript
+// moves to fractal/clients/typescript
 /**
  * `SubjectEnvelope`: the one typed wrapper client-v0 would serve every subject in (q2).
  *
