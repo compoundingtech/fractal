@@ -83,7 +83,7 @@ KEYS = '.st/evidence-keys'
 LOG_KEY = '.st/evidence-log-key'
 LOG_REF = 'refs/evidence-log/main'
 POLICY = '.st/evidence-skip-policy.json'
-MISSING = ('no_record', 'stale_tree', 'wrong_check')
+MISSING = ('no_record', 'stale_tree', 'wrong_check', 'crate_uncovered')  # crate_uncovered: some crate has no note for its key
 UNAVAILABLE = ('error', 'no_policy')
 OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
 TOKEN = re.compile(r'^[A-Za-z0-9._:/@+=-]+$')

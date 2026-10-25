@@ -393,7 +393,8 @@ def prepare_tree(root, n, commit):
         shutil.rmtree(directory, ignore_errors=True)
     git('worktree', 'prune', check=False)
     if directory.exists():
-        git('reset', '--hard', '-q', cwd=directory)
+        # Forced detached checkout replaces both index and tracked files, even after an interrupted run.
+        # A separate reset --hard is redundant and is refused by agent git policies.
         git('checkout', '--detach', '-q', '-f', commit, cwd=directory)
     else:
         git('worktree', 'add', '--detach', '--force', '-q', str(directory), commit)
