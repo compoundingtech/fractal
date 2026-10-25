@@ -1499,7 +1499,7 @@ async fn a_finished_run_cannot_start_its_seat_again() {
     assert_eq!(agent_subjects(&fixture.store), [subject]);
 }
 
-/// Send a typed client action as a person, the way stui and the phone do, fenced on the seat's
+/// Send a typed client action as a person, the way Fractal TUI and the phone do, fenced on the seat's
 /// selected declaration.
 async fn client_action(fixture: &Fixture, kind: &str, agent: &str, key: &str) -> Value {
     use tower::ServiceExt as _;

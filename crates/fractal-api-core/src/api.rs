@@ -496,7 +496,7 @@ pub fn router(state: AppState) -> Router {
     router_with(state, &[])
 }
 
-/// Routes a crate above this one serves (st3-api-mailbox's mailbox stream): each family is added to
+/// Routes a crate above this one serves (fractal-api-mailbox's mailbox stream): each family is added to
 /// the route table before the envelope and leave layers wrap it, so it is served exactly as the
 /// routes listed here. `router` without them is the route table this crate alone answers.
 pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
