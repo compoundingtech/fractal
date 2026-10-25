@@ -8355,6 +8355,25 @@ impl<R: RuntimeControl> Reconciler<R> {
                 },
             );
         }
+        if request.body["fields"]["fresh_session"] == true {
+            // The old incarnation is gone, so nothing can bind its session after this. A launch
+            // finds the request newer than the last binding and starts a new session; so does any
+            // relaunch before the new session binds.
+            self.store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "runtime.action.requested".into(),
+                // Authored by the requester, like the restart: only an authored request is a
+                // claim in the seat's log, which is where a launch looks for it.
+                actor: request.actor.clone(),
+                fields: BTreeMap::from([
+                    ("action".into(), Value::String(crate::suspension::FRESH_SESSION_ACTION.into())),
+                    ("runtime_id".into(), Value::String(member.runtime_id.clone())),
+                ]),
+                evidence: vec![request.id.clone()],
+                expected_subject: None,
+                idempotency_key: Some(format!("agent-restart-fresh-session:{}", request.id)),
+            })?;
+        }
         match self.perform_start_for_request(
             subject,
             member,

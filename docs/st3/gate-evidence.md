@@ -1454,6 +1454,10 @@ output), which a signature on the head does not cover. `st-test` asks the base's
 nothing is checked out in your clone), signs and tests THAT tree in its pool tree, and says so; if the branch does not merge cleanly it refuses and tells
 you to merge the base into the branch first. `st-test --status`, which the pre-push hook asks, judges the same tree, so a push is refused when the tree CI
 will judge is not covered even if the head tree is.
+A check whose base policy compares a note's input with the run's own value (`input_order`: `fractal-web`'s `kit_inputs`) is judged the way the CI gate
+judges it: `st-test` passes the verifier `--run-input kit_inputs=...`, computed by the base's `scripts/ci-fractal-web-changes` (`kit_paths` of the diff
+from the merge base; `true` when that cannot be told) in `--status`, in the pre-push hook (which only asks `--status`) and in the skip of an
+already-signed check. Without it a signed `fractal-web` tree read as `not covered: no_run_input`.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
 counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); unless `--check` names checks, every check of the skip
 policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.

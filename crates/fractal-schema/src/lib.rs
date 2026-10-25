@@ -3538,6 +3538,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("deadline_unix_ms", string()),
             ("signal", string()),
             ("reason", string()),
+            ("fresh_session", boolean()),
         ],
         "runtime.action.succeeded"
         | "runtime.action.failed"

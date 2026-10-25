@@ -433,7 +433,7 @@ export const testArchiveProducer = {
 }
 
 /**
- * isolation-vm's work: st2's transport-isolation cascade tests need a real systemd user manager, which the
+ * isolation-vm's work: the retained st2 controls and current-runtime scope proofs need a real systemd user manager, which the
  * runner image lacks, so a NixOS VM runs the shared producer's prebuilt test binary and compiles nothing; a
  * second VM runs the sekrets gateway. Workspace CI and the daily long-lane run share these steps.
  */
@@ -449,7 +449,7 @@ nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackage
 printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
   },
   {
-    name: 'Run all three systemd-scope tests in the VM',
+    name: 'Run all seven selected systemd-scope tests in the VM',
     id: 'vmtest',
     env: {
       // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read

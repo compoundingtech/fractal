@@ -324,6 +324,14 @@ impl Fixture {
     async fn request(&self, subject: &str, key: &str) -> ClaimRecord {
         self.request_as(subject, key, "person/avery").await
     }
+    async fn request_fresh_session(&self, subject: &str, key: &str) -> anyhow::Result<ClaimRecord> {
+        self.client()
+            .post(
+                "/v1/agents/restart",
+                &json!({"subject": subject, "actor": "person/avery", "idempotency_key": key, "fresh_session": true}),
+            )
+            .await
+    }
     async fn request_as(&self, subject: &str, key: &str, actor: &str) -> ClaimRecord {
         self.client()
             .post(
@@ -3642,4 +3650,141 @@ async fn a_seat_that_stays_down_after_its_retries_is_reported_once_to_its_runs_r
     assert_eq!(messages[0].from, "daemon/runtime");
     assert!(messages[0].content.contains(&subject), "{}", messages[0].content);
     assert!(fractal_daemon::silent::always_wakes(&messages[0].from, &messages[0].tags));
+}
+
+/// The harness begins a turn, as the driver reports it.
+fn begin_turn(fixture: &Fixture, subject: &str, incarnation: &str, key: &str) {
+    fixture
+        .store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: std::collections::BTreeMap::from([
+                ("state".into(), json!("working")),
+                ("driver".into(), json!("claude")),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("observed_since_ms".into(), json!(smallclaims::store::now_ms() as u64)),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some(format!("turn:{subject}:{incarnation}:{key}")),
+        })
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_without_the_flag_still_continues_the_last_session() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    bind_session(&fixture, &subject, "fixture:1", "session-one").await;
+    write_handoff(&fixture, &subject, "PR 12 is open.", "handoff-default");
+    fixture.request(&subject, "restart-default").await;
+    pass(&fixture, 4);
+    let starts = fixture.runtime.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(continued(&starts[1]), Some("session-one"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_session_restart_starts_a_new_session_that_is_given_the_handoff_first() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    bind_session(&fixture, &subject, "fixture:1", "session-one").await;
+    mark_ready(&fixture, &subject, "fixture:1");
+    pass(&fixture, 3);
+    write_handoff(
+        &fixture,
+        &subject,
+        "Branch agent/parser, PR 12 open and waiting on review. Next: the retry test.",
+        "handoff-fresh",
+    );
+    fixture.request_fresh_session(&subject, "restart-fresh").await.unwrap();
+    pass(&fixture, 4);
+    assert_eq!(*fixture.runtime.stops.lock().unwrap(), ["fixture:1"]);
+    assert!(
+        prepare_messages(&fixture, &subject).is_empty(),
+        "the handoff was required up front, so the seat is not asked for it again"
+    );
+    let starts = fixture.runtime.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(continued(&starts[1]), None, "the replacement does not continue session-one");
+
+    // The new session starts with the handoff.
+    mark_ready(&fixture, &subject, "fixture:2");
+    pass(&fixture, 3);
+    let message = session_start(&fixture, &subject, "fixture:2");
+    assert!(
+        message.content.contains("Branch agent/parser, PR 12 open and waiting on review."),
+        "{}",
+        message.content
+    );
+
+    // Once the new session binds, later relaunches continue it, not the old one; a relaunch
+    // before it binds does not go back to the old one.
+    hang_up(&fixture);
+    pass(&fixture, 4);
+    let starts = fixture.runtime.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 3);
+    assert_eq!(continued(&starts[2]), None, "an unbound fresh session does not fall back to session-one");
+    bind_session(&fixture, &subject, "fixture:3", "session-two").await;
+    fixture.request(&subject, "restart-after").await;
+    pass(&fixture, 4);
+    let starts = fixture.runtime.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 4);
+    assert_eq!(continued(&starts[3]), Some("session-two"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_session_restart_is_refused_without_a_handoff_ready_since_the_last_turn() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    let socket = fixture.root.path().join("st3.sock");
+    bind_session(&fixture, &subject, "fixture:1", "session-one").await;
+    let refused = |error: anyhow::Error| {
+        let text = format!("{error:#}");
+        assert!(text.contains("restart-fresh-session-no-handoff") || text.contains("handoff"), "{text}");
+    };
+
+    // No handoff at all.
+    refused(fixture.request_fresh_session(&subject, "none").await.unwrap_err());
+
+    // A handoff from before the seat's last turn says nothing about that turn.
+    write_handoff(&fixture, &subject, "An old handoff.", "handoff-old");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    begin_turn(&fixture, &subject, "fixture:1", "one");
+    refused(fixture.request_fresh_session(&subject, "stale").await.unwrap_err());
+    pass(&fixture, 4);
+    assert!(fixture.runtime.stops.lock().unwrap().is_empty(), "a refused request stops nothing");
+    assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 1);
+
+    // Another seat's readiness claim does not make this one ready.
+    fixture
+        .store
+        .append_claim(&ClaimInput {
+            subject: fractal_daemon::handoff::ready_subject(&subject),
+            kind: fractal_daemon::handoff::READY_KIND.into(),
+            actor: Some("agent/example/other".into()),
+            fields: std::collections::BTreeMap::from([("agent".into(), json!(subject))]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("restart-ready:forged".into()),
+        })
+        .unwrap();
+    refused(fixture.request_fresh_session(&subject, "forged").await.unwrap_err());
+
+    // Saying the handoff is current since that turn makes the restart go ahead.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    succeeded(&st(&socket, &["agents", "handoff", "ready", "--as", &subject]).await);
+    fixture.request_fresh_session(&subject, "ready").await.unwrap();
+    pass(&fixture, 4);
+    let starts = fixture.runtime.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(continued(&starts[1]), None);
 }
