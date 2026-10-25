@@ -7,7 +7,7 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/e237afa8587fb953cc589c35e0c9a252f7192444";
+    pty.url = "github:compoundingtech/pty/6336c376fe3d1657d825f4278465b6192b770b40";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Merged pairing stack, including the daemon-identity restricted client.
     fabric.url = "github:compoundingtech/fabric/1e6e93e9a662a40749f91d63eeecc4e98de114bd";
