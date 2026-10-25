@@ -33,6 +33,35 @@ for stage in "$@"; do
     *) echo "ci-local: stage $stage has no local lane" >&2; exit 2 ;;
   esac
 done
+# A host-local load limit, as scripts/st-test has: the 1-minute load average above which no heavy work starts. The limit is a number in
+# ~/.config/st-test/max-load (or ST_TEST_MAX_LOAD); none means no limit. While the load is above it this WAITS, says why every minute, and
+# after ST_TEST_LOAD_WAIT_MINUTES (default 30) exits non-zero with that reason: never silently. Whoever runs the host sets it, not the repo.
+load_limit=${ST_TEST_MAX_LOAD:-}
+if [ -z "$load_limit" ] && [ -r "$real_home/.config/st-test/max-load" ]; then
+  read -r load_limit _ < "$real_home/.config/st-test/max-load" || true
+fi
+if [ -n "$load_limit" ]; then
+  if ! awk -v v="$load_limit" 'BEGIN { exit !(v ~ /^[0-9]+(\.[0-9]+)?$/) }'; then
+    echo "ci-local: the host load limit '$load_limit' must be a number (a load average)" >&2
+    exit 2
+  fi
+  load_deadline=$(( $(date +%s) + $(awk -v m="${ST_TEST_LOAD_WAIT_MINUTES:-30}" 'BEGIN { printf "%d", m * 60 }') ))
+  load_announced=0
+  while :; do
+    load_now=$(awk '{ print $1 }' "${CI_LOCAL_LOADAVG_FILE:-/proc/loadavg}")
+    awk -v l="$load_now" -v m="$load_limit" 'BEGIN { exit !(l <= m) }' && break
+    now=$(date +%s)
+    if [ $(( now - load_announced )) -ge 60 ]; then
+      echo "ci-local: waiting: load1 $load_now > $load_limit (host limit)" >&2
+      load_announced=$now
+    fi
+    if [ "$now" -ge "$load_deadline" ]; then
+      echo "ci-local: the host stayed above its load limit: load1 $load_now > $load_limit (host limit) for ${ST_TEST_LOAD_WAIT_MINUTES:-30} min; nothing was started" >&2
+      exit 3
+    fi
+    sleep "${CI_LOCAL_LOAD_POLL:-10}"
+  done
+fi
 # The scratch, and the stages' TMPDIR inside it, are on the account's disk as a CI runner's temporary directory is, never the
 # caller's TMPDIR: a dev shell puts that under /tmp, which on some build hosts is a small tmpfs (tests that need tens of GB of
 # scratch are refused there) or holds a stray /tmp/.git (tests that look for the enclosing repository find it).

@@ -850,6 +850,59 @@ class StTest(unittest.TestCase):
         self.assertIn('/usr/bin', first.split(':'))
         self.assertEqual(len(set(first.split(':'))), len(first.split(':')))
 
+    def test_the_host_load_limit_comes_from_the_environment_or_a_file_outside_the_repo_and_no_limit_means_none(self):
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True):
+            self.assertIsNone(st_test.load_limit())  # no file, no variable
+            (self.home / '.config/st-test').mkdir(parents=True, exist_ok=True)
+            (self.home / '.config/st-test/max-load').write_text('20\n')
+            self.assertEqual(st_test.load_limit(), 20.0)
+            with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_MAX_LOAD': '12.5'}):
+                self.assertEqual(st_test.load_limit(), 12.5)  # the variable wins
+            (self.home / '.config/st-test/max-load').write_text('0\n')
+            self.assertIsNone(st_test.load_limit())  # 0 is no limit
+            (self.home / '.config/st-test/max-load').write_text('lots\n')
+            with self.assertRaises(st_test.Failure):
+                st_test.load_limit()
+
+    def test_a_run_waits_while_the_load_is_above_the_limit_says_why_and_proceeds_when_it_drops(self):
+        loads, now, slept = iter([34.0, 34.0, 30.0, 19.0]), [0.0], []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            now[0] += 30.0
+        err = io.StringIO()
+        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), contextlib.redirect_stderr(err):
+            st_test.wait_for_load(20.0, read_load=lambda: next(loads), sleep=sleep, clock=lambda: now[0])
+        self.assertEqual(len(slept), 3)
+        said = err.getvalue().splitlines()
+        self.assertEqual(said[0], 'st-test: waiting: load1 34 > 20 (host limit)')
+        self.assertEqual(len(said), 2)  # once at the start, again after a minute: not every poll
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            st_test.wait_for_load(20.0, read_load=lambda: 5.0, sleep=sleep, clock=lambda: now[0])
+        self.assertEqual(err.getvalue(), '')  # under the limit: no wait, nothing said
+
+    def test_a_run_that_waits_past_the_deadline_fails_with_the_reason(self):
+        now = [0.0]
+
+        def sleep(seconds):
+            now[0] += 600.0
+        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(st_test.Failure, r'load1 40 > 20 \(host limit\) for 30 min; nothing was started'):
+                st_test.wait_for_load(20.0, read_load=lambda: 40.0, sleep=sleep, clock=lambda: now[0])
+            with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_LOAD_WAIT_MINUTES': '5'}):
+                now[0] = 0.0
+                with self.assertRaisesRegex(st_test.Failure, 'for 5 min'):
+                    st_test.wait_for_load(20.0, read_load=lambda: 40.0, sleep=sleep, clock=lambda: now[0])
+
+    def test_a_whole_run_on_an_overloaded_host_refuses_loudly_before_it_starts_anything(self):
+        self.commit('b.txt', 'two')
+        code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MAX_LOAD': '0.0001', 'ST_TEST_LOAD_WAIT_MINUTES': '0.001'})
+        self.assertRegex(str(code), r'host stayed above its load limit: load1 .* > 0.0001 \(host limit\)')
+        self.assertIn('waiting: load1', err)
+        self.assertEqual(self.statements(), [])  # nothing ran, nothing signed
+        self.assertFalse((self.home / '.cache/st-test').exists())  # no pool tree was taken
+
     def test_the_fixed_path_keeps_cargo_s_bin_because_the_clippy_ratchet_s_toolchain_string_depends_on_it(self):
         (self.home / '.cargo/bin').mkdir(parents=True)
         (self.home / '.local/bin').mkdir(parents=True, exist_ok=True)
