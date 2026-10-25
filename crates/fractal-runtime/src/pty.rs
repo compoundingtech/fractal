@@ -495,9 +495,19 @@ impl PtyRuntime {
         const ATTEMPTS: u32 = 4;
         let mut last_failure = None;
         for attempt in 0..ATTEMPTS {
+            // `pty` by name runs whichever build the seat's PATH finds first, and an old build rejects the
+            // name-only `--env` below: run the first that accepts it (crate::pty_launcher).
+            let launch_path = terminal_env
+                .get("PATH")
+                .or_else(|| launcher_environment.as_ref().and_then(|environment| environment.get("PATH")));
+            let program = if self.binary == "pty" {
+                crate::pty_launcher::choose(&self.binary, launch_path.map(std::ffi::OsStr::new))
+            } else {
+                OsString::from(&self.binary)
+            };
             let mut command = crate::isolate::wrap_in(
                 &unit,
-                std::ffi::OsStr::new(&self.binary),
+                program.as_os_str(),
                 &argument_refs,
                 launcher_environment.as_ref(),
             );

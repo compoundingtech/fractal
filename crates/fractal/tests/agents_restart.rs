@@ -3466,3 +3466,133 @@ async fn a_seat_killed_without_warning_resumes_from_what_it_wrote_before() {
     pass(&fixture, 3);
     session_start(&fixture, &subject, "fixture:2");
 }
+
+fn retry_decisions(fixture: &Fixture, subject: &str) -> Vec<ClaimRecord> {
+    fixture
+        .store
+        .claims_for(subject, Some("runtime.reconcile-decision"))
+        .unwrap()
+        .into_iter()
+        .filter(|claim| {
+            claim.body["fields"]["key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("runtime-crash-loop-retry:"))
+        })
+        .collect()
+}
+
+fn parked_fault(fixture: &Fixture, subject: &str) -> bool {
+    fixture
+        .store
+        .operational_attention_items(None, smallclaims::store::now_ms() + 60_000)
+        .unwrap()
+        .iter()
+        .any(|item| item.kind == "fault" && item.subject == subject)
+}
+
+fn wait_ms(ms: u64) {
+    std::thread::sleep(Duration::from_millis(ms));
+}
+
+/// A pass by a daemon that has just started, which re-reads every seat: a pass by the running one
+/// skips what has not changed, and a deadline here is a timer this test does not wait for.
+fn fresh_passes(fixture: &Fixture, passes: usize) {
+    let daemon = restarted_daemon(fixture);
+    for _ in 0..passes {
+        daemon.reconcile_once().unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_launch_a_crash_loop_parked_is_retried_with_backoff_when_the_seat_restarts_always() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    fractal_daemon::reconcile::CRASH_LOOP_RETRY_BASE_MS.store(300, std::sync::atomic::Ordering::SeqCst);
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    park(&fixture, &subject, "claude");
+    *fixture.runtime.refuse_start.lock().unwrap() = true;
+    hang_up(&fixture);
+    assert!(parked_fault(&fixture, &subject), "the park is a fault until a retry succeeds");
+
+    // Parked: no launch is tried before the first wait is over.
+    fresh_passes(&fixture, 4);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1, "only the first launch so far");
+    assert!(retry_decisions(&fixture, &subject).is_empty());
+
+    // The first retry fails, and says so; the next waits twice as long.
+    wait_ms(350);
+    fresh_passes(&fixture, 4);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+    assert_eq!(retry_decisions(&fixture, &subject).len(), 1);
+    assert!(parked_fault(&fixture, &subject));
+    fresh_passes(&fixture, 4);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2, "the second wait is longer");
+
+    // Once the launcher works, the next retry starts the seat and the fault is gone.
+    *fixture.runtime.refuse_start.lock().unwrap() = false;
+    wait_ms(700);
+    fresh_passes(&fixture, 4);
+    assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2, "the retry started the seat");
+    let retries = retry_decisions(&fixture, &subject);
+    assert_eq!(retries.len(), 2, "{retries:?}");
+    let reason = retries[1].body["fields"]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("retry 2 of") && reason.contains("fixture rejected launch"),
+        "each retry reports the failure before it: {reason}"
+    );
+    assert!(!parked_fault(&fixture, &subject), "a retry that started the seat resolves the fault");
+    fresh_passes(&fixture, 4);
+    assert_eq!(retry_decisions(&fixture, &subject).len(), 2, "a running seat is not retried");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_launch_is_retried_a_bounded_number_of_times() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    fractal_daemon::reconcile::CRASH_LOOP_RETRY_BASE_MS.store(5, std::sync::atomic::Ordering::SeqCst);
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    park(&fixture, &subject, "claude");
+    *fixture.runtime.refuse_start.lock().unwrap() = true;
+    hang_up(&fixture);
+    for _ in 0..40 {
+        wait_ms(20);
+        fresh_passes(&fixture, 2);
+    }
+    let tries = fractal_daemon::reconcile::CRASH_LOOP_RETRIES;
+    assert_eq!(retry_decisions(&fixture, &subject).len(), tries);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1 + tries);
+    let exhausted = fixture
+        .store
+        .claims_for(&subject, Some("runtime.reconcile-decision"))
+        .unwrap()
+        .into_iter()
+        .filter(|claim| claim.body["fields"]["decision"] == "retries-exhausted")
+        .count();
+    assert_eq!(exhausted, 1, "one decision says the retries are used up");
+    assert!(parked_fault(&fixture, &subject), "it stays a fault");
+
+    // An explicit restart still tries once more.
+    fixture.request(&subject, "explicit-after-retries").await;
+    fresh_passes(&fixture, 4);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2 + tries);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_launch_of_a_seat_that_does_not_restart_always_is_not_retried() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    fractal_daemon::reconcile::CRASH_LOOP_RETRY_BASE_MS.store(5, std::sync::atomic::Ordering::SeqCst);
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "on-failure").await;
+    park(&fixture, &subject, "claude");
+    *fixture.runtime.refuse_start.lock().unwrap() = true;
+    hang_up(&fixture);
+    for _ in 0..10 {
+        wait_ms(20);
+        fresh_passes(&fixture, 2);
+    }
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1);
+    assert!(retry_decisions(&fixture, &subject).is_empty());
+}
