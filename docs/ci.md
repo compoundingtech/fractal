@@ -17,7 +17,8 @@ The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces t
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
 on `main` are `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (`ci-script-tests`, the CI scripts' own tests on their
-declared inputs, runs beside `genie-freshness` and joins the required list once it has run green on `main`),
+declared inputs, runs beside `genie-freshness` and is not a required context of its own: the `linux-gate` job, which every head reports,
+needs it and fails when it failed or was cancelled; a head from before it existed has no run of it and is not blocked),
 and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)). The VM tests
 (`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
 requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
