@@ -1337,6 +1337,9 @@ sys.exit(code)
 
 FAKE_GATE = """import os, sys
 open(os.environ['FAKE_CALLS'], 'a').write('gate\\n')
+if os.environ.get('FAKE_GATE_SKIP'):
+    # A test this host cannot run reports itself, as fractal-runtime's user-namespace regression does.
+    open(os.environ['CI_TEST_ENV_SKIPS'], 'a').write(os.environ['FAKE_GATE_SKIP'] + '\\n')
 if os.environ.get('FAKE_GATE_NO_REPORT') != '1':
     out = ['<testsuites name="nextest-run">']
     for package in ('base', 'top'):
@@ -1834,6 +1837,14 @@ class PerCrate(StTest):
         code, out, err = self.run_with_gate()
         self.assertEqual(code, 0, out + err)
         self.assertIn('all 2 crates already have a passing note', out)
+
+    def test_a_test_that_skipped_on_this_host_is_named_in_its_crates_record_and_in_linux_gates(self):
+        code, out, err = self.run_with_gate(FAKE_GATE_SKIP='top unit_one')
+        self.assertEqual(code, 0, out + err)
+        inputs = {s['predicate']['observed']['inputs'].get('crate'): s['predicate']['observed']['inputs'] for s in self.statements()}
+        self.assertEqual((inputs['top']['env_skips'], inputs['base']['env_skips']), ('top unit_one', 'none'))
+        gate = next(s for s in self.statements() if 'linux-gate' in s['predicate']['observed']['checks'])['predicate']['observed']['inputs']
+        self.assertEqual(gate['env_skips'], 'top unit_one')
 
     def test_without_a_report_from_linux_gate_rust_tests_runs_the_crates_it_lacks_itself(self):
         code, out, err = self.run_with_gate(FAKE_GATE_NO_REPORT='1')
