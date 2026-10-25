@@ -244,3 +244,37 @@ come back "did not verify locally" (50 of 52 crates on hetz2 at feefaa9c95 when 
 `source_inputs` key is now verified with `--crate-key CRATE=KEY`: as that crate's, the same rule the gate and `st-test` use. Nothing about the record
 or the verifier's rules changes.
 
+
+## 14. CI signs per-crate notes (2026-10-25)
+
+Until now only a local `scripts/st-test` push signed per-crate `rust-tests` notes, so a pull request whose crates were unchanged found a note
+only when someone had run it. CI now signs them too, with its own `fleet/ci` key, from the test shards' own nextest run. The policy entry
+stays in shadow (`enforce` false): this only produces notes.
+
+- **Where.** The test shards (`linux-tests`, `linux-tests-shard-2/3/4`) write nextest's JUnit report (`CI_TEST_JUNIT`) and
+  `scripts/ci-rust-test-notes describe` (job, partition, attempt, how nextest ended, the dev shell digest, the system) and upload both as
+  `rust-test-junit-<job>-<attempt>`. A separate job, `evidence-note-rust-tests`, signs from them. The report is written on every run (so a pull
+  request's own test jobs show that nextest writes it), but it is described and uploaded, and the job runs, only for the merge queue,
+  push to main and manual runs on main; on a pull request the job does not run and the script refuses one (`guard`). The job reaches the key through the `evidence-signing` environment like the other note jobs, takes every script from the
+  base commit, and is fail-soft: no required check needs it and every step continues on error.
+- **Nothing from partial data.** `ci-rust-test-notes plan` runs before the key exists. It signs nothing for any crate when either gate the
+  test jobs read (`evidence-gate-linux-gate`, `evidence-gate-rust-tests`) decided to skip, when any shard of this event (four in a merge group,
+  two otherwise, the merge-only shards then skipped) did not end `success`, when a shard's report of THIS attempt is missing, cut short or
+  describes another partition, attempt or outcome, when the shards ran on different dev shells or systems, or when one test case appears in two
+  shards. A re-run of only the failed jobs therefore signs nothing (the other shards' reports are the previous attempt's).
+- **Per crate.** The reports are joined into one, so a crate split across shards is judged once, from all of them. A crate is signed only when
+  every one of its test cases passed on the first try: a failure, an error, or a test that passed only on a retry (flaky) gives it no note,
+  and so does a failure or flaky test of that crate in an earlier attempt's report of the same run. This is stricter than
+  `scripts/ci-rust-test-result`, which counts flaky as passed for st-test and is unchanged. A crate that ran no test is signed only when the
+  base lists it under `no_tests`, the rule the verifier applies to every note. A crate that does not qualify gets no record at all.
+- **The same record as st-test's.** The key is computed by the same code path as `scripts/st-test`'s `crate_keys` (the base's
+  `scripts/rust-test-keys` over the tested tree, with the base's inputs file and the base's verifier projection; a test compares both on a
+  fixture and on this repository's tree). Each record is `evidence-wrap --aggregate` with the command `python3 scripts/ci-rust-test-result`,
+  the digest of that command's output over the crate's part of the joined report, and the inputs `crate`, `source_inputs`, `tests_run`,
+  `tests_ignored`, `test_list_sha256`, `ignored_list_sha256`, `filterset=workspace`, `run_command_sha256` (the tests stage command and the
+  shard partitions) and the shards' dev shell digest as `toolchain_sha256`, plus the run's id, attempt, event, partitions and shard jobs.
+  `evidence-verify --members` accepts it as it accepts st-test's (fleet level: the wrapper rule, no lane).
+- **Published like the other CI notes.** `evidence-publish --checks rust-tests` files each record under the tree's tag and note and the
+  input-keyed index refs (`refs/notes/evidence-input/rust-tests/<key>/<record>`, `refs/tags/evidence/input/rust-tests/<key>/<record>`) and
+  pushes them. A signature that fails is reported in the job summary and the others are still published.
+- Tests: `scripts/ci-rust-test-notes-test` (in `scripts/ci-script-tests`).
