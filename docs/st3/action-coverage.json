@@ -413,6 +413,14 @@
   ],
   "cli": [
     {
+      "command": "st deploy verify-go",
+      "description": "Verify an existing deployment GO against the local signed replica and immutable packaged policy without changing state",
+      "tests": [
+        "crates/fractal/tests/deploy_verify.rs::verifier_cli_api_uses_signed_local_replica_and_fixed_policy"
+      ],
+      "verification": "real CLI and API over a private Unix socket; signed replica, missing packaged policy and caller policy-override rejection"
+    },
+    {
       "command": "st schedules ls",
       "description": "Read one explicit page of replicated schedule declarations, then follow its cursor explicitly",
       "tests": [

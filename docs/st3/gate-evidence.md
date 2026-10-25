@@ -1417,6 +1417,17 @@ changes the result.
 A check the tree already has a passing signature for (the verifier's answer, the same one `st-test` asks after a run) is not run again:
 it prints `already signed` and, with `--push`, pushes that note as it is, so re-running on an unchanged tree is near instant. A failed
 record is not a signature. `--rerun` runs the check anyway. The megarepo members are fetched only once a check has to run.
+
+For a separate publisher, use `scripts/st-test --out DIR` instead of `--push REMOTE` (the two are mutually exclusive). The
+directory is made absolute relative to the caller's working directory before any clean worktree is entered. Each wrapper writes
+`DIR/<record>.pack` and `DIR/<record>.json`, without importing notes, pushing refs or nudging the log. To keep the exported set
+complete, export mode reruns every selected, relevant check even if a local note already covers it, including every selected
+`rust-tests` crate. When `linux-gate` and `rust-tests` run together, the aggregate and per-crate packs still share the gate's nextest
+report. Lane-edit refusals and irrelevant checks retain their usual behavior. Failed runs still export failure records and fail the
+command. A successful export reports `packs exported, not imported or verified`: the publisher must publish and verify the records;
+export alone does not establish coverage, and `--status` continues to judge imported notes normally. `--seed [REF] --out DIR`
+exports all selected crates of that ref (the base by default), without seed mode's usual implicit push to `origin`.
+
 Every check runs with one fixed `PATH` (`~/.local/bin`, `~/.cargo/bin`, `/run/current-system/sw/bin`, `/nix/var/nix/profiles/default/bin`, `/usr/bin`,
 `/bin` and the directory of `nix`, those that exist) instead of the caller's (`~/.cargo/bin` stays because the clippy ratchet's baseline holds
 the `clippy 0.1.97` that `cargo clippy -V` prints with it, not the longer one it prints without): cargo's build scripts record `PATH`, so two seats whose
@@ -1431,6 +1442,11 @@ end and seconds, and the time it spent waiting in the build admission queue (the
 get a UTC stamp, and the waits are counted and added up per stage), in a table at the end. Each stage's output is also kept in
 `~/.cache/ci-local-logs/run-TIME-PID/STAGE.log` (`CI_LOCAL_LOG_DIR` names another place; the latest 10 runs stay), because the scratch home
 of the stages is removed afterwards.
+A host can set a **load limit** that no repository file names: a number in `~/.config/st-test/max-load` (or `ST_TEST_MAX_LOAD`; `0` or no file is no limit).
+While the 1-minute load average is above it, `st-test` (before it takes a tree or starts any check) and `scripts/ci-local` (before its stages) WAIT, saying
+`waiting: load1 34 > 20 (host limit)` at the start and every minute, and after `ST_TEST_LOAD_WAIT_MINUTES` (default 30) fail with that reason (`st-test`
+exit 2, `ci-local` exit 3) and nothing started: never a silent refusal. It exists because work no build slot governs (verifier runs, test fixtures) can
+push a shared host's load high enough to starve its daemons. Whoever runs the host sets the number; the repository names no host.
 **The tree it signs is the tree the CI gate will judge.** Usually that is the pushed head. But when protected files moved on main since the branch
 point (or the branch is more than `HEAD_TREE_MAX_BEHIND` commits behind), the gate falls back to the MERGE tree (`head_tree=fallback:...` in its
 output), which a signature on the head does not cover. `st-test` asks the base's own `scripts/ci-evidence-gate` (`branch_point_verdict`, the function

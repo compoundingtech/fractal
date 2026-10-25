@@ -95,6 +95,7 @@ mod attention_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
+mod deploy_cli;
 mod launch_cli;
 mod migrate_cli;
 mod replication_cli;
@@ -278,6 +279,8 @@ enum Command {
     },
     /// Inspect Git-backed changes and their separate ref/index/evidence freshness.
     Changes(change_cli::ChangesArgs),
+    /// Verify a deployment GO against the local replica without changing state.
+    Deploy(deploy_cli::DeployArgs),
     /// Validate and publish KDL files containing seats, missions and schedules.
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     /// Gate checks run mission and step scripts; loop until scripts run after each round.
@@ -649,8 +652,8 @@ struct FleetCreateArgs {
 struct FleetInviteArgs {
     /// The name the new machine must use.
     name: Option<String>,
-    /// How long the code stays valid: 10s to 24h.
-    #[arg(long, default_value = "15m")]
+    /// How long the code stays valid: 10s to 24h (Fabric pairing is capped at 10m).
+    #[arg(long, default_value = "10m")]
     expires: String,
     /// Which of this member's endpoints go into the code: auto, tailscale, fabric, loopback.
     #[arg(long, default_value = "auto")]
@@ -5263,6 +5266,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::ActorContract { .. } => unreachable!("the actor contract runs before the CLI runtime"),
         Command::Setup(_) => unreachable!(),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
+        Command::Deploy(args) => deploy_cli::run(&endpoint, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
         Command::Web { .. } => unreachable!("the browser opens before the CLI runtime"),

@@ -34,6 +34,8 @@ struct Runtime {
     exit_on_start: Mutex<bool>,
     before_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     snapshot_unavailable: Mutex<bool>,
+    /// A failed start that cannot prove its producer closed (a launcher that ran and returned an error).
+    producer_unproven: Mutex<bool>,
 }
 impl RuntimeControl for Runtime {
     fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> anyhow::Result<Option<String>> {
@@ -42,8 +44,9 @@ impl RuntimeControl for Runtime {
             .and_then(|(_, member)| member.tags.get("st3.start-operation").cloned()))
     }
     fn start_operation_closed(&self, _: &MemberSpec) -> anyhow::Result<bool> {
-        // Rejected fixture starts create neither a runtime nor a detached producer.
-        Ok(true)
+        // Rejected fixture starts create neither a runtime nor a detached producer, unless the
+        // fixture says its launcher cannot prove it.
+        Ok(!*self.producer_unproven.lock().unwrap())
     }
     fn snapshot_ptys(&self) -> anyhow::Result<Vec<RuntimeObservation>> {
         anyhow::ensure!(!*self.snapshot_unavailable.lock().unwrap(), "fixture snapshot unavailable");
@@ -2104,6 +2107,71 @@ async fn a_failed_explicit_retry_is_completed_parked_and_visible_until_a_new_req
             .unwrap(),
         None
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_restart_supersedes_a_failed_start_that_never_proved_its_producer_closed() {
+    use fractal_daemon::RuntimeStartsStore;
+    use fractal_daemon::reconcile::STALE_FAILED_START_MS;
+    use std::sync::atomic::Ordering;
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel,
+        r#"harness "omp" { model "example-model"; }"#,
+        "always",
+    )
+    .await;
+    hang_up(&fixture);
+    park(&fixture, &subject, "omp");
+    // The launcher fails and cannot prove it started nothing: the failed start stays pending.
+    *fixture.runtime.refuse_start.lock().unwrap() = true;
+    *fixture.runtime.producer_unproven.lock().unwrap() = true;
+    let first = fixture.request(&subject, "failed-first").await;
+    let daemon = restarted_daemon(&fixture);
+    for _ in 0..4 {
+        daemon.reconcile_once().unwrap();
+    }
+    assert_eq!(restart_result(&fixture, &first).kind, "runtime.action.failed");
+    assert!(
+        fixture.store.runtime_start_for(&subject).unwrap().is_some(),
+        "the failed start with no closure proof is still pending"
+    );
+    let attempts = fixture.runtime.attempts.lock().unwrap().len();
+    // The launcher is fixed, but a fresh failed start is not stale yet: the request waits, and says so.
+    *fixture.runtime.refuse_start.lock().unwrap() = false;
+    STALE_FAILED_START_MS.store(36_000_000, Ordering::Relaxed);
+    let second = fixture.request(&subject, "after-the-fix").await;
+    let daemon = restarted_daemon(&fixture);
+    for _ in 0..4 {
+        daemon.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempts, "no new attempt while the start is fresh");
+    let decisions = fixture
+        .store
+        .claims_for(&subject, Some("runtime.reconcile-decision"))
+        .unwrap()
+        .into_iter()
+        .filter_map(|claim| claim.body.pointer("/fields/decision").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert!(decisions.iter().any(|decision| decision == "restart-waiting"), "{decisions:?}");
+    // Once the failed start is older than any launcher could still publish, the same request goes through.
+    // A running daemon is woken at the moment the start turns stale (the pass is armed for it).
+    assert!(daemon.next_deadline().is_some(), "the pass is armed for the moment the failed start turns stale");
+    STALE_FAILED_START_MS.store(0, Ordering::Relaxed);
+    let daemon = restarted_daemon(&fixture);
+    reconcile_ready(&fixture, &daemon, &subject);
+    STALE_FAILED_START_MS.store(15 * 60 * 1000, Ordering::Relaxed);
+    let pending = fixture.store.runtime_start_for(&subject).unwrap().map(|op| (op.id, op.finished, op.applied, op.cleanup_verified, op.revoked_by, op.result));
+    let seen = fixture.store.claims_for(&subject, Some("runtime.reconcile-decision")).unwrap().into_iter().map(|c| c.body["fields"].clone()).collect::<Vec<_>>();
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempts + 1, "the request made its attempt; pending={pending:?} decisions={seen:?} obs={:?}", fixture.runtime.observations.lock().unwrap());
+    assert_eq!(restart_result(&fixture, &second).kind, "runtime.action.succeeded");
+    let decisions = fixture
+        .store
+        .claims_for(&subject, Some("runtime.reconcile-decision"))
+        .unwrap()
+        .into_iter()
+        .filter_map(|claim| claim.body.pointer("/fields/decision").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert!(decisions.iter().any(|decision| decision == "restart-superseded-failed-start"), "{decisions:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
