@@ -172,7 +172,7 @@ pub struct Device {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person_root_fingerprint: Option<String>,
     pub session: PersonPairedSession,
-    /// Old observer and legacy stui profiles have no signing key.
+    /// Old observer and legacy Fractal TUI profiles have no signing key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_key: Option<SigningKey>,
 }

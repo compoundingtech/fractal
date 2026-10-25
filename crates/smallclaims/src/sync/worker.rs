@@ -753,7 +753,7 @@ pub async fn run<B: Backend>(
         notify,
     );
     let endpoints = Endpoints::default();
-    let app = peer_router(state, routes);
+    let app = peer_router(state.clone(), routes);
     let listening = config
         .fleet
         .as_ref()
@@ -832,7 +832,10 @@ pub async fn run<B: Backend>(
             let fleet_id = leave_fleet_id.clone();
             async move { axum::Json(fleet.leave_snapshot(Some(fleet_id)).await) }
         }),
-    );
+    ).route(
+        "/v1/internal/fleet/pairing-admission",
+        post(receive_pairing_admission::<B>).layer(DefaultBodyLimit::max(MAX_JOIN_BYTES)),
+    ).with_state(state);
     let serving_leave = async move { axum::serve(leave_listener, leave_app).await };
     let serving = async move {
         // A dial-out member accepts no connections, but still supervises publication.
@@ -1629,6 +1632,8 @@ async fn dial_peer<B: Backend>(
     // Routes whose one early attempt after an outage is spent, until a probe sees them down again
     // or an exchange over them succeeds. See `wait_peer_retry`.
     let mut early_spent = BTreeSet::new();
+    // Routes that answered for another shard than the one asked for, until the route set changes.
+    let mut misconfigured = Vec::<Route>::new();
     loop {
         // A removed node stops dialing; `st3 doctor` says what to do next.
         if fleet.is_removed() {
@@ -1696,6 +1701,9 @@ async fn dial_peer<B: Backend>(
                 continue;
             }
         }
+        if routes.has_changed().unwrap_or(false) {
+            misconfigured.clear();
+        }
         // Retry waits must retain signs of life received during this attempt, including
         // an inbound request that arrives just before the outbound request fails.
         let attempt_started = tokio::time::Instant::now();
@@ -1707,8 +1715,20 @@ async fn dial_peer<B: Backend>(
                 route = 0;
                 preferred_retry = None;
             }
-            (!routes.is_empty()).then(|| routes[route % routes.len()].clone())
+            (0..routes.len())
+                .map(|offset| routes[route.wrapping_add(offset) % routes.len()].clone())
+                .find(|candidate| !misconfigured.contains(candidate))
         };
+        if selected.is_none() && !misconfigured.is_empty() {
+            // Every route answered for another shard. There is nothing to dial until the
+            // routes change.
+            record_worker(&backend, &name, "misconfigured", attempt_unix_ms, None, None).await;
+            if routes.changed().await.is_err() {
+                return;
+            }
+            misconfigured.clear();
+            continue;
+        }
         let preferred_route = selected
             .as_ref()
             .map(|selected| routes.borrow().first() == Some(selected));
@@ -1722,6 +1742,7 @@ async fn dial_peer<B: Backend>(
         )
         .await;
         let carrier = selected.as_ref().map(Route::carrier).unwrap_or_default();
+        let selected_route = selected.clone();
         let is_http = matches!(selected, Some(Route::Http(_)));
         let fabric_route = selected
             .clone()
@@ -1803,6 +1824,28 @@ async fn dial_peer<B: Backend>(
             Err(mut error) => {
                 if let Some(removed) = error.downcast_ref::<RemovedFromFleet>() {
                     fleet.mark_removed(&peer.name, removed).await;
+                    continue;
+                }
+                if error.is::<PeerShardMismatch>() {
+                    // A shard route pointing at another store is a configuration error.
+                    // Repeating the same exchange cannot repair it. Keep the reason visible
+                    // until the route changes, without sending any shard envelopes.
+                    let failure = ReplicationExchangeFailure::from_error(
+                        &error, ReplicationFailurePhase::Verify, attempt_started.elapsed(), None,
+                    );
+                    let _ = backend
+                        .record_failure(
+                            &peer.name,
+                            "shard-mismatch",
+                            &error.to_string(),
+                            Some(carrier),
+                            Some(&failure),
+                        )
+                        .await;
+                    if let Some(selected_route) = selected_route {
+                        misconfigured.push(selected_route);
+                    }
+                    route = route.wrapping_add(1);
                     continue;
                 }
                 // `fabric dial` never connects, so the member's refusal reaches us only as a
@@ -2601,6 +2644,39 @@ async fn fetch_checkpoint_manifest_page(
     Ok(response.value)
 }
 
+/// Local adapter boundary. This reuses the ordinary sealed handshake; Fabric policy
+/// remains entirely outside st. The proxy pins this worker's fleet incarnation.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairingAdmissionRequest {
+    request: crate::fleet::handshake::JoinRequest,
+    node_id: String,
+    expected_fleet_id: String,
+    expected_sponsor_key: String,
+}
+
+async fn receive_pairing_admission<B: Backend>(
+    State(state): State<PeerState<B>>,
+    body: Bytes,
+) -> Response {
+    let Ok(admission) = serde_json::from_slice::<PairingAdmissionRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if admission.expected_fleet_id != state.auth.fleet_id()
+        || state.auth.member.as_ref().map(|key| key.public())
+            != Some(admission.expected_sponsor_key.as_str())
+        || admission.request.node_id.as_deref() != Some(admission.node_id.as_str())
+        || admission.node_id.len() != 64
+        || !admission.node_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(request) = serde_json::to_vec(&admission.request) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    receive_join(State(state), Bytes::from(request)).await
+}
+
 /// The join route. It exists only while this node sponsors an open invite; otherwise it answers
 /// 404 like any unknown path. Every refusal looks the same to the caller.
 ///
@@ -2644,6 +2720,12 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
         writer_floor: answer["writer_floor"].as_u64(),
         fabric_protocol: text("fabric_protocol"),
         admitted_claim: text("admitted_claim"),
+        sponsor_node_id: request.node_id.as_ref().and_then(|_| text("sponsor_node_id")),
+        sponsor_endpoints: if request.node_id.is_some() {
+            answer["sponsor_endpoints"].as_array().cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        },
     };
     match crate::fleet::handshake::seal_response(&request, &token, &state.node, &member, &payload) {
         Ok(response) => {
@@ -2804,6 +2886,41 @@ pub async fn exchange<B: Backend>(
     exchange_via(http, backend, node, peer, auth, fleet, Default::default()).await
 }
 
+#[derive(Debug)]
+struct PeerShardMismatch {
+    peer: String,
+    expected: Option<String>,
+    actual: Option<String>,
+}
+
+impl std::fmt::Display for PeerShardMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "peer {} answered for shard {:?}, expected {:?}",
+            self.peer, self.actual, self.expected
+        )
+    }
+}
+
+impl std::error::Error for PeerShardMismatch {}
+
+fn ensure_peer_exchange_shard(
+    peer: &str,
+    sent: &ReplicationExchange,
+    answer: &ReplicationExchange,
+) -> Result<()> {
+    if answer.shard_id != sent.shard_id {
+        return Err(PeerShardMismatch {
+            peer: peer.into(),
+            expected: sent.shard_id.clone(),
+            actual: answer.shard_id.clone(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 async fn finish_leave_receipt(
     http: &reqwest::Client,
     peer: &PeerConfig,
@@ -2909,6 +3026,7 @@ async fn exchange_inner<B: Backend>(
     let started = std::time::Instant::now();
     let (remote, peer_inflates) =
         post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
+    ensure_peer_exchange_shard(&peer.name, &query, &remote)?;
     let round_trip = started.elapsed();
     let different = remote.inventory.digest != query.inventory.digest;
     let received = receive_from_peer(
@@ -2944,6 +3062,7 @@ async fn exchange_inner<B: Backend>(
         // A peer that says it takes compressed requests gets a large push compressed.
         let (response, _) =
             post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
+        ensure_peer_exchange_shard(&peer.name, &push, &response)?;
         let round_trip = started.elapsed();
         // The peer stores a push before it answers, so its inventory moved if the push landed.
         pushed = !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;

@@ -12,6 +12,7 @@ mod ci_test_paths;
 
 pub use fractal_kernel::accounts;
 pub mod api;
+pub mod web;
 pub use fractal_kernel::archive;
 pub mod attach_image;
 pub use fractal_store::backup;

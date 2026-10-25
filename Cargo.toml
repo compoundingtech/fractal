@@ -16,6 +16,7 @@ members = [
   "crates/fractal-fabric-adapter",
   "crates/fractal-runtime",
   "crates/fractal-storage-version",
+  "crates/fractal-tiles-registry",
   "crates/fractal-resource-protocol",
   "crates/fractal-resource-providers",
   "crates/fractal-resource-wasip2",

@@ -1,5 +1,5 @@
-//! st3 kernel: the leaf modules of the st3 library (model, wire types, CLI output, configuration-free
-//! helpers) that name no store, api or reconcile code. st3-daemon re-exports each module at its old path.
+//! Fractal kernel: the leaf modules of the Fractal library (model, wire types, CLI output, configuration-free
+//! helpers) that name no store, api or reconcile code. fractal-daemon re-exports each module at its old path.
 
 pub mod cli_output;
 pub mod accounts;

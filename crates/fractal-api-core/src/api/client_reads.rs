@@ -276,6 +276,7 @@ fn client_work_published_continuation(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(cursor.expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -389,6 +390,7 @@ async fn client_work_history(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -829,6 +831,9 @@ pub async fn client_attention(
     let person = client_v0::person_filter(&session, query.person.as_deref())?;
     let mut effective_query = query.clone();
     effective_query.person.clone_from(&person);
+    if query.history {
+        return attention_history::page(state, snapshot, effective_query, "attention").await;
+    }
     let history = query.history;
     client_snapshot_page(
         &state,
@@ -849,12 +854,18 @@ pub async fn client_attention_detail(
     Extension(session): Extension<client_v0::ClientSession>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ClientListQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let person = client_v0::person_filter(&session, query.person.as_deref())?;
-    let mut items = client_attention_resources_with_previews(&state, person.as_deref(), query.history)
-        .map_err(ApiError::internal)?;
+    if let Some(claim) = attention_history::closed_claim_id(&id) {
+        return attention_history::detail(state, claim.to_owned(), person)
+            .await
+            .map(IntoResponse::into_response);
+    }
+    let mut items =
+        client_attention_resources_with_previews(&state, person.as_deref(), query.history)
+            .map_err(ApiError::internal)?;
     client_attention_compatibility(&mut items, session.custom_forms);
-    client_detail(items, "attention", &id)
+    client_detail(items, "attention", &id).map(IntoResponse::into_response)
 }
 
 pub async fn client_messages(
@@ -1059,6 +1070,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
         filters: client_page_filters("messages", query), items,
         page: ClientPageInfo {
             limit, has_more: selected_more, next_cursor: None, cursor_expires_at: None,
+            omitted_items: None,
         },
         sync: client_sync_notice(state), replicated,
     };
@@ -1466,6 +1478,7 @@ pub async fn client_history(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(&state),
         replicated: None,

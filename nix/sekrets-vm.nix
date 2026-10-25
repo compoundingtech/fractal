@@ -188,10 +188,10 @@ pkgs.testers.runNixOSTest {
 
     # A dedicated system UID + exact root-created unit, BEFORE any st daemon exists.
     # It receives a command grant, never Ada's person authority or profile management.
-    machine.succeed("install -d -m 0755 /var/cache/evidence /w && install -d -o evidence-caller -m 0700 /var/cache/evidence/work && install -d -o evidence-caller -m 0755 /var/cache/evidence/work/smalltalk && printf private-runner-checkout > /var/cache/evidence/work/smalltalk/checkout-marker && setfacl -m u:sekrets:x /var/cache/evidence/work")
+    machine.succeed("install -d -m 0755 /var/cache/evidence /w && install -d -o evidence-caller -m 0700 /var/cache/evidence/work && install -d -o evidence-caller -m 0755 /var/cache/evidence/work/fractal && printf private-runner-checkout > /var/cache/evidence/work/fractal/checkout-marker && setfacl -m u:sekrets:x /var/cache/evidence/work")
     login("ada", f"{st} sekrets grant ada/agent-gh --to program/ci1/evidence --allow 'gh pr view'")
     def program(command, unit="ci-evidence-caller.service", user="evidence-caller", succeed=True,
-                cwd="/w/smalltalk", backing="/var/cache/evidence/work"):
+                cwd="/w/fractal", backing="/var/cache/evidence/work"):
         call = (f"systemd-run --quiet --wait --pipe --collect --unit {unit} "
                 f"--property=User={user} --property=WorkingDirectory={cwd} "
                 f"--property=BindPaths={backing}:/w -- /bin/sh -c "
@@ -207,11 +207,11 @@ pkgs.testers.runNixOSTest {
     with subtest("Program first command binds its authorized private checkout"):
         assert "token=set" in program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1")
     output = program(f"printf 'structured-stdin-only' | {st} sekrets --profile ada/agent-gh -- gh pr view 1")
-    assert "checkout=/w/smalltalk:private-runner-checkout" in output
+    assert "checkout=/w/fractal:private-runner-checkout" in output
     assert "checkout-readonly" in output and "structured-stdin-only" in output
     assert "checkout-mount-ro-nosuid-nodev" in output
-    machine.fail("test -e /var/cache/evidence/work/smalltalk/forbidden-checkout-write")
-    machine.fail("test -e /w/smalltalk") # the gateway host has only the empty mount anchor
+    machine.fail("test -e /var/cache/evidence/work/fractal/forbidden-checkout-write")
+    machine.fail("test -e /w/fractal") # the gateway host has only the empty mount anchor
 
     with subtest("Program bind retains the verified inode across caller path replacement"):
         machine.succeed("install -d -o sekrets -m 0700 /run/st-sekrets/bind-control && mkfifo /run/st-sekrets/bind-control/resume && chown sekrets /run/st-sekrets/bind-control/resume && touch /run/st-sekrets/bind-control/pause && install -o evidence-caller -m 0600 /dev/null /var/cache/evidence/swap-output")
@@ -219,24 +219,24 @@ pkgs.testers.runNixOSTest {
                         "result=$?; printf '\\nexit=%s\\n' \"$result\" >> /var/cache/evidence/swap-output; exit \"$result\"")
         machine.succeed("systemd-run --quiet --no-block --unit ci-evidence-caller.service "
                         "--property=Type=oneshot --property=RemainAfterExit=yes "
-                        "--property=User=evidence-caller --property=WorkingDirectory=/w/smalltalk "
+                        "--property=User=evidence-caller --property=WorkingDirectory=/w/fractal "
                         "--property=BindPaths=/var/cache/evidence/work:/w -- /bin/sh -c " + shlex.quote(swap_command))
         machine.wait_for_file("/run/st-sekrets/bind-control/ready")
-        # The caller namespace sees a replacement at /w/smalltalk. The verified descriptor
+        # The caller namespace sees a replacement at /w/fractal. The verified descriptor
         # still names the original directory, now renamed beneath the same backing root.
-        machine.succeed("mv /var/cache/evidence/work/smalltalk /var/cache/evidence/work/verified-original && install -d -o evidence-caller -m 0755 /var/cache/evidence/work/smalltalk && printf swapped-directory > /var/cache/evidence/work/smalltalk/checkout-marker && timeout 10 sh -c 'printf resume > /run/st-sekrets/bind-control/resume'")
+        machine.succeed("mv /var/cache/evidence/work/fractal /var/cache/evidence/work/verified-original && install -d -o evidence-caller -m 0755 /var/cache/evidence/work/fractal && printf swapped-directory > /var/cache/evidence/work/fractal/checkout-marker && timeout 10 sh -c 'printf resume > /run/st-sekrets/bind-control/resume'")
         machine.wait_for_unit("ci-evidence-caller.service")
         assert machine.succeed("systemctl show --value -p ExecMainStatus ci-evidence-caller.service").strip() == "0"
         swapped = machine.succeed("cat /var/cache/evidence/swap-output")
-        assert "checkout=/w/smalltalk:private-runner-checkout" in swapped
+        assert "checkout=/w/fractal:private-runner-checkout" in swapped
         assert "checkout-readonly" in swapped and "exit=0" in swapped
         assert "checkout-mount-ro-nosuid-nodev" in swapped
         assert "swapped-directory" not in swapped
-        machine.succeed("systemctl stop ci-evidence-caller.service && rm -rf /run/st-sekrets/bind-control /var/cache/evidence/work/smalltalk && mv /var/cache/evidence/work/verified-original /var/cache/evidence/work/smalltalk")
+        machine.succeed("systemctl stop ci-evidence-caller.service && rm -rf /run/st-sekrets/bind-control /var/cache/evidence/work/fractal && mv /var/cache/evidence/work/verified-original /var/cache/evidence/work/fractal")
     program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/tmp", succeed=False)
     program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/missing", succeed=False)
-    machine.succeed("install -d -m 0755 /var/cache/evidence/other/smalltalk && ln -s /var/cache/evidence/other /var/cache/evidence/work/escape")
-    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/escape/smalltalk", succeed=False)
+    machine.succeed("install -d -m 0755 /var/cache/evidence/other/fractal && ln -s /var/cache/evidence/other /var/cache/evidence/work/escape")
+    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/escape/fractal", succeed=False)
     with subtest("Program refuses a private checkout with the wrong inode before bwrap"):
         machine.succeed("install -d -o sekrets -m 0700 /run/st-sekrets/bind-control && touch /run/st-sekrets/bind-control/watch")
         assert "passed checkout does not match the configured runner backing directory" in program(

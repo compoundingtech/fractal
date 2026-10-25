@@ -35,10 +35,6 @@ fn alerts_out_of_date(world: &World) -> Option<String> {
     Some(why.join("; "))
 }
 
-/// The tabs everyone sees. Worktrees stays hidden until the graph models worktrees: its screens
-/// only have invented data to show (Nathan, 2026-09-28).
-pub const TABS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
-
 pub enum Item {
     Header {
         title: String,
@@ -166,7 +162,16 @@ pub fn attention_style(kind: &AttentionKind) -> (&'static str, Color) {
         AttentionKind::Fault { .. } => ("✕", theme::FAULT),
         AttentionKind::Message { .. } => ("✉", theme::SAPPHIRE),
         AttentionKind::Update { .. } => ("✦", theme::GREEN),
+        AttentionKind::Unplaced { .. } => ("?", theme::OVERLAY1),
     }
+}
+
+/// The answer an unplaced card offers: the one st lists for the row (a custom reply, else a
+/// request's), or none.
+pub(super) fn unplaced_answer(actions: &[String]) -> Option<&'static str> {
+    ["custom.reply", "work.done"]
+        .into_iter()
+        .find(|answer| actions.iter().any(|action| action == answer))
 }
 
 fn harness_color(harness: Harness) -> Color {
@@ -465,7 +470,7 @@ fn structured_request(
             ));
         }
     }
-    // The images it carries: a line each that opens it; where stui keeps image state, the line
+    // The images it carries: a line each that opens it; where Fractal TUI keeps image state, the line
     // also loads it inline (`Content::expand_requests`).
     if !images.is_empty() {
         card.blank();
@@ -1387,6 +1392,30 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 ),
                 inner,
             );
+        }
+        AttentionKind::Unplaced { text: body, why, .. } => {
+            card.lines(text::markdown(body, inner, theme::text()));
+            card.blank();
+            card.wrap(&text::inline(why, theme::dim()), inner);
+            // Only the answers st lists for the row: a request's answer, never one guessed from
+            // its kind, so a gate here is answered with st.
+            if let Some(answer) = unplaced_answer(&item.actions) {
+                card.blank();
+                if drafts.editing || drafts.text.is_some_and(|text| !text.is_empty()) {
+                    text_box(&mut card, "answer", drafts, "", inner);
+                    card.buttons(&[
+                        ("enter", "Send the answer", Hit::Enter, theme::ACCENT),
+                        ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
+                    ]);
+                } else {
+                    let label = if answer == "custom.reply" {
+                        "Reply with fields"
+                    } else {
+                        "Answer"
+                    };
+                    card.buttons(&[("c", label, Hit::Key('c'), theme::ACCENT)]);
+                }
+            }
         }
         AttentionKind::Message { from, body } => {
             card.line(Line::from(vec![
@@ -2380,7 +2409,7 @@ pub fn fleet_detail(world: &World, id: Option<&str>, width: usize, spinner: &'st
     if links.lines.is_empty() {
         links.line(Line::from(span(
             if machine.you_are_here {
-                "This is the machine stui is talking to."
+                "This is the machine Fractal TUI is talking to."
             } else {
                 "st reports no link to this machine."
             },
@@ -2764,6 +2793,9 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
             theme::fg(harness_color(agent.harness)),
         );
         doc.field("host", &agent.host, width, theme::soft());
+        if let Some(custody) = &agent.details.mail_custody {
+            doc.field("mail", custody, width, theme::text());
+        }
         if let Some(tree) = &agent.worktree {
             doc.field("worktree", tree, width, theme::soft());
         }
@@ -2866,7 +2898,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
             theme::dim(),
         )));
         doc.blank();
-        doc.buttons(&[("g", "Open in Now", Hit::Key('g'), theme::PERSON)]);
+        doc.buttons(&[("g", "Open in Inbox", Hit::Key('g'), theme::PERSON)]);
     } else {
         doc.wrap(
             &[run(
@@ -2908,6 +2940,9 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
         inner.wrap(&text::inline(fault, theme::text()), width.saturating_sub(4));
         doc.card("broken", theme::FAULT, true, inner, width);
         doc.blank();
+    }
+    if let Some(custody) = &details.mail_custody {
+        doc.field("mail", custody, width, theme::text());
     }
     if agent.state == AgentState::NeedsLogin {
         let mut inner = Doc::new();
@@ -3258,7 +3293,7 @@ pub fn new_mission_form(fields: &[String; 4], focus: usize, cursor: usize, width
     inner.blank();
     inner.wrap(
         &[run(
-            "Say what you want. A planner turns it into a proposed mission, which appears in Now for you to approve; nothing runs before that.",
+            "Say what you want. A planner turns it into a proposed mission, which appears in Inbox for you to approve; nothing runs before that.",
             theme::soft(),
         )],
         w,
@@ -3453,8 +3488,8 @@ mod tree_tests {
     fn a_folder_holding_only_a_folder_joins_it_on_one_line() {
         let path = |text: &str| text.split('/').map(str::to_owned).collect::<Vec<_>>();
         let compact = compact_folders(&[
-            path("fleet/smalltalk/operations/2026-10-01/operator"),
-            path("fleet/smalltalk/ci/watcher"),
+            path("fleet/fractal/operations/2026-10-01/operator"),
+            path("fleet/fractal/ci/watcher"),
             path("fleet/cos/standing/cos"),
             path("solo"),
         ]);
@@ -3463,10 +3498,10 @@ mod tree_tests {
             [
                 vec![
                     "fleet".to_owned(),
-                    "smalltalk".into(),
+                    "fractal".into(),
                     "operations/2026-10-01".into()
                 ],
-                vec!["fleet".to_owned(), "smalltalk".into(), "ci".into()],
+                vec!["fleet".to_owned(), "fractal".into(), "ci".into()],
                 vec!["fleet".to_owned(), "cos/standing".into()],
                 Vec::<String>::new(),
             ]
