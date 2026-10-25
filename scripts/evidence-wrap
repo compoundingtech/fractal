@@ -275,8 +275,12 @@ def main(argv):
                     path.write_bytes(shown.stdout)
                     keys = ['--keys', str(path)]
             if keys:
+                # A per-crate record (one crate, one input key) is checked as that crate's: the tree's newest record of the check may be
+                # another crate's, and once one crate's failed record is on the tree it answered "not verified" for every crate signed after.
+                crate = inputs.get('crate', '')
+                per_crate = ['--crate-key', f'{crate}={key}'] if key is not None and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]*', crate) else []
                 checked = subprocess.run([sys.executable, args.verifier, '--repo', '.', '--tree', tree,
-                                          '--check', args.check, *keys], capture_output=True)
+                                          '--check', args.check, *keys, *per_crate], capture_output=True)
                 result['verified'] = checked.returncode == 0
                 if checked.returncode != 0:
                     result['verification'] = checked.stdout.decode(errors='replace')[-500:]
