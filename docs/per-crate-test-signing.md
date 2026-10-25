@@ -274,8 +274,11 @@ stays in shadow (`enforce` false): this only produces notes.
   shards. A re-run of only the failed jobs therefore signs nothing (the other shards' reports are the previous attempt's).
 - **Per crate.** The reports are joined into one, so a crate split across shards is judged once, from all of them. A crate is signed only when
   every one of its test cases passed on the first try: a failure, an error, or a test that passed only on a retry (flaky) gives it no note,
-  and so does a failure or flaky test of that crate in an earlier attempt's report of the same run. This is stricter than
-  `scripts/ci-rust-test-result`, which counts flaky as passed for st-test and is unchanged. A crate that ran no test is signed only when the
+  and so does a failure or flaky test of that crate in an earlier attempt's report of the same run. `scripts/ci-rust-test-result` still
+  counts flaky as passed (its output is the recorded command's), but `scripts/st-test` holds its local per-crate signing to the same rule: a
+  crate with a test that passed only on a retry is left unsigned (exit 4, "left for CI"), so CI runs it. linux-gate's whole-tree note still
+  signs, as the gate counts a retried pass, and records those tests as the input `flaky_tests` (`BINARY TEST` lines from
+  `scripts/ci-nextest-flaky` under `CI_TEST_FLAKY`; `none` when there are none). A crate that ran no test is signed only when the
   base lists it under `no_tests`, the rule the verifier applies to every note. A crate that does not qualify gets no record at all.
 - **The same record as st-test's.** The key is computed by the same code path as `scripts/st-test`'s `crate_keys` (the base's
   `scripts/rust-test-keys` over the tested tree, with the base's inputs file and the base's verifier projection; a test compares both on a

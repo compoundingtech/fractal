@@ -1457,9 +1457,13 @@ if os.environ.get('FAKE_GATE_SKIP'):
 if os.environ.get('FAKE_GATE_NO_REPORT') != '1':
     out = ['<testsuites name="nextest-run">']
     for package in ('base', 'top'):
-        out.append('<testsuite name="%s"><testcase name="unit_one" classname="%s"></testcase></testsuite>' % (package, package))
+        retried = '<flakyFailure message="x"/>' if package == os.environ.get('FAKE_GATE_FLAKY') else ''
+        out.append('<testsuite name="%s"><testcase name="unit_one" classname="%s">%s</testcase></testsuite>' % (package, package, retried))
     out.append('</testsuites>')
     open(os.environ['CI_TEST_JUNIT'], 'w').write('\\n'.join(out))
+if os.environ.get('CI_TEST_FLAKY'):
+    # As scripts/ci-nextest-flaky after the tests stage: the tests that passed only on a retry, one per line.
+    open(os.environ['CI_TEST_FLAKY'], 'w').write(os.environ['FAKE_GATE_FLAKY'] + ' unit_one\\n' if os.environ.get('FAKE_GATE_FLAKY') else '')
 """
 
 
@@ -1948,6 +1952,8 @@ class PerCrate(StTest):
         record = next(s for s in self.statements() if s['predicate']['observed']['inputs'].get('crate') == 'top')['predicate']['observed']['inputs']
         self.assertEqual((record['filterset'], record['tests_run']), ('workspace', '1'))
         self.assertIn("2 of 2 crates signed from linux-gate's own nextest run", out)
+        gate = next(s for s in self.statements() if 'linux-gate' in s['predicate']['observed']['checks'])['predicate']['observed']['inputs']
+        self.assertEqual(gate['flaky_tests'], 'none')
         code, out, err = self.run_with_gate()
         self.assertEqual(code, 0, out + err)
         self.assertIn('all 2 crates already have a passing note', out)
@@ -1959,6 +1965,16 @@ class PerCrate(StTest):
         self.assertEqual((inputs['top']['env_skips'], inputs['base']['env_skips']), ('top unit_one', 'none'))
         gate = next(s for s in self.statements() if 'linux-gate' in s['predicate']['observed']['checks'])['predicate']['observed']['inputs']
         self.assertEqual(gate['env_skips'], 'top unit_one')
+
+    def test_a_crate_with_a_test_that_passed_only_on_a_retry_is_left_for_ci_and_linux_gate_names_it(self):
+        code, out, err = self.run_with_gate(FAKE_GATE_FLAKY='top')
+        self.assertEqual(code, 4, out + err)  # nothing failed; a crate is left unsigned, so CI runs it
+        self.assertEqual(self.crate_records(), [('base', 0)], 'top is not signed')
+        self.assertIn('rust-tests:top', out)
+        self.assertIn('1 test(s) passed only on a retry, CI runs it: unit_one', out)
+        self.assertIn('1 left for CI, a test passed only on a retry: top', out)
+        gate = next(s for s in self.statements() if 'linux-gate' in s['predicate']['observed']['checks'])['predicate']['observed']
+        self.assertEqual((gate['checks']['linux-gate']['exit_code'], gate['inputs']['flaky_tests']), (0, 'top unit_one'))
 
     def test_without_a_report_from_linux_gate_rust_tests_runs_the_crates_it_lacks_itself(self):
         code, out, err = self.run_with_gate(FAKE_GATE_NO_REPORT='1')
