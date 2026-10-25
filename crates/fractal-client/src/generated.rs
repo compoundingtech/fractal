@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; HTTP API/error versions stay unchanged; sunset 2026-11-01.
 pub const API_VERSION: &str = "st3.client.v0";
 pub const ERROR_VERSION: &str = "st3.client.error.v0";
-pub const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
+pub const TERMINAL_SUBPROTOCOL: &str = "fractal.client.terminal.v0";
 
 /// Current advisory text, never an approval, grant, assignment or answer to an ask.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

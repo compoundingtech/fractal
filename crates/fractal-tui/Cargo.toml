@@ -2,7 +2,7 @@
 name = "fractal-tui"
 version = "0.1.0"
 edition = "2024"
-description = "Smalltalk terminal UI library"
+description = "Fractal terminal UI library"
 license = "MIT"
 
 [dependencies]

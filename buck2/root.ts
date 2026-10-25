@@ -2,11 +2,11 @@ import { createGenieOutput } from '../repos/effect-utils/packages/@overeng/genie
 
 /**
  * The consumer root files `effect-utils.lib.mkConsumerBuckRoot` renders for this repository
- * (`devShells.web` in flake.nix): cell `smalltalk`, remote cache and uploads disabled, no
+ * (`devShells.web` in flake.nix): cell `fractal`, remote cache and uploads disabled, no
  * remote-execution, archive-origin or private-product endpoints. `scripts/ci-fractal-web`
  * fails when a checked-in file no longer starts with the Nix-rendered text after its header.
  */
-const cell = 'smalltalk'
+const cell = 'fractal'
 const ignore = [
   '**/__pycache__',
   '**/dist',

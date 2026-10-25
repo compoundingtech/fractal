@@ -61,4 +61,4 @@ st reaches every seat through its harness's own channel. Keys typed into another
 
 ## Upstream feedback
 
-Issues and suggestions are welcome at https://github.com/compoundingtech/smalltalk. File an upstream issue with `gh issue create --repo compoundingtech/smalltalk`. Pull requests are welcome too.
+Issues and suggestions are welcome at https://github.com/compoundingtech/fractal. File an upstream issue with `gh issue create --repo compoundingtech/fractal`. Pull requests are welcome too.
