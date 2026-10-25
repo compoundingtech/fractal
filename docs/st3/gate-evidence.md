@@ -1636,8 +1636,10 @@ whose key has none yet, so a pull request branched from main reuses them; most m
 all of them. Main's code is merged code, the code every run on the host already builds under a pull request, so no author rule applies.
 It starts on the same terms as `sign`, and not while another `st-test --seed` runs on the host (that tick is skipped; the next tries
 again); its nextest takes the build slots through the admission shim like any `st-test` build. A tip is seeded once whatever the outcome
-(the next merge's seed covers what one left missing), and each appends a line to `seeds.jsonl` (wait from the merge to the start,
-seconds, and the crates that did not sign). `evidence-queue-signer report` sums a window, and `~/.config/evidence-queue-signer/off` stops
+(the next merge's seed covers what one left missing), except that a seed load stopped before its tests started (waiting for a build
+slot, or building; nextest's `Starting N tests` line is the boundary) tries the same tip again on the next tick, up to six tries, until
+a newer merge replaces it. Each try appends a line to `seeds.jsonl` (wait from the merge to the start, seconds, the try number, whether
+the tests had started, the pool cap `ST_TEST_POOL_MAX_GB` it ran with, and the crates that did not sign). `evidence-queue-signer report` sums a window, and `~/.config/evidence-queue-signer/off` stops
 all three.
 
 ### When the gate says skip
