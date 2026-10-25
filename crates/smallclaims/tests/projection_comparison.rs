@@ -5,8 +5,11 @@ use smallclaims::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 const FLEET: &str = "sample-fleet";
+// Every case here compares projections, which only the divergence check does.
 fn node(name: &str) -> Store {
-    Store::open_memory(name, Arc::new(Plain)).unwrap()
+    let store = Store::open_memory(name, Arc::new(Plain)).unwrap();
+    store.capture_divergences(true);
+    store
 }
 fn status(store: &Store) -> smallclaims::replication::ReplicationStatus {
     store

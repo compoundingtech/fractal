@@ -17,6 +17,57 @@ use smallclaims::store::runtime::Plain;
 const FLEET: &str = "6f1e8a52-3c4d-4b7e-9a10-2d5c8e7f9b31";
 
 #[test]
+fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering() {
+    thread_local! {
+        static BODY_READS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    for tampered in [false, true] {
+        let store = Store::open_memory("studio", Arc::new(Plain)).unwrap();
+        store.set_node_key(key()).unwrap();
+        let claim = note(&store, None, &"signed payload".repeat(1024));
+        seal(&store);
+        store.judge_claims(true).unwrap();
+        assert_eq!(verdict(&store, &claim), Verdict::Verified);
+        {
+            let mut connection = store.connection.write();
+            if tampered {
+                // Rejudgment must use the current transaction's body, never the earlier one.
+                connection.execute(
+                    "UPDATE claims SET body=json_set(body,'$.fields.text',?1) WHERE id=?2",
+                    rusqlite::params!["changed after signing", claim.id],
+                ).unwrap();
+            }
+            connection.execute(
+                "UPDATE claim_signature_judging SET dirty=1 WHERE claim_id=?1",
+                [&claim.id],
+            ).unwrap();
+            connection.execute(
+                "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
+                [&claim.id],
+            ).unwrap();
+            BODY_READS.with(|reads| reads.borrow_mut().clear());
+            connection.trace(Some(|sql| {
+                if sql.starts_with("SELECT id, subject, kind, actor, body FROM claims WHERE id=") {
+                    BODY_READS.with(|reads| reads.borrow_mut().push(sql.to_owned()));
+                }
+            }));
+        }
+        store.judge_claims(false).unwrap();
+        store.connection.write().trace(None);
+        BODY_READS.with(|reads| {
+            let reads = reads.borrow();
+            assert_eq!(reads.len(), 1, "tampered={tampered}: {reads:?}");
+        });
+        let result = verdict(&store, &claim);
+        if tampered {
+            assert!(matches!(result, Verdict::Invalid(_)), "{result:?}");
+        } else {
+            assert_eq!(result, Verdict::Verified);
+        }
+    }
+}
+
+#[test]
 fn signature_upgrade_uses_the_version_assigned_by_queue_order() {
     // The landed runtime-operation migration owns 19; signature migration takes 20.
     // Update this assertion only with the reviewed queue disposition.

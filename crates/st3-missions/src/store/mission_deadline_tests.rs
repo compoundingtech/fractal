@@ -764,6 +764,8 @@ mission "scale" state="ready" timeout="5m" {
 #[test]
 fn deadline_definition_versions_skip_only_incompatible_tables() {
     let (source, target, _) = synced_takeover_pair();
+    source.capture_divergences(true);
+    target.capture_divergences(true);
     target.begin_first_sync("source").unwrap();
     let mut legacy = source.export_replication_summary(TEST_FLEET).unwrap();
     assert_eq!(legacy.projection_versions["mission_run_deadlines"], 3);

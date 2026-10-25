@@ -186,15 +186,24 @@ fn a_projection_divergence_is_one_p1_fault_that_nothing_repairs() {
 }
 
 #[test]
-fn without_the_check_an_exchange_keeps_nothing_for_a_reproduction() {
+fn without_the_check_an_exchange_compares_nothing() {
     let (left, right) = two_members_in_step();
     right.capture_divergences(false);
     project_wrongly(&right);
     compare(&left, &right, "left");
-    outlast_projection(&right, "left");
     compare(&left, &right, "left");
-    assert!(right.replication_diverged(), "status still reports it");
+    // Comparison is only the optional diagnostic, so a default install records nothing.
+    let progress = right.replication_sync.lock().unwrap()["left"].clone();
+    assert_eq!(progress.graph_compared_at_unix_ms, None);
+    assert_eq!(progress.graph_differs_since_unix_ms, None);
+    assert!(!right.replication_diverged());
     assert!(right.replication_divergences().is_empty());
+    let status = right
+        .replication_status_sealed(true, Some(TEST_FLEET), &["left".into()])
+        .unwrap();
+    assert!(status.peers[0].differing_tables.is_empty());
+    assert!(!status.peers[0].projection_comparison_waiting);
+    assert_eq!(status.peers[0].projection_graphs_equal, None);
     assert_eq!(
         right.check_projection_divergences().unwrap(),
         DivergenceCheck::default()
