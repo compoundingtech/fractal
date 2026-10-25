@@ -38,7 +38,17 @@ export type HomeRow = {
 
 const HOME_KINDS: readonly string[] = ['review', 'launch', 'revision', 'request', 'update', 'prompt', 'login'];
 
-type Kindish = Pick<Attention, 'presentation' | 'attention_kind'> & { alert?: boolean; update?: unknown };
+/** An optional field as the plain model gives it (`T | null`) or as the web app's decoded model gives it (an Effect `Option`, which has a `_tag`). */
+type OptionLike<T> = { readonly _tag: 'None' } | { readonly _tag: 'Some'; readonly value: T };
+type Optional<T> = T | null | OptionLike<T>;
+function plain<T>(value: Optional<T> | undefined): T | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'object' && '_tag' in value && (value._tag === 'None' || value._tag === 'Some')) return value._tag === 'Some' ? (value as { readonly value: T }).value : null;
+  return value as T;
+}
+/** What Home reads of `Attention.presentation`, in either shape. */
+type PresentationLike = { readonly kind: Optional<string>; readonly tier: Optional<string>; readonly waiting: Optional<{ readonly path: string }> };
+type Kindish = { readonly attention_kind: string; readonly presentation?: PresentationLike | undefined; alert?: boolean; update?: unknown };
 /**
  * Where Home shows an item, as st presents it, or null for one st puts on no Now (a null group
  * or card). A feedback gate is a review here. An item st places in a way this client does not
@@ -50,12 +60,14 @@ export function homeKind(item: Kindish): { tier: Tier; kind: HomeKind } | null {
   const presented = item.presentation;
   const fallback: Tier = isAlert(item) ? 'stopped' : 'later';
   if (!presented) {
-    const offNow = (item.attention_kind as string) === 'unread-message' || item.attention_kind === 'fault';
+    const offNow = item.attention_kind === 'unread-message' || item.attention_kind === 'fault';
     return offNow ? null : { tier: fallback, kind: 'unplaced' };
   }
-  if (presented.tier === null || presented.kind === null || presented.kind === 'fault') return null;
-  const tier = TIERS.find(tier => tier === presented.tier) ?? fallback;
-  const kind = presented.kind === 'feedback' ? 'review' : presented.kind;
+  const presentedTier = plain(presented.tier);
+  const presentedKind = plain(presented.kind);
+  if (presentedTier === null || presentedKind === null || presentedKind === 'fault') return null;
+  const tier = TIERS.find(tier => tier === presentedTier) ?? fallback;
+  const kind = presentedKind === 'feedback' ? 'review' : presentedKind;
   return { tier, kind: HOME_KINDS.includes(kind) ? kind as HomeKind : 'unplaced' };
 }
 
@@ -108,7 +120,7 @@ export function homeRows(items: KeptAttention[], actor: string | undefined, now 
   const rows = items.filter(item => onHome(item, actor)).flatMap((item): HomeRow[] => {
     const place = homeKind(item);
     if (!place) return [];
-    const step = item.presentation?.waiting?.path;
+    const step = plain(item.presentation?.waiting)?.path;
     const waiting = item.closedElsewhere ? 'closed; stays until you clear it'
       : !item.presentation ? 'st does not say what this is: this host\'s st is older, or has not presented it yet'
       : place.kind === 'unplaced' ? 'st names a card this app does not know'
