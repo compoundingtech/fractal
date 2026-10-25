@@ -24,7 +24,7 @@ if $dry_run; then
   printf 'stage bin/%s\n' "${runtime_binaries[@]}"
   printf 'nix build .#fractal-web --no-link --print-out-paths; stage share/fractal-web\n'
   printf 'link bin/fractal -> st3\n'
-  # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+  # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
   printf 'link bin/st -> st3\n'
   # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
   printf 'archive %s/fractal-%s.tar.gz\n' "$out" "$target"
@@ -117,7 +117,7 @@ if [[ $target == *apple* ]]; then
   fi
 fi
 ln -s st3 "$work/$package/bin/fractal"
-# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 ln -s st3 "$work/$package/bin/st"
 # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 install -m 0755 scripts/install-release "$work/$package/install.sh"
