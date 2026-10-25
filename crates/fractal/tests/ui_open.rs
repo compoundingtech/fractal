@@ -176,6 +176,11 @@ async fn serve(
         let intent = fractal_daemon::graph::parse_intent(source, state.store.origin()).unwrap();
         state.store.apply_internal(&intent, "ui-open-test").unwrap();
     }
+    // As the daemon starts it publishes its attention rows with their presentation (the interface places an alert by what st says
+    // about it, and shows one st has not presented as unplaced): this server publishes them too.
+    fractal_daemon::api::start_attention_list(&state);
+    // It publishes its agent roster too, which the mission view reads its agents from.
+    fractal_daemon::api::start_agent_roster(&state);
     let socket = root.join("trusted.sock");
     let server = tokio::spawn({
         let path = socket.clone();
