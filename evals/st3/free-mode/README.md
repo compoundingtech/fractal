@@ -1,6 +1,6 @@
 # Free mode eval
 
-This model-free eval proves [free mode](../../../docs/st3/kdl-lifecycle.md#free-mode): within a
+This model-free eval proves [free mode](../../../docs/site/reference/configuration.md#free-mode): within a
 fleet, an agent with no grant publishes, starts, and revises missions as itself.
 
 A run-local planner, whose declaration carries no authority block, publishes a mission through a

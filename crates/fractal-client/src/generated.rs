@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; HTTP API/error versions stay unchanged; sunset 2026-11-01.
 pub const API_VERSION: &str = "st3.client.v0";
 pub const ERROR_VERSION: &str = "st3.client.error.v0";
-pub const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
+pub const TERMINAL_SUBPROTOCOL: &str = "fractal.client.terminal.v0";
 
 /// Current advisory text, never an approval, grant, assignment or answer to an ask.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -70,6 +70,8 @@ pub enum ErrorCode {
     IdentityUnknown,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
+    InvalidCustodySuccessor,
+    CustodyPending,
     AttentionMigrated,
     ArrangementExists,
     ArrangementFolderExists,
@@ -220,6 +222,9 @@ pub struct PageInfo {
     pub next_cursor: Option<String>,
     #[serde(default)]
     pub cursor_expires_at: Option<String>,
+    /// Unreadable history candidates skipped on this page. Nonzero means incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_items: Option<usize>,
 }
 
 /// Declaration reads preserve future fields and state strings without assigning new semantics.
@@ -1451,6 +1456,11 @@ pub struct AgentRelationship {
     pub agent_id: String,
     pub reason: Option<String>,
 }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentMailCustody {
+    pub successor: String,
+    pub state: String,
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentEndReason {
     pub kind: String,
@@ -1470,6 +1480,8 @@ pub struct Agent {
     pub name: String,
     pub state: String,
     pub reachability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_custody: Option<AgentMailCustody>,
     #[serde(default)]
     pub runtime_ids: Vec<String>,
     #[serde(default)]
@@ -3772,6 +3784,8 @@ pub struct PersonAnswerRecord {
 pub struct AgentRetireParameters {
     pub agent: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -4936,10 +4950,23 @@ pub struct AgentRepository {
     pub agent_ids: Vec<String>,
 }
 
+/// Exact prior person instruction and current policy; authentication selects the actor.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationProof {
+    pub person: String,
+    pub policy: String,
+    pub message: String,
+    pub quote: String,
+    pub episode: String,
+}
+
 /// A person's answer to a native harness prompt alert.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptRespondParameters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DelegationProof>,
     pub target_id: String,
     pub episode: String,
     pub answer: String,

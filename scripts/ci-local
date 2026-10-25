@@ -4,6 +4,7 @@
 #
 #   scripts/ci-local mail-redelivery-canaries
 #   scripts/ci-local tests clippy fleet-compat mail-redelivery-canaries      (what a linux-gate skip covers)
+#   scripts/ci-local isolation-vm                                            (the VM tests: scripts/ci-local-isolation-vm)
 #
 # Each STAGE is a scripts/ci-linux stage, run in order; every stage runs even after one fails, and the exit status is the
 # first failure's (0 when all passed). Before the stages it builds and installs the rendered hooks, as the CI job's
@@ -15,19 +16,46 @@
 # inside the account's st state (a seat's command recorder) stays. Two things are kept:
 # the account's cargo and rustup homes (the dependency cache), and XDG_RUNTIME_DIR with the session bus, because the build
 # admission shim queues there. RUNNER_TEMP and GITHUB_STEP_SUMMARY, which CI provides, are scratch files too.
+#
+# Every time is measured and printed: the setup before the stages, each stage's start, end and seconds, and the time each stage spent
+# waiting in the build admission queue (the shim's "cargo: waiting in order" ... "cargo: got build slot" lines, which also get a UTC
+# stamp of their own), in a table at the end. Each stage's output is also kept in CI_LOCAL_LOG_DIR (default
+# ~/.cache/ci-local-logs/run-TIME-PID/STAGE.log; the latest 10 runs stay), after the scratch above is gone.
 set -euo pipefail
+real_home=$HOME  # the account's own, before the stages get a home of their own
 if [ "$#" -eq 0 ]; then
   echo "usage: scripts/ci-local STAGE..." >&2
   exit 2
 fi
 for stage in "$@"; do
   case "$stage" in
-    tests|clippy|fleet-compat|mail-redelivery-canaries) ;;
+    tests|clippy|fleet-compat|mail-redelivery-canaries|isolation-vm) ;;
     *) echo "ci-local: stage $stage has no local lane" >&2; exit 2 ;;
   esac
 done
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/ci-local.XXXXXX")
-trap 'rm -rf "$scratch"' EXIT
+# The scratch, and the stages' TMPDIR inside it, are on the account's disk as a CI runner's temporary directory is, never the
+# caller's TMPDIR: a dev shell puts that under /tmp, which on some build hosts is a small tmpfs (tests that need tens of GB of
+# scratch are refused there) or holds a stray /tmp/.git (tests that look for the enclosing repository find it).
+# A CI runner's umask is 022: a host whose umask is 002 would make the stages' directories group-writable, and tests that
+# refuse a directory others can change (the secrets gateway's) fail there.
+umask 022
+scratch_root=${CI_LOCAL_SCRATCH_ROOT:-$HOME/.cache/ci-local}
+mkdir -p "$scratch_root"
+chmod go-w "$scratch_root"
+scratch=$(mktemp -d "$scratch_root/run.XXXXXX")
+# The stages' TMPDIR is short: tests put Unix sockets several levels below it, a socket path is limited to 108 bytes, and under the
+# scratch above (~/.cache/ci-local/run.XXXXXX/tmp) the daemons' sockets in the delivery-probe and seat tests no longer fit. It is in
+# RAM (/dev/shm) when that has 20 GiB free, else on disk (/var/tmp; /tmp may be a small tmpfs); CI_LOCAL_TMP_ROOT names another root.
+# The tests' SQLite stores sync every commit, and that wait, not CPU, is most of their time: on a build host the linux-gate tests took
+# 849 s on /dev/shm against 1518 s on disk at 6 threads, using about 3.3 GB of it at 12 threads (2026-10-23). 20 GiB leaves room
+# for the checkpoint tests, which refuse a filesystem with less than about 17 GB free, and for a second run.
+tmp_root=${CI_LOCAL_TMP_ROOT:-}
+if [ -z "$tmp_root" ]; then
+  tmp_root=/var/tmp
+  if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -ge $((20 * 1024 * 1024)) ]; then tmp_root=/dev/shm; fi
+fi
+tmp=$(mktemp -d "$tmp_root/cl.XXXXXX")
+trap 'rm -rf "$scratch" "$tmp"' EXIT
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
 # The cargo the stages build with is the dev shell's own, handed to the build admission shim as CARGO_REAL: CI_LOCAL_CARGO
@@ -63,11 +91,77 @@ for entry in "${entries[@]}"; do
   case "$entry" in "$st_state"|"$st_state"/*) ;; *) kept+=("$entry") ;; esac
 done
 PATH=$(IFS=':'; printf '%s' "${kept[*]}")
+# Cargo looks for a subcommand (clippy, fmt) in $CARGO_HOME/bin before PATH unless PATH names that directory, and an account's
+# ~/.cargo/bin holds rustup's proxies: `cargo clippy` would then run rustup's toolchain, not the dev shell's. Named last, the
+# directory comes after the dev shell's.
+case ":$PATH:" in *":$cargo_home/bin:"*) ;; *) PATH="$PATH:$cargo_home/bin" ;; esac
+# The host's build admission (the nix and cargo shims in ~/.local/bin and the build-admission program) finds its program, limits,
+# priorities and queue state under the account's home. The stages' HOME below would hide them: every nix and cargo command inside
+# a stage then found no admission program and took the shims' fallback cap, under a lock of its own per run, so a stage was admitted
+# by nothing the host's other builds wait in. They are named here, from the account's home, by the variables the shims read; a
+# value the caller set is kept, and a host without them is unchanged.
+account_home=$HOME
+if [ -x "$account_home/.local/bin/build-admission" ]; then
+  export BUILD_ADMISSION_BIN="${BUILD_ADMISSION_BIN:-$account_home/.local/bin/build-admission}"
+  export BUILD_ADMISSION_CONFIG="${BUILD_ADMISSION_CONFIG:-$account_home/.config/build-admission}"
+  export BUILD_ADMISSION_STATE="${BUILD_ADMISSION_STATE:-$account_home/.local/state/st3/operations}"
+  export BUILD_ADMISSION_FALLBACK_LOCK="${BUILD_ADMISSION_FALLBACK_LOCK:-$account_home/.local/state/st3/operations/build-admission-fallback.lock}"
+fi
+[ -r "$account_home/.config/cargo-priority" ] && export CARGO_PRIORITY_FILE="${CARGO_PRIORITY_FILE:-$account_home/.config/cargo-priority}"
+if [ -z "${CARGO_HEAVY_SLOTS:-}" ] && [ -r "$account_home/.config/cargo-heavy-slots" ]; then
+  CARGO_HEAVY_SLOTS=$(tr -d '[:space:]' < "$account_home/.config/cargo-heavy-slots")
+  export CARGO_HEAVY_SLOTS
+fi
 export HOME="$scratch/home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" CARGO_REAL="$cargo_real"
 export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
-export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md"
-mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP"
+export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md" TMPDIR="$tmp"
+mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP" "$TMPDIR"
+# The few tests about durability or disk cost keep a disk (disk_tempdir in the tests' support code): the scratch is on one.
+if [ "$(stat -f -c %T "$tmp" 2>/dev/null)" = tmpfs ]; then
+  export CI_TEST_DISK_TMPDIR="$scratch/disk"
+  mkdir -p "$CI_TEST_DISK_TMPDIR"
+fi
+# A host may preload an allocator into every process (jemalloc); a CI runner preloads nothing, and tests that measure the allocator
+# (malloc_trim) fail under one.
+unset LD_PRELOAD
+# The stages compile without sccache, as CI does when its cache is unavailable. A server started from here keeps this run's HOME and
+# TMPDIR, which are removed at exit, and the account's builds share one server (127.0.0.1:4226): every compile through it then failed
+# ("sccache: error: Failed to create temp dir") until it was stopped. The kept build directory (CARGO_TARGET_DIR) is the local cache.
+unset RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER
+# Each test process gets a TMPDIR of its own under this run's (scripts/ci-test-tmpdir, as the cargo target runner nextest honours): on a
+# shared TMPDIR, one test that left an empty `.git` at its top made every later test there see a repository that is not one (2026-10-23,
+# 21 failures in one local run; the stray /tmp/.git on the build hosts came the same way). A CI runner is fresh for every job.
+triple=${CI_LOCAL_TARGET_TRIPLE:-$( { rustc -vV 2>/dev/null || true; } | sed -n 's/^host: //p')}
+if [ -n "$triple" ]; then
+  export CI_TEST_TMPDIR_ROOT="$TMPDIR"
+  export "CARGO_TARGET_$(printf '%s' "$triple" | tr '[:lower:]-' '[:upper:]_')_RUNNER=$(cd "$(dirname "$0")" && pwd)/ci-test-tmpdir"
+else
+  echo "ci-local: no rustc to name the host target; the tests share one TMPDIR" >&2
+fi
 touch "$GITHUB_STEP_SUMMARY"
+stamp() { date -u +%FT%TZ; }
+log_root=${CI_LOCAL_LOG_DIR:-$real_home/.cache/ci-local-logs}
+log_dir=$log_root/run-$(date -u +%Y%m%dT%H%M%SZ)-$$
+mkdir -p "$log_dir"
+echo "ci-local: stage logs in $log_dir"
+# Keep the latest 10 runs' logs (CI_LOCAL_LOG_DIR itself, when given, is the caller's and is not pruned).
+if [ -z "${CI_LOCAL_LOG_DIR:-}" ]; then
+  # shellcheck disable=SC2012
+  ls -1dt "$log_root"/run-* 2>/dev/null | tail -n +11 | while IFS= read -r old; do rm -rf "$old"; done
+fi
+# Passes a stage's output through, stamping the build admission queue's lines and adding up the time spent in the queue.
+queue_times() {
+  local stage=$1 line waiting=-1 count=0 total=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'cargo: waiting in order'*) waiting=$SECONDS; count=$((count + 1)); printf 'ci-local: [%s] %s: waiting for a build slot\n' "$(stamp)" "$stage" ;;
+      'cargo: got build slot'*) if [ "$waiting" -ge 0 ]; then total=$((total + SECONDS - waiting)); waiting=-1; fi; printf 'ci-local: [%s] %s: got a build slot\n' "$(stamp)" "$stage" ;;
+    esac
+    printf '%s\n' "$line"
+  done
+  echo "$count $total" > "$log_dir/$stage.queue"
+}
+setup_started=$(stamp); setup_began=$SECONDS
 # clippy's ratchet compares with the base, as CI compares with the event's base: CLIPPY_BASE_SHA when given (scripts/st-test
 # gives the base it just fetched and records it in the note), otherwise main as fetched now, never a local ref that may be old.
 if [[ " $* " == *" clippy "* && -z "${CLIPPY_BASE_SHA:-}" ]]; then
@@ -95,17 +189,90 @@ if [[ " $* " == *" tests "* ]]; then
 fi
 cargo build --locked -p fractal-drivers --bin ci-hooks-install
 bash scripts/ci-install-built-hooks
-# A build host is shared and test binaries run outside the build admission gate: the stages' tests run 6 at a time unless
-# CI_TEST_THREADS says otherwise (CI's runners use 8 on a machine of their own), at low CPU and IO priority.
-export CI_TEST_THREADS=${CI_TEST_THREADS:-6}
+setup_ended=$(stamp); setup_seconds=$((SECONDS - setup_began))
+# A build host is shared and test binaries run outside the build admission gate: the stages' tests run 12 at a time unless
+# CI_TEST_THREADS says otherwise (CI's runners use 8 on a machine of their own), at low CPU and IO priority. On a 16-core build host
+# with the TMPDIR in RAM, 12 threads took the linux-gate tests from 849 s to 519 s at a peak of 18 GB used (2026-10-23); on disk,
+# 12 threads made six timing-sensitive tests retry, so the two go together.
+export CI_TEST_THREADS=${CI_TEST_THREADS:-12}
 low=()
 if command -v ionice >/dev/null 2>&1; then low+=(ionice -c 3); fi
 if command -v nice >/dev/null 2>&1; then low+=(nice -n 10); fi
+# One stage: its output stamped and tallied (queue_times), kept in its log and, for a stage in the foreground, passed on to this terminal.
+# Its exit code and its row of the closing table go to files, so a stage run in the background lane reports the same way.
+run_stage() {
+  local n=$1 stage=$2 shown=$3 started began code seconds queued waited
+  started=$(stamp); began=$SECONDS
+  # Both streams into one pipe. PIPESTATUS[0] is the stage's own status.
+  set +e
+  if [ "$stage" = isolation-vm ]; then
+    { "${low[@]}" bash scripts/ci-local-isolation-vm; } 2>&1 | queue_times "$stage" | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
+  else
+    { "${low[@]}" bash scripts/ci-linux "$stage"; } 2>&1 | queue_times "$stage" | if [ "$shown" = shown ]; then tee "$log_dir/$stage.log"; else cat > "$log_dir/$stage.log"; fi
+  fi
+  code=${PIPESTATUS[0]}
+  set -e
+  seconds=$((SECONDS - began))
+  read -r queued waited < "$log_dir/$stage.queue" 2>/dev/null || { queued=0; waited=0; }
+  # By position: a stage may be given twice.
+  echo "$code" > "$log_dir/.$n.code"
+  printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss\n' "$stage" "$started" "$(stamp)" "$seconds" "$code" "${queued:-0}" "${waited:-0}" \
+    > "$log_dir/.$n.row"
+  if [ "$shown" = shown ]; then echo "ci-local: $stage exit $code"; fi
+}
+# clippy and fleet compatibility run alongside the tests stage, one after the other in a lane of their own, as their CI jobs run on runners
+# of their own: the tests stage builds first (cargo's lock on the build directory holds the lane's build until then) and then spends most
+# of its time running tests, which is when the lane compiles and runs. Their output is kept and printed once the foreground stages are
+# done, so the two never interleave. CI_LOCAL_SERIAL=1 runs every stage one after another, as before.
+stages=("$@")
+lane=()  # positions
+if [ "${CI_LOCAL_SERIAL:-}" != 1 ] && [[ " $* " == *" tests "* ]]; then
+  for n in "${!stages[@]}"; do
+    case "${stages[$n]}" in clippy|fleet-compat) lane+=("$n") ;; esac
+  done
+fi
+in_lane() { local n; for n in "${lane[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
+# A process and everything under it, children first (read from /proc: a parent's PPid line), so a stage the lane started does not
+# outlive it. What detaches on purpose (the test guardian's setsid) is not under it and is not reached, as before.
+stop_tree() {
+  local pid=$1 status child
+  for status in /proc/[0-9]*/status; do
+    if [ "$(sed -n 's/^PPid:[[:space:]]*//p' "$status" 2>/dev/null)" = "$pid" ]; then
+      child=${status#/proc/}; child=${child%/status}
+      stop_tree "$child"
+    fi
+  done
+  kill "$pid" 2>/dev/null || true
+}
+lane_pid=
+if [ "${#lane[@]}" -gt 0 ]; then
+  echo "ci-local: $(for n in "${lane[@]}"; do printf '%s ' "${stages[$n]}"; done)run alongside the other stages; their output follows when they are done"
+  ( for n in "${lane[@]}"; do run_stage "$n" "${stages[$n]}" quiet; done ) &
+  lane_pid=$!
+  # Stopped, the run takes its lane with it, the stage the lane is running included, before the scratch they use is removed.
+  # (|| true: under set -e a lane that already ended would make the trap's own exit status the run's.)
+  trap 'stop_tree "$lane_pid"; wait "$lane_pid" 2>/dev/null || true; rm -rf "$scratch" "$tmp"' EXIT
+fi
+for n in "${!stages[@]}"; do
+  in_lane "$n" || run_stage "$n" "${stages[$n]}" shown
+done
+if [ -n "$lane_pid" ]; then
+  wait "$lane_pid" || true
+  for n in "${lane[@]}"; do
+    echo "----- ci-local: ${stages[$n]} output -----"
+    cat "$log_dir/${stages[$n]}.log" 2>/dev/null || echo "(no output)"
+    echo "ci-local: ${stages[$n]} exit $(cat "$log_dir/.$n.code" 2>/dev/null || echo 1)"
+  done
+fi
+# The exit status is the first failure's in the order the stages were given; a stage that left no code failed.
 status=0
-for stage in "$@"; do
-  code=0
-  "${low[@]}" bash scripts/ci-linux "$stage" || code=$?
-  echo "ci-local: $stage exit $code"
+table=()
+for n in "${!stages[@]}"; do
+  code=$(cat "$log_dir/.$n.code" 2>/dev/null || echo 1)
+  table+=("$(cat "$log_dir/.$n.row" 2>/dev/null || printf '%-26s (no result)' "${stages[$n]}")")
   if [ "$status" -eq 0 ]; then status=$code; fi
 done
+echo "ci-local: timing (UTC)"
+printf 'ci-local:   %s\n' "$(printf '%-26s %s  %s  %6ss' setup "$setup_started" "$setup_ended" "$setup_seconds")"
+for row in "${table[@]}"; do printf 'ci-local:   %s\n' "$row"; done
 exit "$status"

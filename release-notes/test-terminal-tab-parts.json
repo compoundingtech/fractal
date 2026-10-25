@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The terminal tab protocol test runs as three tests (the byte/render matrix, the agent guards, and the controls and images), each checking its own part of the recorded cases, so they run at the same time instead of one after another.",
+  "replay": {"status": "none", "detail": "Test-only change; no claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to run the probe as one test again."}
+}

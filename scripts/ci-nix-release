@@ -55,7 +55,7 @@ def main():
                 stream.write(('⚠️ **' + coverage + '**' if missing or unknown else coverage) + '\n\n')
         # The runner's persistent cache directory retains GC roots after its checkout and
         # temporary directory disappear. Each runner retains its latest successful outputs.
-        roots = Path(cache_home) / 'smalltalk-nix-release'
+        roots = Path(cache_home) / 'fractal-nix-release'
         roots.mkdir(exist_ok=True)
         results = json.loads(output('nix', 'build', '--no-update-lock-file', '--json',
                                     '--print-build-logs', '--cores', '4', '--max-jobs', '1',
