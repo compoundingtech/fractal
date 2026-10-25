@@ -86,10 +86,6 @@ scripts/st-test --all --push origin
   check's own definition (for example its script) cannot be pre-signed for that check, so CI runs it. `--status` runs nothing and says
   whether the tree is already covered.
 
-The runner reuses locked disposable pool worktrees: forced detached checkout restores tracked files and the index, and
-`git clean` removes ignored/untracked files, including nested fixture repositories. It never resets your authoring checkout.
-See the [signing-worker outline](docs/signing-worker-outline.md) for delegating an exact commit to a dedicated Linux signer.
-
 **Keep it within 12 minutes.** A full warm run of `scripts/st-test` (build, test and sign) has a budget of 12 minutes on a dev box
 today. Keep your changes, and any tests you add, inside it. The table st-test prints at the end gives each check's time in seconds.
 
