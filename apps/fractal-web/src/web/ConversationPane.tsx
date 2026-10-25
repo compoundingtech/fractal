@@ -8,7 +8,7 @@ import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/com
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
-import { composerSendBinding, type SendRefusal } from './composerSend.ts'
+import { composerSendBinding, imageUploadAdapter, type SendRefusal } from './composerSend.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
@@ -147,11 +147,13 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     })
   }, [agentRef])
   const [refusal, setRefusal] = React.useState<SendRefusal>()
+  const upload = source.attachments?.upload
+  const attachmentAdapter = React.useMemo(() => upload === undefined ? undefined : imageUploadAdapter(upload), [upload])
   const binding = composerSendBinding({
     source, agentRef, grants,
     readable: state._tag === 'Observed',
     items: state._tag === 'Observed' ? state.items : [],
-    refusal, onRefused: setRefusal,
+    refusal, onRefused: setRefusal, attachmentAdapter,
   })
   // The composer's Stop (and Esc) interrupts the agent's turn, as Interrupt in its actions does.
   // A refusal belongs to the run it answered (the running turn's id): it shows beside Stop while that run
@@ -218,7 +220,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
     }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
-      <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={binding.disabledReason} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
+      <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={binding.disabledReason} {...(binding.imageAttachments === undefined ? {} : { imageAttachments: binding.imageAttachments })} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>
   </EmbraceRuntimeProvider>
 })

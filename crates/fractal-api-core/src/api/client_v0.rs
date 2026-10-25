@@ -328,6 +328,15 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "pairing.revoke",
 ];
 
+/// Server-established browser admission, never deserialized from a request header.
+/// This grants client API capabilities only; it is not an administrative bearer.
+#[derive(Clone, Debug)]
+pub struct LocalWebSession {
+    pub person: String,
+    pub id: String,
+    pub expires_at: u128,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClientSession {
     /// The credential/session identity used for audit and idempotency isolation.
@@ -599,6 +608,16 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "messages-paging.v2")
         });
+    if let Some(web) = request.extensions().get::<LocalWebSession>() {
+        let mut session = ClientSession::local(Some(&web.person))?;
+        session.actor = format!("client/local-web/{}", web.id);
+        session.transport = "local-web";
+        session.custom_forms = custom_forms;
+        session.grant_expires_at = Some(web.expires_at);
+        session.conversation_blocks = conversation_blocks;
+        session.messages_paging = messages_paging;
+        return Ok(session);
+    }
     let Some(value) = request.headers().get(AUTHORIZATION) else {
         if transport == "unix" {
             let person = request
@@ -730,6 +749,20 @@ pub fn paired_client_session(
 /// Held collection sockets carry no bearer secret. Re-resolve their session grant at each
 /// arrangement read, using the same expiration/revocation checks as HTTP authentication.
 pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<ClientSession, ApiError> {
+    if session.transport == "local-web" {
+        // Only the server-established browser extension mints this transport.
+        // Collection workers must retain its original expiry, never turn it into a pairing.
+        if !acting_party(session)
+            || state.owning_person.as_deref() != Some(session.authority_actor.as_str())
+            || !session.actor.strip_prefix("client/local-web/")
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            || !session.grant_expires_at.is_some_and(|expiry| expiry > client_now_ms())
+            || session.pairing_grant.is_some()
+        {
+            return Err(forbidden("the local web session authority changed or expired"));
+        }
+        return Ok(session.clone());
+    }
     if session.transport == "unix" && acting_party(session) {
         return Ok(session.clone());
     }
@@ -1541,6 +1574,9 @@ pub async fn now(
     let mut effective_query = query.clone();
     effective_query.person.clone_from(&person);
     let (history, actor, owner_run) = (query.history, query.actor.clone(), query.owner_run.clone());
+    if history && actor.is_none() && owner_run.is_none() {
+        return super::attention_history::page(state, snapshot, effective_query, "now").await;
+    }
     client_snapshot_page(
         &state,
         snapshot,
@@ -1746,7 +1782,7 @@ fn normalized_timeline_usage_body(
     Value::Object(body)
 }
 
-/// The Small Talk in one session's conversation: messages sent for this session, and messages
+/// The Fractal in one session's conversation: messages sent for this session, and messages
 /// to or from its agent that name no session, accepted while this incarnation was the agent's
 /// current one. st joins them into the timeline so every client shows the same conversation.
 fn session_messages(
@@ -1785,7 +1821,7 @@ fn session_message_belongs(
     }
 }
 
-/// A message's timeline body: who wrote to whom, about what, so a client can draw Small Talk
+/// A message's timeline body: who wrote to whom, about what, so a client can draw Fractal
 /// apart from the harness's own turns.
 /// Who signed a message a person wrote and whether it checks: the verdict st recorded, and the
 /// device the signing key was granted to, by the label the person gave it when it paired. A
@@ -2345,6 +2381,7 @@ pub fn native_slice_page_at_generation(
         "page": ClientPageInfo {
             limit, has_more, next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
     });
     if let Some(header) = header {
@@ -2421,7 +2458,7 @@ fn canonical_native_slice(
 /// The most native entries one echo-omitting read examines.
 #[cfg(not(any(test, feature = "test-support")))]
 pub const NATIVE_ECHO_SCAN_ITEMS: usize = 4096;
-/// Test builds (st3-api-client-v0's tests reach this through test-support) scan a smaller budget, so a
+/// Test builds (fractal-api-client-v0's tests reach this through test-support) scan a smaller budget, so a
 /// fixture can exceed it with a few hundred echoes.
 #[cfg(any(test, feature = "test-support"))]
 pub const NATIVE_ECHO_SCAN_ITEMS: usize = 256;

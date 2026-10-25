@@ -21,7 +21,7 @@ let
         postBuild = ''
           rm "$out/bin/st3" "$out/bin/pty" "$out/bin/st"
           cp ${cfg.package}/bin/st3 "$out/bin/st3"
-          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
           ln -s st3 "$out/bin/st"
           # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
           ln -s ${cfg.ptyPackage}/bin/pty "$out/bin/pty"
@@ -47,6 +47,8 @@ let
     ++ lib.optionals (cfg.ptyRoot != null) [ "--pty-root" cfg.ptyRoot ]
     ++ lib.optionals (cfg.socket != null) [ "--socket" cfg.socket ]
     ++ lib.optionals (cfg.clientGatewaySocket != null) [ "--client-gateway-socket" cfg.clientGatewaySocket ]
+    ++ [ "--web-listen" (if cfg.webListen == null then "off" else cfg.webListen) ]
+    ++ lib.optionals (!externallyManaged) [ "--web-dist" "${effectivePackage}/share/fractal-web" ]
     ++ lib.optionals (cfg.clientGatewaySocket == null && pkgs.stdenv.hostPlatform.isDarwin)
       [ "--client-gateway-socket" "${cfg.stateDir}/run/st3-client.sock" ]
     ++ (if externallyManaged then
@@ -72,7 +74,7 @@ let
     + "\n"
   );
   hasDeclarations = applyCommands != [ ];
-  # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+  # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
   staging = cfg.fractalMigration.phase != "legacy";
   completed = cfg.fractalMigration.phase == "completed";
   targetState = "${config.xdg.stateHome}/fractal";
@@ -163,14 +165,14 @@ let
 in
 {
   options.programs.smalltalk.fractalBinary.enable = mkEnableOption ''
-    the opt-in fractal alias in the Home Manager-owned Smalltalk stable bin directory.
+    the opt-in fractal alias in the Home Manager-owned Fractal stable bin directory.
     Requires services.smalltalk.enable; ignored when services.smalltalk.binary.path is set
   '';
 
 
   options.services.smalltalk = {
-    enable = mkEnableOption "the smalltalk user daemon";
-    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    enable = mkEnableOption "the Fractal user daemon";
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     fractalMigration.phase = mkOption {
       type = types.enum [ "legacy" "stage" "completed" ];
       default = "legacy";
@@ -189,7 +191,7 @@ in
     binary.path = mkOption {
       type = types.nullOr types.str;
       default = null;
-      example = "/opt/smalltalk/bin/st3";
+      example = "/opt/fractal/bin/st3";
       description = ''
         Stable absolute executable path owned by an external deployer. When set,
         Home Manager neither installs the st3 package nor copies its executable,
@@ -221,6 +223,12 @@ in
     ptyRoot = mkOption { type = types.nullOr types.str; default = null; description = "PTY registry root; null uses the daemon default."; };
     socket = mkOption { type = types.nullOr types.str; default = null; description = "API socket; null uses the daemon default."; };
     clientGatewaySocket = mkOption { type = types.nullOr types.str; default = null; description = "Client gateway socket; null uses the shared runtime socket (%t/st3-client.sock on Linux, stateDir/run/st3-client.sock on Darwin)."; };
+    webListen = mkOption {
+      type = types.nullOr types.str;
+      default = "127.0.0.1:7410";
+      example = null;
+      description = "Embedded web listener address. Null disables the listener with --web-listen off.";
+    };
     ptyPackage = mkOption {
       type = types.nullOr types.package;
       default = null;
@@ -264,7 +272,7 @@ in
   };
 
   config = mkIf cfg.enable {
-    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     assertions = lib.optional staging {
       assertion = (cfg.stateDir == legacyState || lib.hasPrefix "${legacyState}/" cfg.stateDir)
         && !(builtins.any (part: part == "." || part == "..") (lib.splitString "/" cfg.stateDir));
@@ -335,7 +343,7 @@ in
       [ (if pkgs.stdenv.hostPlatform.isLinux then "reloadSystemd" else "setupLaunchAgents") ]
       [ "writeBoundary" ] ''
         if [[ -n "''${DRY_RUN_CMD:-}" ]]; then
-          verboseEcho "Would install the smalltalk executable at ${executable}"
+          verboseEcho "Would install the Fractal executable at ${executable}"
         else
           (
             set -eu
@@ -351,7 +359,7 @@ in
               ${pkgs.coreutils}/bin/chmod 755 "$temporary"
               ${pkgs.coreutils}/bin/mv -f "$temporary" "$target"
             fi
-            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
             ${pkgs.coreutils}/bin/ln -sfn st3 "$binDir/st"
             ${if config.programs.smalltalk.fractalBinary.enable then ''
               if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then
@@ -430,7 +438,7 @@ in
       # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk-apply.
       smalltalk-apply = {
         Unit = {
-          Description = "Apply smalltalk KDL declarations";
+          Description = "Apply Fractal KDL declarations";
           After = [ "smalltalk.service" ];
           Requires = [ "smalltalk.service" ];
         };

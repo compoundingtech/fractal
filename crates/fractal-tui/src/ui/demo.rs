@@ -1,4 +1,4 @@
-//! An invented fleet for `stui --demo`. Nothing here reads st3.
+//! An invented fleet for `fractal tui --demo`. Nothing here reads st3.
 //!
 //! Every name is made up. The world moves: one agent streams a reply, a tool runs and
 //! finishes, a message arrives, so the scrolling and "new below" behaviour can be felt.
@@ -792,6 +792,7 @@ fn agents() -> Vec<Agent> {
     });
     let detail =
         |goal: &str, claimed: &str, next: Option<&str>, queue: &[&str], state: &str| AgentDetails {
+            mail_custody: None,
             goal: Some(s(goal)),
             claimed: Some(s(claimed)),
             next: next.map(s),
@@ -822,6 +823,7 @@ fn agents() -> Vec<Agent> {
         "idle, waiting for feedback",
     );
     list[2].details = AgentDetails {
+        mail_custody: None,
         goal: Some(s("Tag this week's release.")),
         claimed: Some(s("1h ago")),
         next: Some(s("Weekly release › publish")),

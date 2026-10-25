@@ -59,7 +59,7 @@ vi.mock('../data/react.tsx', async () => {
     return () => { source.clockListeners.delete(listener) }
   }, () => source.now),
   useNowSnapshot: () => source.now,
-  useGrants: () => ({ actions: 'ungranted', messageSend: source.sendable ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
+  useGrants: () => ({ actions: 'ungranted', messageSend: source.sendable ? 'granted' : 'ungranted', attachmentUpload: source.sendable ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
   usePausedNow: () => undefined,
   useAttention: () => ({ _tag: 'Waiting' }),
   })

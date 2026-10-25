@@ -259,7 +259,7 @@ export function agentTreeLines(rows: AgentRowView[]): TreeLine[] {
 
 /**
  * Each path's folders, with a folder that holds only one folder joined to it on one line
- * (Nathan, 2026-10-01): `fleet/smalltalk/operations` rather than three nested folders.
+ * (Nathan, 2026-10-01): `fleet/fractal/operations` rather than three nested folders.
  */
 export function compactFolders(paths: string[][]): string[][] {
   const holds = new Map<string, Set<string>>();

@@ -1,4 +1,4 @@
-//! Process-local fixture tools: st3-api's, re-exported, and the mailbox protocol fixtures.
+//! Process-local fixture tools: fractal-api-core's, re-exported, and the mailbox protocol fixtures.
 
 pub use fractal_api_core::test_support::*;
 
