@@ -48,6 +48,48 @@ def git(repo, *args, stdin=None):
     return done.stdout.decode().strip()
 
 
+class PoolTreeTest(unittest.TestCase):
+    """Pool reuse without a signer or remote: only disposable local worktrees are involved."""
+
+    def test_forced_checkout_replaces_dirty_index_and_files_without_hard_reset(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            repo = root / 'repo'
+            repo.mkdir()
+            git(repo, 'init', '-q')
+            (repo / '.gitignore').write_text('ignored\n')
+            (repo / 'tracked').write_text('first')
+            git(repo, 'add', '.')
+            git(repo, 'commit', '-q', '-m', 'first')
+            real_git = st_test.git
+            def no_hard_reset(*args, **kwargs):
+                self.assertFalse(args and args[0] == 'reset' and '--hard' in args)
+                return real_git(*args, **kwargs)
+            with contextlib.chdir(repo), mock.patch.dict(os.environ, GIT_ENV, clear=True), \
+                    mock.patch.object(st_test, 'git', side_effect=no_hard_reset):
+                tree = st_test.prepare_tree(root / 'pool', 0, git(repo, 'rev-parse', 'HEAD'))
+                (tree / 'tracked').write_text('staged')
+                git(tree, 'add', 'tracked')
+                (tree / 'tracked').write_text('unstaged')
+                (tree / 'ignored').write_text('ignored')
+                (tree / 'nested').mkdir()
+                git(tree / 'nested', 'init', '-q')
+                (repo / 'tracked').write_text('second')
+                (repo / 'added').write_text('new')
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-q', '-m', 'second')
+                commit = git(repo, 'rev-parse', 'HEAD')
+                reused = st_test.prepare_tree(root / 'pool', 0, commit)
+                self.assertEqual(reused, tree)
+                self.assertEqual(git(tree, 'rev-parse', 'HEAD'), commit)
+                self.assertEqual(git(tree, 'status', '--porcelain'), '')
+                self.assertEqual((tree / 'tracked').read_text(), 'second')
+                self.assertEqual((tree / 'added').read_text(), 'new')
+                self.assertFalse((tree / 'ignored').exists())
+                self.assertFalse((tree / 'nested').exists())
+                git(repo, 'worktree', 'remove', '--force', str(tree))
+
+
 class StTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -520,14 +562,27 @@ class StTest(unittest.TestCase):
         self.commit('c.txt', 'three')
         tree = (self.pool() / 'tree-0').resolve()
         (tree / 'a.txt').write_text('left by a killed run\n')  # a tracked change an earlier run left
+        git(tree, 'add', 'a.txt')  # discard index changes as well as working-tree changes
+        (tree / 'b.txt').unlink()
         (tree / 'stray').write_text('untracked')
+        (tree / 'nested').mkdir()
+        git(tree / 'nested', 'init', '-q')
         (tree / 'target').mkdir()
         (tree / 'target/ignored.o').write_text('x')
         (self.pool() / 'target-0').mkdir(exist_ok=True)
         (self.pool() / 'target-0/kept').write_text('build output')
-        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        real_git = st_test.git
+        def no_hard_reset(*args, **kwargs):
+            self.assertFalse(args and args[0] == 'reset' and '--hard' in args,
+                             'pool reuse must not require a destructive reset policy exception')
+            return real_git(*args, **kwargs)
+        with mock.patch.object(st_test, 'git', side_effect=no_hard_reset):
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
         self.assertEqual(seen.read_text().split(), [str(tree), 'one', str(tree), 'one'])  # a.txt reset, stray removed
         self.assertFalse((tree / 'target').exists())
+        self.assertFalse((tree / 'nested').exists())
+        self.assertEqual((tree / 'b.txt').read_text(), 'two')
+        self.assertEqual((tree / 'c.txt').read_text(), 'three')
         self.assertEqual((self.pool() / 'target-0/kept').read_text(), 'build output')  # build output is outside the tree
         self.assertTrue(tree.is_dir())
         self.assertIn(str(tree), git(self.work, 'worktree', 'list'))
@@ -1245,7 +1300,7 @@ class PerCrate(StTest):
         inputs = json.loads((self.work / '.st/rust-test-inputs.json').read_text())
         self.commit('.st/rust-test-inputs.json', json.dumps(dict(inputs, no_tests=['base'])))
         self.assertEqual(self.members()[0], 1)
-        git(self.work, 'reset', '-q', '--hard', 'HEAD~1')
+        git(self.work, 'checkout', '-q', '-B', 'feature', 'HEAD~1')
         branch_point = git(self.work, 'rev-parse', 'origin/main').strip()
         self.on_main('list base as having no test', lambda: (self.work / '.st/rust-test-inputs.json').write_text(json.dumps(dict(inputs, no_tests=['base']))))
         git(self.work, 'fetch', '-q', 'origin')
