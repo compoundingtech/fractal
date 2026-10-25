@@ -24,6 +24,12 @@
 #           until one exists
 
 [kinds]
+"deploy.go" = { class = "durable" }
+"deploy.go-revoked" = { class = "durable" }
+"deploy.go-consumed" = { class = "durable" }
+"deploy.stop" = { class = "durable" }
+"deploy.stop-lifted" = { class = "durable" }
+"deploy.compat-signoff" = { class = "durable" }
 "agent.account" = { class = "durable" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }

@@ -74,6 +74,9 @@ impl Tui {
         command.env("TERM", "xterm-256color");
         // A real restart of st reads "connecting" for a minute; this test only waits 25 s for "offline".
         command.env("STUI_OFFLINE_GRACE_MS", "0");
+        // A silent link is dropped after the quiet check, the ping and the pong wait: 20 s by
+        // default. Capped at 2 s each, the blackhole phase takes a few seconds.
+        command.env("STUI_FEED_TIMER_CAP_MS", "2000");
         // These deliberately unusable local settings must never select local authority.
         command.env("ST3_ENDPOINT", root.join("absent.sock"));
         command.env("ST3_PERSON", "person/wrong-local-actor");

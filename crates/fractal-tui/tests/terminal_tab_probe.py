@@ -667,6 +667,8 @@ def main():
     parser.add_argument("--worker", required=True, type=Path)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--check-action-publication", action="store_true")
+    # One part of the recorded cases, so the parts can run as separate tests at the same time.
+    parser.add_argument("--part", choices=["matrix", "agent-guards", "controls"])
     parser.add_argument("--record", type=Path)
     parser.add_argument("--program", action="append", default=[], metavar="NAME=PATH")
     args = parser.parse_args()
@@ -675,25 +677,39 @@ def main():
     if args.check_action_publication:
         action_publication(args.worker.resolve())
         return
-    with tempfile.TemporaryDirectory(prefix="stui-probe-") as directory:
-        command = [sys.executable, str(HERE / "copper_probe.py"), directory]
-        tab = Tab(args.worker.resolve(), command, directory)
-        try:
-            rows = []
-            tab.start(before_attach=lambda: rows.append(no_answer_client(tab)))
-            rows.extend(matrix(tab))
-        except Exception:
-            print("worker tail:", bytes(tab.output[-2000:]), file=sys.stderr)
-            print("relay error:", tab.relay_error, file=sys.stderr)
-            raise
-        finally:
-            tab.close()
-    if args.record:
-        args.record.write_text(json.dumps(rows, indent=2) + "\n")
-    rows.extend(agent_guards(args.worker.resolve()))
-    rows.extend(controls_and_images(args.worker.resolve()))
+    rows = []
+    if args.part in (None, "matrix"):
+        with tempfile.TemporaryDirectory(prefix="stui-probe-") as directory:
+            command = [sys.executable, str(HERE / "copper_probe.py"), directory]
+            tab = Tab(args.worker.resolve(), command, directory)
+            try:
+                tab.start(before_attach=lambda: rows.append(no_answer_client(tab)))
+                rows.extend(matrix(tab))
+            except Exception:
+                print("worker tail:", bytes(tab.output[-2000:]), file=sys.stderr)
+                print("relay error:", tab.relay_error, file=sys.stderr)
+                raise
+            finally:
+                tab.close()
+        if args.record:
+            args.record.write_text(json.dumps(rows, indent=2) + "\n")
+    if args.part in (None, "agent-guards"):
+        rows.extend(agent_guards(args.worker.resolve()))
+    if args.part in (None, "controls"):
+        rows.extend(controls_and_images(args.worker.resolve()))
     if args.check:
         expected = json.loads((HERE / "fixtures/terminal-tab-current.json").read_text())
+        if args.part is not None:
+            # The parts are contiguous runs of the recorded cases, in this order, and together they are
+            # all of them: fixtures/terminal-tab-parts.json names each part's length.
+            parts = json.loads((HERE / "fixtures/terminal-tab-parts.json").read_text())
+            order = ["matrix", "agent-guards", "controls"]
+            assert list(parts) == order, f"parts file names {list(parts)}"
+            assert sum(parts.values()) == len(expected), (
+                f"the parts cover {sum(parts.values())} of {len(expected)} recorded cases: update terminal-tab-parts.json")
+            start = sum(parts[name] for name in order[:order.index(args.part)])
+            assert len(rows) == parts[args.part], f"part {args.part} has {len(rows)} cases, recorded {parts[args.part]}"
+            expected = expected[start:start + len(rows)]
         assert len(rows) == len(expected), f"row count {len(rows)} != {len(expected)}"
         for row, old in zip(rows, expected):
             assert row == old, f"{row['case']}:\nexpected {old}\nreceived {row}"

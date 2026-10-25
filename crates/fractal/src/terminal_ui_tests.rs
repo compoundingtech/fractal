@@ -63,8 +63,8 @@ fn terminal_ui_arguments_and_help_match_the_documented_surface() {
         Ok(_) => panic!("help exits"),
     };
     assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
-    assert!(error.to_string().contains("st ui"));
+    assert!(error.to_string().contains("fractal ui"));
     let help = cli_help::root_help(false);
     assert!(help.contains("Open the terminal interface"));
-    assert!(help.contains("Run st in a terminal"));
+    assert!(help.contains("Run fractal in a terminal"));
 }

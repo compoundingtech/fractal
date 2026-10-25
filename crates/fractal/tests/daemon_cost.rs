@@ -1145,6 +1145,22 @@ const PROBES: &[Probe] = &[
         "/v1/internal/replication/checkpoint-need",
         |_, _| json!({}),
     ),
+    get("GET /v1/client/runtime-starts", "/v1/client/runtime-starts"),
+    get("GET /v1/client/schedules", "/v1/client/schedules?limit=50"),
+    // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
+    // attempt renames its own fresh identity.
+    post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
+        "from": format!("agent/bench/cost/rename-{attempt}"),
+        "to": format!("agent/bench/cost/renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-agent-rename-{attempt}"),
+    })),
+    post("POST /v1/missions/rename-id", "/v1/missions/rename-id", |_, attempt| json!({
+        "from": format!("mission/cost-rename-{attempt}"),
+        "to": format!("mission/cost-renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-mission-rename-{attempt}"),
+    })),
 ];
 
 /// Each write publishes a fresh, fenced member rather than measuring an idempotent retry.
@@ -2629,6 +2645,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         if probe.route == "POST /v1/work/start" {
             prepare_handoffs(&store, &mut fixture);
         }
+        if probe.route == "POST /v1/agents/rename-id" {
+            prepare_renames(&store);
+        }
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
@@ -3023,6 +3042,18 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
 
 /// Set up fresh writes outside the measured region. A handoff releases its sender before the
 /// next task starts, so each dedicated agent has exactly one worker lease during measurement.
+/// Four agents and four missions for the rename probes, one of each per attempt.
+fn prepare_renames(store: &Store) {
+    let kdl = (0..4)
+        .map(|attempt| format!(
+            "agent \"bench/cost/rename-{attempt}\" {{ workspace \"/tmp\"; command \"true\"; restart \"never\" }}\n\
+             mission \"cost-rename-{attempt}\" state=\"ready\" {{ goal \"Invented goal\"; step \"review\" {{ assigned-to \"person/bench-operator\" }} }}\n"
+        ))
+        .collect::<String>();
+    let intent = fractal_daemon::parse_intent(&format!("version 2\n{kdl}"), NODE).unwrap();
+    store.apply_internal(&intent, "cost-rename-identities").unwrap();
+}
+
 fn prepare_handoffs(store: &Store, fixture: &mut Fixture) {
     let kdl = (0..4)
         .map(|attempt| format!(

@@ -17,6 +17,72 @@ pub use crate::store::publication_tests_shared::{declaration, observe, publish};
     use super::*;
     use crate::graph::parse_intent;
 
+    fn preview_change(original: &str, proposed: &str) -> MissionResponse {
+        let store = Store::open_memory("node").unwrap();
+        publish(&store, &parse_intent(original, "node").unwrap(), "original");
+        store.mission(
+            &parse_intent(proposed, "node").unwrap(),
+            IntentInput { kdl: String::new(), source_name: None },
+        ).unwrap()
+    }
+
+    #[test]
+    fn apply_preview_metadata_only_with_harness_is_publish_only() {
+        let original = "version 2\nagent \"example-preview/worker\" { workspace \"/tmp\"; harness \"claude\" {}; description \"before\"; }";
+        let preview = preview_change(original, &original.replace("before", "after"));
+        assert_eq!(preview.changes.len(), 1);
+        assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+        assert_eq!(preview.predicted_actions.len(), 1);
+        assert_eq!(preview.predicted_actions[0].subject, "agent/example-preview/worker");
+        assert_eq!(preview.predicted_actions[0].action, "publish-only");
+    }
+
+    #[test]
+    fn apply_preview_metadata_only_without_harness_is_publish_only() {
+        let original = "version 2\nagent \"example-preview/worker\" { workspace \"/tmp\"; description \"before\"; exec \"one\" { command \"true\"; }; exec \"two\" { command \"true\"; }; exec \"three\" { command \"true\"; }; }";
+        let preview = preview_change(original, &original.replace("before", "after"));
+        assert_eq!(preview.changes.len(), 1);
+        assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+        assert_eq!(preview.predicted_actions.len(), 1);
+        assert_eq!(preview.predicted_actions[0].subject, "agent/example-preview/worker");
+        assert_eq!(preview.predicted_actions[0].action, "publish-only");
+    }
+
+    #[test]
+    fn apply_preview_launch_change_keeps_observe_or_start() {
+        let original = "version 2\nagent \"example-preview/worker\" { workspace \"/tmp\"; command \"true\"; }";
+        let preview = preview_change(original, &original.replace("true", "false"));
+        assert_eq!(preview.changes.len(), 1);
+        assert_eq!(preview.predicted_actions.len(), 1);
+        assert_eq!(preview.predicted_actions[0].action, "observe-or-start");
+    }
+
+    #[test]
+    fn apply_preview_grouping_only_is_publish_only() {
+        for launch in ["harness \"claude\" {}", "exec \"one\" { command \"true\"; }"] {
+            let original = format!("version 2\nagent \"example-preview/worker\" {{ workspace \"/tmp\"; {launch}; }}");
+            let proposed = original.replace("workspace", "under \"agent/example-parent\"; workspace");
+            let preview = preview_change(&original, &proposed);
+            assert_eq!(preview.changes.len(), 1);
+            assert_eq!(preview.predicted_actions.len(), 1);
+            assert_eq!(preview.predicted_actions[0].action, "publish-only");
+        }
+    }
+
+    #[test]
+    fn apply_preview_operational_changes_are_not_metadata_only() {
+        let original = "version 2\nagent \"example-preview/worker\" { workspace \"/tmp\"; command \"true\"; restart \"always\"; }";
+        for proposed in [
+            original.replace("/tmp", "/workspace"),
+            original.replace("always", "never"),
+            original.replace("command", "env { EXAMPLE \"changed\"; }; command"),
+        ] {
+            let preview = preview_change(original, &proposed);
+            assert_eq!(preview.predicted_actions.len(), 1);
+            assert_eq!(preview.predicted_actions[0].action, "observe-or-start");
+        }
+    }
+
     #[test]
     fn publication_check_uses_launch_not_selected_declaration() {
         let store = Store::open_memory("node").unwrap();

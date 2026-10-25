@@ -262,6 +262,9 @@ pub enum AttentionKind {
         seat_id: String,
         /// What st says it is about; the call it would make is in the seat's conversation.
         text: String,
+        /// Native question identity, independent of whether a client may submit an answer.
+        #[serde(skip)]
+        question: bool,
         /// Answers a client may send (`allow`, `deny`); empty when the prompt is answered in
         /// the seat's terminal.
         answers: Vec<String>,

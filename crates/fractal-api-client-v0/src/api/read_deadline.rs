@@ -127,8 +127,9 @@ mod tests {
         assert!(state.store.readers.get().is_autocommit());
     }
 
-    /// The one idle read-deadline test on the real clock: 30 real seconds, so the paused-clock
-    /// tests below are not the only proof that the envelope really waits past the ordinary deadline.
+    /// The one idle read-deadline test on the real clock: the handler idles one real second past the
+    /// ordinary deadline, so the paused-clock tests below are not the only proof that the envelope
+    /// really waits past it.
     #[tokio::test]
     async fn an_idle_conversation_poll_is_not_cut_at_the_ordinary_deadline_on_the_real_clock() {
         idle_long_poll_keeps_its_normal_empty_answer(

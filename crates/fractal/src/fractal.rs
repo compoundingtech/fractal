@@ -1,33 +1,23 @@
-//! Additive program-name routing; the existing CLI and UI keep their own identity.
+//! Legacy UI spelling and local browser-session launching.
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum Dispatch {
-    Cli,
-    Web,
-}
-
 /// Rewrite only the new program's UI spelling. All legacy invocations pass through untouched.
-pub fn dispatch(arguments: &mut [OsString]) -> Dispatch {
+pub fn dispatch(arguments: &mut [OsString]) {
     let fractal = arguments
         .first()
         .and_then(|program| Path::new(program).file_name())
         == Some(OsStr::new("fractal"));
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
-    // st and st3 retain their existing CLI parser, display strings and bare-program behavior.
-    if arguments.get(1).and_then(|argument| argument.to_str()) == Some("web") {
-        return Dispatch::Web;
-    }
+    // st and st3 retain their bare-program behavior and command spellings.
     if !fractal {
-        return Dispatch::Cli;
+        return;
     }
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
     if arguments.get(1).and_then(|argument| argument.to_str()) == Some("tui") {
         arguments[1] = "ui".into();
     }
-    Dispatch::Cli
 }
 
 /// Only exact installer-created symlinks belong to this installation.
@@ -56,16 +46,7 @@ pub fn installed_binaries(mut files: Vec<PathBuf>) -> Vec<PathBuf> {
     files
 }
 
-pub fn web(arguments: &[OsString]) -> ExitCode {
-    let explicit_state = if arguments.len() == 4 && arguments[2] == "--state-dir" {
-        Some(std::path::PathBuf::from(&arguments[3]))
-    } else if arguments.len() == 2 {
-        None
-    } else {
-        let help = arguments.len() == 3 && matches!(arguments[2].to_str(), Some("--help" | "-h"));
-        fractal_daemon::cli_println!("Usage: fractal web [--state-dir DIR]\n\nOpen the daemon's local web session (default port 7410). FRACTAL_WEB_URL overrides the daemon rendezvous URL. This command does not start a server.");
-        return if help { ExitCode::SUCCESS } else { ExitCode::from(2) };
-    };
+pub fn web(explicit_state: Option<PathBuf>) -> ExitCode {
     let url = match std::env::var("FRACTAL_WEB_URL") {
         Ok(url) => url,
         Err(std::env::VarError::NotPresent) => {
@@ -122,15 +103,15 @@ pub fn web(arguments: &[OsString]) -> ExitCode {
 mod tests {
     use super::*;
 
-    fn route(input: &[&str]) -> (Dispatch, Vec<OsString>) {
+    fn route(input: &[&str]) -> Vec<OsString> {
         let mut arguments = input.iter().map(OsString::from).collect::<Vec<_>>();
-        (dispatch(arguments.as_mut_slice()), arguments)
+        dispatch(arguments.as_mut_slice());
+        arguments
     }
 
     #[test]
     fn fractal_dispatch_no_arguments_keeps_onboarding_and_terminal_guards() {
-        let (dispatch, arguments) = route(&["/bin/fractal"]);
-        assert_eq!(dispatch, Dispatch::Cli);
+        let arguments = route(&["/bin/fractal"]);
         assert_eq!(arguments, vec![OsString::from("/bin/fractal")]);
         for (stdin, stdout, seat, expected) in [
             (true, true, false, true),
@@ -149,18 +130,8 @@ mod tests {
     fn fractal_dispatch_tui_reuses_ui_arguments() {
         assert_eq!(
             route(&["fractal", "tui", "--help"]),
-            (
-                Dispatch::Cli,
-                vec!["fractal".into(), "ui".into(), "--help".into()]
-            )
+            vec![OsString::from("fractal"), "ui".into(), "--help".into()]
         );
-    }
-
-    #[test]
-    fn fractal_dispatch_web() {
-        assert_eq!(route(&["fractal", "web"]).0, Dispatch::Web);
-        assert_eq!(route(&["st", "web"]).0, Dispatch::Web);
-        assert_eq!(route(&["st3", "web"]).0, Dispatch::Web);
     }
 
     #[test]
@@ -174,7 +145,7 @@ mod tests {
         ] {
             assert_eq!(
                 route(input),
-                (Dispatch::Cli, input.iter().map(OsString::from).collect())
+                input.iter().map(OsString::from).collect::<Vec<_>>()
             );
         }
     }

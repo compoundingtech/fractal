@@ -82,6 +82,10 @@ scratch_diagnostic_finish() {
   # The poller holds no pipe of the stage (its output is /dev/null), so the stage never waits for it.
   python3 scripts/script_process.py "$scratch_poller" 15 --parent "$BASHPID"
   echo "Test scratch: TMPDIR=$scratch on $(stat -f -c %T "$scratch"), filesystem $(df -Pm "$scratch" | awk 'NR==2 {print $2}') MiB, peak du of TMPDIR $(cat "$scratch_peak_file") MiB; /dev/shm $(stat -f -c %T /dev/shm 2>/dev/null || echo absent), $(df -Pm /dev/shm 2>/dev/null | awk 'NR==2 {print $2}') MiB, $(df -Pm /dev/shm 2>/dev/null | awk 'NR==2 {print $3}') MiB used at the end; memory $(awk '/MemTotal/ {printf "%d", $2 / 1024}' /proc/meminfo) MiB, peak RSS of the tests not measured"
+  # Several jobs share a ci box's /dev/shm: a shard that needs far more than the 0.5 GiB measured should be seen.
+  if [[ "$scratch" == /dev/shm/* && "$(cat "$scratch_peak_file")" -gt 4096 ]]; then
+    echo "::warning::the tests used $(cat "$scratch_peak_file") MiB of /dev/shm, more than the 4 GiB a shared runner allows for"
+  fi
   rm -f "$scratch_peak_file"
 }
 
@@ -91,18 +95,71 @@ start=$SECONDS status=0
 if [[ ( "$stage" == tests || "$stage" == mail-redelivery-canaries ) && -n "${CI_LOCAL_CARGO_HOME:-}" ]]; then
   export TMPDIR="$RUNNER_TEMP/t" TMP="$RUNNER_TEMP/t" TEMP="$RUNNER_TEMP/t"
   mkdir -p "$TMPDIR"
-  printf 'Test scratch filesystem: '
-  stat -f -c %T "$TMPDIR"
+  # On the ci boxes RUNNER_TEMP is ext3 and /dev/shm a 46 GiB tmpfs mounted exec (91 GiB of memory, six runners per box).
+  # Pull-request and merge-group test shards put TMPDIR in a /dev/shm directory of their own, as GitHub runners do below,
+  # and the tests about durability or disk cost keep RUNNER_TEMP/t (CI_TEST_DISK_TMPDIR). A shard's peak is about 0.5 GiB
+  # (2026-10-25), so six at once fit; each job still requires 20 GiB free. The runners persist: the directory is named
+  # for its runner, which runs one job at a time, and is removed on exit, failure or cancel, and by the runner's next
+  # tests job when a kill left it behind.
+  if [[ "$stage" == tests && "${GITHUB_ACTIONS:-}" == true && "${CI_TEST_LANE:-}" != daily && "${RUNNER_NAME:-}" =~ ^[A-Za-z0-9._-]+$ ]] \
+    && [[ "$(stat -f -c %T /dev/shm 2>/dev/null)" == tmpfs ]]; then
+    shm="/dev/shm/ci-tests.$RUNNER_NAME"
+    rm -rf "$shm"
+    if [[ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -ge $((20 * 1024 * 1024)) ]] \
+      && ! awk '$2 == "/dev/shm" {print $4}' /proc/mounts | tr ',' '\n' | grep -qx noexec; then
+      mkdir -m 700 "$shm"
+      trap 'rm -rf "$shm" || true' EXIT
+      trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+      export CI_TEST_DISK_TMPDIR="$TMPDIR" TMPDIR="$shm" TMP="$shm" TEMP="$shm"
+    fi
+  fi
+  echo "Test scratch filesystem: $(stat -f -c %T "$TMPDIR") at $TMPDIR; disk for durability tests: ${CI_TEST_DISK_TMPDIR:-none}"
+fi
+# On a CI runner the tests' TMPDIR is a disk (overlayfs), and their file-backed SQLite stores spend most of their time there waiting
+# on fsync. The runner's /dev/shm is tmpfs (8 GiB, noexec, on the 8x16 runners): remount it exec and resize it as perf.yml does, so the checkpoint tests'
+# free-space gate (about 17 GB, as in scripts/ci-local) passes, and put TMPDIR there. tmpfs holds only what the tests write: the
+# peak was 2.4 GiB per pull-request shard (2026-10-24). The tests about durability or disk cost use CI_TEST_DISK_TMPDIR, the old
+# TMPDIR (disk_tempdir in the tests' support code). The daily shards keep a disk for now.
+if [[ "$stage" == tests && -z "${CI_LOCAL_CARGO_HOME:-}" && "${GITHUB_ACTIONS:-}" == true && "${CI_TEST_LANE:-}" != daily ]] \
+  && [[ "$(stat -f -c %T /dev/shm 2>/dev/null)" == tmpfs ]]; then
+  # The runners mount it noexec; tests run programs they write into TMPDIR (installers, fake children).
+  sudo -n mount -o remount,exec,size=24G /dev/shm || echo "::warning::could not remount /dev/shm"
+  if [[ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -ge $((20 * 1024 * 1024)) ]] \
+    && ! awk '$2 == "/dev/shm" {print $4}' /proc/mounts | tr ',' '\n' | grep -qx noexec; then
+    export CI_TEST_DISK_TMPDIR="${TMPDIR:-/tmp}"
+    shm=$(mktemp -d /dev/shm/t.XXXXXX)
+    export TMPDIR="$shm" TMP="$shm" TEMP="$shm"
+  fi
+  echo "Test scratch filesystem: $(stat -f -c %T "${TMPDIR:-/tmp}") at ${TMPDIR:-/tmp}; disk for durability tests: ${CI_TEST_DISK_TMPDIR:-none}"
 fi
 case "$stage" in
   # The nextest --no-run step already compiled the test executables.
   tests) {
     # The standalone feature check is independent of the workspace's unified test build.
     # Only shard 1 (or an unpartitioned local run) needs to perform it.
-    if [[ -z "${CI_TEST_EXTRACTED:-}" && "${CI_TEST_PARTITION:-}" != hash:2/2 ]]; then conversation_model || exit $?; fi
+    # CI_TEST_PACKAGES (comma-separated package names; scripts/st-test's per-crate run, docs/per-crate-test-signing.md) narrows the run to
+    # those packages' tests on the same workspace build; CI_TEST_JUNIT names the file nextest writes its JUnit report to.
+    selected=()
+    if [[ -n "${CI_TEST_PACKAGES:-}" ]]; then
+      filter=""
+      for package in ${CI_TEST_PACKAGES//,/ }; do
+        [[ "$package" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "invalid package name in CI_TEST_PACKAGES: $package" >&2; exit 2; }
+        filter+="${filter:+ or }package(=$package)"
+      done
+      selected+=(-E "$filter")
+    fi
+    if [[ -n "${CI_TEST_JUNIT:-}" ]]; then
+      [[ "$CI_TEST_JUNIT" == /* ]] || { echo "CI_TEST_JUNIT must be an absolute path" >&2; exit 2; }
+      junit_config="$logs/junit-tool-config.toml"
+      printf '[profile.ci.junit]\npath = "%s"\n' "$CI_TEST_JUNIT" > "$junit_config"
+      selected+=(--tool-config-file "st-test:$junit_config")
+    fi
+    # The standalone feature check is a separate cargo test of one package.
+    if [[ -z "${CI_TEST_EXTRACTED:-}" && "${CI_TEST_PARTITION:-}" != hash:2/2 \
+          && ( -z "${CI_TEST_PACKAGES:-}" || ",$CI_TEST_PACKAGES," == *,fractal-conversation-ui,* ) ]]; then conversation_model || exit $?; fi
     scratch_diagnostic_start
     tests_status=0
-    bash scripts/ci-nextest run --test-threads "${CI_TEST_THREADS:-${CI_LOCAL_TEST_THREADS:-$(nproc)}}" --status-level pass || tests_status=$?
+    bash scripts/ci-nextest run --test-threads "${CI_TEST_THREADS:-${CI_LOCAL_TEST_THREADS:-$(nproc)}}" --status-level pass "${selected[@]}" || tests_status=$?
     scratch_diagnostic_finish
     exit "$tests_status"
   } 2>&1 | tee "$logs/$stage.log" || status=$? ;;

@@ -3642,9 +3642,23 @@ mod tests {
                 id,
                 Some(&transcript),
             )
+            .unwrap(),
+            vec!["omp", "--resume", transcript.to_str().unwrap()]
+        );
+        let other_id = "00000000-0000-4000-8000-000000000025";
+        let other = root.path().join(format!("2026-10-24_{other_id}.jsonl"));
+        fs::write(&other, format!("{{\"type\":\"session\",\"id\":\"{other_id}\"}}\n")).unwrap();
+        assert_eq!(
+            crate::native_resume::pi_family_argv(
+                "omp",
+                vec!["omp".into(), format!("--resume={}", other.display())],
+                &managed,
+                id,
+                Some(&transcript),
+            )
             .unwrap_err()
             .code,
-            "authored-session-selection"
+            "authored-session-mismatch"
         );
         assert_eq!(
             crate::native_resume::pi_family_argv(
