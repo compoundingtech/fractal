@@ -1403,6 +1403,9 @@ run with `--push` then starts that unit without waiting (`systemctl --user start
 `ST_EVIDENCE_LOG_NUDGE`): a pass counts only once the log lists it, so the agent's record is logged in seconds instead of at the next
 2-minute pull. The pull itself is the unit's, with the log key's grant; st-test never signs the log. Asking is best effort and never
 changes the result.
+A check the tree already has a passing signature for (the verifier's answer, the same one `st-test` asks after a run) is not run again:
+it prints `already signed` and, with `--push`, pushes that note as it is, so re-running on an unchanged tree is near instant. A failed
+record is not a signature. `--rerun` runs the check anyway. The megarepo members are fetched only once a check has to run.
 `scripts/ci-local` (what the Linux gate stages run through) measures and prints every time: the setup before the stages, each stage's start,
 end and seconds, and the time it spent waiting in the build admission queue (the shim's `cargo: waiting in order` / `got build slot` lines
 get a UTC stamp, and the waits are counted and added up per stage), in a table at the end. Each stage's output is also kept in
