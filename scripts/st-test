@@ -925,6 +925,24 @@ def usable_report(path):
         return False
 
 
+def env_skips_file(scratch, check):
+    """The file a check's tests append to when this host cannot run them (CI_TEST_ENV_SKIPS): one 'CRATE TEST' line per skip."""
+    return Path(scratch) / f'env-skips-{check}.txt'
+
+
+def crate_env_skips(path, crate):
+    """The env_skips input of one crate's record: its skipped tests, comma-joined, or 'none'."""
+    lines = path.read_text().splitlines() if path.exists() else []
+    value = ','.join(sorted({line.strip() for line in lines if line.strip().split(' ', 1)[0] == crate})) or 'none'
+    # The signer takes inputs of at most 500 characters, as evidence-wrap --input-file records a longer list.
+    return value if len(value) <= 500 else f'{value.count(",") + 1} entries, sha256 {hashlib.sha256(value.encode()).hexdigest()}'
+
+
+def takes_input_files(wrapper):
+    """Whether the base's evidence-wrap records --input-file (older bases' wrappers refuse the flag)."""
+    return '--input-file' in Path(wrapper).read_text()
+
+
 def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes, target, report=None):
     """The `rust-tests` check: one nextest run of the crates that have no passing note for their key, on the workspace build CI makes,
     then one signature per crate over that crate's part of the run. Returns the summary rows.
@@ -948,12 +966,14 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     selected = [crate for crate, _ in missing]
     if usable_report(report):
         junit, ran_seconds = report, 0
+        skips = env_skips_file(scratch, 'linux-gate')  # the tests of linux-gate's run wrote the report and their skips
         filterset = 'workspace'
         run_sha = hashlib.sha256(json.dumps([LOCAL['linux-gate']]).encode()).hexdigest()
     else:
         junit = Path(scratch) / 'nextest-junit.xml'
         environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
-        environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit))
+        skips = env_skips_file(scratch, RUST_TESTS)
+        environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit), CI_TEST_ENV_SKIPS=str(skips))
         environment.setdefault('CARGO_INCREMENTAL', '0')  # as the other checks: no incremental state in a one-shot build
         if target:
             environment['CARGO_TARGET_DIR'] = str(target)
@@ -987,7 +1007,9 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
                 '--input', f'crate={crate}', '--input', f'source_inputs={keys[crate]}', '--input', f'tests_run={facts["tests_run"]}',
                 '--input', f'tests_ignored={facts["tests_ignored"]}', '--input', f'test_list_sha256={facts["test_list_sha256"]}',
                 '--input', f'ignored_list_sha256={facts["ignored_list_sha256"]}',
-                '--input', f'filterset={filterset}', '--input', f'run_command_sha256={run_sha}']
+                '--input', f'filterset={filterset}', '--input', f'run_command_sha256={run_sha}',
+                # A test this host cannot run returns early and the report counts it as passed: the record names it.
+                '--input', f'env_skips={crate_env_skips(skips, crate)}']
         if RUST_TESTS in lanes:
             wrap += ['--lanes-from', lane_base]
         if toolchain:
@@ -1342,6 +1364,14 @@ def main(argv):
                 if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
                     # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
                     environment['CI_TEST_JUNIT'] = str(gate_report)
+                if name in BUILDS:
+                    # A test that cannot run on this host (no unprivileged user namespace, say) skips outside CI and writes its id here;
+                    # the note records the list as env_skips, so the evidence says which tests did not run on this machine. rust-tests
+                    # reads linux-gate's list for its per-crate records, so it is written even under a base wrapper without --input-file.
+                    skips = env_skips_file(scratch, name)
+                    environment['CI_TEST_ENV_SKIPS'] = str(skips)
+                    if takes_input_files(tools['evidence-wrap']):
+                        wrap += ['--input-file', f'env_skips={skips}']
                 if name in BASE_BOUND:
                     # clippy's ratchet compares with the base, as CI compares with the event's base: the base as just fetched,
                     # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.
