@@ -1897,7 +1897,7 @@ async fn a_local_only_harness_observation_wakes_only_the_client_feed() {
         expected_subject: None,
         idempotency_key: Some(format!("wake-usage-{tokens}")),
     };
-    let post = |input: ClaimInput| post_claim(State(state.clone()), Json(input));
+    let post = |input: ClaimInput| post_claim(State(state.clone()), None, Json(input));
     let reconciler_woke = || async {
         tokio::time::timeout(Duration::from_millis(20), state.notify.notified())
             .await
@@ -6284,6 +6284,53 @@ async fn message_send_peer_binding_preserves_unbound_local_sender_selection() {
         })).await;
         assert_eq!(status, StatusCode::OK, "{from}: {body}");
         assert!(body["from"].as_str().is_some(), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn message_claim_peer_binding_accepts_own_sender_and_rejects_spoofing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    // Keep the top-level actor valid: the attack is in the nested sender, not actor.
+    let app = router(state.clone()).layer(Extension(BoundAgent("agent/sender".into())));
+    let identity = public_identity(
+        &state.store, crate::store::identities::IdentityKind::Agent, "agent/sender",
+    ).unwrap().identity;
+    for (key, from) in [("own-label", "agent/sender"), ("own-identity", identity.as_str())] {
+        let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+            "subject": format!("message/{key}"), "kind": "message.sent", "actor": "agent/sender",
+            "fields": {"from": from, "to": "agent/receiver", "content": "Hello", "status": "sent"},
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{from}: {body}");
+        assert_eq!(body["body"]["fields"]["from"], from, "{body}");
+    }
+    for from in ["agent/other", "person/alex", "requester", "daemon/runtime"] {
+        for subject in ["message/spoofed", "message/own-label"] {
+            let before = state.store.index().unwrap();
+            let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+                "subject": subject, "kind": "message.sent", "actor": "agent/sender",
+                "fields": {"from": from, "to": "agent/receiver", "content": "Hello", "status": "sent"},
+            })).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{from}: {body}");
+            assert_eq!(body["code"], "foreign-agent-actor", "{from}: {body}");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+    assert!(state.store.claims_for("message/spoofed", None).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn message_claim_peer_binding_preserves_unbound_local_sender_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (index, from) in ["agent/sender", "agent/other", "person/alex", "person/requester", "daemon/runtime"].into_iter().enumerate() {
+        let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+            "subject": format!("message/unbound-{index}"), "kind": "message.sent", "actor": "agent/sender",
+            "fields": {"from": from, "to": "agent/receiver", "content": "Hello", "status": "sent"},
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{from}: {body}");
+        assert_eq!(body["body"]["fields"]["from"], from, "{body}");
     }
 }
 

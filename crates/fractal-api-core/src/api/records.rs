@@ -234,14 +234,35 @@ pub async fn get_document(
 
 pub async fn post_claim(
     State(state): State<AppState>,
+    bound: Option<Extension<BoundAgent>>,
     Json(request): Json<ClaimInput>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
     // A write can wait for the store's writer. It waits on the blocking pool, so the API's
     // workers keep answering other requests meanwhile.
     let store = state.store.clone();
     let kind = request.kind.clone();
-    let (response, appended) =
-        blocking_action(move || store.append_client_claim_outcome(&request)).await?;
+    let (response, appended) = blocking_api(move || {
+        // The generic claim writer is also a message sender. Bind its nested sender before
+        // append admission (including replay), just like the dedicated message endpoint.
+        if request.kind == "message.sent"
+            && let Some(Extension(BoundAgent(agent))) = bound
+            && let Some(from) = request.fields.get("from").and_then(Value::as_str)
+        {
+            let from = normalize_message_party(from);
+            let identity = public_identity(
+                &store,
+                crate::store::identities::IdentityKind::Agent,
+                &agent,
+            )?.identity;
+            if !is_bound_actor(&store, &from, &identity)? {
+                return Err(ApiError::bad(St3Error::new(
+                    "foreign-agent-actor",
+                    format!("this harness is `{agent}` and cannot act as `{from}`"),
+                )));
+            }
+        }
+        store.append_client_claim_outcome(&request).map_err(ApiError::bad)
+    }).await?;
     finish_claim_publication(&state, &kind, response, appended, None).await
 }
 
