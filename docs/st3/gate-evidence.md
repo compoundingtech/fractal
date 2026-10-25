@@ -196,7 +196,7 @@ undone by the merge queue's full run, and one run in five is sampled. The order,
    then one fetch of every branch and tag with the negative refspec `^refs/tags/evidence/*`. Deepening the shallow clone
    took 21 s against 11 s for a full fetch, so the step drops the shallow marker, fetches as a fresh clone would
    (`--refetch`, git 2.36 or later) and checks connectivity: 15 s in all, against 11 s for `fetch-depth: 0` today
-   (2026-10-20, from hetz2). `scripts/ci-evidence-signing-test` allows only literal positive depths and runs that fetch
+   (2026-10-20, from a build host). `scripts/ci-evidence-signing-test` allows only literal positive depths and runs that fetch
    against a real repository.
    A plain `git fetch` does not follow these tags either: a record's tag points at a commit no fetched branch holds.
    A fresh `git clone` does fetch them.
@@ -700,7 +700,7 @@ standard system directories, or the `path` in its configuration (`EVIDENCE_TOOL_
 A required check that runs in the Nix sandbox can be a check derivation (`checks.<system>.<check>` in `flake.nix`). It only
 produces output when its tests pass, and the output path hashes every input (source, `flake.lock`, toolchain, build script),
 so a valid path is both the proof that these inputs passed and a cache: an unchanged tree needs no rebuild. Today
-The first one built this way is `checks.genie-freshness` (about 163 s cold, 0.4 s warm on hetz2; a change to any file in the flake
+The first one built this way is `checks.genie-freshness` (about 163 s cold, 0.4 s warm on a build host; a change to any file in the flake
 source still rebuilds it, because its source is the whole flake).
 
 `scripts/nix-check-facts --check NAME --out FILE` builds the derivation and writes the facts for
@@ -1208,34 +1208,48 @@ message names the paths), and records `lane_definition_sha256`, the digest the v
 nothing changes. So this alone must never let a signed note skip a queue lane; shadow reporting and the pull-request signing path are the only
 uses until every lane a gate relies on has a clean trace (typescript-client has; genie-freshness has not been traced).
 
-#### Definition paths are the lane's command closure (`scripts/lane-definition-closure`)
+#### Definition paths are what the lane executes, plus its verdict data (`scripts/lane-definition-closure`)
 
-A file the lane's commands execute or read that `definition_paths` leaves out would let a tree change the check and still be signed, and a file
-listed that the lane never reads makes every change to it an unsignable lane edit. So the list is derived, not written by hand:
-`scripts/lane-definition-closure` starts from each lane's `argv` and statically follows what the command graph runs, sources, imports or reads by
-name, transitively: the shell words, Python string constants and imports, JavaScript literals and relative imports that name a tracked file
+A lane's definition is what defines its verdict: the files it executes, plus the data that sets the bar (baselines, splits, budgets,
+allowlists), declared as verdict data. A file a test merely checks for consistency is part of the tree under test, and the signed run tested
+it. A file the lane executes that `definition_paths` leaves out would let a tree change the check and still be signed; a file listed that does
+not define the verdict makes every change to it an unsignable lane edit. So the list is derived, not written by hand.
+
+`scripts/lane-definition-closure` starts from each lane's `argv` and statically follows what the command graph runs, sources, imports or names,
+transitively: the shell words, Python string constants and imports, JavaScript literals and relative imports that name a tracked file
 (`bash scripts/x`, `. "$(dirname "$0")/x"`, `$root/scripts/x`, `SourceFileLoader(..., 'scripts/x')`, `open('.github/clippy-baseline.json')`, an
-f-string such as `.github/{name}-compat-baseline.json` as a glob), the part of `flake.nix` that defines the dev shell the lane enters (its
-shellHook's scripts), the package.json whose script a `pnpm` call runs, and the files a tool reads by convention (`cargo` `.cargo/config.toml`,
-`nextest` `.config/nextest.toml`, `pnpm` the root manifest, lockfile and workspace file). A mention counts like a call, so it errs wide. Its
-docstring lists the rules and the few explicit tables (an edge no reference shows, such as rust-tests' JUnit report coming from the tests stage;
-`scripts/install-git-hooks`, whose pre-push stub runs the base's scripts at push time, not in the lane). The walk ends at the tree under test (the
-Rust workspace and the pnpm workspace packages, the lanes' `tree_inputs`; a lint that reads a crate's build.rs reads its subject, not its
-definition) except the lanes' runners inside them (`apps/fractal-web/scripts/ci`, `packages/fractal-ui/scripts`); a file outside the lanes' code
-directories (`scripts/`, `nix/`, those runners) is read as data, not followed; and a directory the code lists (iterdir, glob, `find`,
-`dir/*.json`) counts whole inside those directories and is reported, not added, elsewhere (a lint over `crates/`, every release note).
+f-string such as `.github/{name}-compat-baseline.json` as a glob). It sorts each file it reaches into one of two kinds:
 
-`scripts/lane-definition-closure --why` prints each lane's closure with the file that names each path; `--write` sets every lane's
-`definition_paths` to it (review the diff: it changes each lane's `lane_definition_sha256`, so a note signed under the old list is
-`wrong_definition` once the change is the base, and the tree is signed again); `--check` exits 1 naming any path a lane reads that its list does not
-cover. `scripts/lane-definition-closure-test` (in ci-script-tests) tests each reference form on fixtures and holds the committed lanes to their
-closure in that check's sparse copy, and `scripts/ci-genie-freshness` runs `--check` over the whole tree, so a change that makes a lane run or read
-a new file fails until the lane file lists it. A superset is allowed (a parent directory covers the files below it): `ci-script-tests` and
-`genie-freshness` keep all of `scripts/`, which one of their tests lists. Narrowed on 2026-10-25 from all of `scripts/` and `.st/` for five lanes:
-a change to a script now is a lane edit only for the lanes that run or read it. The lanes' `.st` paths are the `.st` files their own commands read
-in the tree (`linux-gate` and `rust-tests`: `.st/module-layers.json`; the web lanes none); the gate and the verifier read the policy, keys and
-lanes from the base, never the tree. Limits: the closure is static, so a path built at run time from names it cannot see needs a table entry, and
-the sparse copy sees only ci-script-tests' inputs (the whole-tree `--check` sees the rest).
+- **Executed**: the lanes' own code and its data in their code directories (`scripts/`; `nix/` when Nix code imports it; a lane's runners inside a
+  package, such as fractal-web's `apps/fractal-web/scripts/ci` and `packages/fractal-ui/scripts`), the part of `flake.nix` that defines the dev
+  shell the lane enters and what that Nix code reads, the package.json whose script a `pnpm` call runs, and the files a tool the lane runs reads
+  by convention (`cargo` `.cargo/config.toml`, `nextest` `.config/nextest.toml`, `pnpm` the root manifest, lockfile and workspace file, `buck2`
+  its cell, root, targets and toolchains). A tool counts when a shell word or a whole string constant names it, not a word inside an assert's
+  text. Only executed code is followed, and a mention counts like a call, so it errs wide.
+- **Read**: any other file the code names (a workflow, a doc, a fixture outside the code directories). This is the tree under test unless the
+  lane declares it as verdict data (the `VERDICT_DATA` table, one reason per file: linux-gate's clippy baseline and splits, its compat
+  baselines and the daily-only filterset; rust-tests' filterset and messaging compat baseline; fractal-web's license inventory).
+
+The walk ends at the tree under test (the Rust workspace and the pnpm workspace packages, the lanes' `tree_inputs`; a lint that reads a
+crate's build.rs reads its subject, not its definition). A lane's runners inside a package are followed only for that lane: for genie-freshness,
+which imports `kit-play-shards.mjs` to test it, they are the tree under test. A lane whose tests run in a sparse copy (ci-script-tests) is walked
+only inside that copy's inputs. A directory the code lists (iterdir, glob, `find`, `dir/*.json`) counts whole inside the code directories and is
+reported, not added, elsewhere (a lint over `crates/`, every release note). The docstring lists the rules and the few explicit tables (an edge
+no reference shows, such as rust-tests' JUnit report coming from the tests stage; `scripts/install-git-hooks`, whose pre-push stub runs the
+base's scripts at push time, not in the lane).
+
+`--why` prints each lane's executed paths and verdict data with the file that names each one, and what it only reads; `--write` sets each lane's
+`definition_paths` to executed plus verdict data (review the diff: it changes each lane's `lane_definition_sha256`, so a note signed under the
+old list is `wrong_definition` once the change is the base, and the tree is signed again); `--check` exits 1 naming any executed path or
+declared verdict-data file that a lane's list does not cover. That is the rule it enforces: executed is a subset of definition for every lane,
+and verdict data is a subset of definition where declared. `scripts/lane-definition-closure-test` (in ci-script-tests) tests each form on
+fixtures and holds the committed lanes to it in that check's sparse copy, and `scripts/ci-genie-freshness` runs `--check` over the whole tree,
+so a change that makes a lane execute a new file fails until the lane file lists it. A superset is allowed (a parent directory covers the files
+below it): `ci-script-tests` and `genie-freshness` are kept by hand (`KEPT`): all of `scripts/` and `.st/`, the flake, and the few files outside
+them that the walk finds they execute. Narrowed on 2026-10-25 from all of `scripts/` and `.st/` for the other four lanes: a change to a script
+now is a lane edit only for the lanes that run it, and a change to a workflow or a doc that a test checks is not a lane edit at all. The gate and
+the verifier read the policy, keys and lanes from the base, never the tree. Limits: the walk is static, so a path built at run time from names it
+cannot see needs a table entry, and it cannot tell a test that runs a script from one that reads it as text (it errs wide).
 
 #### Lane closure: what the lane really touches (`scripts/evidence-lane-trace`)
 
@@ -1530,7 +1544,7 @@ there with the key within reach (cooperative trust, see Host keys). It changes n
 
 **The signer starts with a scrubbed loader environment.** `evidence-sign` refuses to start when the loader or the interpreter was
 told to load code (`LD_PRELOAD` and the rest of its `REFUSED_ENVIRONMENT`): a preloaded library inside the signer is an injection
-point, and the refusal stays. Some hosts set `LD_PRELOAD` for every process (hetz2 preloads jemalloc), which made every signed push
+point, and the refusal stays. Some hosts set `LD_PRELOAD` for every process (one build host preloads jemalloc), which made every signed push
 there report "a check failed". So the launcher scrubs instead: `evidence-wrap` resolves the signer program with the caller's PATH,
 then starts it by absolute path without any `LD_*`, `DYLD_*` or `PYTHON*` variable, `GLIBC_TUNABLES`, `GCONV_PATH` or `NLSPATH`,
 and with `PATH=/run/current-system/sw/bin:/usr/bin:/bin`; `st-test` starts the signer's interpreter with `-I`. The checks themselves

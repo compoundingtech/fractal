@@ -136,8 +136,8 @@ and a stale pass is reused. Four controls, in order of when they bite:
 - `.st/evidence-skip-policy.json`: `rust-tests` (shadow: `enforce` false, `pull_request` only, `sample_one_in` 5, no `inputs`: the keys are
   per crate). Fleet level: the wrapper command; host and agent levels: `python3 scripts/ci-rust-test-result`, lane-bound, requiring `crate`,
   `source_inputs`, `tests_run`, `tests_ignored`, `test_list_sha256`, `ignored_list_sha256`, `filterset` and `run_command_sha256`.
-- `.st/required-lanes.json` (since narrowed to the scripts and files the lane's commands read, without `.st/rust-test-inputs.json`, which
-  only the base's copy keys a note: docs/st3/gate-evidence.md, "Definition paths are the lane's command closure"): the `rust-tests` lane (the test-stage scripts through `scripts`, `.config/nextest.toml`, the filterset, the
+- `.st/required-lanes.json` (since narrowed to what the lane's commands execute plus its verdict data, without `.st/rust-test-inputs.json`,
+  which only the base's copy keys a note: docs/st3/gate-evidence.md, "Definition paths are what the lane executes, plus its verdict data"): the `rust-tests` lane (the test-stage scripts through `scripts`, `.config/nextest.toml`, the filterset, the
   flake files, and `.st`, which holds `rust-test-inputs.json`), so a tree that edits how keys are computed never skips on a local note. `Cargo.toml` and `Cargo.lock` are deliberately not definition paths: they are in every crate's key, so a change re-runs every crate, and as definition paths they would make every lockfile change an unsignable lane edit. `tree_inputs` is informational (the policy consistency test and the lane trace read it); nothing indexes or verifies rust-tests notes by it.
 - `scripts/evidence-verify --check rust-tests --members --policy-from BASE --repository R ...`: the member list and each key come from the
   tree's manifests with the `rust-test-keys` that sits next to the verifier and `.st/rust-test-inputs.json` at the base; the check is satisfied

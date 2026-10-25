@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""scripts/lane-definition-closure: what it finds for each reference form, and that every committed lane's closure is declared.
+"""scripts/lane-definition-closure: what it finds for each reference form, which of it a lane executes, and that every committed
+lane declares what it executes and its verdict data.
 
-The repository test holds each lane of .st/required-lanes.json to its closure: a file the lane's commands execute or read that its
-definition_paths do not cover fails here (run `scripts/lane-definition-closure --write` and review the diff). It runs in
-ci-script-tests' sparse copy, where only that check's declared inputs exist, so there it sees the part of each closure that lies in
-them; scripts/ci-genie-freshness runs `scripts/lane-definition-closure --check` over the whole tree.
+The repository test holds each lane of .st/required-lanes.json to its definition: a file the lane's commands execute, or a file its
+VERDICT_DATA declares, that its definition_paths do not cover fails here (run `scripts/lane-definition-closure --write` and review the
+diff). It runs in ci-script-tests' sparse copy, where only that check's declared inputs exist, so there it sees the part of each lane
+that lies in them; scripts/ci-genie-freshness runs `scripts/lane-definition-closure --check` over the whole tree.
 """
 import importlib.machinery
 import importlib.util
@@ -54,8 +55,18 @@ class Fixture(unittest.TestCase):
         self.tree(files)
         return ldc.lane_closure(ldc.Repo(self.root), {'argv': argv}, lane)
 
+    def harness(self, lanes):
+        old = ldc.HARNESS, ldc.FOLLOWED, ldc.HARNESS_LANES
+        ldc.HARNESS = ('tools/ci',)
+        ldc.FOLLOWED = ('scripts', 'nix') + ldc.HARNESS
+        ldc.HARNESS_LANES = set(lanes)
+        self.addCleanup(lambda: (setattr(ldc, 'HARNESS', old[0]), setattr(ldc, 'FOLLOWED', old[1]),
+                                 setattr(ldc, 'HARNESS_LANES', old[2])))
+
     def paths(self, argv, files, lane='demo'):
-        return self.closure(argv, files, lane).paths()
+        """Everything the walk finds: what the lane executes and what it only reads."""
+        closure = self.closure(argv, files, lane)
+        return sorted(set(closure.paths()) | set(closure.read()))
 
 
 SH = '#!/usr/bin/env bash\n'
@@ -133,16 +144,14 @@ class PythonForms(Fixture):
         closure = self.closure(['python3', 'scripts/lint'], {
             'scripts/lint': PY + 'open("crates/c/build.rs").read()\nopen("Cargo.toml").read()\nopen(".config/limits.toml").read()\n',
             'crates/c/build.rs': '', 'Cargo.toml': '', '.config/limits.toml': ''})
-        self.assertEqual(closure.paths(), ['.config/limits.toml', 'scripts/lint'])
+        self.assertEqual(closure.paths(), ['scripts/lint'])
+        self.assertEqual(closure.read(), ['.config/limits.toml'])
         self.assertEqual(sorted(closure.subject), ['Cargo.toml', 'crates/c/build.rs'])
 
 
 class OtherForms(Fixture):
     def test_javascript_imports_and_literals(self):
-        old = ldc.HARNESS, ldc.FOLLOWED
-        ldc.HARNESS = ('tools/ci',)
-        ldc.FOLLOWED = ('scripts', 'nix') + ldc.HARNESS
-        self.addCleanup(lambda: (setattr(ldc, 'HARNESS', old[0]), setattr(ldc, 'FOLLOWED', old[1])))
+        self.harness({'demo'})
         paths = self.paths(['node', 'tools/ci/run.mjs'], {
             'tools/ci/run.mjs': "// import './commented.mjs'\nimport { x } from './helper';\nconst t = `${dir}/case-${n}.json`;\n"
                                 "readFileSync('.github/budget.json');\n",
@@ -189,12 +198,67 @@ class OtherForms(Fixture):
                                                    '.cargo/config.toml': '', '.config/other.toml': ''})
         self.assertEqual(paths, ['.cargo/config.toml', '.config/nextest.toml', 'scripts/t'])
 
+    def test_a_tool_runs_from_a_command_word_not_from_text_about_it(self):
+        paths = self.paths(['python3', 'scripts/t'], {
+            'scripts/t': PY + 'import subprocess\nsubprocess.run(["cargo", "test"])\n'
+                              'assert "cargo nextest run" in open("scripts/t").read()\n',
+            '.cargo/config.toml': '', '.config/nextest.toml': ''})
+        self.assertEqual(paths, ['.cargo/config.toml', 'scripts/t'])
+
+    def test_naming_the_lockfile_is_not_a_pnpm_call(self):
+        paths = self.paths(['python3', 'scripts/t'], {'scripts/t': PY + 'open("pnpm-lock.yaml").read()\n',
+                                                      'package.json': '{}', 'pnpm-lock.yaml': ''})
+        self.assertEqual(paths, ['pnpm-lock.yaml', 'scripts/t'])
+
+
+class Executed(Fixture):
+    """What a lane executes is its definition; what it only reads is the tree under test unless declared as verdict data."""
+
+    def test_code_is_executed_and_data_it_names_outside_the_code_directories_is_read(self):
+        closure = self.closure(['nix', 'develop', '-c', 'bash', 'scripts/a'], {
+            'flake.nix': "{ outputs = { self }: let\n  devShells.default = import ./nix/shell.nix { };\nin { }; }\n",
+            'flake.lock': '{}', 'nix/shell.nix': '{ }: builtins.fromJSON (builtins.readFile ../pins.json)\n', 'pins.json': '{}',
+            'nix/hash': 'sha256-x', 'scripts/a': SH + 'bash scripts/b\njq . .github/baseline.json docs/x.md scripts/b.json\n'
+                                                     'cat nix/hash\n',
+            'scripts/b': SH, 'scripts/b.json': '{}', '.github/baseline.json': '{}', 'docs/x.md': ''})
+        self.assertEqual(closure.paths(), ['flake.lock', 'flake.nix', 'nix/shell.nix', 'pins.json', 'scripts/a', 'scripts/b',
+                                           'scripts/b.json'])  # what Nix code reads is the shell; scripts/ data is the lane's own
+        self.assertEqual(closure.read(), ['.github/baseline.json', 'docs/x.md', 'nix/hash'])  # a script that names nix/ reads it
+
+    def test_a_harness_is_the_runner_of_its_lanes_and_the_subject_of_the_others(self):
+        self.harness({'web'})
+        old = ldc.SUBJECT
+        ldc.SUBJECT = ('tools',)
+        self.addCleanup(setattr, ldc, 'SUBJECT', old)
+        files = {'scripts/a': SH + 'node tools/ci/run.mjs\n', 'tools/ci/run.mjs': "import './helper.mjs'\n",
+                 'tools/ci/helper.mjs': ''}
+        self.assertEqual(self.closure(['bash', 'scripts/a'], files, 'web').paths(), ['scripts/a', 'tools/ci'])
+        other = self.closure(['bash', 'scripts/a'], files, 'other')
+        self.assertEqual(other.paths(), ['scripts/a'])
+        self.assertEqual(sorted(other.subject), ['tools/ci/run.mjs'])
+
+    def test_a_sparse_lane_is_walked_inside_its_inputs(self):
+        old = ldc.SPARSE
+        ldc.SPARSE = {'demo'}
+        self.addCleanup(setattr, ldc, 'SPARSE', old)
+        closure = self.closure(['bash', 'scripts/a'], {
+            '.st/evidence-skip-policy.json': json.dumps({'checks': {'demo': {'inputs': ['.st', 'scripts']}}}),
+            'scripts/a': SH + 'bash scripts/b\nbash tools/c\n', 'scripts/b': SH, 'tools/c': SH})
+        self.assertEqual(closure.paths(), ['scripts/a', 'scripts/b'])
+        self.assertEqual(closure.read(), [])
+
 
 class CommandLine(Fixture):
-    def lanes(self, definition):
+    def lanes(self, definition, kept=None):
         (self.root / '.st').mkdir(exist_ok=True)
-        (self.root / '.st/required-lanes.json').write_text(json.dumps(
-            {'version': 1, 'lanes': {'demo': {'argv': ['bash', 'scripts/a'], 'definition_paths': definition}}}, indent=2) + '\n')
+        lanes = {'demo': {'argv': ['bash', 'scripts/a'], 'definition_paths': definition}}
+        if kept is not None:
+            lanes['kept'] = {'argv': ['bash', 'scripts/a'], 'definition_paths': kept}
+        (self.root / '.st/required-lanes.json').write_text(json.dumps({'version': 1, 'lanes': lanes}, indent=2) + '\n')
+
+    def definitions(self):
+        lanes = json.loads((self.root / '.st/required-lanes.json').read_text())['lanes']
+        return {name: entry['definition_paths'] for name, entry in lanes.items()}
 
     def run_tool(self, *args):
         return subprocess.run([sys.executable, str(TOOL), '--root', str(self.root), *args], capture_output=True, text=True, env=GIT_ENV)
@@ -214,21 +278,58 @@ class CommandLine(Fixture):
         self.assertEqual(self.run_tool('--check').returncode, 0)
         self.assertEqual(self.run_tool('--lane', 'nope').returncode, 2)
 
+    def test_verdict_data_is_declared_and_kept_lanes_are_left_alone(self):
+        tool = TOOL.read_text()
+        tool = tool.replace("KEPT = {'ci-script-tests', 'genie-freshness'}", "KEPT = {'kept'}")
+        tool = tool.replace("VERDICT_DATA = {\n", "VERDICT_DATA = {\n    'demo': {'.github/baseline.json': 'the bar'},\n", 1)
+        patched = Path(self.tmp.name) / 'lane-definition-closure'
+        patched.write_text(tool)
+        run = lambda *args: subprocess.run([sys.executable, str(patched), '--root', str(self.root), *args],
+                                           capture_output=True, text=True, env=GIT_ENV)
+        self.tree({'scripts/a': SH + 'jq . .github/baseline.json docs/x.json\n', '.github/baseline.json': '{}', 'docs/x.json': '{}'})
+        self.lanes(['scripts/a'], kept=['scripts'])
+        done = run('--check')
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn('.github/baseline.json   (the bar)', done.stdout)
+        self.assertNotIn('docs/x.json', done.stdout)  # read, not executed: the tree under test
+        self.assertEqual(run('--write').returncode, 0)
+        self.assertEqual(self.definitions(), {'demo': ['.github/baseline.json', 'scripts/a'], 'kept': ['scripts']})
+        self.assertEqual(run('--check').returncode, 0)
+        self.lanes(['.github/baseline.json', 'scripts/a'], kept=['.github'])  # a kept lane is still held to what it executes
+        done = run('--check')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('kept: 1 file(s) the lane executes are not in its definition_paths', done.stdout)
+
 
 class CommittedLanes(unittest.TestCase):
-    def test_every_lane_closure_is_inside_its_definition_paths(self):
+    def test_every_lane_executes_and_declares_only_what_its_definition_paths_cover(self):
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         repo = ldc.Repo(ROOT)
         for name, entry in sorted(lanes.items()):
             closure = ldc.lane_closure(repo, entry, name)
             missing = [path for path in closure.paths() if not ldc.covered(path, entry['definition_paths'])]
-            self.assertEqual(missing, [], f'lane {name} reads files its definition_paths do not cover (named by '
+            self.assertEqual(missing, [], f'lane {name} executes files its definition_paths do not cover (named by '
                              f'{sorted({closure.why.get(p) or closure.why.get(p + "/") for p in missing})}); '
                              'run scripts/lane-definition-closure --write and review the diff')
+            verdict = [path for path in ldc.VERDICT_DATA.get(name, {}) if not ldc.covered(path, entry['definition_paths'])]
+            self.assertEqual(verdict, [], f'lane {name} declares verdict data its definition_paths do not cover')
 
     def test_the_tables_name_lanes_and_paths_that_exist(self):
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         self.assertLessEqual(set(ldc.EXTRA), set(lanes))
+        self.assertLessEqual(set(ldc.VERDICT_DATA) | ldc.KEPT | ldc.SPARSE | ldc.HARNESS_LANES, set(lanes))
+        repo = ldc.Repo(ROOT)
+        for lane in sorted(ldc.SPARSE):
+            inputs = ldc.sparse_inputs(repo, lane)
+            runner = next(word for word in lanes[lane]['argv'] if word.startswith('scripts/'))
+            self.assertIn(f'--check {lane}', (ROOT / runner).read_text(), f'{runner} no longer runs in a sparse copy')
+            for path in sorted(ldc.VERDICT_DATA.get(lane, {})):
+                self.assertTrue(ldc.covered(path, inputs), path)
+        for lane, paths in sorted(ldc.VERDICT_DATA.items()):
+            for path in sorted(paths):  # the sparse copy holds only ci-script-tests' inputs; the whole-tree --check sees the rest
+                in_copy = ldc.covered(path, ldc.sparse_inputs(repo, 'ci-script-tests')) or (ROOT / 'scripts/ci-genie-freshness').exists()
+                if (ROOT / '.git').exists() or in_copy and (ROOT / path).exists():
+                    self.assertTrue((ROOT / path).is_file(), f'VERDICT_DATA {lane}: {path} does not exist')
         for path in sorted(ldc.NOT_FOLLOWED | set(ldc.NOT_READ)):
             self.assertTrue(path.startswith('scripts/') and (ROOT / path).is_file(), path)  # scripts/ is in the sparse copy too
         for referrer, paths in sorted(ldc.NOT_READ.items()):

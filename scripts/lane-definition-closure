@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""The files a lane's commands execute or read, found statically: the source of each lane's `definition_paths`.
+"""What a lane executes, found statically, plus the data it declares sets its bar: the source of each lane's `definition_paths`.
 
-  scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... [--why | --json]   print each lane's closure
+  scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... [--why | --json]   print each lane's definition
   scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... --check            exit 1 if a lane's file misses one
-  scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... --write            set definition_paths to the closure
+  scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... --write            set definition_paths to it
 
 `.st/required-lanes.json` gives each lane an `argv` and the `definition_paths` whose bytes decide what that argv does: a tree that
-changes one is a lane edit, which is never signed locally (scripts/evidence-wrap refuses it; CI runs the check). A file the lane's
-commands read that the list leaves out would let a tree change the check and still be signed, so the list is this closure, and
-scripts/lane-definition-closure-test holds every lane's closure inside its definition_paths (a path covers a file when equal or a
-parent directory). From the argv the walk reads every file the command names, and follows the ones that are code:
+changes one is a lane edit, which is never signed locally (scripts/evidence-wrap refuses it; CI runs the check). A lane's definition is
+what defines its verdict: the files it executes, plus the data that sets the bar (baselines, splits, budgets, allowlists), declared as
+verdict data (VERDICT_DATA). A file a test merely checks for consistency is part of the tree under test, and the signed run tested it.
+scripts/lane-definition-closure-test holds every lane's executed files and declared verdict data inside its definition_paths (a path
+covers a file when equal or a parent directory). From the argv the walk reads every file the command names, and follows the ones that
+are code it executes:
 
   shell (by extension or shebang)  every word that names a tracked file, comments dropped: `bash scripts/x`, `scripts/x`,
                                    `. scripts/x`, `"$(dirname "$0")/x"`, `$root/scripts/x`, `python3 scripts/x`, a glob that picks
@@ -28,18 +30,25 @@ A word names a file when it is a tracked file joined to the root, to the referri
 (`ROOT / 'scripts' / name`); a bare shell word with no `/` before or in it is relative to the working directory only (`pnpm install`
 is not scripts/install). A mention counts like a call (a path in a message is in the closure too): the walk errs wide.
 
+A file it reaches is executed when it is the lanes' own code or data (FOLLOWED: scripts/, nix/ when Nix code imports it, the lane's
+HARNESS), what evaluated Nix code reads, a package manifest whose script a pnpm call runs, or a convention file of a tool the lane runs
+(TOOL_FILES; a tool runs when a shell word or a whole string constant is its name). Anything else it reaches is read: the tree under
+test, unless VERDICT_DATA declares it. Only executed code is followed.
+
 What ends the walk, on purpose:
   * The tree under test (SUBJECT: the Rust workspace and the pnpm workspace packages, the lanes' `tree_inputs`): a script that reads
-    a crate's build.rs to lint it reads the check's subject, not its definition. HARNESS (the lanes' own runners inside a package)
-    is followed like scripts/, and a package.json whose script a pnpm call runs is in the closure.
+    a crate's build.rs to lint it reads the check's subject, not its definition. HARNESS (the runners of HARNESS_LANES inside a
+    package) is followed like scripts/ for those lanes only, and a package.json whose script a pnpm call runs is executed.
   * Files outside FOLLOWED (scripts/, nix/, HARNESS) are read as data: a workflow or doc that names scripts is not run by a lane.
+  * A SPARSE lane's tests run in a copy that holds only its skip-policy inputs: the walk does not leave them.
   * A directory the code lists (iterdir, glob, rglob, listdir, walk, find, `dir/*.json`) is all in the closure inside FOLLOWED (the
     lanes' own fixtures); elsewhere it is the tree the code checks (a lint over crates/, every release note), reported, not added.
   * NOT_FOLLOWED, NOT_READ and NOT_DEFINITION name the few files the rules above get wrong, each with why; EXTRA adds the edges no
     reference shows; TOOL_FILES the files a tool the lane runs reads by convention (nextest's .config/nextest.toml).
 
---check prints, per lane, the closure paths its definition_paths do not cover (exit 1 if any). --write sets each lane's
-definition_paths to its closure (run it in a full checkout, then review the diff). Exit 2 for a usage error. Needs Python and git.
+--check prints, per lane, the executed paths and verdict-data files its definition_paths do not cover (exit 1 if any). --write sets
+each lane's definition_paths to what it executes plus its verdict data (run it in a full checkout, then review the diff); KEPT lanes
+are kept by hand and left alone. Exit 2 for a usage error. Needs Python and git.
 """
 import argparse
 import ast
@@ -53,6 +62,36 @@ import sys
 sys.dont_write_bytecode = True
 
 LANES = '.st/required-lanes.json'
+SKIP_POLICY = '.st/evidence-skip-policy.json'
+
+# Lanes whose tests run in a copy of the tree that holds only their skip-policy inputs (scripts/ci-sparse-tree): a file outside the
+# copy cannot run in the lane, so the walk does not reach it.
+SPARSE = {'ci-script-tests'}
+
+# The data that sets a lane's bar, which the lane reads but does not execute: the baselines it compares with, the splits and filters
+# that pick what runs, the allowlists and inventories it holds the tree to. A lane's definition is what it executes plus this; any
+# other file it only reads is the tree under test (a test that checks a workflow or a doc tests that file, and the signed run tested
+# it). Lane -> path -> why.
+VERDICT_DATA = {
+    'linux-gate': {
+        '.config/daily-only.filterset': 'the tests the PR run leaves to the daily run (scripts/ci-nextest)',
+        '.github/clippy-baseline.json': 'the warnings clippy may still report (scripts/clippy_ratchet.py)',
+        '.github/clippy-splits.json': 'how the clippy stage splits the workspace (scripts/clippy_ratchet.py)',
+        '.github/fleet-compat-baseline.json': 'the release the fleet-compat stage runs against (scripts/compat-baseline)',
+        '.github/messaging-compat-baseline.json': 'the release the messaging compatibility tests run against (scripts/ci-local)',
+    },
+    'rust-tests': {
+        '.config/daily-only.filterset': 'the tests the PR run leaves to the daily run (scripts/ci-nextest)',
+        '.github/messaging-compat-baseline.json': 'the release the messaging compatibility tests run against (scripts/ci-local)',
+    },
+    'fractal-web': {
+        'buck2/dependencies/licenses.json': 'the license inventory the lockfile is held to (scripts/ci-fractal-web-licenses)',
+    },
+}
+
+# Lanes whose definition_paths are kept by hand, wider than what they execute; --write leaves them alone and --check still holds what
+# they execute inside them. The CI scripts' self-tests: their definition is the scripts and the checks' own data (Factory, 2026-10-25).
+KEPT = {'ci-script-tests', 'genie-freshness'}
 
 # Edges no static reference shows, each with why. Keep this small: a reference the scanner can see belongs in the code it is in.
 EXTRA = {
@@ -63,12 +102,14 @@ EXTRA = {
 # The tree under test: what the lanes build and test (the Rust workspace, the pnpm workspace packages), their `tree_inputs`. A script
 # that reads a file here (a lint over the crates, a test that copies a build script into a fixture) reads the subject of the check,
 # not its definition: a change there changes the result the way any source change does, so the walk ends there. HARNESS are the
-# directories inside it that hold the lanes' own runners (scripts/ci-fractal-web runs apps/fractal-web/scripts/ci/*.mjs), which
-# are followed like scripts/. A package.json whose script a lane's pnpm call runs is in the closure (its `scripts` entry is the
+# directories inside it that hold the runners of the HARNESS_LANES (scripts/ci-fractal-web runs apps/fractal-web/scripts/ci/*.mjs),
+# which those lanes follow like scripts/; for any other lane they are the subject (scripts/ci-fractal-web-test imports
+# kit-play-shards.mjs to test it). A package.json whose script a lane's pnpm call runs is in the closure (its `scripts` entry is the
 # command). Nothing outside SUBJECT is assumed to be the subject.
 SUBJECT = ('Cargo.toml', 'Cargo.lock', 'src', 'tests', 'crates', 'components', 'examples', 'wit', 'vendor',
            'apps/fractal-web', 'apps/ios', 'clients/typescript', 'packages/fractal-sdk', 'packages/fractal-ui')
 HARNESS = ('apps/fractal-web/scripts/ci', 'packages/fractal-ui/scripts')
+HARNESS_LANES = {'fractal-web'}
 # Where the lanes' own code lives. A file elsewhere that the code names (a workflow, a doc, a fixture, a baseline) is read as data:
 # it is in the closure, and what it names is not followed (a workflow source that names every script is not run by a lane).
 FOLLOWED = ('scripts', 'nix') + HARNESS
@@ -102,6 +143,7 @@ TOOL_FILES = {
     'nextest': ('.config/nextest.toml',),  # cargo-nextest's profiles (the ci profile, retries, the JUnit report)
     'cargo': ('.cargo/config.toml',),  # rustflags, [env] and any runner, for every cargo command the lane runs
     'pnpm': ('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml'),  # the root manifest, the lockfile, the workspace
+    'buck2': ('.buckconfig', '.buckroot', 'BUCK', 'buck2/toolchains/BUCK'),  # the cell, its root, the targets and the toolchains
 }
 
 # Shell functions that run a file named by their arguments: name -> the path an argument stands for.
@@ -119,7 +161,7 @@ ENUMERATING = re.compile(r'\*+(?:\.[A-Za-z0-9]+)*\Z')
 LISTING_ATTRS = {'iterdir', 'glob', 'rglob'}
 LISTING_CALLS = {'listdir', 'walk', 'scandir'}
 SH_LISTING = re.compile(r'(?:^|[\s;|&(])(?:find|ls)\s+(?:-\S+\s+)*["\']?([A-Za-z0-9_.@+/$}{-]+)')
-PNPM = re.compile(r'(?:^|[ \t;|&(`])pnpm((?:[ \t]+[^\s;|&)`]+)*)', re.M)
+PNPM = re.compile(r'(?:^|[ \t;|&(`])pnpm(?![\w.-])((?:[ \t]+[^\s;|&)`]+)*)', re.M)  # not pnpm-lock.yaml
 
 
 class Repo:
@@ -432,8 +474,10 @@ def under(path, prefixes):
 
 
 class Closure:
-    def __init__(self, repo):
+    def __init__(self, repo, lane=None):
         self.repo = repo
+        self.harness = HARNESS if lane in HARNESS_LANES else ()
+        self.followed = tuple(p for p in FOLLOWED if p not in HARNESS or p in self.harness)
         self.files = set()
         self.dirs = set()
         self.scanned = set()
@@ -441,20 +485,38 @@ class Closure:
         self.listings = {}
         self.subject = {}
         self.tools = set()
+        self.executed = set()
+        self.bound = None
 
-    def add(self, path, because, manifest=False):
-        if path in NOT_DEFINITION or path in self.files or path in NOT_READ.get(because, ()):
+    def add(self, path, because, manifest=False, executed=False):
+        """Add a file the lane names. It is executed (part of what the lane runs) when it is the lanes' own code or data (FOLLOWED;
+        a Nix file only when Nix code imports it), a package manifest whose script a pnpm call runs, or a tool's convention file;
+        anything else it reads as data. Only executed code is followed."""
+        if path in NOT_DEFINITION or path in NOT_READ.get(because, ()):
             return
-        if under(path, SUBJECT) and not under(path, HARNESS) and not manifest:
+        if self.bound is not None and not covered(path, self.bound):
+            return  # not in the copy the lane's commands run in (SPARSE)
+        what = kind(self.repo, path)
+        # A script that names a file of nix/ (a .nix file, the pins a dev shell evaluates) reads it: Nix code that imports it runs it.
+        evaluated = not under(path, ('nix',)) or because.endswith('.nix')
+        # What evaluated Nix code reads (a JSON of pinned inputs, a file a shellHook reads) is part of the dev shell the lane runs in.
+        executed = executed or manifest or because.endswith('.nix') or under(path, self.followed) and evaluated
+        if path in self.files:
+            if executed and path not in self.executed:
+                self.executed.add(path)
+                self.why[path] = because
+                if what != 'data' and path not in NOT_FOLLOWED and under(path, self.followed):
+                    self.scan(path)
+            return
+        if under(path, SUBJECT) and not under(path, self.harness) and not manifest:
             self.subject.setdefault(path, because)
             return
         self.files.add(path)
         self.why[path] = because
-        what = kind(self.repo, path)
-        if what == 'data' or path in NOT_FOLLOWED or not under(path, FOLLOWED):
+        if executed:
+            self.executed.add(path)
+        if not executed or what == 'data' or path in NOT_FOLLOWED or not under(path, self.followed):
             return
-        if what == 'nix' and not because.endswith('.nix'):
-            return  # a Nix file is evaluated when the dev shell's Nix code imports it; a script that names one reads it
         self.scan(path)
 
     def add_dir(self, path, because):
@@ -464,13 +526,15 @@ class Closure:
             for name in self.repo.below(path):
                 self.add(name, because)
 
-    def words(self, words, bases, origin, js=False, globs=False, narrow=()):
+    def words(self, words, bases, origin, js=False, globs=False, narrow=(), commands=()):
         """Add the files the words name. A word resolves from the referring file's directory, the root and every directory the file
         names (`ROOT / 'scripts' / name`, `cd apps/x && node scripts/y`). A `narrow` word (a shell word, or a word inside a longer
         string) with no `/` before or inside it is an argument relative to the working directory, so it does not resolve from the
-        file's own directory (`pnpm install` is not scripts/install); a script that runs from elsewhere names that directory."""
+        file's own directory (`pnpm install` is not scripts/install); a script that runs from elsewhere names that directory. A tool
+        in TOOL_FILES runs when one of `commands` is its name: a shell word, or a whole string constant (an argv element), not a word
+        inside a longer string (an assert on a script's text)."""
         everything = sorted(set(words) | set(narrow))
-        self.tools |= set(TOOL_FILES) & set(everything)
+        self.tools |= set(TOOL_FILES) & set(commands)
         mentioned = set()
         for word in everything:
             _, dirs, _ = resolve(self.repo, word, bases, js)
@@ -505,7 +569,7 @@ class Closure:
 
     def list_dirs(self, dirs, origin):
         for path in sorted(dirs):
-            if under(path, FOLLOWED):
+            if under(path, self.followed):
                 self.add_dir(path, origin)  # the lanes' own fixtures and helpers (scripts/x/schemas): all of it is read
             else:
                 self.listings.setdefault(path, set()).add(origin)
@@ -591,7 +655,7 @@ class Closure:
         text = self.repo.read(path).decode('utf-8', 'replace')
         if what == 'shell':
             words, listed, pnpm = shell_words(text)
-            self.words([], bases, path, globs=True, narrow=words)
+            self.words([], bases, path, globs=True, narrow=words, commands=words)
             self.listed(listed, bases, path)
             self.pnpm(pnpm, '', path)
         elif what == 'python':
@@ -599,7 +663,7 @@ class Closure:
                 words, inner, listed, modules, patterns = python_words(text)
             except SyntaxError:
                 words, inner, listed, modules, patterns = [], WORD.findall(text), [], [], []
-            self.words(words, bases, path, narrow=inner)
+            self.words(words, bases, path, narrow=inner, commands=words)
             self.patterns(patterns, bases, path)
             self.listed(listed, bases, path)
             for module in modules:
@@ -614,7 +678,7 @@ class Closure:
         elif what == 'js':
             strings, patterns = js_strings(text)
             inner = [word for value in strings for word in shell_words(value)[0]]
-            self.words(strings, bases, path, js=True, narrow=inner)
+            self.words(strings, bases, path, js=True, narrow=inner, commands=strings)
             self.patterns(patterns, bases, path)
         elif what == 'nix':
             code = flake_shell(text, self.shell) if path == 'flake.nix' and getattr(self, 'shell', None) else nix_code(text)
@@ -638,16 +702,18 @@ class Closure:
             for name in ('flake.nix', 'flake.lock'):
                 if name in self.repo.files:
                     self.files.add(name)
+                    self.executed.add(name)
                     self.why[name] = origin
             self.shell = shell
             self.scanned.discard('flake.nix')
             self.scan('flake.nix')
             self.shell = None
+        self.bound = getattr(self, 'sparse', None)  # the dev shell is evaluated from the checkout; the command may run in a copy
         line = ' '.join(command)
         if command[:2] in (['bash', '-c'], ['sh', '-c']) and len(command) == 3:
             line = command[2]
         words, listed, pnpm = shell_words(line)
-        self.words([], [''], origin, globs=True, narrow=words)
+        self.words([], [''], origin, globs=True, narrow=words, commands=words)
         self.listed(listed, [''], origin)
         self.pnpm(pnpm, '', origin)
 
@@ -657,23 +723,37 @@ class Closure:
         for tool in sorted(self.tools):
             for path in TOOL_FILES[tool]:
                 if path in self.repo.files:
-                    self.add(path, f'{origin} runs {tool}')
-        for harness in HARNESS:
+                    self.add(path, f'{origin} runs {tool}', executed=True)
+        for harness in self.harness:
             if harness in self.repo.dirs and any(under(name, (harness,)) for name in self.files):
                 self.add_dir(harness, f'{origin} runs code in {harness}')
 
     def paths(self):
-        """The closure as sorted paths: a listed directory stands for everything below it."""
+        """What the lane executes, as sorted paths: a listed directory (all of it the lanes' own code) stands for everything below."""
         out = set(self.dirs)
-        for name in self.files:
+        for name in self.executed:
             if not any(name == d or name.startswith(d + '/') for d in self.dirs):
                 out.add(name)
         return sorted(p for p in out if not any(p != d and p.startswith(d + '/') for d in self.dirs))
 
+    def read(self):
+        """The files the lane only reads as data: the tree under test unless the lane declares one as VERDICT_DATA."""
+        return sorted(self.files - self.executed)
+
+
+def sparse_inputs(repo, lane):
+    """The paths of the copy a SPARSE lane's tests run in: its skip-policy entry's inputs."""
+    try:
+        return json.loads(repo.read(SKIP_POLICY))['checks'][lane]['inputs']
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ValueError(f'{lane} runs in a sparse copy of {SKIP_POLICY} checks.{lane}.inputs, which cannot be read: {error}')
+
 
 def lane_closure(repo, entry, lane=None):
     """The closure of one lane entry ({argv, ...}) in `repo`, as a Closure."""
-    closure = Closure(repo)
+    closure = Closure(repo, lane)
+    if lane in SPARSE:
+        closure.sparse = sparse_inputs(repo, lane)
     closure.argv(entry['argv'], f'{lane or "lane"} argv')
     for extra in EXTRA.get(lane, {}).get('argv', []):
         closure.argv(extra, f'{lane} EXTRA')
@@ -690,10 +770,12 @@ def main(argv):
     parser.add_argument('--root', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
     parser.add_argument('--lanes', help=f'the lane file (default: ROOT/{LANES})')
     parser.add_argument('--lane', action='append', default=[], help='only this lane (repeatable)')
-    parser.add_argument('--json', action='store_true', help='print {lane: [paths]}')
-    parser.add_argument('--why', action='store_true', help='print, for each path, the file that names it')
-    parser.add_argument('--check', action='store_true', help='exit 1 when a lane\'s closure is not covered by its definition_paths')
-    parser.add_argument('--write', action='store_true', help='set each lane\'s definition_paths in the lane file to its closure')
+    parser.add_argument('--json', action='store_true', help='print {lane: [paths]}: what each lane executes plus its verdict data')
+    parser.add_argument('--why', action='store_true', help='print, for each path, the file that names it, and what the lane only reads')
+    parser.add_argument('--check', action='store_true',
+                        help='exit 1 when a lane\'s definition_paths miss a file it executes or a declared verdict-data file')
+    parser.add_argument('--write', action='store_true',
+                        help='set each lane\'s definition_paths to what it executes plus its verdict data (KEPT lanes untouched)')
     args = parser.parse_args(argv)
     if sum((args.json, args.why, args.check, args.write)) > 1:
         parser.error('--json, --why, --check and --write are exclusive')
@@ -712,25 +794,42 @@ def main(argv):
         print(f'lane-definition-closure: no lane {", ".join(unknown)}', file=sys.stderr)
         return 2
     result, failed = {}, False
+    written = []
     for name in names:
         closure = lane_closure(repo, lanes[name], name)
-        result[name] = closure.paths()
+        verdict = VERDICT_DATA.get(name, {})
+        result[name] = sorted(set(closure.paths()) | set(verdict))
         if args.check:
-            missing = [p for p in result[name] if not covered(p, lanes[name]['definition_paths'])]
-            if missing:
+            declared = lanes[name]['definition_paths']
+            missing = [p for p in closure.paths() if not covered(p, declared)]
+            missing_verdict = [p for p in sorted(verdict) if not covered(p, declared)]
+            if missing or missing_verdict:
                 failed = True
-                print(f'{name}: {len(missing)} file(s) the lane reads are not in its definition_paths:')
+            if missing:
+                print(f'{name}: {len(missing)} file(s) the lane executes are not in its definition_paths:')
                 for path in missing:
                     print(f'  {path}   (named by {closure.why.get(path) or closure.why.get(path + "/")})')
-            else:
-                print(f'{name}: closure of {len(result[name])} path(s) covered by its definition_paths')
+            if missing_verdict:
+                print(f'{name}: {len(missing_verdict)} verdict-data file(s) are not in its definition_paths:')
+                for path in missing_verdict:
+                    print(f'  {path}   ({verdict[path]})')
+            if not missing and not missing_verdict:
+                print(f'{name}: the {len(closure.paths())} path(s) it executes and its {len(verdict)} verdict-data file(s) '
+                      'are covered by its definition_paths')
         elif args.write:
-            lanes[name]['definition_paths'] = result[name]
+            if name not in KEPT:
+                lanes[name]['definition_paths'] = result[name]
+                written.append(name)
         elif not args.json:
             print(f'{name}:')
-            for path in result[name]:
+            for path in closure.paths():
                 print(f'  {path}' + (f'   <- {closure.why.get(path) or closure.why.get(path + "/")}' if args.why else ''))
+            for path in sorted(verdict):
+                print(f'  {path}' + (f'   (verdict data: {verdict[path]})' if args.why else ''))
             if args.why:
+                for path in closure.read():
+                    if path not in verdict:
+                        print(f'  (reads {path}, the tree under test: {closure.why.get(path)})')
                 for path, origins in sorted(closure.listings.items()):
                     print(f'  (lists {path}/, the tree it checks: {", ".join(sorted(origins))})')
     if args.json:
@@ -738,7 +837,8 @@ def main(argv):
     if args.write:
         with open(lane_file, 'w') as handle:
             handle.write(json.dumps(document, indent=2) + '\n')
-        print(f'wrote the definition_paths of {", ".join(names)} to {lane_file}')
+        print(f'wrote the definition_paths of {", ".join(written) or "no lane"} to {lane_file}'
+              + (f' (kept by hand: {", ".join(sorted(set(names) & KEPT))})' if set(names) & KEPT else ''))
     return 1 if failed else 0
 
 
