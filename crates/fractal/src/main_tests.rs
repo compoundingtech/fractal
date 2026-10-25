@@ -2445,6 +2445,15 @@ fn every_cli_command_has_a_valid_help_surface() {
                 "{} contains legacy product wording: {line}",
                 path.join(" ")
             );
+            if !line.trim_start().starts_with("Usage:") {
+                assert!(
+                    !line.split_whitespace().any(|word| {
+                        matches!(word.trim_matches(['`', '.', ',', ';', ':']), "seat" | "seats" | "seat's" | "Seat" | "Seats")
+                    }),
+                    "{} contains legacy agent terminology: {line}",
+                    path.join(" ")
+                );
+            }
         }
         let subcommands = command.get_subcommands().cloned().collect::<Vec<_>>();
         for subcommand in subcommands {
@@ -2469,6 +2478,28 @@ fn every_cli_command_has_a_valid_help_surface() {
     let command = Cli::command();
     command.clone().debug_assert();
     visit(&command, &["fractal".into()]);
+}
+
+#[test]
+fn web_help_hides_only_its_unsupported_inherited_global_options() {
+    let command = cli_command();
+    let globals = command.get_arguments()
+        .filter(|argument| argument.is_global_set())
+        .collect::<Vec<_>>();
+    assert_eq!(globals.len(), 7);
+    let web = command.find_subcommand("web").unwrap();
+    for argument in globals {
+        let id = argument.get_id().as_str();
+        assert!(web.get_arguments().find(|arg| arg.get_id().as_str() == id).unwrap().is_hide_set(), "{id}");
+    }
+    let mut setup = command.find_subcommand("setup").unwrap().clone();
+    assert!(setup.render_long_help().to_string().contains("--endpoint"));
+    let mut web = web.clone();
+    let help = web.render_long_help().to_string();
+    assert!(help.contains("--state-dir"));
+    assert!(help.contains("--help"));
+    assert!(!help.contains("--endpoint"));
+    assert!(!help.contains("--instance"));
 }
 
 #[test]
