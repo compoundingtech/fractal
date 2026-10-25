@@ -27,7 +27,7 @@ rusqlite = { version = "0.32", features = ["bundled", "trace", "functions", "hoo
 rustls = { version = "0.23", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 # Claim bodies keep the writer's field order when they decode, so a claim hashed in insertion
-# order by an old build still verifies (see `hash::claim_id_is_content_hash`). Inside smalltalk
+# order by an old build still verifies (see `hash::claim_id_is_content_hash`). Inside Fractal
 # another dependency turns this on; the crate asks for it so it behaves the same built alone.
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"

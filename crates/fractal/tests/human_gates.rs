@@ -1,4 +1,4 @@
-//! A person answers a mission's human gate from every surface: client-v0 actions (stui, iOS),
+//! A person answers a mission's human gate from every surface: client-v0 actions (Fractal TUI, iOS),
 //! the CLI, and the HTTP API. Each test drives a real reconciler and an in-process API.
 
 use fractal_daemon::MissionsStore;

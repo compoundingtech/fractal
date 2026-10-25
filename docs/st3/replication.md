@@ -754,8 +754,8 @@ its first differing ranges in order, and this build no longer falls back to a fu
 when that listing stops on tombstone ranges. The large answers also stop once every member runs
 this build. A pair of members with only tombstone differences reports no
 progress, so the worker rests rather than loops. Importing older or losing checkpoint lineages
-remains separate ([#1433](https://github.com/compoundingtech/smalltalk/issues/1433),
-[#1052](https://github.com/compoundingtech/smalltalk/issues/1052)); live-envelope convergence
+remains separate ([#1433](https://github.com/compoundingtech/fractal/issues/1433),
+[#1052](https://github.com/compoundingtech/fractal/issues/1052)); live-envelope convergence
 does not assert equal tombstone inventories.
 
 `sync::worker::tests::checkpoint_tombstones_do_not_starve_later_live_ranges` proves later notes

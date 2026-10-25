@@ -52,7 +52,7 @@ class RenameProof(unittest.TestCase):
             (tree / 'docs').mkdir()
             path = tree / 'docs/build.md'
             valid = ('nix build .#st-chatgpt\nnix develop .#web\n'
-                     'nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt\n'
+                     'nix build github:compoundingtech/fractal/<commit>#st-chatgpt\n'
                      'nix build .#checks.<system>.genie-freshness\n'
                      'nix build .#checks.<system>.NAME\n')
             path.write_text(valid)
@@ -62,7 +62,7 @@ class RenameProof(unittest.TestCase):
             for invalid in ('nix build .#fractal-chatgpt', 'nix build .#web',
                             'nix build .#checks.x86_64-linux.suite',
                             'nix build .#checks.unknown.NAME',
-                            'nix build github:compoundingtech/smalltalk/main#missing'):
+                            'nix build github:compoundingtech/fractal/main#missing'):
                 path.write_text(valid + invalid)
                 self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['result'], 'FAIL')
 
@@ -75,7 +75,7 @@ class RenameProof(unittest.TestCase):
         expected = text.replace(f'-p {old}', f'-p {new}')
         self.assertEqual(docs.rewrite(text), expected)
         self.assertEqual(docs.rewrite(expected), expected)
-        for prefix in ('.#', 'github:compoundingtech/smalltalk/<commit>#'):
+        for prefix in ('.#', 'github:compoundingtech/fractal/<commit>#'):
             self.assertEqual(docs.rewrite('nix build ' + prefix + 'fractal-chatgpt'),
                              'nix build ' + prefix + 'st-chatgpt')
         with tempfile.TemporaryDirectory() as directory:

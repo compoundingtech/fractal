@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""How long the per-PR suite takes on a dev box: scripts/st-test's own run records against the time objective.
+
+  scripts/st-test-report [RUNS.jsonl ...] [--hours 24 | --since 2026-10-24T00:00:00Z] [--slo-s 720] [--max-s 900] [--markdown]
+
+Reads the lines scripts/st-test appends after every run (default ${XDG_STATE_HOME:-~/.local/state}/st-test/runs.jsonl, or ST_TEST_RUNS) and
+prints JSON, or with --markdown a short table. Nothing is written and nothing is run.
+
+The objective (docs/st3/gate-evidence.md, "Running the checks locally"): a full warm run of the per-PR suite (`scripts/st-test` with no
+--check and no --crate, on a kept build target) takes 12 minutes (--slo-s 720) or less. Only such runs in the window (by `ended`) count, and
+only those that ran and signed all of it: exit 0. The others are counted by why they are left out: `not_full`, `cold`, `partial` (exit 4:
+a tree that edits a lane runs nothing for that check, so its time is not a run of the suite) and `failed`. Percentiles are nearest-rank (p90 of N sorted values is the
+value at ceil(0.9 N) - 1). Breach: at least one counted run, and its p90 over --slo-s or any counted run over --max-s (default 900, 15 minutes).
+`slowest` is the five stages or checks with the highest mean over the counted runs (a run's linux-gate stages when scripts/ci-local printed
+them, else its summary rows). An unreadable file is an error, never zeros; a line that is not a version 1 record is counted as `unreadable`.
+"""
+import argparse
+import collections
+import datetime
+import json
+import math
+import os
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+
+PARTIAL = 4  # nothing failed, but a check did not run: the tree edits its lane (CI runs it), so the time is not the suite's
+
+
+def default_path():
+    """Where scripts/st-test records its runs (the same rule it uses)."""
+    value = os.environ.get('ST_TEST_RUNS', '')
+    if value and value != 'off':
+        return Path(value)
+    state = os.environ.get('XDG_STATE_HOME', '')
+    return Path(state if os.path.isabs(state) else Path.home() / '.local/state') / 'st-test/runs.jsonl'
+
+
+def parse_time(text):
+    when = datetime.datetime.fromisoformat(text.replace('Z', '+00:00'))
+    return when if when.tzinfo else when.replace(tzinfo=datetime.timezone.utc)
+
+
+def iso(when):
+    return when.astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def percentile(values, share):
+    """Nearest rank: the value at ceil(share * N) - 1 of the sorted values; None for none."""
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(share * len(ordered)) - 1)] if ordered else None
+
+
+def summary(totals):
+    return {'count': len(totals), 'p50_s': percentile(totals, 0.5), 'p90_s': percentile(totals, 0.9), 'max_s': max(totals) if totals else None}
+
+
+def read_records(paths):
+    """(records, unreadable lines). A file that cannot be read raises OSError."""
+    records, unreadable = [], 0
+    for path in paths:
+        for line in Path(path).read_text(errors='replace').splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                if not isinstance(record, dict) or record.get('v') != 1 or not isinstance(record.get('total_s'), int):
+                    raise ValueError('not a version 1 record')
+                record['_ended'] = parse_time(record['ended'])
+            except (ValueError, KeyError, TypeError, AttributeError):
+                unreadable += 1
+                continue
+            records.append(record)
+    return records, unreadable
+
+
+def excluded_by(record):
+    """Why a record does not count toward the objective, or None when it does (the first reason that applies)."""
+    if record.get('full') is not True:
+        return 'not_full'
+    if record.get('warm') is not True:
+        return 'cold'
+    if record.get('exit') == PARTIAL:
+        return 'partial'
+    if record.get('exit') != 0:
+        return 'failed'
+    return None
+
+
+def parts(record):
+    """(kind, name, seconds) for what a run spent its time on: its linux-gate stages when it has them, else its summary rows."""
+    stages = record.get('stages') or []
+    if stages:
+        return [('stage', stage.get('name'), stage.get('seconds')) for stage in stages if isinstance(stage, dict)]
+    return [('check', row.get('name'), row.get('seconds')) for row in record.get('rows') or [] if isinstance(row, dict)]
+
+
+def report(records, since, until, slo_s=720, max_s=900, unreadable=0):
+    window = [record for record in records if since <= record['_ended'] <= until]
+    excluded = collections.Counter({'not_full': 0, 'cold': 0, 'partial': 0, 'failed': 0})
+    counted = []
+    for record in window:
+        reason = excluded_by(record)
+        if reason:
+            excluded[reason] += 1
+        else:
+            counted.append(record)
+    counted.sort(key=lambda record: record['_ended'])
+    totals = [record['total_s'] for record in counted]
+    overall = summary(totals)
+    reasons = []
+    if counted and overall['p90_s'] > slo_s:
+        reasons.append(f'p90 {overall["p90_s"]}s is over the {slo_s}s objective')
+    over = [total for total in totals if total > max_s]
+    if counted and over:
+        reasons.append(f'{len(over)} full warm run(s) over {max_s}s (slowest {max(over)}s)')
+    hosts = collections.defaultdict(list)
+    for record in counted:
+        hosts[str(record.get('host'))].append(record['total_s'])
+    spent = collections.defaultdict(list)
+    for record in counted:
+        for kind, name, seconds in parts(record):
+            if isinstance(name, str) and isinstance(seconds, (int, float)):
+                spent[(kind, name)].append(seconds)
+    slowest = sorted(({'name': name, 'kind': kind, 'count': len(values), 'mean_s': round(sum(values) / len(values), 1),
+                       'p90_s': percentile(values, 0.9)} for (kind, name), values in spent.items()),
+                     key=lambda row: (-row['mean_s'], row['name']))[:5]
+    return {'window': {'since': iso(since), 'until': iso(until)}, 'slo_s': slo_s, 'max_allowed_s': max_s, **overall,
+            'within_slo': round(sum(total <= slo_s for total in totals) / len(totals), 3) if totals else None,
+            'breach': bool(reasons), 'breach_reasons': reasons, 'excluded': dict(excluded), 'unreadable': unreadable,
+            'by_host': {host: summary(values) for host, values in sorted(hosts.items())}, 'slowest': slowest,
+            'runs': [{'ended': record['ended'], 'host': record.get('host'), 'total_s': record['total_s'], 'tree': record.get('tree')}
+                     for record in counted]}
+
+
+def seconds(value):
+    return '-' if value is None else f'{value}s'
+
+
+def markdown(result):
+    excluded = ', '.join(f'{count} {reason}' for reason, count in result['excluded'].items() if count) or 'none'
+    share = '-' if result['within_slo'] is None else f'{result["within_slo"]:.0%}'
+    unreadable = f'; {result["unreadable"]} unreadable lines' if result['unreadable'] else ''
+    lines = [f'**st-test full warm runs**, {result["window"]["since"]} .. {result["window"]["until"]}: {result["count"]} counted '
+             f'(left out: {excluded}{unreadable})', '',
+             f'Objective: p90 at most {result["slo_s"]}s, no run over {result["max_allowed_s"]}s; {share} of runs within {result["slo_s"]}s.', '',
+             '| runs | count | p50 | p90 | max |', '|---|---:|---:|---:|---:|',
+             f'| all | {result["count"]} | {seconds(result["p50_s"])} | {seconds(result["p90_s"])} | {seconds(result["max_s"])} |']
+    lines += [f'| {host} | {row["count"]} | {seconds(row["p50_s"])} | {seconds(row["p90_s"])} | {seconds(row["max_s"])} |'
+              for host, row in result['by_host'].items()]
+    if result['slowest']:
+        lines += ['', '| slowest stage or check | mean | p90 |', '|---|---:|---:|']
+        lines += [f'| {row["name"]} ({row["kind"]}) | {row["mean_s"]}s | {seconds(row["p90_s"])} |' for row in result['slowest']]
+    lines += ['', f'**Breach**: {"; ".join(result["breach_reasons"])}' if result['breach'] else
+              ('**Within the objective.**' if result['count'] else 'No full warm run in the window: nothing to judge.')]
+    return '\n'.join(lines)
+
+
+def main(argv, now=None):
+    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser.add_argument('files', nargs='*', metavar='RUNS.jsonl', help='default: the file scripts/st-test writes')
+    parser.add_argument('--hours', type=float, default=24.0, help='the window, ending now (default 24)')
+    parser.add_argument('--since', help='the window starts here instead (ISO 8601, UTC)')
+    parser.add_argument('--slo-s', type=int, default=720, help='the p90 objective in seconds (default 720)')
+    parser.add_argument('--max-s', type=int, default=900, help='no single full warm run may take longer (default 900)')
+    parser.add_argument('--markdown', action='store_true', help='a short table instead of JSON')
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as error:
+        return 2 if error.code else 0
+    if args.hours <= 0 or args.slo_s <= 0 or args.max_s <= 0:
+        print('--hours, --slo-s and --max-s must be positive', file=sys.stderr)
+        return 2
+    until = now or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        since = parse_time(args.since) if args.since else until - datetime.timedelta(hours=args.hours)
+    except ValueError:
+        print('bad --since', file=sys.stderr)
+        return 2
+    try:
+        records, unreadable = read_records(args.files or [default_path()])
+    except OSError as error:  # an unreadable file is an error, never zeros
+        print(f'st-test-report: cannot read the runs: {error}', file=sys.stderr)
+        return 1
+    result = report(records, since, until, args.slo_s, args.max_s, unreadable)
+    print(markdown(result) if args.markdown else json.dumps(result, indent=2))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
