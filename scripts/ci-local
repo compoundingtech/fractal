@@ -232,14 +232,26 @@ if [ "${CI_LOCAL_SERIAL:-}" != 1 ] && [[ " $* " == *" tests "* ]]; then
   done
 fi
 in_lane() { local n; for n in "${lane[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
+# A process and everything under it, children first (read from /proc: a parent's PPid line), so a stage the lane started does not
+# outlive it. What detaches on purpose (the test guardian's setsid) is not under it and is not reached, as before.
+stop_tree() {
+  local pid=$1 status child
+  for status in /proc/[0-9]*/status; do
+    if [ "$(sed -n 's/^PPid:[[:space:]]*//p' "$status" 2>/dev/null)" = "$pid" ]; then
+      child=${status#/proc/}; child=${child%/status}
+      stop_tree "$child"
+    fi
+  done
+  kill "$pid" 2>/dev/null || true
+}
 lane_pid=
 if [ "${#lane[@]}" -gt 0 ]; then
   echo "ci-local: $(for n in "${lane[@]}"; do printf '%s ' "${stages[$n]}"; done)run alongside the other stages; their output follows when they are done"
   ( for n in "${lane[@]}"; do run_stage "$n" "${stages[$n]}" quiet; done ) &
   lane_pid=$!
-  # Stopped, the run takes its lane with it before the scratch it uses is removed.
+  # Stopped, the run takes its lane with it, the stage the lane is running included, before the scratch they use is removed.
   # (|| true: under set -e a lane that already ended would make the trap's own exit status the run's.)
-  trap 'kill "$lane_pid" 2>/dev/null || true; wait "$lane_pid" 2>/dev/null || true; rm -rf "$scratch" "$tmp"' EXIT
+  trap 'stop_tree "$lane_pid"; wait "$lane_pid" 2>/dev/null || true; rm -rf "$scratch" "$tmp"' EXIT
 fi
 for n in "${!stages[@]}"; do
   in_lane "$n" || run_stage "$n" "${stages[$n]}" shown
