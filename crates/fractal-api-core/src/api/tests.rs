@@ -6320,6 +6320,46 @@ async fn message_claim_peer_binding_accepts_own_sender_and_rejects_spoofing() {
 }
 
 #[tokio::test]
+async fn message_claim_peer_binding_rejects_missing_or_null_sender_before_write_or_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(Extension(BoundAgent("agent/sender".into())));
+    let (status, accepted) = json_request(app.clone(), "/v1/claims", json!({
+        "subject": "message/accepted", "kind": "message.sent", "actor": "agent/sender",
+        "idempotency_key": "accepted-message",
+        "fields": {"from": "agent/sender", "to": "agent/receiver", "content": "Hello", "status": "sent"},
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+
+    for (name, from) in [("missing", None), ("null", Some(Value::Null))] {
+        for (subject, key) in [
+            (format!("message/{name}"), format!("refused-{name}")),
+            ("message/accepted".into(), "accepted-message".into()),
+        ] {
+            let mut fields = json!({"to": "agent/receiver", "content": "Hello", "status": "sent"});
+            if let Some(from) = &from {
+                fields["from"] = from.clone();
+            }
+            let request = json!({
+                "subject": subject, "kind": "message.sent", "actor": "agent/sender",
+                "idempotency_key": key, "fields": fields,
+            });
+            // Retry a refused key explicitly, and also attempt replay of an accepted key.
+            for _ in 0..2 {
+                let before = state.store.index().unwrap();
+                let (status, body) = json_request(app.clone(), "/v1/claims", request.clone()).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{name}: {body}");
+                assert_eq!(body["code"], "foreign-agent-actor", "{name}: {body}");
+                assert_eq!(state.store.index().unwrap(), before);
+            }
+        }
+        assert!(state.store.claims_for(&format!("message/{name}"), None).unwrap().is_empty());
+        assert!(state.store.message(&format!("message/{name}")).unwrap().is_none());
+    }
+    assert_eq!(state.store.claims_for("message/accepted", Some("message.sent")).unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn message_claim_peer_binding_preserves_unbound_local_sender_selection() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());

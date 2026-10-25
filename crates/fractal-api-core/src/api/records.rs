@@ -246,8 +246,13 @@ pub async fn post_claim(
         // append admission (including replay), just like the dedicated message endpoint.
         if request.kind == "message.sent"
             && let Some(Extension(BoundAgent(agent))) = bound
-            && let Some(from) = request.fields.get("from").and_then(Value::as_str)
         {
+            let from = request.fields.get("from").and_then(Value::as_str).ok_or_else(|| {
+                ApiError::bad(St3Error::new(
+                    "foreign-agent-actor",
+                    format!("this harness is `{agent}` and must name its own message sender"),
+                ))
+            })?;
             let from = normalize_message_party(from);
             let identity = public_identity(
                 &store,
