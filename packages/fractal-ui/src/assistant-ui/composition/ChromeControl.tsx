@@ -27,6 +27,8 @@ export interface ChromeControlProps {
   readonly popup?: 'dialog' | 'menu'
   readonly expanded?: boolean
   readonly controls?: string
+  /** Warm the control's data on hover, focus or press start; it never opens or presses anything itself. */
+  readonly onPrefetch?: () => void
   /** A header-edge control: in a narrow host its 44px touch target overhangs the gutter so the glyph stays where the 28px control put it. */
   readonly edge?: 'lead' | 'trail'
   readonly tooltipPlacement?: 'top' | 'bottom'
@@ -36,7 +38,7 @@ export interface ChromeControlProps {
  * One quiet 28px icon button for the chrome: borderless, filled on hover, named by the kit tooltip.
  * Inside a React Aria trigger (MenuTrigger, DialogTrigger) it is the trigger's button.
  */
-export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, edge, tooltipPlacement = 'bottom' }: ChromeControlProps) {
+export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, onPrefetch, edge, tooltipPlacement = 'bottom' }: ChromeControlProps) {
   const reasonId = React.useId()
   // Inside a narrow (phone) host every chrome control is a 44px touch target; a narrow desktop pane keeps desktop density.
   const narrow = React.useContext(NarrowLayoutContext)
@@ -75,6 +77,7 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
       {...(popup === undefined ? {} : { 'aria-haspopup': popup })}
       {...(expanded === undefined ? {} : { 'aria-expanded': expanded })}
       {...(controls === undefined ? {} : { 'aria-controls': controls })}
+      {...(onPrefetch === undefined ? {} : { onHoverStart: onPrefetch, onFocus: onPrefetch, onPressStart: onPrefetch })}
       isDisabled={isDisabled}
       {...(onPress === undefined ? {} : { onPress })}
       {...stylex.props(styles.control, (pressed === true || active) && styles.pressed, ...touch)}

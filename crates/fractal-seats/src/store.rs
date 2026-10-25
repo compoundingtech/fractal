@@ -143,6 +143,7 @@ pub mod retirements;
 pub mod revision_seats;
 pub mod rollouts;
 pub mod roster_admission;
+pub mod runtime_start_diagnostics;
 pub mod runtime_starts;
 pub mod seat_status;
 pub mod seats;

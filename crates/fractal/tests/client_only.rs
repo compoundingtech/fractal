@@ -13,7 +13,7 @@ use fractal_daemon::{api::AppState, model::PersonAskRequest, store::Store};
 use fractal_client::{Client, PersonPairingBegin};
 use std::{
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
@@ -64,8 +64,8 @@ impl Tui {
             })
             .unwrap();
         let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_st3"));
-        // This proves pairing and control, read off the classic layout's screens.
-        command.args(["ui", "--classic"]);
+        // This proves pairing and control, read off Now, which fills a space with nothing open.
+        command.args(["ui"]);
         command.env_clear();
         command.env("HOME", root);
         command.env("XDG_CONFIG_HOME", root.join("config"));
@@ -74,6 +74,9 @@ impl Tui {
         command.env("TERM", "xterm-256color");
         // A real restart of st reads "connecting" for a minute; this test only waits 25 s for "offline".
         command.env("STUI_OFFLINE_GRACE_MS", "0");
+        // A silent link is dropped after the quiet check, the ping and the pong wait: 20 s by
+        // default. Capped at 2 s each, the blackhole phase takes a few seconds.
+        command.env("STUI_FEED_TIMER_CAP_MS", "2000");
         // These deliberately unusable local settings must never select local authority.
         command.env("ST3_ENDPOINT", root.join("absent.sock"));
         command.env("ST3_PERSON", "person/wrong-local-actor");
@@ -390,6 +393,20 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
     http_server.abort();
 }
 
+/// Every file under `root`, or none when it does not exist.
+fn files_under(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .flat_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() { files_under(&path) } else { vec![path] }
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member() {
     let member = tempfile::tempdir().unwrap();
@@ -425,13 +442,18 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     pair(device.path(), &local, &url).await;
     let online_step = person_ask(&state, "online-proof", "Online proof");
     let mut tui = Tui::start(device.path());
+    // Each ask exists on one member only, so seeing it names the member reached; answering it
+    // as the paired person proves the grant.
     tui.wait("paired live view", |screen| {
-        screen.contains("live") && screen.contains("Online proof") && screen.contains("avery")
+        screen.contains("live") && screen.contains("Online proof")
     })
     .await;
     tui.send("cConfirmed on the remote member\r");
+    // Now advances optimistically: disappearance alone does not prove that the paired
+    // member accepted the action. Every successful-send wait also checks its stored step.
     tui.wait("confirmed remote action", |screen| {
         !screen.contains("Online proof")
+            && state.store.step_run(&online_step).unwrap().unwrap().status == "completed"
     })
     .await;
     assert_eq!(
@@ -459,9 +481,15 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
         "offline keys must queue no mutation"
     );
     assert!(!device.path().join("absent.sock").exists());
+    // stui keeps this device's spaces and preferences under state/st3/stui; nothing else.
+    let kept = device.path().join("state/st3/stui");
+    let others = files_under(&device.path().join("state"))
+        .into_iter()
+        .filter(|path| !path.starts_with(&kept))
+        .collect::<Vec<_>>();
     assert!(
-        !device.path().join("state").exists(),
-        "the device must create no daemon or replica"
+        others.is_empty(),
+        "the device must create no daemon or replica: {others:?}"
     );
     drop(tui);
     let mut tui = Tui::start(device.path());
@@ -491,9 +519,10 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     tui.send("cConfirmed on the remote member\r");
     tui.wait("remote action after recovery", |screen| {
         !screen.contains("Retained proof")
+            && state.store.step_run(&offline_step).unwrap().unwrap().status == "completed"
     })
     .await;
-    let _blackhole_step = person_ask(&state, "blackhole-proof", "Blackhole proof");
+    let blackhole_step = person_ask(&state, "blackhole-proof", "Blackhole proof");
     tui.wait("data before a silent outage", |screen| {
         screen.contains("Blackhole proof")
     })
@@ -513,6 +542,7 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     tui.send("cConfirmed on the remote member\r");
     tui.wait("remote action after blackhole recovery", |screen| {
         !screen.contains("Blackhole proof")
+            && state.store.step_run(&blackhole_step).unwrap().unwrap().status == "completed"
     })
     .await;
     drop(tui);
@@ -552,14 +582,13 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     let alternate_step = person_ask(&alternate, "alternate-proof", "Alternate proof");
     let mut tui = Tui::start(device.path());
     tui.wait("another reachable member", |screen| {
-        screen.contains("live")
-            && screen.contains("Alternate proof")
-            && screen.contains("member-willow")
+        screen.contains("live") && screen.contains("Alternate proof")
     })
     .await;
     tui.send("cConfirmed on the remote member\r");
     tui.wait("action on alternate", |screen| {
         !screen.contains("Alternate proof")
+            && alternate.store.step_run(&alternate_step).unwrap().unwrap().status == "completed"
     })
     .await;
     assert_eq!(
@@ -577,14 +606,13 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     alternate_route.abort();
     let _ = alternate_route.await;
     tui.wait("live failover", |screen| {
-        screen.contains("live")
-            && screen.contains("Returned member proof")
-            && screen.contains("member-cedar")
+        screen.contains("live") && screen.contains("Returned member proof")
     })
     .await;
     tui.send("cConfirmed on the remote member\r");
     tui.wait("action after live failover", |screen| {
         !screen.contains("Returned member proof")
+            && state.store.step_run(&return_step).unwrap().unwrap().status == "completed"
     })
     .await;
     assert_eq!(
@@ -608,8 +636,9 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute()
 {
+    // The palette opens the Fleet list as a tab.
     inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute(
-        "4",
+        "\\x0bfleet\\r",
         "inventory-fleet",
         &["clients", "machines", "devices", "sessions"],
     )
@@ -619,8 +648,9 @@ async fn the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute()
 {
+    // The palette opens Usage over the space.
     inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute(
-        "5",
+        "\\x0busage\\r",
         "inventory-usage",
         &["usage-24"],
     )
@@ -661,7 +691,6 @@ async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_
         .args([
             "--binary",
             test_env!("CARGO_BIN_EXE_st3"),
-            "--classic",
             "--seconds",
             "72",
             "--label",
@@ -824,13 +853,12 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
         .args([
             "--binary",
             test_env!("CARGO_BIN_EXE_st3"),
-            "--classic",
             "--seconds",
             "4",
             "--label",
             "older-inventory",
             "--keys",
-            "4",
+            "\\x0bfleet\\r",
         ])
         .arg("--timing")
         .arg(&log)

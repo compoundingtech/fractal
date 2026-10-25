@@ -823,6 +823,8 @@ pub struct UnderSpec {
 pub struct ScheduleSpec {
     pub stopped: bool,
     pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby: Option<ScheduleStandby>,
     pub at_unix_ms: Option<i64>,
     pub every_ms: Option<u64>,
     pub anchor_unix_ms: Option<i64>,
@@ -830,6 +832,12 @@ pub struct ScheduleSpec {
     pub catch_up: String,
     pub max_catch_up: Option<u32>,
     pub work: Option<ScheduledWork>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ScheduleStandby {
+    pub host: String,
+    pub after_ms: u64,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CalendarSchedule {
@@ -1697,6 +1705,9 @@ pub struct ClientPageInfo {
     pub next_cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_expires_at: Option<String>,
+    /// Unreadable history candidates skipped on this page. Nonzero means incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_items: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2079,6 +2090,9 @@ pub struct AttentionResolveRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AttentionWithdrawRequest {
+    /// The original work.person-asked claim for an informational update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode: Option<String>,
     pub reason: String,
     pub actor: String,
     pub idempotency_key: String,

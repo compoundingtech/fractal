@@ -1465,6 +1465,7 @@ fn only(exchange: &ReplicationExchange, envelopes: Vec<ReplicaEnvelope>) -> Repl
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         },
         envelopes,
         ..exchange.clone()
@@ -2353,7 +2354,7 @@ carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 19);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 20);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2367,6 +2368,7 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
                 "sekret.changed slot=subject keep=newest min-age-before-cut=5d\n",
                 &format!(
                     "sekret.changed slot=subject keep=newest min-age-before-cut=5d\n\
+                     slo.breach-transition slot=subject keep=episode-event-fences-and-conflicts-after-recovery-7d\n\
                      harness-question.observed slot=subject {questions}\n"
                 ),
             )
@@ -2629,6 +2631,7 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
         Rule::UsageCumulative => "cumulative",
         Rule::AccountLimits => "limits",
         Rule::QuestionLifecycle => "question",
+        Rule::SloEventFences => "slo",
     };
     let field_sets = [
         json!({}),
@@ -2687,6 +2690,11 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
         if claim.kind == "harness.limits" {
             let slot = vec![claim.subject.clone(), claim.kind.clone()];
             assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("limits", slot)));
+            continue;
+        }
+        if claim.kind == "slo.breach-transition" {
+            let slot = vec![claim.subject.clone(), claim.kind.clone()];
+            assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("slo", slot)));
             continue;
         }
         if claim.kind == "runtime.reconcile-decision" {

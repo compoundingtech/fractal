@@ -47,6 +47,8 @@ let
     ++ lib.optionals (cfg.ptyRoot != null) [ "--pty-root" cfg.ptyRoot ]
     ++ lib.optionals (cfg.socket != null) [ "--socket" cfg.socket ]
     ++ lib.optionals (cfg.clientGatewaySocket != null) [ "--client-gateway-socket" cfg.clientGatewaySocket ]
+    ++ [ "--web-listen" (if cfg.webListen == null then "off" else cfg.webListen) ]
+    ++ lib.optionals (!externallyManaged) [ "--web-dist" "${effectivePackage}/share/fractal-web" ]
     ++ lib.optionals (cfg.clientGatewaySocket == null && pkgs.stdenv.hostPlatform.isDarwin)
       [ "--client-gateway-socket" "${cfg.stateDir}/run/st3-client.sock" ]
     ++ (if externallyManaged then
@@ -221,6 +223,12 @@ in
     ptyRoot = mkOption { type = types.nullOr types.str; default = null; description = "PTY registry root; null uses the daemon default."; };
     socket = mkOption { type = types.nullOr types.str; default = null; description = "API socket; null uses the daemon default."; };
     clientGatewaySocket = mkOption { type = types.nullOr types.str; default = null; description = "Client gateway socket; null uses the shared runtime socket (%t/st3-client.sock on Linux, stateDir/run/st3-client.sock on Darwin)."; };
+    webListen = mkOption {
+      type = types.nullOr types.str;
+      default = "127.0.0.1:7410";
+      example = null;
+      description = "Embedded web listener address. Null disables the listener with --web-listen off.";
+    };
     ptyPackage = mkOption {
       type = types.nullOr types.package;
       default = null;

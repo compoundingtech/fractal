@@ -42,8 +42,13 @@ production_build() (
 
 
 kit_receipt_dir=${KIT_RECEIPT_DIRECTORY:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/kit-play-receipts}
-# Retain the whole lane duration even when it fails before a strict-play receipt exists.
-trap 'mkdir -p "$kit_receipt_dir"; echo "$SECONDS" > "$kit_receipt_dir/lane-seconds"' EXIT
+# Reporting is best-effort and must preserve the lane's original exit status.
+trap 'status=$?
+  { mkdir -p "$kit_receipt_dir" && echo "$SECONDS" > "$kit_receipt_dir/lane-seconds"; } \
+    || echo "lane timing unavailable" >&2
+  node packages/fractal-ui/scripts/kit-runner-cpu.mjs > "$kit_receipt_dir/runner-cpu.json" \
+    || { rm -f "$kit_receipt_dir/runner-cpu.json" || :; echo "runner CPU metadata unavailable" >&2; }
+  exit "$status"' EXIT
 
 kit_storybook() (
   # The module graph proves every bundled repository file is a declared kit input. The build's
@@ -106,7 +111,8 @@ stream_checks() {
   lane "Synthetic fixtures" bash apps/fractal-web/scripts/ci/fixtures-gate.sh
   lane "Extension registry" node --experimental-strip-types --test apps/fractal-web/src/extensions/registry.unit.test.ts
   lane "Folders core" node --test apps/fractal-web/src/folders/core.node-test.mjs
-  lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/fractal-sdk exec vitest run --config vitest.config.ts
+  lane "SDK typecheck" pnpm --filter @fractal/sdk typecheck
+  lane "SDK unit tests" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.config.ts
 }
 
 stream_app() {
@@ -127,6 +133,7 @@ stream_kit() {
   if first_shard; then
     lane "UI kit typecheck" pnpm --filter @fractal/ui typecheck
     lane "UI kit scenario story check" pnpm --filter @fractal/ui test:stories
+    lane "UI kit tab-strip policy" pnpm -C packages/fractal-ui run test:tab-strip
   fi
   case "${KIT_INPUTS:-true}" in
     true)
@@ -155,7 +162,7 @@ exclusive_lanes() {
   if first_shard; then
     # Replay covers the app even when no kit inputs changed; never duplicate it across kit shards.
     lane "App replay browser e2e" node apps/fractal-web/scripts/replay-e2e.mjs
-    lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/fractal-sdk exec vitest run --config vitest.perf.config.ts
+    lane "SDK frame CPU budgets" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.perf.config.ts
   fi
   if [ "${KIT_INPUTS:-true}" = true ]; then
     lane "UI kit strict plays (440/1440 × dark/light)" kit_plays

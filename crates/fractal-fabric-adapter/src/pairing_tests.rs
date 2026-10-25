@@ -66,6 +66,18 @@ fn permit_and_reciprocal_policy_grants_are_client_only() {
     assert_eq!(grants("fleet"), json!(["st3/fleet/fleet", "st3-client-v0"]));
 }
 
+#[test]
+fn quarantined_pairing_writes_fail_closed_without_accepting_a_status() {
+    let error = pairing_reply(json!({
+        "type":"pairing","reply":{
+            "error":{"code":"policy_quarantine"},
+            "status":{"state":"confirmed"}
+        }
+    }))
+    .unwrap_err();
+    assert!(error.to_string().contains("policy_quarantine"));
+}
+
 #[tokio::test]
 async fn issue_only_reserves_immutable_policy_without_runtime_grants() {
     let dir = tempfile::tempdir().unwrap();
@@ -397,6 +409,7 @@ async fn missing_receipt_before_deadline_or_unrelated_error_remains_uncertain() 
         (u64::MAX, "invalid_argument", "unknown or expired creation_id"),
         (1, "invalid_argument", "invalid creation_id"),
         (1, "runtime_state_unavailable", "unknown or expired creation_id"),
+        (1, "policy_quarantine", "runtime policy writes quarantined"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("fabric.sock");
@@ -607,6 +620,9 @@ async fn supersession_status_uses_same_daemon_and_pinned_gateway_without_present
         "state":"rejected","terminal_reason":"exchange_lost",
         "attempt_id":"old-attempt","bound_node_id":"joining-node","deadline":1
     });
+    // Merged Fabric strips owner-private metadata from restricted replies.
+    assert!(retained.get("creation_id").is_none());
+    assert!(retained.get("completion").is_none());
     let server = tokio::spawn(fabric(
         listener,
         vec![

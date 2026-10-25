@@ -155,4 +155,6 @@ pub mod read_deadline;
 pub mod tile_endpoint;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod alert_action_controls;
 

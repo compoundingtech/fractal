@@ -15,6 +15,8 @@ import { useTouchLayout } from './useTouchLayout'
 export interface MilestoneAgentRowProps {
   readonly row: Row
   readonly active?: boolean
+  /** Details shows only status values supplied by the session. */
+  readonly reportedStatusOnly?: boolean
   /** Readable observation only: no menu, hover affordance, selection or activation. */
   readonly displayOnly?: boolean
   /**
@@ -61,7 +63,7 @@ export const openAgentRowMenu = (element: Element): boolean => {
  * card with no timers: the CSS entrance delay supplies hover intent. The shared action trigger overlays line 2 on
  * desktop; narrow rows reserve an always-visible touch-sized action column.
  */
-export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, onOpen, actions, onMarkRead }: MilestoneAgentRowProps) {
+export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, reportedStatusOnly = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, onOpen, actions, onMarkRead }: MilestoneAgentRowProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const anchor = React.useRef<HTMLDivElement>(null)
   const touch = useTouchLayout()
@@ -92,10 +94,10 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
           ? <span data-mission-unavailable {...stylex.props(styles.unavailable)}><svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12" {...stylex.props(styles.warningIcon)}><path d="M6 1 11 10H1Z" fill="none" stroke="currentColor" /><path d="M6 4v3m0 1v1" stroke="currentColor" /></svg> Mission info unavailable</span>
           : <span data-row-field="status-label">{row.statusLabel}</span>}<span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
     </span>
-    {!displayOnly && <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
+    {!displayOnly && <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
       menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />}
     {!displayOnly && hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
-      <AgentHoverCard row={row} now={now} />
+      <AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} />
     </Popover>}
   </div>
 })
