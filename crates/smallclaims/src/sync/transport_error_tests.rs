@@ -114,6 +114,7 @@ fn timing_promotes_original_boundaries_only_for_failures_or_slow_exchanges() {
     let timing = ExchangeTiming {
         id: uuid::Uuid::now_v7().to_string(),
         started: std::time::Instant::now(),
+        server: false,
         boundaries: Default::default(),
     };
     timing.record("client-send-start");
@@ -130,10 +131,76 @@ fn timing_promotes_original_boundaries_only_for_failures_or_slow_exchanges() {
     let slow = ExchangeTiming {
         id: uuid::Uuid::now_v7().to_string(),
         started: std::time::Instant::now() - Duration::from_secs(6),
+        server: false,
         boundaries: Default::default(),
     };
     slow.record("response-headers-ready");
     assert!(slow.boundaries.lock().unwrap().1);
+}
+
+#[derive(Clone, Default)]
+struct SummaryCapture(Arc<std::sync::Mutex<Vec<BTreeMap<String, String>>>>);
+
+impl tracing::Subscriber for SummaryCapture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool { true }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() != tracing::Level::INFO { return; }
+        struct Fields(BTreeMap<String, String>);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.insert(field.name().into(), format!("{value:?}"));
+            }
+        }
+        let mut fields = Fields(BTreeMap::new());
+        event.record(&mut fields);
+        self.0.lock().unwrap().push(fields.0);
+    }
+}
+
+#[test]
+fn server_emits_one_info_summary_even_for_fast_success_and_incomplete_backend() {
+    for complete in [true, false] {
+        let capture = SummaryCapture::default();
+        tracing::subscriber::with_default(capture.clone(), || {
+            let timing = ExchangeTiming {
+                id: "test-correlation".into(),
+                started: std::time::Instant::now(),
+                server: true,
+                boundaries: Default::default(),
+            };
+            timing.record("server-ingress");
+            let ingress = timing.server_boundaries()[0].unwrap();
+            if complete {
+                timing.record("backend-done");
+                // The waiter must not replace the backend's completion timestamp.
+                timing.record("backend-done");
+            }
+            timing.record("response-headers-ready");
+            timing.summarize_server(if complete { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE });
+            // A late backend completion or explicit promotion must not emit extra INFO.
+            timing.record("backend-done");
+            timing.promote();
+            let events = capture.0.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            let summary = &events[0];
+            assert_eq!(summary["correlation_id"], "test-correlation");
+            assert_eq!(summary["status"], if complete { "200" } else { "503" });
+            assert_eq!(summary["server_ingress_unix_ms"], ingress.unix_ms.to_string());
+            assert_eq!(summary["server_ingress_elapsed_us"], ingress.elapsed_us.to_string());
+            assert_eq!(summary["backend_done"], complete.to_string());
+            assert_eq!(summary.contains_key("backend_done_unix_ms"), complete);
+            assert_eq!(summary.contains_key("backend_done_elapsed_us"), complete);
+            assert!(summary.contains_key("response_headers_ready_unix_ms"));
+            assert!(summary.contains_key("response_headers_ready_elapsed_us"));
+        });
+    }
 }
 
 #[tokio::test]

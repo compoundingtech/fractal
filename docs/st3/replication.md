@@ -1282,18 +1282,25 @@ dispatch can omit these fields.
 
 Structured `smallclaims::replication` events carry `correlation_id`, `stage`,
 `unix_ms` (UTC), and `elapsed_us` (monotonic time since this host's request start).
-Fast successful exchanges log boundaries at DEBUG. A locally failed exchange or
-one crossing five seconds promotes its retained boundaries to INFO with their
-original timestamps; subsequent boundaries remain INFO. Enable DEBUG for this
-target on both hosts during a reproduction to also retain a fast successful
-server response whose client never received it.
-Search both hosts' journals for the ID from the failed record. The client emits
-`client-send-start`, `connect-done`, `client-headers-received`, and `client-failed`;
-the server emits `server-ingress`, `backend-done`, and `response-headers-ready`.
+Fast successful clients log boundaries at DEBUG. A locally failed client exchange
+or one crossing five seconds promotes retained boundaries to INFO with their
+original timestamps; subsequent client boundaries remain INFO. The client emits
+`client-send-start`, `connect-done`, `client-headers-received`, and `client-failed`.
+
+Every handled server request emits exactly one INFO `replication exchange server
+summary`, including fast successes whose response never reaches the client.
+Search both hosts' journals for the ID from the failed record; no DEBUG logging
+is required. The summary includes `status`, `server_ingress_unix_ms`,
+`server_ingress_elapsed_us`, `backend_done_unix_ms`, `backend_done_elapsed_us`,
+`response_headers_ready_unix_ms`, and `response_headers_ready_elapsed_us`.
+`backend_done: false` and absent backend timestamps mean no completed backend
+answer was observed at response handoff (for example an overload or early refusal).
+The server's individual boundaries remain DEBUG, including late backend completion.
 Ingress means the handler entered after Axum extracted the body. Headers-ready
 means the signed/compressed response was handed to Axum, not that the socket write
-completed. A retained backend job logs completion with its originating request ID;
-later polls can reuse that answer without starting another job. Compare monotonic
+completed. A retained backend job records completion with its originating request
+ID; a later poll reusing the answer timestamps when that poll observed it.
+Compare monotonic
 durations only within one host/request; cross-host UTC comparison requires clock
 synchronization. IDs are diagnostic metadata, not authenticated identities.
 

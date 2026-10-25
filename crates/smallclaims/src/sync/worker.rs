@@ -2251,26 +2251,31 @@ const EXCHANGE_CORRELATION_HEADER: &str = "x-fractal-exchange-id";
 struct ExchangeTiming {
     id: String,
     started: std::time::Instant,
-    // Retain original timestamps so failures/slow requests can promote earlier
-    // DEBUG boundaries without emitting INFO for every healthy exchange.
+    server: bool,
+    // Clients promote retained DEBUG boundaries on failure/slowness; servers
+    // retain them for one always-INFO summary at response handoff.
     boundaries: std::sync::Mutex<([Option<ExchangeBoundary>; 8], bool)>,
 }
 
 #[derive(Clone, Copy)]
 struct ExchangeBoundary {
     stage: &'static str,
-    unix_ms: u128,
-    elapsed_us: u128,
+    unix_ms: u64,
+    elapsed_us: u64,
 }
 
 impl ExchangeTiming {
     fn record(&self, stage: &'static str) {
         let boundary = ExchangeBoundary {
             stage,
-            unix_ms: crate::store::now_ms(),
-            elapsed_us: self.started.elapsed().as_micros(),
+            unix_ms: u64::try_from(crate::store::now_ms()).unwrap_or(u64::MAX),
+            elapsed_us: u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX),
         };
         let mut boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        // A retained backend job and its waiter can both observe completion.
+        if self.server && boundaries.0.iter().flatten().any(|event| event.stage == stage) {
+            return;
+        }
         if boundaries.1 {
             self.emit_info(boundary);
             return;
@@ -2287,7 +2292,9 @@ impl ExchangeTiming {
             *slot = Some(boundary);
         } else {
             // Bounded storage even if a future caller adds more boundaries.
-            self.emit_info(boundary);
+            if !self.server {
+                self.emit_info(boundary);
+            }
             drop(boundaries);
             self.promote();
             return;
@@ -2299,6 +2306,9 @@ impl ExchangeTiming {
     }
 
     fn promote(&self) {
+        if self.server {
+            return;
+        }
         let mut boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
         boundaries.1 = true;
         for boundary in boundaries.0.iter_mut().filter_map(Option::take) {
@@ -2314,6 +2324,29 @@ impl ExchangeTiming {
             unix_ms = %boundary.unix_ms,
             elapsed_us = %boundary.elapsed_us,
             "replication exchange boundary"
+        );
+    }
+
+    fn server_boundaries(&self) -> [Option<ExchangeBoundary>; 3] {
+        let boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        ["server-ingress", "backend-done", "response-headers-ready"]
+            .map(|stage| boundaries.0.iter().flatten().find(|event| event.stage == stage).copied())
+    }
+
+    fn summarize_server(&self, status: StatusCode) {
+        let [ingress, backend, headers] = self.server_boundaries();
+        tracing::info!(
+            target: "smallclaims::replication",
+            correlation_id = %self.id,
+            status = status.as_u16(),
+            server_ingress_unix_ms = ingress.map(|event| event.unix_ms),
+            server_ingress_elapsed_us = ingress.map(|event| event.elapsed_us),
+            backend_done = backend.is_some(),
+            backend_done_unix_ms = backend.map(|event| event.unix_ms),
+            backend_done_elapsed_us = backend.map(|event| event.elapsed_us),
+            response_headers_ready_unix_ms = headers.map(|event| event.unix_ms),
+            response_headers_ready_elapsed_us = headers.map(|event| event.elapsed_us),
+            "replication exchange server summary"
         );
     }
 }
@@ -2389,15 +2422,14 @@ async fn receive_exchange<B: Backend>(
             .and_then(|value| uuid::Uuid::parse_str(value).ok())
             .map_or_else(|| uuid::Uuid::now_v7().to_string(), |id| id.to_string()),
         started: std::time::Instant::now(),
+        server: true,
         boundaries: Default::default(),
     });
     timing.record("server-ingress");
     let response = receive_exchange_inner(State(state), headers, body, &timing).await;
     // Axum owns socket writes. This is the handoff boundary, not a wire-write timestamp.
     timing.record("response-headers-ready");
-    if !response.status().is_success() {
-        timing.promote();
-    }
+    timing.summarize_server(response.status());
     response
 }
 
@@ -2545,9 +2577,6 @@ async fn receive_exchange_inner<B: Backend>(
                         &error, ReplicationFailurePhase::LocalReceive, started.elapsed(), None,
                     ));
                     backend_timing.record("backend-done");
-                    if result.is_err() {
-                        backend_timing.promote();
-                    }
                     done.send_replace(Some(result));
                 },
             ));
@@ -2565,6 +2594,11 @@ async fn receive_exchange_inner<B: Backend>(
         }
     })
     .await;
+    if matches!(&ready, Ok(Some(_))) {
+        // A poll may reuse a previously completed job; record when this request
+        // observed its answer if the originating job did not record it here.
+        timing.record("backend-done");
+    }
     match ready {
         Ok(Some(Ok(export))) => {
             finish_exchange_job(&state.fleet, &relay, &answer);
@@ -3665,6 +3699,7 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
         timing: ExchangeTiming {
             id: uuid::Uuid::now_v7().to_string(),
             started: std::time::Instant::now(),
+            server: false,
             boundaries: Default::default(),
         },
         state: std::sync::atomic::AtomicU8::new(0),
