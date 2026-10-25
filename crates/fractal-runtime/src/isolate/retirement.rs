@@ -17,9 +17,20 @@ impl PopulationEvents {
     }
 
     fn populated(&mut self) -> Result<bool> {
-        self.0.rewind()?;
+        // Once the scope empties, systemd removes its cgroup, and kernfs then fails this held
+        // descriptor with ENODEV. The descriptor is bound to the exact cgroup opened before the
+        // signal, and the kernel removes a cgroup only when it is empty (rmdir of a populated one
+        // is EBUSY), so its removal is empty evidence. Any other error still fails.
+        let removed = |error: &std::io::Error| error.raw_os_error() == Some(libc::ENODEV);
+        match self.0.rewind() {
+            Err(error) if removed(&error) => return Ok(false),
+            result => result?,
+        }
         let mut events = String::new();
-        (&mut self.0).take(65537).read_to_string(&mut events)?;
+        match (&mut self.0).take(65537).read_to_string(&mut events) {
+            Err(error) if removed(&error) => return Ok(false),
+            result => result?,
+        };
         is_populated(&events)
     }
 
