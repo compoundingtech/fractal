@@ -10,6 +10,7 @@ use crate::MissionsStoreCore;
 use crate::PersonWorkStore;
 use crate::AccountsStore;
 use crate::RuntimeStartsStore;
+use crate::store::RuntimeStartOperation;
 use crate::SeatsStore;
 use crate::SeatsStoreCore;
 use crate::StopDeferralStore;
@@ -3734,6 +3735,20 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
+    /// `Ok` when the subject's latest actual state is a running member, else its status (`absent` when
+    /// none is recorded).
+    fn member_liveness(&self, subject: &str) -> Result<std::result::Result<(), String>> {
+        let status = self
+            .store
+            .latest_actual_value(subject)?
+            .and_then(|actual| actual_field(&actual, "status").and_then(Value::as_str).map(str::to_owned));
+        Ok(match status.as_deref() {
+            Some("running" | "ready" | "working" | "idle" | "starting") => Ok(()),
+            Some(other) => Err(other.to_owned()),
+            None => Err("absent".to_owned()),
+        })
+    }
+
     fn record_member_reconcile_result(&self, subject: &str, result: Result<()>) -> Result<()> {
         let previous = self.store.member_reconcile_fault(subject, None)?;
         let (decision, reason) = match result {
@@ -3745,10 +3760,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 ("member-fault", reason)
             }
-            Ok(()) if previous.is_some() => (
-                "member-recovered",
-                "the member reconciled successfully".to_owned(),
-            ),
+            // A pass that returns Ok may have started nothing: the member loop returns early while a
+            // start is pending, while a restart waits, or when nothing is due. Only a member seen
+            // alive has recovered; for any other, say what the pass did, so an earlier fault does
+            // not read as cured by a pass that left the seat absent.
+            Ok(()) if previous.is_some() => match self.member_liveness(subject)? {
+                Ok(()) => (
+                    "member-recovered",
+                    "the member reconciled successfully".to_owned(),
+                ),
+                Err(status) => (
+                    "member-pass-clean",
+                    format!(
+                        "the member pass completed without error, but the member is {status}: nothing was started"
+                    ),
+                ),
+            },
             Ok(()) => return Ok(()),
         };
         self.record_once(
@@ -7949,6 +7976,74 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// A requester-authored action replicates to the runtime owner. The declaration and old
     /// incarnation fence it, so a delayed request cannot stop a replacement or revive a stop.
+    /// A start that FAILED and whose producer closure was never proven stays pending, and while it
+    /// does an explicit restart is swallowed (the seat looks parked for good). Once the failed start
+    /// is older than any launcher could still publish a session, no runtime of the seat is observed
+    /// running, and no launch worker holds the start lock, the failure is final: close the operation
+    /// so the request makes a new attempt. Returns whether it did.
+    fn supersede_stale_failed_start(
+        &self,
+        subject: &DesiredSubject,
+        pending: &RuntimeStartOperation,
+        observation: Option<&RuntimeObservation>,
+    ) -> Result<bool> {
+        let stale_after = u128::from(STALE_FAILED_START_MS.load(Ordering::Relaxed));
+        let failed = pending.finished
+            && !pending.cleanup_verified
+            && pending
+                .result
+                .as_ref()
+                .is_some_and(|result| result["error"].is_string());
+        if !failed {
+            return Ok(false);
+        }
+        let created_ms = uuid::Uuid::parse_str(&pending.id)
+            .ok()
+            .filter(|id| id.get_version_num() == 7)
+            .and_then(|id| id.get_timestamp())
+            .map(|timestamp| {
+                let (seconds, nanos) = timestamp.to_unix();
+                u128::from(seconds) * 1000 + u128::from(nanos / 1_000_000)
+            });
+        let Some(created) = created_ms else {
+            return Ok(false);
+        };
+        let stale_at = created.saturating_add(stale_after);
+        if now_ms() < stale_at {
+            // Nothing the member pass reads changes when the start grows old: wake it then.
+            self.arm_restart(&format!("stale-failed-start:{}", pending.id), stale_at);
+            return Ok(false);
+        }
+        if observation.is_some_and(|item| !matches!(item.status.as_str(), "exited" | "vanished" | "stopped")) {
+            return Ok(false);
+        }
+        // The kernel lock, not a PID guess, says no launch worker holds admission.
+        let Some(_lock) = self.store.try_runtime_start_lock(&subject.subject)? else {
+            return Ok(false);
+        };
+        if pending.revoked_by.is_none() {
+            self.revoke_start(&subject.subject)?;
+        }
+        self.store.retain_runtime_start_producer_closed(&pending.id)?;
+        self.record_once(
+            &subject.subject,
+            "runtime.reconcile-decision",
+            BTreeMap::from([
+                ("key".into(), Value::String(format!("restart-superseded-failed-start:{}", pending.id))),
+                ("decision".into(), Value::String("restart-superseded-failed-start".into())),
+                (
+                    "reason".into(),
+                    Value::String(format!(
+                        "the failed runtime start {} never proved its producer closed; it is older than any launcher could still publish and no runtime is running, so a new restart request makes a new attempt",
+                        pending.id
+                    )),
+                ),
+            ]),
+        )?;
+        self.start_changed(&subject.subject);
+        Ok(true)
+    }
+
     fn reconcile_requested_restart(
         &self,
         subject: &DesiredSubject,
@@ -7988,7 +8083,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         let attempted = self
             .store
             .operation_claim(&format!("agent-restart-attempt:{}", request.id))?;
-        if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(true); }
+        if let Some(pending) = self.store.runtime_start_for(&subject.subject)? {
+            if self.supersede_stale_failed_start(subject, &pending, observation)? {
+                // The failed start no longer holds the seat: this request makes the new attempt.
+            } else {
+                // The request is not lost: it waits for this start. Say so (once per request and
+                // start), so a restart that is never consumed is visible and not a silent success.
+                self.record_once(
+                    &subject.subject,
+                    "runtime.reconcile-decision",
+                    BTreeMap::from([
+                        ("key".into(), Value::String(format!("restart-waiting:{}", request.id))),
+                        ("decision".into(), Value::String("restart-waiting".into())),
+                        (
+                            "reason".into(),
+                            Value::String(format!(
+                                "the requested restart {} waits for the pending runtime start {} to finish",
+                                request.id, pending.id
+                            )),
+                        ),
+                    ]),
+                )?;
+                return Ok(true);
+            }
+        }
         let previous = request.body["fields"]["incarnation_id"]
             .as_str()
             .unwrap_or("");
@@ -18595,6 +18713,11 @@ struct GateCheck<'a> {
     start_failure: Option<String>,
 }
 
+/// How old a FAILED runtime start must be before an explicit restart may close it without proof from its
+/// producer: longer than a launcher takes to publish a session or to be declared timed out. Tests lower it.
+pub static STALE_FAILED_START_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(15 * 60 * 1000);
+
 pub fn now_ms() -> u128 {
     smallclaims::store::now_ms()
 }
@@ -23836,6 +23959,32 @@ agent "import/omp/fixture" {{
         );
         reconciler.reconcile_once().unwrap();
         assert!(reconciler.file_watchers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pass_that_started_nothing_does_not_say_the_member_recovered() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let subject = "agent/node.seat";
+        reconciler
+            .record_member_reconcile_result(subject, Err(anyhow::anyhow!("spawn PTY failed: launcher-incompatible")))
+            .unwrap();
+        assert!(store.member_reconcile_fault(subject, None).unwrap().is_some());
+        // The pass returns Ok, but the seat is absent: nothing was started.
+        reconciler.record_member_reconcile_result(subject, Ok(())).unwrap();
+        let decisions = store
+            .claims_for(subject, Some("runtime.reconcile-decision"))
+            .unwrap();
+        let last = decisions.last().unwrap();
+        assert_eq!(last.body.pointer("/fields/decision").and_then(Value::as_str), Some("member-pass-clean"));
+        let reason = last.body.pointer("/fields/reason").and_then(Value::as_str).unwrap();
+        assert!(reason.contains("absent") && reason.contains("nothing was started"), "{reason}");
+        assert!(!reason.contains("recovered"), "{reason}");
     }
 
     #[test]
