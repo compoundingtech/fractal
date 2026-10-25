@@ -9,3 +9,4 @@ record c6c262871118816acc47f6ea80afb8fe4123db05 isolation-vm 0 fleet/ci 2026-10-
 record d113698ddaefa93981414c5d89be03ba2ef87f68 linux-gate 0 fleet/ci 2026-10-21T18:18:27Z
 record dbd03f398918ec0e0033faee10ddfeb414dc7624 linux-tests-shard-3 0 fleet/ci 2026-10-21T18:16:16Z
 record e275e271c562edbb64b0bee8d2e1d12d3c175f57 linux-tests 0 fleet/ci 2026-10-21T18:16:33Z
+gc 2026-10-25T03:40:44+00:00 d1b50e68c708bf13791f968fe6bfadbd6c9d56b2ee4795f652976012bf6b1c35

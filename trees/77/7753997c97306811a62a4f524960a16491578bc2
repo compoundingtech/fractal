@@ -9,3 +9,4 @@ record 9746273fdbf767d8113ccf666e367139ce038678 linux-fleet-compat 0 fleet/ci 20
 record decef5d4a0b22403d74fa2ea1a550769d132e2e3 linux-tests-shard-4 0 fleet/ci 2026-10-21T03:51:48Z
 record e365228d74ed0ef440c28f77862e97bd52f45642 linux-gate 0 fleet/ci 2026-10-21T03:52:49Z
 record ebbbf03958f075708397de46ef22423e34814ce9 linux-tests-shard-2 0 fleet/ci 2026-10-21T03:51:41Z
+gc 2026-10-25T03:40:44+00:00 d1b50e68c708bf13791f968fe6bfadbd6c9d56b2ee4795f652976012bf6b1c35

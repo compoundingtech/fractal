@@ -9,3 +9,4 @@ record a99526e70853282b5f90558ac70c8080e3461abf linux-fleet-compat 0 fleet/ci 20
 record aba2b6fd5ff7e5cdc76081200fce43d2f81fdb69 genie-freshness 0 fleet/ci 2026-10-21T09:27:59Z
 record d1a4557f63ff0cbfca8761b01f787e55b81682dc linux-tests 0 fleet/ci 2026-10-21T09:35:28Z
 record f517ad75b9739943fe11a3295a49c04b65aabd52 linux-tests-shard-2 0 fleet/ci 2026-10-21T09:34:30Z
+gc 2026-10-25T03:40:44+00:00 d1b50e68c708bf13791f968fe6bfadbd6c9d56b2ee4795f652976012bf6b1c35

@@ -5,3 +5,4 @@ record 78486a180cf7d84aa83eb266761e3a15a007b2a3 linux-tests-shard-2 0 fleet/ci 2
 record 8efda8df95117a136467f127e3f1654f53c0b726 typescript-client 0 fleet/ci 2026-10-24T04:01:04Z
 record b72277f0cd080b3dbe5c8a6ac66948310d37666a genie-freshness 0 fleet/ci 2026-10-24T03:57:29Z
 record e83eb3b91bf3689c2def832121d3bcf2f74d4740 linux-tests 100 fleet/ci 2026-10-24T03:59:42Z
+gc 2026-10-25T03:40:44+00:00 d1b50e68c708bf13791f968fe6bfadbd6c9d56b2ee4795f652976012bf6b1c35
