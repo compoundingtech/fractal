@@ -402,9 +402,9 @@ def governed(argv, name):
     return argv
 
 
-def web_unchanged(base):
-    """Why CI would not run the fractal-web lane for HEAD: no web-relevant path changed since HEAD's merge base with the accepted base,
-    by the base's own scripts/ci-fractal-web-changes rules. None when one did, or when that cannot be told (then the lane runs)."""
+def web_changes(base):
+    """(relevant paths, kit paths) of HEAD since its merge base with the accepted base, by the base's own scripts/ci-fractal-web-changes
+    (`relevant_paths` and `kit_paths`, the functions its CI job runs); None when that cannot be told."""
     source = git('show', f'{base}:scripts/ci-fractal-web-changes', check=False)
     start = git('merge-base', base, 'HEAD', check=False)
     if source.returncode or start.returncode:
@@ -420,10 +420,30 @@ def web_unchanged(base):
             module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
             loader.exec_module(module)
             changed = [name for name in diff.stdout.decode().split('\0') if name]
-            relevant = module.relevant_paths(changed)
+            return list(module.relevant_paths(changed)), list(module.kit_paths(changed)), text(start)
         except Exception:
             return None
-    return None if relevant else f'no web input changed since {text(start)[:12]}: CI does not run the lane'
+
+
+def web_unchanged(base):
+    """Why CI would not run the fractal-web lane for HEAD: no web-relevant path changed since HEAD's merge base with the accepted base,
+    by the base's own scripts/ci-fractal-web-changes rules. None when one did, or when that cannot be told (then the lane runs)."""
+    changes = web_changes(base)
+    if changes is None:
+        return None
+    relevant, _, start = changes
+    return None if relevant else f'no web input changed since {start[:12]}: CI does not run the lane'
+
+
+def run_input_arguments(check, base):
+    """The `--run-input KEY=VALUE` arguments the CI gate passes the verifier for `check` (ci-evidence-gate RUN_INPUTS): fractal-web's kit_inputs,
+    which its change detection (scripts/ci-fractal-web-changes) answers for this diff; true when that cannot be told, as the job runs all lanes
+    then. A verifier whose base policy requires such an input never counts a run that does not say it as covered ('no_run_input')."""
+    if check != WEB:
+        return []
+    changes = web_changes(base)
+    kit = True if changes is None else bool(changes[1])
+    return ['--run-input', f"kit_inputs={'true' if kit else 'false'}"]
 
 
 def lane_names(base):
@@ -721,6 +741,8 @@ def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=N
         command += ['--policy-from', base, '--repository', repository]
         if lane_base and b'--lane-base' in Path(verifier).read_bytes():
             command += ['--lane-base', lane_base]
+    if b'--run-input' in Path(verifier).read_bytes():
+        command += run_input_arguments(check, base)
     done = subprocess.run(command, capture_output=True, text=True)
     try:
         result = json.loads(done.stdout)
