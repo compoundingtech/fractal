@@ -835,10 +835,51 @@
         # One cargo invocation builds all four guest crates: they share the same wasm32 dependency
         # graph, so a derivation per component compiled it four times. Install paths are unchanged
         # and every component package attr points at this single output.
+        # The workspace manifest with only the four guest crates as members: the root's workspace-wide tables (workspace settings,
+        # profiles, patches), so the same build, without the root package or the other members, which cargo would otherwise load.
+        providerComponentDirs = map (name: "components/${name}") [ "github-issue" "github-pr" "pty-stats" "vista" ];
+        providerWorkspaceManifest =
+          let
+            root = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+          in
+          (pkgs.formats.toml { }).generate "Cargo.toml" (
+            pkgs.lib.filterAttrs (name: _: builtins.elem name [ "profile" "patch" "replace" ]) root
+            // {
+              workspace = builtins.removeAttrs root.workspace [ "default-members" ] // {
+                members = providerComponentDirs;
+              };
+            }
+          );
+
         st2ProviderComponents = providerRustPlatform.buildRustPackage {
           pname = "st2-provider-components";
           inherit version;
-          src = self;
+          # Only what the guest crates build from (their manifests' and the root's settings, the lock, the cargo config, the crates and
+          # their WIT worlds). With `self` every commit was a new input, so a warm local run (scripts/ci-local) rebuilt them each time; a
+          # change elsewhere now reuses the store path. Any change to these inputs, the root manifest included, still rebuilds.
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions (
+              [
+                ./Cargo.toml
+                ./Cargo.lock
+                ./.cargo
+                ./components
+                ./wit
+                # wit/*/provider-api.wit link here: a link whose target is missing fails the build, it never builds something else.
+                ./crates/fractal-resource-wasip2/wit
+              ]
+              # Every [patch] the root declares stays (cargo loads each one), so its source must be there too.
+              ++ map (path: ./. + "/${path}") (
+                pkgs.lib.concatMap (registry: map (patch: patch.path) (builtins.filter (patch: patch ? path) (builtins.attrValues registry)))
+                  (builtins.attrValues ((builtins.fromTOML (builtins.readFile ./Cargo.toml)).patch or { }))
+              )
+            );
+          };
+          postPatch = ''
+            cp ${providerWorkspaceManifest} Cargo.toml
+            chmod u+w Cargo.toml
+          '';
           inherit cargoDeps;
           buildPhase = ''
             runHook preBuild
