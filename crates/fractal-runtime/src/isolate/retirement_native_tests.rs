@@ -265,4 +265,36 @@ fn a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor() {
     .unwrap()
     .expect("neighbor's separate cleanup must be proven");
     assert!(wait_readable(neighbor.as_raw_fd(), EXIT_BUDGET));
+
+    // Deterministically, the race the retirements above can lose: systemd removes an emptied
+    // scope's cgroup while its cgroup.events descriptor is still held. That descriptor must read
+    // as empty, not fail.
+    let (removed_path, mut removed_ready) = fixture.pipe("removed-ready");
+    let (removed_unit, _) = fixture.spawn(
+        "removed",
+        r#"printf "%s\n" "$$" > "$1"; exec sleep 300"#,
+        &removed_path,
+    );
+    let removed_pid = ready_pid(&mut removed_ready);
+    let removed = pin(removed_pid);
+    assert_in_scope(removed_pid, &removed_unit);
+    let live = observe(&removed_unit).unwrap();
+    let mut events =
+        PopulationEvents::open(&group_path(&removed_unit, &live.control_group).unwrap()).unwrap();
+    assert!(events.populated().unwrap());
+    kill_unit(&removed_unit, libc::SIGKILL).unwrap();
+    assert!(wait_readable(removed.as_raw_fd(), EXIT_BUDGET));
+    let deadline = Instant::now() + EXIT_BUDGET;
+    while observe(&removed_unit).unwrap().load_state != "not-found" {
+        assert!(
+            Instant::now() < deadline,
+            "systemd must remove the emptied scope within the exit budget"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !events.populated().unwrap(),
+        "a held descriptor of a removed cgroup is empty evidence"
+    );
+    assert!(events.wait_empty(Duration::ZERO).unwrap());
 }
