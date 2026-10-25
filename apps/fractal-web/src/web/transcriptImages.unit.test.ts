@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createTranscriptImages } from './transcriptImages.ts'
+import { createTranscriptImages, transcriptImagesFor } from './transcriptImages.ts'
 import type { AttachmentPort, ConversationPortResult } from '../data/source.ts'
 import type { BlobChunk } from '@fractal/client/schema'
 
@@ -114,5 +114,75 @@ describe('transcript image byte reads', () => {
     const cache = createTranscriptImages({ chunk: async () => { throw new Error('network failed') } }, { urls: urls() })
     await cache.load(attachment, 'message/native')
     expect(cache.state(attachment.id)).toEqual({ _tag: 'Failed' })
+  })
+
+  it.each([
+    { ...attachment, id: 'attachment/native' },
+    { ...attachment, mediaType: 'image/svg+xml' },
+    { ...attachment, mediaType: 'image/avif' },
+    { ...attachment, mediaType: 'text/plain' },
+  ])('keeps permanently unsupported attachments non-retryable without reading', async unsupported => {
+    const read = vi.fn<AttachmentPort['chunk']>()
+    const cache = createTranscriptImages({ chunk: read }, { urls: urls() })
+    expect(cache.state(unsupported.id, unsupported.mediaType)).toEqual({ _tag: 'Unavailable' })
+    await cache.load(unsupported, 'message/native')
+    await cache.load(unsupported, 'message/native')
+    expect(cache.state(unsupported.id, unsupported.mediaType)).toEqual({ _tag: 'Unavailable' })
+    expect(cache.snapshot().size).toBe(0)
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  it('shares one 24-entry bound across three retained panes and revokes only on final unmount', async () => {
+    let createdCount = 0
+    const created = vi.spyOn(URL, 'createObjectURL').mockImplementation(() => `blob:viewer-${++createdCount}`)
+    const revoked = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const read = vi.fn<AttachmentPort['chunk']>(async request => ({ ...chunk(), value: { ...chunk().value, sha256: request.sha256 } }))
+    const source = { attachments: { chunk: read } }
+    const panes = Array.from({ length: 3 }, () => transcriptImagesFor(source))
+    const releases = panes.map(pane => pane.acquire())
+    try {
+      expect(panes[1]).toBe(panes[0])
+      expect(panes[2]).toBe(panes[0])
+      for (let index = 0; index < 25; index += 1) {
+        await panes[index % 3]!.load({ ...attachment, id: `blob/${index.toString(16).padStart(64, '0')}` }, `message/pane-${index % 3}`)
+      }
+      expect(panes[0]!.snapshot().size).toBe(24)
+      expect(panes[1]!.state(`blob/${'0'.repeat(64)}`)._tag).toBe('Deferred')
+      expect(created).toHaveBeenCalledTimes(25)
+      expect(revoked).toHaveBeenCalledTimes(1)
+      releases[0]!()
+      releases[0]!()
+      releases[1]!()
+      expect(panes[2]!.snapshot().size).toBe(24)
+      expect(revoked).toHaveBeenCalledTimes(1)
+      releases[2]!()
+      expect(panes[2]!.snapshot().size).toBe(0)
+      expect(revoked).toHaveBeenCalledTimes(25)
+    } finally {
+      releases.forEach(release => release())
+      created.mockRestore()
+      revoked.mockRestore()
+    }
+  })
+
+  it('never shares a cached image across different viewer/data-source identities', async () => {
+    const created = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:viewer-a')
+    const revoked = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const port = { chunk: vi.fn<AttachmentPort['chunk']>().mockResolvedValue(chunk()) }
+    const first = transcriptImagesFor({ attachments: port })
+    const second = transcriptImagesFor({ attachments: port })
+    const releaseFirst = first.acquire()
+    const releaseSecond = second.acquire()
+    try {
+      await first.load(attachment, 'message/native')
+      expect(first.state(attachment.id)._tag).toBe('Loaded')
+      expect(second.state(attachment.id)._tag).toBe('Deferred')
+      expect(first).not.toBe(second)
+    } finally {
+      releaseFirst()
+      releaseSecond()
+      created.mockRestore()
+      revoked.mockRestore()
+    }
   })
 })

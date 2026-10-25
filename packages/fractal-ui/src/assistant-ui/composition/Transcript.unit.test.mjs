@@ -81,23 +81,41 @@ test('a sent image is a named file card until the host loads it, and never an em
   assert.doesNotMatch(cards, /<img|Show image/)
   // Markdown's resolver never reaches attachments.
   assert.doesNotMatch(render({ resolveImage: () => ({ _tag: 'Load', src: 'data:image/png;base64,AA==' }) }), /<img/)
-  const withStates = (states) => render({ attachmentImages: { state: id => states[id] ?? { _tag: 'Deferred' }, load: () => {} } })
+  const asked = []
+  const withStates = (states) => render({ attachmentImages: { state: (id, mediaType) => { asked.push([id, mediaType]); return states[id] ?? { _tag: 'Deferred' } }, load: () => {} } })
   const deferredHost = withStates({})
-  assert.match(deferredHost, /aria-label="Show image layout.png"/)
+  // The host sees each id with its media type, so it can refuse types it can never read.
+  assert.deepEqual(asked.slice(0, 2), [['blob/layout', 'image/png'], ['blob/unnamed', 'image/webp']])
+  assert.match(deferredHost, /<button type="button" aria-label="Show image layout.png" data-testid="transcript-attachment-show"/)
   assert.match(deferredHost, /data-attachment-state="deferred"/)
-  assert.match(withStates({ 'blob/layout': { _tag: 'Loading' } }), /data-attachment-state="loading"[\s\S]*Loading image/)
+  // The card is a script-only focus target, and its polite status stays silent until a person asks.
+  assert.match(deferredHost, /role="group" aria-label="Image: layout.png, PNG" tabindex="-1"/)
+  assert.match(deferredHost, /<span role="status" aria-live="polite" data-testid="transcript-attachment-status"[^>]*><\/span><span role="group" aria-label="Image: layout.png, PNG"/)
+  // Loading keeps Show image's place as a focusable, inert button, so focus never falls to the page.
+  const loading = withStates({ 'blob/layout': { _tag: 'Loading' } })
+  assert.match(loading, /aria-busy="true"[^>]*data-attachment-state="loading"/)
+  assert.match(loading, /<button type="button" aria-label="Loading image layout.png" aria-disabled="true" data-testid="transcript-attachment-loading"[^>]*>Loading image<\/button>/)
+  assert.doesNotMatch(loading, /Show image layout.png/)
   const unauthorized = withStates({ 'blob/layout': { _tag: 'Unauthorized' } })
   assert.match(unauthorized, /Not authorized/)
-  assert.doesNotMatch(unauthorized, /Retry loading layout.png/)
+  assert.doesNotMatch(unauthorized, /(Show image|Retry loading|Loading image) layout.png/)
+  assert.match(unauthorized, /aria-label="Image: layout.png, PNG" tabindex="-1"/)
   const failed = withStates({ 'blob/layout': { _tag: 'Failed' } })
   assert.match(failed, /Couldn&#x27;t load image/)
-  assert.match(failed, /aria-label="Retry loading layout.png"/)
+  assert.match(failed, /<button type="button" aria-label="Retry loading layout.png" data-testid="transcript-attachment-retry"/)
+  // An id or type the host can never read is the plain card: no action, no status, no focus target.
+  const unavailable = withStates({ 'blob/layout': { _tag: 'Unavailable' } })
+  assert.match(unavailable, /<span role="group" aria-label="Image: layout.png, PNG" data-testid="transcript-attachment" data-attachment-state="deferred"/)
+  assert.doesNotMatch(unavailable, /(Show image|Retry loading|Loading image) layout.png|Not authorized|Couldn&#x27;t load/)
+  assert.doesNotMatch(unavailable, /data-testid="transcript-attachment-status"[^>]*><\/span><span role="group" aria-label="Image: layout.png, PNG"/)
   // Only the id the host loaded shows; the other stays a card.
   const loaded = withStates({ 'blob/layout': { _tag: 'Loaded', src: 'data:image/png;base64,AA==' } })
   assert.match(loaded, /aria-label="Open layout.png"/)
   assert.match(loaded, /<img src="data:image\/png;base64,AA==" alt="layout.png"/)
   assert.match(loaded, /aria-label="Image: Unnamed image, WebP"/)
   assert.doesNotMatch(loaded, /src="blob\/unnamed"/)
+  // The status outlives the card, so the load that replaces it can still be announced.
+  assert.match(loaded, /<span role="status" aria-live="polite" data-testid="transcript-attachment-status"[^>]*><\/span><button[^>]*aria-label="Open layout.png"/)
 })
 
 test('host-owned header omits only the duplicate band, including unavailable history', () => {

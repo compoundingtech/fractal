@@ -4,15 +4,38 @@ import type { AttachmentPort } from '../data/source.ts'
 import type { TranscriptAttachmentImageState as TranscriptImageState } from '@fractal/ui/assistant-ui'
 
 const deferred: TranscriptImageState = { _tag: 'Deferred' }
+const unavailable: TranscriptImageState = { _tag: 'Unavailable' }
 const imageTypes: Readonly<Record<string, true | undefined>> = { 'image/png': true, 'image/jpeg': true, 'image/gif': true, 'image/webp': true }
 const maxImageBytes = 10 * 1024 * 1024
+
+export interface TranscriptImageCache {
+  readonly state: (id: string, mediaType?: string) => TranscriptImageState
+  readonly load: (attachment: Attachment, messageId: string) => Promise<void>
+  readonly snapshot: () => ReadonlyMap<string, TranscriptImageState>
+  readonly subscribe: (listener: () => void) => () => void
+  /** Each mounted pane acquires the shared viewer cache; the final release revokes its URLs. */
+  readonly acquire: () => () => void
+  readonly dispose: () => void
+}
+
+type TranscriptImageSource = { readonly attachments?: Pick<AttachmentPort, 'chunk'> }
+const viewerCaches = new WeakMap<TranscriptImageSource, TranscriptImageCache>()
+
+/** Retained conversation panes share one bounded cache for their data-source/viewer identity. */
+export const transcriptImagesFor = (source: TranscriptImageSource): TranscriptImageCache => {
+  const existing = viewerCaches.get(source)
+  if (existing !== undefined) return existing
+  const cache = createTranscriptImages(source.attachments)
+  viewerCaches.set(source, cache)
+  return cache
+}
 
 /** Viewer-scoped, consent-only byte reads. No upload preview URL enters this cache. */
 export function createTranscriptImages(port: Pick<AttachmentPort, 'chunk'> | undefined, options: {
   readonly maxEntries?: number
   readonly maxBytes?: number
   readonly urls?: Pick<typeof URL, 'createObjectURL' | 'revokeObjectURL'>
-} = {}) {
+} = {}): TranscriptImageCache {
   const maxEntries = Math.max(1, options.maxEntries ?? 24)
   const maxBytes = Math.max(1, options.maxBytes ?? 40 * 1024 * 1024)
   const urls = options.urls ?? URL
@@ -20,6 +43,7 @@ export function createTranscriptImages(port: Pick<AttachmentPort, 'chunk'> | und
   const sizes = new Map<string, number>()
   const listeners = new Set<() => void>()
   let bytes = 0
+  let owners = 0
   const publish = (next: Map<string, TranscriptImageState>) => {
     states = next
     for (const listener of listeners) listener()
@@ -44,13 +68,15 @@ export function createTranscriptImages(port: Pick<AttachmentPort, 'chunk'> | und
     bytes += size
     publish(next)
   }
-  const state = (id: string) => states.get(id) ?? deferred
+  const state = (id: string, mediaType?: string) => {
+    if (!/^blob\/[0-9a-f]{64}$/.test(id) || (mediaType !== undefined && imageTypes[mediaType] !== true)) return unavailable
+    return states.get(id) ?? deferred
+  }
   const load = async (attachment: Attachment, messageId: string): Promise<void> => {
-    const previous = state(attachment.id)
-    if (previous._tag === 'Loading' || previous._tag === 'Loaded') return
+    const previous = state(attachment.id, attachment.mediaType)
+    if (previous._tag === 'Unavailable' || previous._tag === 'Loading' || previous._tag === 'Loaded') return
     if (port === undefined) { put(attachment.id, { _tag: 'Unauthorized' }); return }
-    const sha256 = /^blob\/([0-9a-f]{64})$/.exec(attachment.id)?.[1]
-    if (sha256 === undefined || imageTypes[attachment.mediaType] !== true) { put(attachment.id, { _tag: 'Failed' }); return }
+    const sha256 = attachment.id.slice('blob/'.length)
     const pending: TranscriptImageState = { _tag: 'Loading' }
     put(attachment.id, pending)
     // Disposal or eviction invalidates an in-flight read; its late answer cannot allocate a URL.
@@ -84,15 +110,26 @@ export function createTranscriptImages(port: Pick<AttachmentPort, 'chunk'> | und
       if (current()) put(attachment.id, { _tag: 'Failed' })
     }
   }
+  const dispose = () => {
+    const next = new Map(states)
+    for (const id of next.keys()) remove(next, id)
+    // Teardown must not notify React while its subscriptions are being detached.
+    states = next
+  }
   return {
     state, load,
     snapshot: () => states,
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    dispose: () => {
-      const next = new Map(states)
-      for (const id of next.keys()) remove(next, id)
-      // Teardown must not notify React while its subscriptions are being detached.
-      states = next
+    acquire: () => {
+      owners += 1
+      let released = false
+      return () => {
+        if (released) return
+        released = true
+        owners -= 1
+        if (owners === 0) dispose()
+      }
     },
+    dispose,
   }
 }

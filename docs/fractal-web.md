@@ -63,13 +63,16 @@ or after this callback; it never fetches the URL on the app's behalf.
 Sent and received image attachments use a separate consent boundary: **Show image**
 reads the attachment through `AttachmentPort.chunk`, retaining the native message
 carrier so the gateway authorizes the viewer. No upload preview URL is reused.
-The viewer-scoped cache holds at most 24 entries and 40 MiB of image bytes, accepts
-images up to 10 MiB, and revokes object URLs on eviction and unmount. A pending
-read whose entry was evicted or disposed cannot publish a late object URL.
+Retained panes share one cache per data-source/viewer identity, holding at most
+24 entries and 40 MiB of image bytes in total. Images are limited to 10 MiB;
+object URLs are revoked on eviction and when the final pane releases the cache.
+A pending read whose entry was evicted or disposed cannot publish a late object URL.
 Loading, unauthorized and failed reads keep the file card; failures offer **Retry**.
 Loaded thumbnails open in the kit's image viewer. Existing mailbox attachment
 metadata supplies sizes; native content that carries only an attachment ID keeps
 **Size unavailable** without changing the wire contract.
+Only PNG, JPEG, GIF and WebP attachments with a `blob/<sha256>` ID offer image
+reads. Unsupported types and references stay plain non-retryable file cards.
 
 Run the regression proofs with:
 
