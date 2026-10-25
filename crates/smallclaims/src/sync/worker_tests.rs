@@ -1135,6 +1135,8 @@ fn transport_order_view() -> FleetView {
         member_key: format!("{name}-key"),
         state: "current".into(),
         mode: "listening".into(),
+        node_id: None,
+        endpoints_published: true,
         endpoints,
         start: 1,
         end: None,
