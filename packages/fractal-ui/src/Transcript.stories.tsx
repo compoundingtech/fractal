@@ -64,6 +64,7 @@ const harnessEventData: TranscriptStoryData = {
 }
 export const HarnessEvents: Story = {
   tags: ['critical'],
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exercises native harness notice row rendering and runtime adoption with exact local notice fixtures.' } },
   render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={harnessEventData} onRetry={() => {}} /></main>,
   play: async ({ canvasElement }) => {
     const notices = await within(canvasElement).findAllByTestId('harness-notice')
@@ -150,6 +151,7 @@ export const SettledLight: Story = { ...Settled, args: { scheme: 'light' } }
 /** The host supplies facts and presentation; the kit only owns the per-turn slot. */
 export const TurnFooter: Story = {
   tags: ['critical'],
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exercises the host-supplied per-turn footer slot with exact local facts, independent of scenario data.' } },
   render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={cases.settled} onRetry={() => {}} renderTurnFooter={() => <footer data-testid="example-turn-footer">example-model · 4,200 tokens · $0.0250</footer>} /></main>,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
