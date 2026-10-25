@@ -140,6 +140,12 @@ POOL_SETTINGS = {}  # the ST_TEST_* settings (pool, pool cap, signing jobs, memb
 SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_POOL_MAX_GB', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT', 'ST_TEST_RUNS',
                  'ST_TEST_MAX_LOAD', 'ST_TEST_LOAD_WAIT_MINUTES')
 POOL_MAX_GB = 60.0  # all repositories' pools together under the pool directory; ST_TEST_POOL_MAX_GB (0 or off: no cap) replaces it
+# A run that releases its pool tree records what the tree and its target hold (tree-N.size, beside the lock), so the next start sums the
+# records instead of walking every tree: the walk is tens of GB of small files and, with several runs starting, is IO the host feels.
+# Trees are walked at a start only when a record is missing or older than a change to the tree, and only when the sum of what is
+# recorded (a tree with no record counted as POOL_UNMEASURED_GB) comes within POOL_NEAR of the cap.
+POOL_NEAR = 0.8
+POOL_UNMEASURED_GB = 10.0
 
 
 # A host-local load limit (set by whoever runs the host, never in the repo): the 1-minute load average above which a run does not start its
@@ -540,13 +546,48 @@ def pool_max_gb():
     return limit or None
 
 
-def du_gb(path):
-    """The disk a directory holds, in GB (du, which is far quicker than walking a 60 GB build tree from here)."""
-    done = subprocess.run(['du', '-sk', '--', str(path)], capture_output=True, text=True, check=False)
+def du_gb(path, quiet=False):
+    """The disk a directory holds, in GB (du, which is far quicker than walking a 60 GB build tree from here). `quiet` runs it at the lowest
+    CPU and IO priority, for the walks a run makes of its own accord."""
+    argv = ['du', '-sk', '--', str(path)]
+    if quiet:
+        for prefix in (['ionice', '-c', '3'], ['nice', '-n', '19']):
+            if shutil.which(prefix[0]):
+                argv = prefix + argv
+    done = subprocess.run(argv, capture_output=True, text=True, check=False)
     try:
         return int(done.stdout.split()[0]) * 1024 / 1e9
     except (IndexError, ValueError):
         return size_gb(path)
+
+
+def unit_paths(repo, n):
+    return [path for path in (repo / f'tree-{n}', repo / f'target-{n}') if path.exists()]
+
+
+def measure_unit(repo, n):
+    """What pool unit `n` of `repo` holds now, in GB: one du each of its tree and its target, at low priority."""
+    return sum(du_gb(path, quiet=True) for path in unit_paths(repo, n))
+
+
+def record_unit_size(repo, n, gb):
+    """Write what pool unit `n` of `repo` holds to tree-N.size, for the next start to sum."""
+    record = repo / f'tree-{n}.size'
+    scratch = record.with_name(record.name + f'.{os.getpid()}')
+    scratch.write_text(json.dumps({'gb': round(gb, 6), 'at': int(time.time())}))
+    os.replace(scratch, record)
+
+
+def read_unit_size(repo, n):
+    """(GB, current) from the unit's record, or None without a usable one. A record is current while it is newer than the tree's and the
+    target's own directories (their entries change when the tree is cleaned or the target is emptied)."""
+    record = repo / f'tree-{n}.size'
+    try:
+        gb = float(json.loads(record.read_text())['gb'])
+        written = record.stat().st_mtime_ns
+        return gb, all(path.stat().st_mtime_ns <= written for path in unit_paths(repo, n))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def pool_units(base):
@@ -572,7 +613,28 @@ def evict_to_cap(base, limit_gb, keep=None):
     """Keep the pool directory under `limit_gb` GB in all: before a run, remove the least recently used trees and their targets whose lock
     is free, oldest first, until it fits. A unit someone holds is never touched (`keep` is the one this run holds). Says what it removed."""
     units = pool_units(base)
-    sizes = {(repo, n): sum(du_gb(path) for path in paths) for _, repo, n, paths in units}
+    sizes, walk = {}, []
+    for _, repo, n, paths in units:
+        record = read_unit_size(repo, n)
+        if record:
+            sizes[(repo, n)] = record[0]
+        if not record or not record[1]:
+            walk.append((repo, n, paths))
+    if sum(sizes.get((repo, n), POOL_UNMEASURED_GB) for _, repo, n, _ in units) <= limit_gb * POOL_NEAR:
+        return  # far from the cap by what the runs recorded: no tree is walked
+    for repo, n, paths in walk:
+        sizes[(repo, n)] = measured = sum(du_gb(path, quiet=True) for path in paths)
+        try:
+            lock = open(repo / f'tree-{n}.lock', 'a')
+        except OSError:
+            continue
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # a unit someone holds is measured but not recorded: its run records it
+            record_unit_size(repo, n, measured)
+        except (BlockingIOError, OSError):
+            pass
+        finally:
+            lock.close()
     total = sum(sizes.values())
     for used, repo, n, paths in units:
         if total <= limit_gb:
@@ -593,6 +655,7 @@ def evict_to_cap(base, limit_gb, keep=None):
                 subprocess.run(['chmod', '-R', 'u+rwX', '--', str(path)], check=False, capture_output=True)
                 shutil.rmtree(path, ignore_errors=True)
             total -= sizes[(repo, n)]
+            (repo / f'tree-{n}.size').unlink(missing_ok=True)
             idle = max(0, int((time.time() - used) / 60))
             print(f'st-test: pool over {limit_gb:g} GB: evicted {repo.name}/tree-{n} and target-{n} ({sizes[(repo, n)]:.1f} GB, idle {idle} min)', file=sys.stderr)
         finally:
@@ -1560,6 +1623,11 @@ def main(argv):
             if not pool_trees and directory.exists():
                 git('worktree', 'remove', '--force', str(directory), check=False)
             if tree_lock:
+                if pool_max_gb():
+                    try:
+                        record_unit_size(root, n, measure_unit(root, n))  # what the next start sums instead of walking the tree
+                    except OSError:
+                        pass
                 os.utime(tree_lock.name)  # last used: now, for the eviction order
                 tree_lock.close()
 

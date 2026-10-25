@@ -785,6 +785,80 @@ class StTest(unittest.TestCase):
                 with self.assertRaises(st_test.Failure):
                     st_test.pool_max_gb()
 
+    def record(self, base, repo, n, gb):
+        """The size record a run leaves when it releases its tree, written after the unit's last change."""
+        path = base / repo / f'tree-{n}.size'
+        path.write_text(json.dumps({'gb': gb, 'at': 1}))
+        later = max(path.stat().st_mtime, (base / repo / f'tree-{n}').stat().st_mtime, (base / repo / f'target-{n}').stat().st_mtime) + 5
+        os.utime(path, (later, later))
+
+    def walks(self, base, limit):
+        """The directories evict_to_cap walked (du) in one start."""
+        walked = []
+        real = st_test.du_gb
+        def counting(path, quiet=False):
+            walked.append(path)
+            return real(path, quiet)
+        with mock.patch.object(st_test, 'du_gb', counting), contextlib.redirect_stderr(io.StringIO()):
+            st_test.evict_to_cap(base, limit)
+        return walked
+
+    def test_a_start_far_from_the_cap_by_the_recorded_sizes_walks_no_tree(self):
+        base = Path(self.tmp.name) / 'pool'
+        for repo, n in (('repo-a', 0), ('repo-a', 1), ('repo-b', 0)):
+            self.fake_unit(base, repo, n, 100, 1_000 + n)
+            self.record(base, repo, n, 4.0)
+        self.assertEqual(self.walks(base, 60.0), [])  # 12 GB recorded against 60
+        self.assertEqual(len(list(base.glob('*/tree-*'))), 9)  # trees, locks and records of three units: nothing was removed
+
+    def test_a_start_near_the_cap_evicts_by_the_recorded_sizes_without_walking_a_current_record(self):
+        base = Path(self.tmp.name) / 'pool'
+        self.fake_unit(base, 'repo-a', 0, 100, 1_000)   # oldest
+        self.fake_unit(base, 'repo-a', 1, 100, 2_000)
+        self.record(base, 'repo-a', 0, 30.0)
+        self.record(base, 'repo-a', 1, 30.0)
+        self.assertEqual(self.walks(base, 50.0), [])    # 60 GB recorded against 50: over the cap, still no walk
+        self.assertFalse((base / 'repo-a/tree-0').exists())
+        self.assertFalse((base / 'repo-a/tree-0.size').exists())  # the record goes with the unit
+        self.assertTrue((base / 'repo-a/tree-1').exists())
+
+    def test_a_unit_without_a_current_record_is_walked_once_near_the_cap_and_then_recorded(self):
+        base = Path(self.tmp.name) / 'pool'
+        self.fake_unit(base, 'repo-a', 0, 200, 1_000)    # no record
+        self.fake_unit(base, 'repo-a', 1, 200, 2_000)    # a record, then the tree changes
+        self.record(base, 'repo-a', 1, 0.0004)
+        (base / 'repo-a/tree-1/new').write_text('changed after the record')
+        before = (base / 'repo-a/tree-1').stat().st_mtime - 100
+        os.utime(base / 'repo-a/tree-1.size', (before, before))  # the record is older than the tree's last change
+        self.assertIsNone(st_test.read_unit_size(base / 'repo-a', 0))
+        self.assertFalse(st_test.read_unit_size(base / 'repo-a', 1)[1])
+        walked = self.walks(base, 10.0)  # an unrecorded unit counts as POOL_UNMEASURED_GB: 20 GB estimated against 8 GB of room
+        self.assertEqual(sorted(path.name for path in walked), ['target-0', 'target-1', 'tree-0', 'tree-1'])
+        self.assertAlmostEqual(st_test.read_unit_size(base / 'repo-a', 0)[0], 0.0004, delta=0.0003)
+        self.assertTrue(st_test.read_unit_size(base / 'repo-a', 1)[1])
+        self.assertEqual(self.walks(base, 10.0), [])  # both recorded now (0.0008 GB in all)
+
+    def test_a_held_unit_is_measured_but_left_for_its_own_run_to_record(self):
+        base = Path(self.tmp.name) / 'pool'
+        self.fake_unit(base, 'repo-a', 0, 100, 1_000)
+        held = open(base / 'repo-a/tree-0.lock', 'a')
+        self.addCleanup(held.close)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        self.assertEqual(len(self.walks(base, 1.0)), 2)
+        self.assertFalse((base / 'repo-a/tree-0.size').exists())
+
+    def test_a_run_records_what_its_tree_and_target_hold_when_it_releases_the_tree(self):
+        self.commit('b.txt', 'two')
+        base = self.home / '.cache/st-test'
+        code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_POOL_MAX_GB': '50'})
+        self.assertEqual(code, 0, err)
+        own, = list(base.iterdir())
+        record = json.loads((own / 'tree-0.size').read_text())
+        self.assertGreater(record['gb'], 0)
+        self.assertTrue(st_test.read_unit_size(own, 0)[1])  # newer than the tree's and the target's own directories
+        code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_POOL_MAX_GB': 'off'})
+        self.assertEqual(code, 0, err)
+
     def test_a_run_enforces_the_cap_before_it_starts_and_never_evicts_its_own_tree(self):
         self.commit('b.txt', 'two')
         base = self.home / '.cache/st-test'
