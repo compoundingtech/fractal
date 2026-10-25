@@ -51,7 +51,8 @@ or to the path in ST_TEST_RUNS (`off` records nothing); scripts/st-test-report r
 
 Exit 0 when every selected check passed and was signed (with --out, exported but not verified); 1 when a check failed, timed out or
 could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered; 4 when nothing failed but a check
-was not signed because the tree edits that check's lane (evidence-wrap would refuse it; CI runs it).
+was not signed because the tree edits that check's lane (evidence-wrap would refuse it; CI runs it), or rust-tests left a crate unsigned because one of its
+tests passed only on a retry (CI's own per-crate notes refuse such a crate too, so CI runs it; linux-gate still signs and records them as flaky_tests).
 """
 import argparse
 import base64
@@ -1015,6 +1016,16 @@ def takes_input_files(wrapper):
     return '--input-file' in Path(wrapper).read_text()
 
 
+UNCOVERED = 'not signed'  # a crate left for CI (a test passed only on a retry): its row, and the check's unsigned flag
+
+
+def retried_tests(directory, junit, crate):
+    """The crate's tests that passed only on a retry in the report (scripts/ci-rust-test-result's `flaky` lines)."""
+    done = subprocess.run([sys.executable, str(directory / 'scripts/ci-rust-test-result')], capture_output=True, text=True,
+                          env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate))
+    return [line.split(' ', 1)[1] for line in done.stdout.splitlines() if line.startswith('flaky ')]
+
+
 def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes, target, report=None):
     """The `rust-tests` check: one nextest run of the crates that have no passing note for their key, on the workspace build CI makes,
     then one signature per crate over that crate's part of the run. Returns the summary rows.
@@ -1078,6 +1089,12 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
                                           text=True, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate)).stdout or 'null')
         if not facts:
             return (f'rust-tests:{crate}', 'NOT SIGNED', 0, 'cannot read its result from the report'), []
+        flaky = retried_tests(directory, junit, crate)
+        if flaky:
+            # As CI's per-crate notes (scripts/ci-rust-test-notes): a crate with a test that passed only on a retry is not signed, so it
+            # stays uncovered and CI runs it. Not a failure of this run.
+            return (f'rust-tests:{crate}', UNCOVERED, 0, f'{len(flaky)} test(s) passed only on a retry, CI runs it: '
+                    + ', '.join(name.split(' ', 1)[-1] for name in flaky[:2]) + (' ...' if len(flaky) > 2 else ''))[:200], UNCOVERED
         wrap = [sys.executable, tools['evidence-wrap'], '--check', 'rust-tests', '--attempt', args.attempt,
                 '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base,
                 '--input', f'crate={crate}', '--input', f'source_inputs={keys[crate]}', '--input', f'tests_run={facts["tests_run"]}',
@@ -1125,7 +1142,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     for crate, (row, signed) in zip(selected, outcomes):
         if row:
             rows.append(row)
-            failed = True
+            failed = failed or signed != UNCOVERED
         else:
             refs, facts = signed
             signed_count += 1
@@ -1143,6 +1160,9 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
               f'{signed_count} of {len(selected)} crates run and signed ({have} of {len(keys)} already had a passing note); one nextest run on the workspace build')
     if args.out:
         detail += '; packs exported, not imported or verified'
+    left = [crate for crate, (_, signed) in zip(selected, outcomes) if signed == UNCOVERED]
+    if left:
+        detail += f'; {len(left)} left for CI, a test passed only on a retry: {", ".join(left[:8])}' + (' ...' if len(left) > 8 else '')
     empty = [crate for crate in empty if crate not in listed_no_tests(args.base)]
     if empty:
         # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).
@@ -1428,7 +1448,7 @@ def main(argv):
                     # One run, one row for the run and one for each crate that did not sign (a list: the collector below takes either).
                     new_rows, bad = run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes,
                                                    target, report=gate_report)
-                    return new_rows, bad, False
+                    return new_rows, bad, any(row[1] == UNCOVERED for row in new_rows)  # a crate left for CI: exit 4, not 1
                 unchanged = web_unchanged(args.base) if name == WEB else None
                 if unchanged:
                     return (name, 'not relevant', 0, unchanged), False, False  # nothing to run, nothing to sign: not a failure
@@ -1469,6 +1489,13 @@ def main(argv):
                     environment['CI_TEST_ENV_SKIPS'] = str(skips)
                     if takes_input_files(tools['evidence-wrap']):
                         wrap += ['--input-file', f'env_skips={skips}']
+                if name == 'linux-gate' and 'tests' in LOCAL[name] and takes_input_files(tools['evidence-wrap']):
+                    # The tests that passed only on a retry (scripts/ci-nextest-flaky writes them after the tests stage): the whole-tree note
+                    # still signs, as CI's gate counts a retried pass, and records them as flaky_tests so the evidence says so. rust-tests
+                    # does not sign a crate with one (run_rust_tests), as CI's own per-crate notes do not.
+                    flaky = Path(scratch) / 'flaky-linux-gate.txt'
+                    environment['CI_TEST_FLAKY'] = str(flaky)
+                    wrap += ['--input-file', f'flaky_tests={flaky}']
                 if name in BASE_BOUND:
                     # clippy's ratchet compares with the base, as CI compares with the event's base: the base as just fetched,
                     # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.
