@@ -1549,7 +1549,7 @@ fn offer_round(delivery: &mut CodexInboxDelivery, state: &CodexControlState) -> 
 /// `idle_delivery_control`): after an idle period, under a hold, at its release and at its expiry,
 /// the native pump admits exactly one offer for each message and replays none. The gate is fed
 /// what the daemon's hold view reports at each instant of a test clock (`active` is
-/// `held && now < until`, which st3-api-core's
+/// `held && now < until`, which fractal-api-core's
 /// `expiry_release_restart_and_adoption_preserve_graph_authority` proves on the real claim store),
 /// so nothing sleeps. That an idle tick reads no hold at all is
 /// driver_cli's `native_delivery_control_reads_hold_only_while_mail_waits`.

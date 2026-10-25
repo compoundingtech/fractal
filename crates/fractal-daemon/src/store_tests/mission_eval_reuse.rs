@@ -1,4 +1,4 @@
-//! Mission evaluation reuse tests that build a reconciler fixture; they live in st3-daemon because the reconciler does.
+//! Mission evaluation reuse tests that build a reconciler fixture; they live in fractal-daemon because the reconciler does.
 
 #![allow(unused_imports)]
 

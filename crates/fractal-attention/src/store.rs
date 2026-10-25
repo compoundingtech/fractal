@@ -1,4 +1,4 @@
-//! The part of `store` that moved up from st3-seats.
+//! The part of `store` that moved up from fractal-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -90,7 +90,7 @@ pub use fractal_seats::store::checkpoint_rules::{RULES_VERSION, plan_drops, rule
 pub use fractal_seats::store::limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
 pub use fractal_seats::store::limits::ACCOUNT_READING_WINDOW_MS;
 pub use fractal_seats::store::subagents::{SUBAGENT_KINDS, SubagentView};
-pub use fractal_seats::store::runtime::SmalltalkRuntime;
+pub use fractal_seats::store::runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use fractal_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;

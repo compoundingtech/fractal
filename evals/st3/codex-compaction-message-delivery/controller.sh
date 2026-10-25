@@ -117,7 +117,7 @@ wait_until "initial exact idle" 300 is_harness_state idle
 
 send_request \
   "Working-turn anchor" \
-  "Run the shell command sleep 20. After it finishes, send $REQUESTER exactly one Small Talk message containing ANCHOR-DONE $NONCE and tagged $RUN_TAG. Do not modify files." \
+  "Run the shell command sleep 20. After it finishes, send $REQUESTER exactly one Fractal message containing ANCHOR-DONE $NONCE and tagged $RUN_TAG. Do not modify files." \
   anchor
 anchor="$sent_subject"
 wait_until "anchor native lifecycle" 180 message_has_lifecycle "$anchor"
@@ -125,7 +125,7 @@ wait_until "Codex working state" 90 is_harness_state working
 
 send_request \
   "Working-turn steer" \
-  "Send $REQUESTER exactly one Small Talk message containing STEER-SEEN $NONCE and tagged $RUN_TAG. Do not modify files." \
+  "Send $REQUESTER exactly one Fractal message containing STEER-SEEN $NONCE and tagged $RUN_TAG. Do not modify files." \
   steer
 steer="$sent_subject"
 wait_until "steered message lifecycle" 180 message_has_lifecycle "$steer"
@@ -148,7 +148,7 @@ persist_state
 
 send_request \
   "Post-compaction delivery" \
-  "Send $REQUESTER exactly one Small Talk message containing POST-COMPACT-SEEN $NONCE and tagged $RUN_TAG. Then complete your claimed message-target work step in the graph. Do not modify files." \
+  "Send $REQUESTER exactly one Fractal message containing POST-COMPACT-SEEN $NONCE and tagged $RUN_TAG. Then complete your claimed message-target work step in the graph. Do not modify files." \
   post_compact
 post="$sent_subject"
 wait_until "post-compaction native lifecycle" 180 message_has_lifecycle "$post"

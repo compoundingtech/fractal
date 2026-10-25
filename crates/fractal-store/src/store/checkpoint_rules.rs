@@ -1,4 +1,4 @@
-//! smalltalk's checkpoint rules: which of its claims a stable checkpoint may drop, what a
+//! Fractal's checkpoint rules: which of its claims a stable checkpoint may drop, what a
 //! checkpoint proof compares about each subject, and the attention a stalled checkpoint asks
 //! for. The graph runs checkpoints (`smallclaims::store::checkpoint`) and asks the runtime for
 //! these through `smallclaims::store::Runtime`.

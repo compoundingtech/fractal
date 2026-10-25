@@ -33,7 +33,7 @@ export const roleSender = ({
       ? { kind: 'human', label: 'You', via: 'harness' }
       : { kind: 'system', label: 'System' }
 
-/** Small Talk subjects carry provenance in their explicit subject prefix. */
+/** Fractal subjects carry provenance in their explicit subject prefix. */
 export const deliverySender = (from: string | undefined): Sender =>
   from?.startsWith('agent/') === true
     ? { kind: 'st-agent', label: from.slice('agent/'.length), via: 'st' }

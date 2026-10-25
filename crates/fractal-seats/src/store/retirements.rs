@@ -1,4 +1,4 @@
-//! The part of `store::retirements` that moved up from st3-store.
+//! The part of `store::retirements` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::model::{LifecycleUnavailableReason, MessageSendRefusal};
@@ -206,7 +206,7 @@ impl RetirementsStore for Store {
                 connection,
                 self.origin(),
                 peers,
-                &self.smalltalk.schema_digest(),
+                &self.fractal.schema_digest(),
             )?;
             validate_claim_input(&input)
         };
@@ -365,7 +365,7 @@ mod tests {
     use fractal_missions::store::retirements_tests_shared_seats::*;
     use fractal_missions::store::retirements_tests_shared_seats::{ACTOR, SUBJECT, send};
 
-    /// The part of st3-store's producer guard for the message producers that moved up with this crate.
+    /// The part of fractal-store's producer guard for the message producers that moved up with this crate.
     #[test]
     fn moved_message_producers_use_the_common_wrapper() {
         let source = include_str!("limits.rs");
@@ -1005,7 +1005,7 @@ mod tests {
         assert_eq!(custody_error.code, "retirement-upgrade-required");
         assert!(store.agent_retirement(SUBJECT).unwrap().is_none());
         store.append_claim(&send("owner-offline-safe")).unwrap();
-        store.connection.write().execute("INSERT INTO replication_peers(peer,status,schema_digest,updated_at_unix_ms) VALUES('birch','up',?1,'1')",[store.smalltalk.schema_digest()]).unwrap();
+        store.connection.write().execute("INSERT INTO replication_peers(peer,status,schema_digest,updated_at_unix_ms) VALUES('birch','up',?1,'1')",[store.fractal.schema_digest()]).unwrap();
         store
             .retire_agent(
                 SUBJECT,

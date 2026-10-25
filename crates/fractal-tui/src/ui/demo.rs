@@ -1,4 +1,4 @@
-//! An invented fleet for `stui --demo`. Nothing here reads st3.
+//! An invented fleet for `fractal tui --demo`. Nothing here reads st3.
 //!
 //! Every name is made up. The world moves: one agent streams a reply, a tool runs and
 //! finishes, a message arrives, so the scrolling and "new below" behaviour can be felt.
