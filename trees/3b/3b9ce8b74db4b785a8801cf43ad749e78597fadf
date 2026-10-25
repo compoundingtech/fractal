@@ -4,3 +4,4 @@ record fd524b0883137ac844d738f83ed1daa4fb6790ba ci-script-tests 0 host/anvil 202
 record 7a8fe8176aa4b43e0ba3793d6da0eaad1fd491d8 linux-gate 100 host/anvil 2026-10-25T12:19:46Z
 record 4bf39aee5b0990fc8265ad760e4f9e55a69e8002 typescript-client 0 host/forge 2026-10-25T12:24:45Z
 record 4c6722e415ae13301e4282b3859b24739955fbae genie-freshness 0 host/forge 2026-10-25T12:25:49Z
+record f68ce0005765bc8724d71dcc29bc1dca9b7381f1 ci-script-tests 0 host/forge 2026-10-25T12:27:49Z
