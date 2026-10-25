@@ -121,7 +121,7 @@ BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
 # trimmed only while no other run uses it); ST_EVIDENCE_TARGET=off builds in the tree itself; a CARGO_TARGET_DIR the caller set is
 # left alone.
 # One run (test build + clippy + fleet-compat profiles) ends near 60 GB; with incremental compilation on, a quarter to a half of that is debug/incremental
-# (hetz2, 2026-10-23: target-0 99 GB of which incremental 40, deps 55, examples 5). The check is only made before a run, so a limit below one run's
+# (a build host, 2026-10-23: target-0 99 GB of which incremental 40, deps 55, examples 5). The check is only made before a run, so a limit below one run's
 # size would empty the target every time and nothing would ever be warm: 80 GB lets one run's output stay.
 TARGET_MAX_GB = 80.0
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
