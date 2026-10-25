@@ -21,6 +21,7 @@
         "clients/typescript/fractal-scenarios/package.json",
         "flake.lock",
         "flake.nix",
+        "nix/web-shell-inputs.json",
         "nix/web-shell.nix",
         "package.json",
         "packages/fractal-sdk/package.json",

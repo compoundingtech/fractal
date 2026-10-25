@@ -1238,7 +1238,10 @@ f-string such as `.github/{name}-compat-baseline.json` as a glob). It sorts each
   text. Only executed code is followed, and a mention counts like a call, so it errs wide.
 - **Read**: any other file the code names (a workflow, a doc, a fixture outside the code directories). This is the tree under test unless the
   lane declares it as verdict data (the `VERDICT_DATA` table, one reason per file: linux-gate's clippy baseline and splits, its compat
-  baselines and the daily-only filterset; rust-tests' filterset and messaging compat baseline; fractal-web's license inventory).
+  baselines and the daily-only filterset; rust-tests' filterset and messaging compat baseline; fractal-web's license inventory and the web
+  dev shell's input spec). A file that executed code reads as configuration of the environment it builds (`jq --slurpfile`, `--argfile`,
+  `--rawfile` or `-f`, `nix eval|build --file`) must be executed or declared: `--check` fails on one that is neither, for every lane but
+  the two kept by hand, whose script tests read the other lanes' configuration to test the scripts that read it.
 
 The walk ends at the tree under test (the Rust workspace and the pnpm workspace packages, the lanes' `tree_inputs`; a lint that reads a
 crate's build.rs reads its subject, not its definition). A lane's runners inside a package are followed only for that lane: for genie-freshness,

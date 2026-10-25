@@ -237,6 +237,17 @@ class Executed(Fixture):
         self.assertEqual(other.paths(), ['scripts/a'])
         self.assertEqual(sorted(other.subject), ['tools/ci/run.mjs'])
 
+    def test_a_file_read_as_environment_configuration_must_be_declared(self):
+        closure = self.closure(['bash', 'scripts/shell'], {
+            'scripts/shell': SH + 'spec=$(jq -cS --slurpfile spec nix/inputs.json -f scripts/build.jq flake.lock)\n'
+                                  'python3 scripts/pins\njq . docs/notes.json\n',
+            'scripts/pins': PY + 'import subprocess\nsubprocess.run(["jq", "--argfile", "pins", ".github/pins.json", "-n", "$pins"])\n',
+            'scripts/build.jq': '.', 'nix/inputs.json': '{}', '.github/pins.json': '{}', 'docs/notes.json': '{}', 'flake.lock': '{}'})
+        self.assertEqual(sorted(closure.config), ['.github/pins.json', 'nix/inputs.json', 'scripts/build.jq'])
+        self.assertEqual(closure.undeclared({}), ['.github/pins.json', 'nix/inputs.json'])  # build.jq is executed
+        self.assertEqual(closure.undeclared({'nix/inputs.json': '', '.github/pins.json': ''}), [])
+        self.assertNotIn('docs/notes.json', closure.config)  # jq's input (or flake.lock's) is data, not the environment
+
     def test_a_sparse_lane_is_walked_inside_its_inputs(self):
         old = ldc.SPARSE
         ldc.SPARSE = {'demo'}
@@ -299,6 +310,14 @@ class CommandLine(Fixture):
         done = run('--check')
         self.assertEqual(done.returncode, 1)
         self.assertIn('kept: 1 file(s) the lane executes are not in its definition_paths', done.stdout)
+        self.tree({'scripts/a': SH + 'jq . .github/baseline.json docs/x.json\njq -n --slurpfile spec docs/spec.json .\n',
+                   'docs/spec.json': '{}'})
+        self.lanes(['.github/baseline.json', 'scripts/a'], kept=['scripts'])
+        done = run('--check')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('demo: docs/spec.json is read as environment configuration by scripts/a', done.stdout)
+        self.assertNotIn('kept: docs/spec.json', done.stdout)  # a KEPT lane is not held to it
+        self.tree({'scripts/a': SH + 'jq . .github/baseline.json docs/x.json\n'})
         (self.root / '.github/baseline.json').unlink()
         subprocess.run(['git', '-C', str(self.root), 'add', '-A'], check=True, env=GIT_ENV)
         self.lanes(['.github/baseline.json', 'scripts/a'], kept=['scripts'])

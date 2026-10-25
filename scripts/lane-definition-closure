@@ -33,7 +33,8 @@ is not scripts/install). A mention counts like a call (a path in a message is in
 A file it reaches is executed when it is the lanes' own code or data (FOLLOWED: scripts/, nix/ when Nix code imports it, the lane's
 HARNESS), what evaluated Nix code reads, a package manifest whose script a pnpm call runs, or a convention file of a tool the lane runs
 (TOOL_FILES; a tool runs when a shell word or a whole string constant is its name). Anything else it reaches is read: the tree under
-test, unless VERDICT_DATA declares it. Only executed code is followed.
+test, unless VERDICT_DATA declares it. Only executed code is followed. A file that executed code reads as configuration of the
+environment it builds (CONFIG_SH: `jq --slurpfile NAME FILE`, `nix eval --file FILE`) must be executed or declared, or --check fails.
 
 What ends the walk, on purpose:
   * The tree under test (SUBJECT: the Rust workspace and the pnpm workspace packages, the lanes' `tree_inputs`): a script that reads
@@ -86,6 +87,8 @@ VERDICT_DATA = {
     },
     'fractal-web': {
         'buck2/dependencies/licenses.json': 'the license inventory the lockfile is held to (scripts/ci-fractal-web-licenses)',
+        'nix/web-shell-inputs.json': 'the web dev shell\'s input spec: scripts/ci-web-shell reads it with jq --slurpfile to build the '
+                                     'environment the lane tests in',
     },
 }
 
@@ -161,6 +164,13 @@ ENUMERATING = re.compile(r'\*+(?:\.[A-Za-z0-9]+)*\Z')
 LISTING_ATTRS = {'iterdir', 'glob', 'rglob'}
 LISTING_CALLS = {'listdir', 'walk', 'scandir'}
 SH_LISTING = re.compile(r'(?:^|[\s;|&(])(?:find|ls)\s+(?:-\S+\s+)*["\']?([A-Za-z0-9_.@+/$}{-]+)')
+# A file executed code reads as configuration of the environment it builds: `jq --slurpfile NAME FILE` (--argfile, --rawfile),
+# `jq -f FILE`, `nix eval|build|shell|develop --file FILE`. It is executed, or the lane declares it as VERDICT_DATA (--check). Not
+# held for a KEPT lane: the script tests read the other lanes' configuration to test the scripts that read it (the tree under test).
+CONFIG_SH = (re.compile(r'--(?:slurpfile|argfile|rawfile)[ \t]+\S+[ \t]+(\S+)'),
+             re.compile(r'(?:^|[\s;|&(])jq\b[^\n;|]*?[ \t](?:-f|--from-file)[ \t]+(\S+)', re.M),
+             re.compile(r'(?:^|[\s;|&(])nix[ \t]+(?:eval|build|shell|develop)\b[^\n;|]*?[ \t](?:-f|--file)[ \t]+(\S+)', re.M))
+CONFIG_FLAGS = {'--slurpfile': 2, '--argfile': 2, '--rawfile': 2, '-f': 1, '--from-file': 1, '--file': 1}
 PNPM = re.compile(r'(?:^|[ \t;|&(`])pnpm(?![\w.-])((?:[ \t]+[^\s;|&)`]+)*)', re.M)  # not pnpm-lock.yaml
 
 
@@ -366,6 +376,26 @@ def python_words(text):
     return words, inner, listed, modules, patterns
 
 
+def config_args(code):
+    """The file arguments of shell code's environment-configuration reads (CONFIG_SH)."""
+    return [match.group(1) for regex in CONFIG_SH for match in regex.finditer(code)]
+
+
+def python_config_args(text):
+    """The file arguments of a jq or nix argv written as a list or tuple of constants (["jq", "--slurpfile", "spec", "x.json"])."""
+    found = []
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, (ast.List, ast.Tuple)):
+            items = [e.value if isinstance(e, ast.Constant) and isinstance(e.value, str) else None for e in node.elts]
+            if not {'jq', 'nix'} & set(items):
+                continue
+            for i, item in enumerate(items):
+                step = CONFIG_FLAGS.get(item)
+                if step and i + step < len(items) and items[i + step]:
+                    found.append(items[i + step])
+    return found
+
+
 def js_strings(text):
     """(string literals, template patterns) of JavaScript or TypeScript source, comments dropped: a template literal's static
     parts are literals, and the template with each `${...}` as `*` is a pattern."""
@@ -483,6 +513,7 @@ class Closure:
         self.scanned = set()
         self.why = {}
         self.listings = {}
+        self.config = {}  # path -> the executed file that reads it as environment configuration (CONFIG_SH)
         self.subject = {}
         self.tools = set()
         self.executed = set()
@@ -574,6 +605,19 @@ class Closure:
             else:
                 self.listings.setdefault(path, set()).add(origin)
 
+    def config_reads(self, args, bases, origin):
+        """Record the tracked files an executed file reads as environment configuration (`jq --slurpfile spec nix/x.json`)."""
+        for arg in args:
+            for word in shell_words(arg.strip('\'"'))[0]:
+                files, _, _ = resolve(self.repo, word, bases)
+                for path in sorted(files):
+                    if not under(path, SUBJECT) or under(path, self.harness):
+                        self.config.setdefault(path, origin)
+
+    def undeclared(self, verdict):
+        """The environment-configuration reads that are neither executed nor declared as verdict data."""
+        return sorted(p for p in self.config if p not in self.executed and not covered(p, verdict) and not covered(p, self.dirs))
+
     def pnpm(self, invocations, cwd, origin):
         """pnpm [--filter P | -F P | -C DIR] [run|exec] SCRIPT ...: the package.json whose script runs, and that script."""
         packages = self.packages()
@@ -655,6 +699,7 @@ class Closure:
         text = self.repo.read(path).decode('utf-8', 'replace')
         if what == 'shell':
             words, listed, pnpm = shell_words(text)
+            self.config_reads(config_args(shell_code(text)), bases, path)
             self.words([], bases, path, globs=True, narrow=words, commands=words)
             self.listed(listed, bases, path)
             self.pnpm(pnpm, '', path)
@@ -666,6 +711,10 @@ class Closure:
             self.words(words, bases, path, narrow=inner, commands=words)
             self.patterns(patterns, bases, path)
             self.listed(listed, bases, path)
+            try:
+                self.config_reads(python_config_args(text), bases, path)
+            except SyntaxError:
+                pass
             for module in modules:
                 stem = module.replace('.', '/')
                 for candidate in (stem + '.py', stem + '/__init__.py'):
@@ -713,6 +762,7 @@ class Closure:
         if command[:2] in (['bash', '-c'], ['sh', '-c']) and len(command) == 3:
             line = command[2]
         words, listed, pnpm = shell_words(line)
+        self.config_reads(config_args(line), [''], origin)
         self.words([], [''], origin, globs=True, narrow=words, commands=words)
         self.listed(listed, [''], origin)
         self.pnpm(pnpm, '', origin)
@@ -804,8 +854,12 @@ def main(argv):
             missing = [p for p in closure.paths() if not covered(p, declared)]
             missing_verdict = [p for p in sorted(verdict) if not covered(p, declared)]
             absent = [p for p in sorted(verdict) if p not in repo.files]
-            if missing or missing_verdict or absent:
+            config = [] if name in KEPT else closure.undeclared(verdict)  # a KEPT lane's tests read other lanes' configuration
+            if missing or missing_verdict or absent or config:
                 failed = True
+            for path in config:
+                print(f'{name}: {path} is read as environment configuration by {closure.config[path]} but is neither executed nor '
+                      'declared: add it to VERDICT_DATA with its reason')
             for path in absent:
                 print(f'{name}: verdict data {path} is not a tracked file (drop it from VERDICT_DATA or fix the path)')
             if missing:
@@ -816,7 +870,7 @@ def main(argv):
                 print(f'{name}: {len(missing_verdict)} verdict-data file(s) are not in its definition_paths:')
                 for path in missing_verdict:
                     print(f'  {path}   ({verdict[path]})')
-            if not missing and not missing_verdict and not absent:
+            if not missing and not missing_verdict and not absent and not config:
                 print(f'{name}: the {len(closure.paths())} path(s) it executes and its {len(verdict)} verdict-data file(s) '
                       'are covered by its definition_paths')
         elif args.write:
