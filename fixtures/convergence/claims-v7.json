@@ -4190,6 +4190,15 @@
           "person"
         ]
       },
+      "acting_for": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent"
+        ]
+      },
       "delegation": {
         "value_type": "object",
         "required": false,
@@ -4261,6 +4270,15 @@
       "message"
     ],
     "fields": {
+      "acting_for": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent"
+        ]
+      },
       "status": {
         "value_type": "string",
         "required": true,
@@ -7563,6 +7581,25 @@
     "wakes_reconciler": false,
     "retention": "local"
   },
+  "slo.breach-transition": {
+    "kind": "slo.breach-transition",
+    "subjects": [
+      "resource"
+    ],
+    "fields": {
+      "record": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "slo-breaches",
+    "wakes_reconciler": true
+  },
   "step-run.carried": {
     "kind": "step-run.carried",
     "subjects": [
@@ -8596,12 +8633,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -8721,12 +8752,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -8842,12 +8867,6 @@
       },
       "summary": {
         "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait_on": {
-        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -9278,12 +9297,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -9403,12 +9416,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -9524,12 +9531,6 @@
       },
       "summary": {
         "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait_on": {
-        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -9659,12 +9660,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -9683,43 +9678,6 @@
     "cardinality": "once-per-attempt",
     "projection": "work",
     "wakes_reconciler": true
-  },
-  "work.wait-ended": {
-    "kind": "work.wait-ended",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "attempt": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "message": {
-        "value_type": "subject-reference",
-        "required": false,
-        "immutable": false,
-        "reference": true
-      },
-      "reason": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
   },
   "workspace.observed": {
     "kind": "workspace.observed",

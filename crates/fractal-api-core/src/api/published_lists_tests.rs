@@ -534,6 +534,16 @@ mission "garden/proposed" state="ready" revisions="human-only" revision-reviewer
         .unwrap();
     fold(&store);
     fold_work_checked(&store);
+    // Its approval card names what the candidate changes, from the revision the run runs now.
+    let card = crate::api::revision_card(
+        &store,
+        &serde_json::json!({"source_id": proposal.subject, "mission_id": "mission/garden/proposed"}),
+    )
+    .unwrap()
+    .expect("the run and the candidate both have revisions");
+    assert_eq!(card["truncated"], serde_json::json!(false));
+    assert_eq!(card["to_revision"], serde_json::json!(proposal.candidate_revision));
+    assert_eq!(card["lines"], serde_json::json!([{"op": "~", "text": "plant: assignee, goal"}]));
     store
         .approve_revision_proposal(
             &proposal.id,

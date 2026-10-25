@@ -15,8 +15,8 @@ pub const SKILL: &str = /* sqlite-large-value: allow-for-now lv-h6ac6d24a28e7 ow
 pub fn message_sender_guidance() -> &'static str {
     SKILL
         .split("\n\n")
-        .find(|paragraph| paragraph.starts_with("The sender st records ("))
-        .expect("the st skill contains the message sender paragraph")
+        .find(|paragraph| paragraph.starts_with("The sender fractal records ("))
+        .expect("the fractal skill contains the message sender paragraph")
 }
 
 /// Every harness a typed st seat can run.

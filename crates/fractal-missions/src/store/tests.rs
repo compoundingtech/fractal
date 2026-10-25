@@ -2757,7 +2757,7 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
     let upgraded = Store::open(&path, "worker").unwrap();
     assert_eq!(
         upgraded
-            .smalltalk
+            .fractal
             .work_extension_roots_rebuilt
             .load(Ordering::Relaxed),
         1
@@ -2800,7 +2800,7 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
     let reopened = Store::open(&path, "worker").unwrap();
     assert_eq!(
         reopened
-            .smalltalk
+            .fractal
             .work_extension_roots_rebuilt
             .load(Ordering::Relaxed),
         0
@@ -10731,6 +10731,7 @@ mission "typecase" state="ready" {
         .withdraw_attention(
             "attention/other-fault",
             &AttentionWithdrawRequest {
+                episode: None,
                 reason: "cleared".into(),
                 actor: "agent/node.requester".into(),
                 idempotency_key: "other-fault-withdrawn".into(),

@@ -659,7 +659,7 @@ pub struct StepSpec {
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     /// st's own step that holds its run open while the mission watches: not work. Read it with
-    /// `mission::step_keeps_open` (st3-daemon), which covers revisions published before the flag.
+    /// `mission::step_keeps_open` (fractal-daemon), which covers revisions published before the flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub keep_open: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -714,7 +714,7 @@ pub struct MissionSpec {
     pub state: MissionState,
     pub revision: String,
     /// st's own plumbing or a standing observer, which clients fold away until asked. Read it
-    /// with `mission::is_system` (st3-daemon), which covers revisions published before the flag.
+    /// with `mission::is_system` (fractal-daemon), which covers revisions published before the flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub system: bool,
     #[serde(default)]
@@ -1705,6 +1705,9 @@ pub struct ClientPageInfo {
     pub next_cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_expires_at: Option<String>,
+    /// Unreadable history candidates skipped on this page. Nonzero means incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_items: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2087,6 +2090,9 @@ pub struct AttentionResolveRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AttentionWithdrawRequest {
+    /// The original work.person-asked claim for an informational update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode: Option<String>,
     pub reason: String,
     pub actor: String,
     pub idempotency_key: String,

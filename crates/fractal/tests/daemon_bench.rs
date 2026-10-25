@@ -57,7 +57,7 @@ pub(crate) const NODE: &str = "bench-host";
 /// The peer whose history the generated store replicated, and that replicates during the run.
 pub(crate) const PEER: &str = "bench-peer";
 
-/// The reads a person makes from the CLI, stui and the app, and the ones every seat makes.
+/// The reads a person makes from the CLI, Fractal TUI and the app, and the ones every seat makes.
 /// `{agent}`, `{mission}`, `{step}` and `{message}` stand for items the list reads return, and
 /// `{seat}` for a seat of the synthetic fleet.
 const READS: &[(&str, &str)] = &[
@@ -539,7 +539,7 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
         failed.clone(),
     )));
 
-    // People read one route after another, as someone moving through stui or the CLI does: a few
+    // People read one route after another, as someone moving through Fractal TUI or the CLI does: a few
     // of them at once, each starting at a different route, so a slow route cannot starve the
     // others of samples.
     let deadline = Instant::now() + Duration::from_secs(settings.seconds);

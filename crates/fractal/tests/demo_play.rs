@@ -74,6 +74,22 @@ fn pty() -> Option<PathBuf> {
     })
 }
 
+/// Where the demo's agents keep their sessions, under the throwaway HOME.
+const INSTANCE_PTY_ROOT: &str = ".st-instance/demo-test/state/st3/pty";
+/// pty refuses a root whose session sockets would not fit `sun_path`: 90 bytes on Linux, 89 on
+/// macOS, and the agent then never starts.
+const PTY_ROOT_LIMIT: usize = 89;
+
+/// A throwaway HOME short enough for that root. TMPDIR can be too long for it (scripts/ci-local
+/// puts it under the account's cache, macOS under /var/folders); /tmp then holds the HOME.
+fn throwaway_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    if home.path().join(INSTANCE_PTY_ROOT).as_os_str().len() <= PTY_ROOT_LIMIT {
+        return home;
+    }
+    tempfile::tempdir_in("/tmp").unwrap()
+}
+
 fn processes_mentioning(needle: &str) -> Vec<String> {
     let output = std::process::Command::new("ps")
         .args(["-eo", "pid=,args="])
@@ -92,7 +108,7 @@ fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
         eprintln!("skipped: no pty on PATH for the demo's agents");
         return;
     };
-    let root = tempfile::tempdir().unwrap();
+    let root = throwaway_home();
     let home = root.path();
     let file = home.join("garden.kdl");
     std::fs::write(&file, DEMO).unwrap();

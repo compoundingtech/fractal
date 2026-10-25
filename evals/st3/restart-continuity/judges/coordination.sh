@@ -51,4 +51,4 @@ report_index="$(jq -r '.[0].created_index' <<<"$reports")"
 confirmation_index="$(jq -r '.[0].created_index' <<<"$confirmations")"
 test "$confirmation_index" -gt "$report_index"
 
-echo "PASS: Small Talk has two assignments, one closed duplicate, one report, and one later confirmation"
+echo "PASS: Fractal has two assignments, one closed duplicate, one report, and one later confirmation"

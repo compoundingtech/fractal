@@ -11,7 +11,7 @@ pub struct Prefs {
     pub simple: Option<bool>,
     /// Before conversation_first: an agent's tab opened on its terminal. Read only to keep the
     /// choice of a device that turned it on, and written beside conversation_first so an older
-    /// stui keeps opening agents the same way.
+    /// Fractal TUI keeps opening agents the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_first: Option<bool>,
     /// An agent's tab opens on its conversation rather than attaching its terminal. Attaching is
@@ -94,7 +94,7 @@ mod tests {
             let prefs: Prefs = serde_json::from_str(old).unwrap();
             assert_eq!(conversation_first(&prefs), None, "{old}");
         }
-        // A newer file an older stui reads keeps working there: unknown keys are ignored.
+        // A newer file an older Fractal TUI reads keeps working there: unknown keys are ignored.
         let new = serde_json::to_string(&Prefs {
             conversation_first: Some(true),
             terminal_first: Some(false),

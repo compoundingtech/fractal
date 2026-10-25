@@ -844,7 +844,7 @@ treats any present `st` key as collector-owned sampling, so only sampled externa
 
 The typed Rust client's optional `trace-propagation` feature owns its OTel API and tracing
 bridge dependencies, not an exporter or SDK initializer. `st3` enables the feature;
-`stui` and the client TUI example leave it disabled. Without the feature, injection is
+`fractal-tui` and the client TUI example leave it disabled. Without the feature, injection is
 a no-op with no context lookup, trace headers, or OTel dependencies. The embedding
 application owns subscriber and propagator setup. The client source is generated from
 `crates/fractal-client-codegen/templates/lib.rs.in`; the
