@@ -111,9 +111,27 @@ pub async fn decide_subscription_request(
 
 pub async fn send_message(
     State(state): State<AppState>,
+    bound: Option<Extension<BoundAgent>>,
     Json(request): Json<MessageSendRequest>,
 ) -> Result<Json<MessageSendReceipt>, ApiError> {
-    blocking_api(move || accept_message_receipt(&state, request, None, None).map(Json)).await
+    blocking_api(move || {
+        if let Some(Extension(BoundAgent(agent))) = bound {
+            let from = normalize_message_party(&request.from);
+            let identity = public_identity(
+                &state.store,
+                crate::store::identities::IdentityKind::Agent,
+                &agent,
+            )?.identity;
+            if !is_bound_actor(&state.store, &from, &identity)? {
+                return Err(ApiError::bad(St3Error::new(
+                    "foreign-agent-actor",
+                    format!("this harness is `{agent}` and cannot act as `{from}`"),
+                )));
+            }
+        }
+        // Unbound callers retain the trusted local API's existing sender selection.
+        accept_message_receipt(&state, request, None, None).map(Json)
+    }).await
 }
 
 #[derive(Deserialize)]

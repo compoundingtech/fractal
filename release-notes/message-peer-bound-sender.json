@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Message sends from peer-bound harnesses must name their own agent as sender; attempts to impersonate another agent, a person, or the daemon are refused before message acceptance.",
+  "replay": {"status": "none", "detail": "Existing messages and replay remain unchanged."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "POST /v1/messages returns foreign-agent-actor when a peer-bound caller names a different normalized sender. Its own agent label and stable identity are accepted. Unbound trusted-local callers retain sender selection; authenticated client send paths keep their existing authorization."},
+  "downtime": {"status": "none", "detail": "No migration or fleet coordination required; normal daemon deployment activates the check."},
+  "manual": {"status": "none", "detail": "Normal harness sends already use their own identity. A bound harness can no longer use the local CLI's explicit non-agent sender override."},
+  "recovery": {"status": "none", "detail": "Revert the commit; stored messages require no conversion."}
+}

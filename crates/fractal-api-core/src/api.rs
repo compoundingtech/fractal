@@ -9204,6 +9204,10 @@ pub fn accept_message(
 
 /// Accept one message, or find the one its idempotency key already sent. The receipt says which,
 /// so a client that repeats an unanswered send can say that nothing new was sent.
+///
+/// Transport callers authorize the sender before entering this shared receipt path:
+/// `messages::send_message` binds peer-bound harnesses to their own normalized identity;
+/// unbound local principals retain sender selection, and client-v0 supplies its session actor.
 pub fn accept_message_receipt(
     state: &AppState,
     request: MessageSendRequest,

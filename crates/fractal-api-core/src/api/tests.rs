@@ -6245,6 +6245,49 @@ version 2
 }
 
 #[tokio::test]
+async fn message_send_peer_binding_accepts_own_sender_and_rejects_spoofing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    // Exercise the endpoint itself, even without the serving boundary's actor middleware.
+    let app = router(state.clone()).layer(Extension(BoundAgent("agent/sender".into())));
+    let identity = public_identity(
+        &state.store, crate::store::identities::IdentityKind::Agent, "agent/sender",
+    ).unwrap().identity;
+    for (key, from) in [("own-label", "agent/sender"), ("own-short", "sender"), ("own-identity", identity.as_str())] {
+        let (status, body) = json_request(app.clone(), "/v1/messages", json!({
+            "idempotency_key": key, "from": from, "to": "agent/receiver", "content": "Hello",
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["from"], identity);
+    }
+    for from in ["agent/other", "person/alex", "requester", "daemon/runtime"] {
+        let before = state.store.index().unwrap();
+        let (status, body) = json_request(app.clone(), "/v1/messages", json!({
+            // Even replaying an accepted key must check the bound sender first.
+            "idempotency_key": "own-label", "from": from, "to": "agent/receiver", "content": "Hello",
+        })).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{from}: {body}");
+        assert_eq!(body["code"], "foreign-agent-actor", "{from}: {body}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn message_send_peer_binding_preserves_unbound_local_sender_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for from in ["agent/sender", "agent/other", "person/alex", "requester", "daemon/runtime"] {
+        let (status, body) = json_request(app.clone(), "/v1/messages", json!({
+            "idempotency_key": format!("unbound-{from}"),
+            "from": from, "to": "agent/receiver", "content": "Hello",
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{from}: {body}");
+        assert!(body["from"].as_str().is_some(), "{body}");
+    }
+}
+
+#[tokio::test]
 async fn message_ingress_rejects_empty_content_before_it_enters_the_fifo() {
     let root = tempfile::tempdir().unwrap();
     let app = router(state(root.path()));
