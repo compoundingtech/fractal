@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { agentHeaderDetail, agentHealth, attentionActionLabel, attentionHeadline, attentionKindLabel, blockedLine, clientDetail, clientTitle, currentWorkSummary, deviceDetail, deviceTitle, missionLabels, missionSteps, olderThanMember, pingPresentation, queuedWorkSummary, smallTalkPresentation } from './presentation.ts';
+import { agentHeaderDetail, agentHealth, attentionActionLabel, attentionHeadline, attentionKindLabel, blockedLine, clientDetail, clientTitle, currentWorkSummary, deviceDetail, deviceTitle, missionLabels, missionSteps, olderThanMember, pingPresentation, queuedWorkSummary, fractalPresentation } from './presentation.ts';
 
 const now = Date.parse('2026-09-25T08:25:00Z');
 
@@ -30,9 +30,9 @@ const step = (path, state) => ({ id: `step-run/9f/${path}`, path, state, attempt
 const release = { id: 'mission/fleet/app/release', title: 'fleet/app/release', state: 'running', runs: ['mission-run/9f'], run_details: [{ id: 'mission-run/9f', steps: [step('build', 'completed'), step('review', 'claimed')] }] };
 assert.deepEqual(missionSteps(release).map(s => s.path), ['build', 'review']);
 
-// Small Talk st joined into a conversation shows who wrote to whom and its title.
-assert.deepEqual(smallTalkPresentation({ message_id: 'message/1', from: 'agent/example/cos/standing/cos', to: 'person/alex', title: 'Release is ready' }), { from: 'COS → alex', text: 'Release is ready' });
-assert.deepEqual(smallTalkPresentation({ message_id: 'message/2', from: 'agent/example/app' }), { from: 'App → someone', text: 'Fractal' });
+// Fractal st joined into a conversation shows who wrote to whom and its title.
+assert.deepEqual(fractalPresentation({ message_id: 'message/1', from: 'agent/example/cos/standing/cos', to: 'person/alex', title: 'Release is ready' }), { from: 'COS → alex', text: 'Release is ready' });
+assert.deepEqual(fractalPresentation({ message_id: 'message/2', from: 'agent/example/app' }), { from: 'App → someone', text: 'Fractal' });
 
 
 // (3) A crash-looping seat must stand out rather than read as a normal row.
@@ -87,8 +87,8 @@ assert.deepEqual(pingPresentation('No envelope here'), { from: null, text: 'No e
 
 // Connected clients: shown as they describe themselves; only an older st build gets the quiet note.
 {
-  const phone = { actor: 'person/robin/session/s1', person: 'person/robin', client: 'smalltalk-ios 1.0 (42)', device_id: 'device/d1', device_name: "Robin's phone", member: 'lark', via: 'gateway', connected: true, streams: 2, since: '2026-09-25T08:13:00Z', last_seen: '2026-09-25T08:24:59Z', follows: ['now', 'terminal:terminal/agent/lark/planner'] };
-  assert.equal(clientTitle(phone, 'person/robin/session/s1'), 'smalltalk-ios 1.0 (42) · this phone');
+  const phone = { actor: 'person/robin/session/s1', person: 'person/robin', client: 'fractal-ios 1.0 (42)', device_id: 'device/d1', device_name: "Robin's phone", member: 'lark', via: 'gateway', connected: true, streams: 2, since: '2026-09-25T08:13:00Z', last_seen: '2026-09-25T08:24:59Z', follows: ['now', 'terminal:terminal/agent/lark/planner'] };
+  assert.equal(clientTitle(phone, 'person/robin/session/s1'), 'fractal-ios 1.0 (42) · this phone');
   assert.equal(clientTitle({ ...phone, client: null }, undefined), 'unnamed client');
   assert.equal(clientDetail(phone, now), "person/robin · Robin's phone · gateway · lark · since 12m · follows now, terminal:terminal/agent/lark/planner");
   const gone = { ...phone, actor: 'person/robin', client: 'stui 0.0.9+77d0a13', device_id: undefined, device_name: undefined, via: 'local', connected: false, last_seen: '2026-09-25T08:22:00Z', follows: [] };
@@ -96,7 +96,7 @@ assert.deepEqual(pingPresentation('No envelope here'), { from: null, text: 'No e
   assert.equal(olderThanMember('stui 0.0.9+77d0a13', '0.1.0+1ecae71'), true);
   assert.equal(olderThanMember('st 0.1.0+local.ab12cd3', '0.2.0+1ecae71'), true);
   assert.equal(olderThanMember('stui 0.1.0+77d0a13', '0.1.0+1ecae71'), false);
-  assert.equal(olderThanMember('smalltalk-ios 0.0.1 (3)', '0.1.0+1ecae71'), false);
+  assert.equal(olderThanMember('fractal-ios 0.0.1 (3)', '0.1.0+1ecae71'), false);
   assert.equal(olderThanMember('stui dev', '0.1.0+1ecae71'), false);
   assert.equal(olderThanMember('stui 0.0.9+77d0a13', undefined), false);
 }

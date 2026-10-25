@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "smalltalk",
-    "slug": "smalltalk-starter",
+    "name": "fractal",
+    "slug": "fractal-starter",
     "version": "0.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -20,7 +20,7 @@
       "./plugins/withNonblockingMetro.cjs"
     ],
     "ios": {
-      "bundleIdentifier": "com.compoundingtech.smalltalk.starter",
+      "bundleIdentifier": "com.compoundingtech.fractal.starter",
       "supportsTablet": true,
       "infoPlist": {
         "UIViewControllerBasedStatusBarAppearance": true,
