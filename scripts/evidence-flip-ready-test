@@ -290,6 +290,17 @@ class FlipReady(unittest.TestCase):
         self.assertEqual((entry['unlogged_pass_unexplained'], entry['log_missing']), (2, 1))
         self.assertEqual(entry['why_not'], ['1 lines with log=missing', '2 unexplained log=unlogged_pass'])
 
+    def test_an_aggregates_unlogged_pass_is_explained_by_its_unlogged_members_observed_at_not_its_oldest_members(self):
+        self.ready_history(count=40)
+        # The line's observed_at is its oldest member's (an hour before the run); the unlogged member was observed 100 s before it.
+        self.gh.run(3000, at(3), [decision(log='unlogged_pass', observed_at=stamp(at(3, 3600)), log_unlogged='1',
+                                           log_unlogged_crates='fractal-tui=0123456789ab', log_unlogged_observed_at=stamp(at(3, 100)))])
+        self.assertEqual(self.check()['unlogged_pass_unexplained'], 0)
+        # The oldest unlogged member was observed 300 s before the run: more than the log's latency explains.
+        self.gh.run(3001, at(2), [decision(log='unlogged_pass', observed_at=stamp(at(2, 3600)), log_unlogged='2',
+                                           log_unlogged_observed_at=stamp(at(2, 300)))])
+        self.assertEqual(self.check()['unlogged_pass_unexplained'], 1)
+
     def test_a_satisfied_line_beside_a_failed_real_job_of_the_same_attempt_is_a_hidden_red(self):
         self.ready_history(count=40)
         self.gh.run(4000, at(5), [decision(decision='skip')], real='skipped')  # an enforced skip is evidence neither way

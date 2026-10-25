@@ -292,7 +292,9 @@ def evaluate(rows, enforce, now):
     unexplained = 0
     for row, value in zip(window, log):
         if value == 'unlogged_pass':
-            observed = parse_time(row['fields'].get('observed_at'))
+            # An aggregate's line names the oldest observed_at of its unlogged members; its own observed_at is its oldest member's.
+            unlogged_at = row['fields'].get('log_unlogged_observed_at')
+            observed = parse_time(unlogged_at if unlogged_at not in (None, '-') else row['fields'].get('observed_at'))
             if observed is None or (row['created_at'] - observed).total_seconds() > LATENCY_S:
                 unexplained += 1
     red = [row for row in window if row['fields'].get('outcome') == 'satisfied' and row['real'] == 'failure']

@@ -258,6 +258,11 @@ to its answer, and changes nothing else. `log` is the first of:
 - `unlogged_pass`: the chosen record is a pass the log does not list;
 - `ok`.
 
+For a per-crate check (`rust-tests`) the view is read for every member at once. `unlogged_pass` then means some member's chosen record
+is not listed, and the line's `record` and `observed_at` (its oldest member's) do not name it. The view adds `log_unlogged`, the number
+of such members; `log_unlogged_crates`, the first five as `crate=record` (12 hex, joined by `+`, then `+N_more`); and
+`log_unlogged_observed_at`, the oldest observed time among them, which is the one log lag would have to explain.
+
 A failure counts whether or not the log lists it, as the verdict already does. Once the base pins the key, the gate
 fetches the one log ref (one commit deep) and prints the view on its decision line. Enforcing it, so that skipping
 requires `ok`, is a later change, after the shadow shows what it would refuse. Every read of the log is made with
@@ -1164,7 +1169,8 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
 - at least 30 lines with `outcome=satisfied` and `log=ok`;
 - no `log=missing`;
 - no unexplained `log=unlogged_pass`: one is explained when the record was observed at most 240 s (two log pulls) before the run was
-  created, or after it;
+  created, or after it. For an aggregate, the time is `log_unlogged_observed_at`, the oldest of its unlogged members, when the line has
+  it, and its `observed_at` when it does not;
 - no hidden red: no satisfied line in a run (and attempt) whose real job, the job named exactly the check, concluded `failure`. A real
   job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red is hidden only when a member that a skip skips
   (the jobs whose `if` reads `needs.evidence-gate-linux-gate.outputs.skip`: `linux-test-build`, `linux-tests` and its shards,
