@@ -48,6 +48,42 @@ import {
   nextestFlakyUpload,
 } from './workspace-ci.ts'
 
+// CI's per-crate rust-tests notes (docs/per-crate-test-signing.md, section 14) are signed from the test shards' own nextest run: each shard
+// writes nextest's JUnit report (scripts/ci-linux honours CI_TEST_JUNIT) and a description of it (scripts/ci-rust-test-notes describe: job,
+// partition, attempt, how nextest ended, the dev shell digest and the system), and uploads both as `rust-test-junit-<job>-<attempt>`. Only on
+// the events whose runs sign them (never a pull request: those runs write no report). Every step is fail-soft and runs after the tests,
+// so it can never change a shard's result. The artifact name never matches `evidence-note-*`, which the linux-gate note job collects.
+const signingEvent = "(github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))"
+// The report is written on every run, pull requests included, so a pull request's own linux-tests jobs show that nextest writes it on
+// the archive path; only describing, uploading and signing it are limited to the signing events.
+const rustTestJunitPath = "${{ format('{0}/rust-test-junit/junit.xml', runner.temp) }}"
+const rustTestJunitRoom = {
+  name: 'Make room for the JUnit report',
+  'continue-on-error': true,
+  run: 'mkdir -p "$RUNNER_TEMP/rust-test-junit"',
+}
+const rustTestJunitUpload = (name: string) => [
+  {
+    name: 'Describe the JUnit report for the per-crate notes',
+    if: `\${{ always() && ${signingEvent} }}`,
+    'continue-on-error': true,
+    env: { SHARD_JOB: name, NEXTEST_OUTCOME: '${{ steps.nextest.outcome }}' },
+    run: 'python3 scripts/ci-rust-test-notes describe --out "$RUNNER_TEMP/rust-test-junit/shard.json"',
+  },
+  {
+    name: 'Retain the JUnit report for the per-crate notes',
+    if: `\${{ always() && ${signingEvent} }}`,
+    'continue-on-error': true,
+    uses: 'actions/upload-artifact@v4',
+    with: {
+      name: `rust-test-junit-${name}-\${{ github.run_attempt }}`,
+      path: '${{ runner.temp }}/rust-test-junit/',
+      'if-no-files-found': 'ignore',
+      'retention-days': 3,
+    },
+  },
+]
+
 // One Linux gate stage: its own runner (ci1 or Namespace, see pickRunnerJob) and caches, the common
 // setup, then scripts/ci-linux.
 const linuxStageJob = ({
@@ -60,6 +96,7 @@ const linuxStageJob = ({
   extraLogs = '',
   runsOn = supportingStageRunsOn,
   flakyArtifact = false,
+  junitArtifact = false,
 }: {
   name: string
   stage: string
@@ -71,6 +108,8 @@ const linuxStageJob = ({
   runsOn?: unknown
   /** A test lane: publish nextest's flaky-test count as an artifact name, for `st slo`'s flakes. */
   flakyArtifact?: boolean
+  /** A test lane whose nextest JUnit report CI's per-crate rust-tests notes are signed from (evidence-note-rust-tests). */
+  junitArtifact?: boolean
 }) => ({
   name,
   ...afterPickRunner,
@@ -86,11 +125,14 @@ const linuxStageJob = ({
       run: `printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' "$(git rev-parse HEAD)" "$(nproc)" "$(free -h | awk '/^Mem:/ {print $2 " memory"}')" >> "$GITHUB_STEP_SUMMARY"`,
     },
     ...before,
+    ...(junitArtifact ? [rustTestJunitRoom] : []),
     {
       ...nixDevelopStep({ name: description ?? 'Run nextest', command: ['bash', 'scripts/ci-linux', stage] }),
       ...(flakyArtifact ? { id: 'nextest' } : {}),
+      ...(junitArtifact ? { env: { CI_TEST_JUNIT: rustTestJunitPath } } : {}),
     },
     ...(flakyArtifact ? [nextestFlakyUpload(name)] : []),
+    ...(junitArtifact ? rustTestJunitUpload(name) : []),
     {
       name: 'Save Nix outputs to the local Nix cache',
       if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`,
@@ -516,6 +558,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       ...linuxStageJob({
         name: 'linux-tests',
         flakyArtifact: true,
+        junitArtifact: true,
         stage: 'tests',
         setup: testArchiveConsumerSetup,
         runsOn: primaryTestRunsOn,
@@ -532,6 +575,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       ...linuxStageJob({
         name: 'linux-tests-shard-2',
         flakyArtifact: true,
+        junitArtifact: true,
         stage: 'tests',
         runsOn: secondaryStageRunsOn,
         setup: testArchiveConsumerSetup,
@@ -545,6 +589,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       ...linuxStageJob({
         name: 'linux-tests-shard-3', stage: 'tests', setup: testArchiveConsumerSetup,
         flakyArtifact: true,
+        junitArtifact: true,
         runsOn: extraMergeTestRunsOn,
         env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:3/4', CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
@@ -556,6 +601,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       ...linuxStageJob({
         name: 'linux-tests-shard-4', stage: 'tests', setup: testArchiveConsumerSetup,
         flakyArtifact: true,
+        junitArtifact: true,
         runsOn: extraMergeTestRunsOn,
         env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:4/4', CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
@@ -744,6 +790,93 @@ python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "
         { name: 'Remove the key', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
       ],
     },
+    // CI's per-crate rust-tests notes (docs/per-crate-test-signing.md, section 14), signed with the `evidence-signing` key from the test
+    // shards' own JUnit reports, so a later pull request whose crates are unchanged finds a note for each. Only the merge queue, push to
+    // main and manual runs on main sign: never a pull request (its job does not run, and the script refuses one). The reports are read and
+    // judged BEFORE the key exists (scripts/ci-rust-test-notes plan): nothing is signed unless every shard of this event succeeded and left
+    // its report, and neither evidence gate the test jobs read skipped them; then a crate is signed only when every one of its tests passed
+    // on the first try across all the shards and it ran one (or is listed under no_tests). Like evidence-note-linux-gate, every step is
+    // fail-soft and no required check needs this job, and every script comes from the BASE commit. The rust-tests entry stays in shadow
+    // (enforce false): these notes are only produced here, never acted on.
+    'evidence-note-rust-tests': {
+      name: 'evidence-note-rust-tests',
+      needs: [...testJobs, 'evidence-gate-linux-gate', 'evidence-gate-rust-tests'],
+      if: `\${{ !cancelled() && ${signingEvent} }}`,
+      'runs-on': 'ubuntu-latest',
+      environment: evidenceEnvironment,
+      permissions: { contents: 'write' },
+      'timeout-minutes': 20,
+      defaults: { run: { shell: 'bash' } },
+      env: {
+        EVIDENCE_PUSH_TOKEN: '${{ github.token }}',
+        NEEDS_JSON: '${{ toJSON(needs) }}',
+        BASE_SHA: '${{ github.event.merge_group.base_sha || github.sha }}',
+      },
+      steps: [
+        // The tested commit with its whole history: a note's parent is that commit, and the server refuses a push from a shallow repository.
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, { name: 'Check out the tested commit', 'continue-on-error': true }),
+        {
+          name: 'Take the signer scripts from the base commit',
+          id: 'base',
+          'continue-on-error': true,
+          run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
+git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
+        },
+        {
+          name: 'Collect the test shards\' JUnit reports',
+          if: "${{ steps.base.outcome == 'success' }}",
+          'continue-on-error': true,
+          uses: 'actions/download-artifact@v4',
+          with: { pattern: 'rust-test-junit-*', path: '${{ runner.temp }}/rust-test-junit' },
+        },
+        {
+          name: 'Decide which crates may be signed',
+          id: 'plan',
+          if: "${{ steps.base.outcome == 'success' }}",
+          'continue-on-error': true,
+          run: `[ -f "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" ] || { echo "no ci-rust-test-notes at the base commit; nothing is signed"; exit 1; }
+python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" plan --reports "$RUNNER_TEMP/rust-test-junit" --out "$RUNNER_TEMP/rust-test-plan"`,
+        },
+        {
+          name: 'May this job use the signing key?',
+          id: 'guard',
+          if: "${{ steps.plan.outcome == 'success' }}",
+          'continue-on-error': true,
+          run: `python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" guard`,
+        },
+        {
+          name: 'Write the signer configuration and key',
+          id: 'configure',
+          if: "${{ steps.guard.outcome == 'success' }}",
+          'continue-on-error': true,
+          env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
+          run: `set -o pipefail
+python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+        },
+        {
+          name: 'Sign the per-crate rust-tests notes',
+          id: 'sign',
+          if: "${{ steps.configure.outcome == 'success' }}",
+          'continue-on-error': true,
+          run: `python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" once rust-tests
+home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" sign --plan "$RUNNER_TEMP/rust-test-plan" --out "$RUNNER_TEMP/rust-test-notes"`,
+        },
+        // Whatever was signed is published, even when some crate's signature failed: each record stands on its own.
+        {
+          name: 'Publish the notes that verify',
+          if: "${{ steps.configure.outcome == 'success' }}",
+          'continue-on-error': true,
+          run: `[ -d "$RUNNER_TEMP/rust-test-notes" ] || { echo "nothing was signed"; exit 0; }
+git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/rust-test-notes" --keys "$RUNNER_TEMP/evidence-keys" \\
+  --checks rust-tests --limit 400 --remote origin`,
+        },
+        { name: 'Remove the key', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
+      ],
+    },
     // `fractal-web` is a required check (.github/repo-settings.json): it must report on every PR
     // and merge-group run, so the gate job always runs and fails closed.
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
@@ -756,4 +889,4 @@ python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "
       steps: skipIfCovered('fractal-web', fractalWebJobs['fractal-web-execution'].steps),
     },
   }),
-}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."})))))
+}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."})))))

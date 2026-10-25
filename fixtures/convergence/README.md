@@ -88,6 +88,19 @@ characterization `[34]` does not apply: with v7 seeds 2 and 34 do not trim a che
 other 15 fixed seeds do, measured with
 `cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.
 
+`claims-v8.json` captures the six durable version-1 deployment audit kinds added
+on top of v7. Regenerate it with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v8.json`;
+do not hand-edit the snapshot. Versions 1 through 7 stay frozen. The seeded
+generator supplies schema-valid deployment package tuples, bounded RFC3339 issue
+and expiry times, preview/signoff references and STOP host lists, rather than
+generic empty nested objects. A focused regression generates and appends every
+deployment kind through the same path used by random schedules.
+The measured v8 never-trim set is `[13, 34, 144, 987]`: the other 13 of 17 fixed
+seeds trim. Every seed converges, and exact per-seed trim assertions and majority
+coverage checks remain enforced. The characterization run used
+`cargo test -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
+
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&fractal_schema::registry().claims)`
 and deliberately update the simulation's include. Apply identical simulation

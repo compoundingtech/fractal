@@ -155,6 +155,7 @@ export const liveSource = ({
   const noGrants: Grants = {
     actions: 'ungranted',
     messageSend: 'ungranted',
+    attachmentUpload: 'ungranted',
     terminalInput: 'ungranted',
   }
   setDebug('Wf.socketErrors', 0)
@@ -169,7 +170,7 @@ export const liveSource = ({
   setDebug('Wf.freshnessConsumers', 0)
   const client = new FractalClient({
     baseUrl,
-    // Remove the browser receiver workaround after smalltalk#1040 / #1247 lands.
+    // Remove the browser receiver workaround after Fractal #1040 / #1247 lands.
     fetchImpl: fetch,
   })
   const registry = AtomRegistry.make()
@@ -777,7 +778,7 @@ export const liveSource = ({
   const conversationFamily = Atom.family((ref: string): RetainedConversation => {
     const timeline = new LiveTimeline()
     // A Sent row retires only when its identity-correlated server content is in the window.
-    // Until smalltalk#1977 provides owner-side read-after-send visibility, an absent row on
+    // Until Fractal #1977 provides owner-side read-after-send visibility, an absent row on
     // even a later replace page proves nothing; outbox and key aliases share this feed's lifetime.
     const pending = new Map<string, PendingSend>()
     // st deduplicates a key by its whole request except the fence. Each key's first action
@@ -1096,6 +1097,7 @@ export const liveSource = ({
             actions:
               allowed.has('message.send') || allowed.has('work.done') ? 'granted' : 'ungranted',
             messageSend: allowed.has('message.send') ? 'granted' : 'ungranted',
+            attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
           })
         }),

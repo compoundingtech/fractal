@@ -1296,7 +1296,7 @@ class CommittedPolicy(unittest.TestCase):
 
     def rules(self, check):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
-        return evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')
+        return evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')
 
     def test_the_committed_lane_file_is_valid_exists_at_head_and_matches_what_st_test_runs(self):
         text = (ROOT / '.st/required-lanes.json').read_text()
@@ -1309,7 +1309,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(rules['argv'], command, lane)  # the lane is what the local producer runs
             for path in rules['definition_paths']:
                 self.assertTrue((ROOT / path).exists(), path)
-            declared = evidence_verify.policy_rules(policy, lane, 'compoundingtech/smalltalk')['inputs']
+            declared = evidence_verify.policy_rules(policy, lane, 'compoundingtech/fractal')['inputs']
             if declared is not None:
                 self.assertEqual(rules['tree_inputs'], declared, lane)  # what the lane tests is what the policy declares as inputs
         self.assertEqual(set(json.loads(text)['lanes']), set(module.LOCAL))
@@ -1345,7 +1345,7 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
-        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
+        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')['require'] for check in json.loads(text)['checks']}
         self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'ci-script-tests': 'shadow', 'fractal-web': 'off',
                                  'rust-tests': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
@@ -1516,9 +1516,9 @@ class CommittedPolicy(unittest.TestCase):
             self.assertIsNone(rules['max_age_s'], check)  # no age limit by default
             self.assertIs(rules['enforce'], check in ENFORCED, check)  # skipping is off until the policy says otherwise
             observed = rules['kinds']['observed']
-            self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/smalltalk',
+            self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/fractal',
                                                    '.github/workflows/fleet.yml', check])
-            self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/smalltalk/')
+            self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/fractal/')
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
         for check in ('isolation-vm', 'mail-redelivery-canaries'):  # daily only: nothing in the per-PR policy waits on them
@@ -1630,6 +1630,74 @@ class PerCrateNotes(unittest.TestCase):
             with self.assertRaises(evidence_verify.Failure) as caught:
                 evidence_verify.zero_test_crates(repo, at_base(bad))
             self.assertEqual(caught.exception.reason, 'error', bad)
+
+
+class MembersLogView(unittest.TestCase):
+    """The log's view of a per-crate check (rust-tests): the head judged once, then each member's own key file. Every member's pass must be
+    listed, and a record the log lists under any member's key that is not here is missing, as for one record."""
+
+    CHECK = 'rust-tests'
+
+    def setUp(self):
+        self.f = Fixture(layout='tag')
+        self.addCleanup(self.f.tmp.cleanup)
+        self.commit, self.tree = self.f.commit('content\n')
+        self.log_key = self.f.key('log-key')
+        self.log_keys = self.f.root / 'log-keys'
+        self.log_keys.write_text(f'log/evidence namespaces="git" {self.log_key.with_suffix(".pub").read_text()}')
+        self.keys = {'base': 'a' * 40, 'top': 'b' * 40}
+
+    def record(self, crate):
+        """A record indexed under the crate's key (the index ref is named by the object it points at)."""
+        oid = self.f.git('hash-object', '-w', '--stdin', stdin=f'{crate} {len(self.f.git("for-each-ref").splitlines())}\n'.encode())
+        self.f.git('update-ref', f'refs/notes/evidence-input/{self.CHECK}/{self.keys[crate]}/{oid}', oid)
+        return oid
+
+    def log(self, by_key):
+        """A signed log head whose keys/<check>/<prefix>/<key> files list the given record ids."""
+        def tree_of(entries):
+            return self.f.git('mktree', stdin=''.join(f'{mode} {kind} {oid}\t{name}\n' for name, (mode, kind, oid) in sorted(entries.items())).encode())
+        prefixes = {}
+        for key, records in by_key.items():
+            blob = self.f.git('hash-object', '-w', '--stdin',
+                              stdin=''.join(f'record {r} {self.CHECK} 0 machine/ci1 {NOW.isoformat()}\n' for r in records).encode())
+            prefixes.setdefault(key[:2], {})[key] = ('100644', 'blob', blob)
+        check_tree = tree_of({prefix: ('040000', 'tree', tree_of(files)) for prefix, files in prefixes.items()})
+        root = tree_of({'keys': ('040000', 'tree', tree_of({self.CHECK: ('040000', 'tree', check_tree)}))})
+        head = self.f.git('-c', 'gpg.format=ssh', '-c', f'user.signingKey={self.log_key}', 'commit-tree', '-S', root,
+                          '-m', f'evidence-log v1 as_of={NOW.isoformat()} added=0 gc=0 missing=0')
+        self.f.git('update-ref', 'refs/evidence-log/main', head)
+        return head
+
+    def view(self, chosen):
+        return evidence_verify.members_log_view(str(self.f.repo), str(self.log_keys), self.tree, self.CHECK,
+                                                {crate: (self.keys[crate], chosen.get(crate)) for crate in self.keys},
+                                                now=NOW + timedelta(seconds=30))
+
+    def test_every_members_pass_listed_is_ok_and_one_not_listed_is_an_unlogged_pass(self):
+        base, top = self.record('base'), self.record('top')
+        head = self.log({self.keys['base']: [base], self.keys['top']: [top]})
+        view = self.view({'base': base, 'top': top})
+        self.assertEqual((view['log'], view['log_head'], view['log_missing'], view['log_unlogged']), ('ok', head, 0, 0), view)
+        self.log({self.keys['base']: [base]})
+        view = self.view({'base': base, 'top': top})
+        self.assertEqual((view['log'], view['log_missing'], view['log_unlogged']), ('unlogged_pass', 0, 1), view)
+
+    def test_a_record_the_log_lists_under_a_members_key_that_is_not_here_is_missing_with_or_without_a_choice(self):
+        base, top = self.record('base'), self.record('top')
+        gone = 'c' * 40
+        self.log({self.keys['base']: [base, gone], self.keys['top']: [top]})
+        self.assertEqual((self.view({'base': base, 'top': top})['log'], self.view({})['log']), ('missing', 'missing'))
+        self.assertEqual(self.view({})['log_missing'], 1)
+        self.log({self.keys['base']: [base], self.keys['top']: [top]})
+        self.assertEqual(self.view({})['log'], 'ok', 'a check that did not hold: only missing can follow')
+
+    def test_a_head_that_is_absent_or_unsigned_says_so_for_every_member_at_once(self):
+        base = self.record('base')
+        self.assertEqual(self.view({'base': base})['log'], 'absent')
+        self.log_key = self.f.key('not-the-log-key')
+        self.log({self.keys['base']: [base]})
+        self.assertEqual(self.view({'base': base})['log'], 'unsigned')
 
 
 class ValueRules(unittest.TestCase):

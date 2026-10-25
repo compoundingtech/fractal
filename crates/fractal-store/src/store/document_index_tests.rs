@@ -1,4 +1,4 @@
-//! Tests of `smallclaims::store::document_index` through smalltalk's store.
+//! Tests of `smallclaims::store::document_index` through Fractal's store.
 use super::*;
 use proptest::prelude::*;
 

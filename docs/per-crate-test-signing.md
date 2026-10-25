@@ -174,6 +174,10 @@ stage scripts). So about half the merges re-run a handful of crates and one in s
   - asks `--members`.
   A base whose verifier lacks `--members`, or that has no `scripts/rust-test-keys`, makes the outcome `unavailable`, and the check runs.
 - The decision line adds `members` (workspace members), `missing` (how many have no satisfying note), `manifests_fetch` and `members_fetch`.
+- The evidence log's view (`log`, `log_head`, `log_age_s`, `log_missing`) covers every member at once: the log head is judged once, then
+  each member's own key file in the log. `missing` when the log lists a record under any member's key that is not here, else
+  `unlogged_pass` when some member's chosen note is not listed yet, else `ok`. Without it every line said `log=-`, and the flip trigger's
+  24 h log window could never start.
 - The test jobs are wired to it: `linux-tests` and its shards (and through them `linux-test-build`) skip when linux-gate's note OR every
   crate's per-crate note covers the tree; clippy and fleet compatibility still need linux-gate's own note. The linux-gate verdict accepts
   a skipped stage only when one of those gates decided skip and that stage's own rule says skip. Nothing changes while the rust-tests entry is
@@ -214,3 +218,63 @@ for the crates that lack one, runs only those crates, and pushes the notes (to `
 exits 0 when every crate is covered or signed, and `--crate NAME` narrows it. Measured: a full seeding of 52 crates is about 12 minutes on this host
 (prep 158 s, nextest 480 s, signing 53 s); after a merge that touched 2 crates it runs only those 2.
 
+## 12. Verification and push time (measured 2026-10-24)
+
+Two warm full runs on hetz2 took 935 s and 1116 s against the 12-minute budget, with 123 to 270 s outside every check row. Where it went, and what
+changed:
+
+- **Asking the verifier about 52 crates.** `st-test` ran `evidence-verify --crate-key` once per crate: 52 processes, each loading all of the tree's
+  52 records (2 880 `load` calls, two git runs each). The same 52 crates in one `evidence-verify --members` run, with each record read once per
+  process (`load` is cached: a record is content-addressed) and the members checked 8 at a time, give the identical answer. Measured on one input
+  (tree e9fd13c5b808, policy at main): per-crate processes 110.0 s, `--members` before the cache 105.9 s, with the cache 32.8 s, with the cache and
+  the members side by side 8.6 s. `st-test` now asks once (`--members`, falling back to the per-crate loop only when the verifier cannot answer).
+  The CI gate's `--members` call gets the same speed-up.
+- **The row's time.** The `rust-tests` row used to show only the tests (0 s when signed from linux-gate's report). It now shows all of its time, with
+  `[keys, verify, tests, sign, push]` in the detail, and a `setup` row shows the fetch, the clean tree and the megarepo members before any check.
+- **The push.** Records are pushed in chunks of 40 refs with git's porcelain output, and a ref that failed is retried (3 tries, 2 s and 4 s apart); the
+  error names the refs left and git's reason. One 76-ref push once reported only `(failed)` for a ref that pushed alone afterwards.
+- **What did not change.** Signing 52 crates still costs about 48 s: the post-sign check inside `evidence-wrap` (6.8 s per record, in its own process)
+  is the base tool's, and a change to it is its own trust review.
+
+## 13. The check after signing is the crate's own (2026-10-25)
+
+`evidence-wrap` verifies each new record before it pushes it, by asking the verifier about the check on the record's tree. For a per-crate check
+that asked for the tree's newest `rust-tests` record whatever its crate, so one crate's failed record on the tree made every record signed after it
+come back "did not verify locally" (50 of 52 crates on hetz2 at feefaa9c95 when a mailbox test failed). A record that signs a `crate` and a
+`source_inputs` key is now verified with `--crate-key CRATE=KEY`: as that crate's, the same rule the gate and `st-test` use. Nothing about the record
+or the verifier's rules changes.
+
+
+## 14. CI signs per-crate notes (2026-10-25)
+
+Until now only a local `scripts/st-test` push signed per-crate `rust-tests` notes, so a pull request whose crates were unchanged found a note
+only when someone had run it. CI now signs them too, with its own `fleet/ci` key, from the test shards' own nextest run. The policy entry
+stays in shadow (`enforce` false): this only produces notes.
+
+- **Where.** The test shards (`linux-tests`, `linux-tests-shard-2/3/4`) write nextest's JUnit report (`CI_TEST_JUNIT`) and
+  `scripts/ci-rust-test-notes describe` (job, partition, attempt, how nextest ended, the dev shell digest, the system) and upload both as
+  `rust-test-junit-<job>-<attempt>`. A separate job, `evidence-note-rust-tests`, signs from them. The report is written on every run (so a pull
+  request's own test jobs show that nextest writes it), but it is described and uploaded, and the job runs, only for the merge queue,
+  push to main and manual runs on main; on a pull request the job does not run and the script refuses one (`guard`). The job reaches the key through the `evidence-signing` environment like the other note jobs, takes every script from the
+  base commit, and is fail-soft: no required check needs it and every step continues on error.
+- **Nothing from partial data.** `ci-rust-test-notes plan` runs before the key exists. It signs nothing for any crate when either gate the
+  test jobs read (`evidence-gate-linux-gate`, `evidence-gate-rust-tests`) decided to skip, when any shard of this event (four in a merge group,
+  two otherwise, the merge-only shards then skipped) did not end `success`, when a shard's report of THIS attempt is missing, cut short or
+  describes another partition, attempt or outcome, when the shards ran on different dev shells or systems, or when one test case appears in two
+  shards. A re-run of only the failed jobs therefore signs nothing (the other shards' reports are the previous attempt's).
+- **Per crate.** The reports are joined into one, so a crate split across shards is judged once, from all of them. A crate is signed only when
+  every one of its test cases passed on the first try: a failure, an error, or a test that passed only on a retry (flaky) gives it no note,
+  and so does a failure or flaky test of that crate in an earlier attempt's report of the same run. This is stricter than
+  `scripts/ci-rust-test-result`, which counts flaky as passed for st-test and is unchanged. A crate that ran no test is signed only when the
+  base lists it under `no_tests`, the rule the verifier applies to every note. A crate that does not qualify gets no record at all.
+- **The same record as st-test's.** The key is computed by the same code path as `scripts/st-test`'s `crate_keys` (the base's
+  `scripts/rust-test-keys` over the tested tree, with the base's inputs file and the base's verifier projection; a test compares both on a
+  fixture and on this repository's tree). Each record is `evidence-wrap --aggregate` with the command `python3 scripts/ci-rust-test-result`,
+  the digest of that command's output over the crate's part of the joined report, and the inputs `crate`, `source_inputs`, `tests_run`,
+  `tests_ignored`, `test_list_sha256`, `ignored_list_sha256`, `filterset=workspace`, `run_command_sha256` (the tests stage command and the
+  shard partitions) and the shards' dev shell digest as `toolchain_sha256`, plus the run's id, attempt, event, partitions and shard jobs.
+  `evidence-verify --members` accepts it as it accepts st-test's (fleet level: the wrapper rule, no lane).
+- **Published like the other CI notes.** `evidence-publish --checks rust-tests` files each record under the tree's tag and note and the
+  input-keyed index refs (`refs/notes/evidence-input/rust-tests/<key>/<record>`, `refs/tags/evidence/input/rust-tests/<key>/<record>`) and
+  pushes them. A signature that fails is reported in the job summary and the others are still published.
+- Tests: `scripts/ci-rust-test-notes-test` (in `scripts/ci-script-tests`).

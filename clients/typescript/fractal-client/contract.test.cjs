@@ -119,7 +119,7 @@ test('actual delayed WebSocket upgrade distinguishes readiness and contains malf
         }
     });
     const accept = createHash('sha1').update(request.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-    peer.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: st3.client.collections.v0\r\n\r\n`);
+    peer.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: fractal.client.collections.v0\r\n\r\n`);
     await ready;
     assert.equal(opens, 1);
     await flushed;
@@ -510,6 +510,53 @@ test('preserves versioned cursor gap errors', async () => {
     });
 });
 
+test('non-JSON HTTP rejections expose status through ClientError', async () => {
+    for (const [body, status, statusText, contentType] of [
+        ['length limit exceeded', 413, 'Payload Too Large', 'text/plain'],
+        ['<html>Bad Gateway</html>', 502, 'Bad Gateway', 'text/html'],
+        ['', 403, '', 'text/plain'],
+        ['{invalid', 500, 'Internal Server Error', 'application/json'],
+    ]) {
+        const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () =>
+            new Response(body, { status, statusText, headers: { 'Content-Type': contentType, 'Retry-After': '2' } }),
+        });
+        await assert.rejects(client.uploadBlob(new Uint8Array([1]), 'image/png'), error => {
+            assert.ok(error instanceof ClientError);
+            assert.equal(error.status, status);
+            assert.equal(error.response.code, 'http-error');
+            assert.equal(error.message, `HTTP ${status}${statusText ? ` ${statusText}` : ''}`);
+            assert.equal(error.response.retryable, false);
+            assert.equal(error.retryAfterMs, 2000);
+            return true;
+        });
+    }
+});
+
+test('structured HTTP errors keep their complete server envelope', async () => {
+    const wire = { ...cursorGapFixture, code: 'blob-too-large', message: 'Image exceeds 10 MiB', details: { max_bytes: 10485760 } };
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () =>
+        new Response(JSON.stringify(wire), { status: 413, headers: { 'Content-Type': 'text/plain', 'Retry-After': '3' } }),
+    });
+    await assert.rejects(client.uploadBlob(new Uint8Array([1]), 'image/png'), error => {
+        assert.ok(error instanceof ClientError);
+        assert.deepEqual(error.response, wire);
+        assert.equal(error.status, 413);
+        assert.equal(error.retryAfterMs, 3000);
+        return true;
+    });
+});
+
+test('successful malformed JSON and failed body reads are not HTTP rejections', async () => {
+    const malformed = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => new Response('not JSON') });
+    await assert.rejects(malformed.uploadBlob(new Uint8Array([1]), 'image/png'), SyntaxError);
+
+    const failure = new TypeError('response body interrupted');
+    const interrupted = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () =>
+        new Response(new ReadableStream({ start(controller) { controller.error(failure); } }), { status: 413 }),
+    });
+    await assert.rejects(interrupted.uploadBlob(new Uint8Array([1]), 'image/png'), error => error === failure);
+});
+
 test('completes pairing with either canonical or bare pairing ID', async () => {
     const calls = [];
     const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
@@ -542,7 +589,7 @@ test('follows terminal screens until the server ends the stream with its error',
     });
     assert.deepEqual(opened, [{
         url: 'wss://example.test/v1/client/terminals/terminal%2Frelease-shell/stream?incarnation=pty-4%3A2026-09-20T11%3A10%3A00Z',
-        protocols: ['st3.client.terminal.v0', 'st3.cap.capability-proof'],
+        protocols: ['fractal.client.terminal.v0', 'fractal.cap.capability-proof'],
         headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' },
     }]);
     socket.onmessage({ data: JSON.stringify(screenFixture) });
@@ -576,7 +623,7 @@ test('conversation stream opens at a cursor and delivers bounded changes', async
         onChange: change => received.push(change.value),
         socket: (url, protocols, headers) => { opened.push({ url, protocols, headers }); return socket; },
     });
-    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/conversations/example/stream?after=conversation-cursor%2Fowner%2Fexample%2F1.2.3', protocols: ['st3.client.conversation.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
+    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/conversations/example/stream?after=conversation-cursor%2Fowner%2Fexample%2F1.2.3', protocols: ['fractal.client.conversation.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
     const change = { kind: 'conversation-changes', session_id: 'session/example', items: [{ id: 'timeline-entry/example', sequence: 4, revision: 1, timestamp: snapshot.created_at, role: 'assistant', type: 'content', final: true, body: { media_type: 'text/plain', text: 'reply' } }], next_cursor: 'conversation-cursor/owner/example/1.3.3' };
     socket.onmessage({ data: JSON.stringify(envelope(change)) });
     assert.deepEqual(received, [change]);
@@ -596,7 +643,7 @@ test('collection stream holds commands until the socket opens and passes frames 
     const ends = [];
     const client = new FractalClient({ baseUrl: 'https://example.test/', credential: () => 'secret', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const stream = await client.collectionStream({ onFrame: frame => frames.push(frame), onEnd: error => ends.push(error), onOpen: () => lifecycle.push(['open']), onCommandSent: command => lifecycle.push([command.kind, command.id]), socket: (url, protocols, headers) => { opened.push({ url, protocols, headers }); return socket; } });
-    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/collections/stream', protocols: ['st3.client.collections.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
+    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/collections/stream', protocols: ['fractal.client.collections.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
     stream.subscribe('missions', 'missions', 200);
     stream.subscribe('mine', 'attention', 50, { person: 'person/example' });
     assert.deepEqual(socket.sent, []);

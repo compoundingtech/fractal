@@ -40,7 +40,7 @@ const word = (m: St3.Mission, agents: readonly DecodedAgent[] = [agent()], atten
   presentMission({ mission: m, agents, attention }).word
 
 describe('presentMission', () => {
-  it('follows st3-ui-model\'s precedence, first match wins', () => {
+  it('follows fractal-ui-model\'s precedence, first match wins', () => {
     const gate = { attention_kind: 'human-gate', state: 'open', mission_id: 'mission/example/nightly', source_id: 'step-run/example/review' } as unknown as St3.Attention
     expect(word(mission([step('build', 'claimed')]), [agent()], [gate])).toBe('decision')
     expect(word(mission([], { runs: [], run_details: [] }))).toBe('not_started')

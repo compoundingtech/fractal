@@ -85,7 +85,7 @@ class MacGuards(unittest.TestCase):
                 import shlex
                 remote=shlex.split(argv[-1])
                 self.assertEqual(remote[:2],['/bin/bash','-c'])
-                self.assertEqual(remote[2],"mkdir -p ~/smalltalk-install; cat > '/Users/ada/candidate $(touch unwanted)'")
+                self.assertEqual(remote[2],"mkdir -p ~/fractal-install; cat > '/Users/ada/candidate $(touch unwanted)'")
 
     def test_launchd_state_requires_actual_daemon_and_running_flags(self):
         status={'manager':'launchd-user','services':[{'name':'com.compoundingtech.st3','installed':True,'running':True,'state':'running'}]}
