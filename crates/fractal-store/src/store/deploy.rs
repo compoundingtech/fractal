@@ -42,7 +42,7 @@ impl Store {
     }
 
     fn deploy_record(&self, id: &str, kind: &str, signers: &[String]) -> Checked<(ClaimRecord, BTreeMap<String, Value>)> {
-        let claim = self.readers.get().query_row(&format!(
+        let claim = self.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-hcd60d83de7b8 owner=fractal_store::store::deploy TODO=trace-statement-and-value-representation */ &format!(
             "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims
              WHERE id=?1 AND {UNREPAIRED_CLAIM} AND {UNREPAIRED_REPLICA}"), [id], claim_from_row)
             .optional().map_err(internal)?
@@ -73,12 +73,12 @@ impl Store {
             || !policy.consumption_signers.iter().any(|a| Some(a.as_str()) == go.get("actor").and_then(Value::as_str)) {
             return Err(refuse("deploy-policy-refused", "GO host or executor is refused by packaged policy"));
         }
-        let issued = timestamp(&go, "issuedAt")?;
-        let expires = timestamp(&go, "expiresAt")?;
+        let issued = timestamp(go, "issuedAt")?;
+        let expires = timestamp(go, "expiresAt")?;
         if now.is_some_and(|now| now < issued || now >= expires) || expires <= issued || expires - issued > 4 * 60 * 60 * 1000 {
             return Err(refuse("deploy-invalid-time", "GO is not within its bounded issue/expiry interval"));
         }
-        let (_, compat) = self.deploy_record(text(&go, "compatSignoffId")?, "deploy.compat-signoff", &policy.compat_signoff_signers)?;
+        let (_, compat) = self.deploy_record(text(go, "compatSignoffId")?, "deploy.compat-signoff", &policy.compat_signoff_signers)?;
         if compat.get("trainId") != go.get("trainId") || compat.get("oldCommit") != go.get("old").and_then(|v| v.get("commit"))
             || compat.get("newCommit") != go.get("new").and_then(|v| v.get("commit")) {
             return Err(refuse("deploy-compat-mismatch", "compatibility signoff does not bind GO train and commits"));
@@ -89,7 +89,7 @@ impl Store {
     /// Signed history is a ratchet, not a clock oracle. Future origin facts are diagnostics.
     fn deploy_trusted_now(&self, go: &ClaimRecord, fields: &BTreeMap<String, Value>, local_now: u128) -> Checked<(u128, ClockDiagnostics)> {
         let connection = self.readers.get();
-        let mut query = connection.prepare_cached(&format!(
+        let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he4d379218d03 owner=fractal_store::store::deploy TODO=trace-statement-and-value-representation */ &format!(
             "SELECT id,origin FROM claims WHERE origin IN (?1,?2) AND {UNREPAIRED_CLAIM} AND {UNREPAIRED_REPLICA}"))
             .map_err(internal)?;
         let records = query.query_map([&go.origin, &self.origin], |row|
@@ -163,7 +163,7 @@ impl Store {
         if last > now || now - last > ORIGIN_FRESHNESS_MS {
             return Err(refuse("deploy-stale-replica", "GO origin sync receipt is stale or in the future"));
         }
-        let mut query = connection.prepare_cached(&format!(
+        let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5e7d6e0f3a53 owner=fractal_store::store::deploy TODO=trace-statement-and-value-representation */ &format!(
             "SELECT id,kind FROM claims WHERE kind IN ('deploy.go-revoked','deploy.go-consumed','deploy.stop','deploy.stop-lifted')
              AND {UNREPAIRED_CLAIM} AND {UNREPAIRED_REPLICA} ORDER BY store_index")).map_err(internal)?;
         let records = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))

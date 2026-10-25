@@ -65,6 +65,7 @@ impl Fixture {
     }
     fn receipt(&self, time: Option<u128>) {
         self.local.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h493aa8cab034 owner=fractal_store::store::deploy::tests TODO=chunk-or-reference-exact-wire-values */
             "UPDATE replication_peers SET last_success_at_unix_ms=?1 WHERE peer='host-b'", [time.map(|t|t.to_string())]
         ).unwrap();
     }
@@ -128,7 +129,7 @@ fn origin_receipt_requires_recent_nonfuture_success() {
     }
     fixture.receipt(Some(trusted_now - 10*60*1000));
     fixture.verify().unwrap();
-    fixture.local.connection.write().execute("DELETE FROM replication_peers WHERE peer='host-b'", []).unwrap();
+    fixture.local.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h63250a64d298 owner=fractal_store::store::deploy::tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replication_peers WHERE peer='host-b'", []).unwrap();
     assert!(fixture.verify().is_err());
 }
 
@@ -421,6 +422,7 @@ fn unreadable_deployment_history_fails_closed_after_successful_sync() {
         // Model the retained transport/admission row for an unsupported v2 revocation.
         // The approved GO and its principal chain above remain genuinely signed.
         fixture.local.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-haeca40cf61e3 owner=fractal_store::store::deploy::tests TODO=chunk-or-reference-exact-wire-values */
             "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,kind_hint,error_code,updated_at_unix_ms)
              VALUES('example-unsupported','host-b',9999,'example-envelope',0,?1,?2,'deploy.go-revoked','unsupported-deploy-version',?3)",
             params![serde_json::to_vec(&json!({"kind":"deploy.go-revoked","fields":{"version":2,"goId":fixture.request.go_id}})).unwrap(),state,fixture.now.to_string()]
@@ -433,6 +435,7 @@ fn unreadable_deployment_history_fails_closed_after_successful_sync() {
 fn incomplete_principal_model_is_never_authority() {
     let fixture = Fixture::new();
     fixture.local.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h8c4ce07dd4ee owner=fractal_store::store::deploy::tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE claim_signature_migration SET phase='legacy',serving_legacy=0", []
     ).unwrap();
     assert!(matches!(fixture.local.claim_authorization(&fixture.request.go_id).unwrap().verdict, Verdict::Held(_)));
@@ -449,6 +452,7 @@ fn repaired_release_records_cannot_lift_a_stop() {
     sync(&fixture.issuer,&fixture.local); fixture.receipt(Some(fixture.now));
     fixture.verify().unwrap();
     fixture.local.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h455635f8de24 owner=fractal_store::store::deploy::tests TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", [&lift.id]
     ).unwrap();
     assert!(fixture.verify().is_err());
