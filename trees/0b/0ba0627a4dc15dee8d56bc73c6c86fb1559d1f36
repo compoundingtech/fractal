@@ -13,3 +13,4 @@ record fbc26461882286af372959bdf7812f932f18ff13 rust-tests 0 host/anvil 2026-10-
 record fd10cad0a307201e604f43faa5d77d17087bef47 rust-tests 0 host/anvil 2026-10-25T15:27:37Z
 record 053e849e24f69a7afb8c1b7ad5420ca904de2e79 typescript-client 0 host/forge 2026-10-25T15:30:48Z
 record 1a44ca63264f75fcabfa0f218deda0c7067d5f30 genie-freshness 0 host/forge 2026-10-25T15:33:58Z
+record 3b45b321b1d7646309e5a8f4785b1b10a1e1560c ci-script-tests 0 host/forge 2026-10-25T15:40:38Z
