@@ -224,6 +224,10 @@ setup_ended=$(stamp); setup_seconds=$((SECONDS - setup_began))
 # with the TMPDIR in RAM, 12 threads took the linux-gate tests from 849 s to 519 s at a peak of 18 GB used (2026-10-23); on disk,
 # 12 threads made six timing-sensitive tests retry, so the two go together.
 export CI_TEST_THREADS=${CI_TEST_THREADS:-12}
+# A proptest that fails (on its first try, under load, before nextest retries it) writes proptest-regressions/ into the tree it runs in: an
+# untracked file the evidence signer then sees as a changed checkout ("the checkout changed while the command ran; nothing was signed"), so one
+# flaky property test voided a whole signing run. The stages persist no failures.
+export PROPTEST_DISABLE_FAILURE_PERSISTENCE=1
 low=()
 if command -v ionice >/dev/null 2>&1; then low+=(ionice -c 3); fi
 if command -v nice >/dev/null 2>&1; then low+=(nice -n 10); fi
