@@ -110,6 +110,83 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> usize {
 }
 
 #[tokio::test]
+async fn failure_stage_distinguishes_connected_timeout_from_refused_connect() {
+    use crate::replication::ReplicationClientStage;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        std::future::pending::<()>().await;
+    });
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_millis(250))
+        .connector_layer(ExchangeConnectLayer)
+        .build().unwrap();
+    let auth = FleetAuth::test("test-fleet", b"test-secret");
+    let fleet = FleetContext::legacy(Default::default());
+    let peer = PeerConfig { name: "cedar".into(), url: format!("http://{address}") };
+    let error = post_signed_to::<_, serde_json::Value>(
+        &client, &peer, "birch", &auth, &fleet, EXCHANGE_PATH,
+        &serde_json::json!({}), false,
+    ).await.unwrap_err();
+    let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+    assert_eq!(failure.client_stage, Some(ReplicationClientStage::Connected));
+    assert_eq!(failure.code, "replication-timeout");
+    let timeout_id = failure.correlation_id.clone().unwrap();
+    assert!(uuid::Uuid::parse_str(&timeout_id).is_ok());
+    server.abort();
+    let _ = server.await;
+
+    // Hold a bound socket without listening so no other test can claim this port.
+    let refused = TcpSocket::new_v4().unwrap();
+    refused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(), url: format!("http://{}", refused.local_addr().unwrap()),
+    };
+    let error = post_signed_to::<_, serde_json::Value>(
+        &client, &peer, "birch", &auth, &fleet, EXCHANGE_PATH,
+        &serde_json::json!({}), false,
+    ).await.unwrap_err();
+    let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+    assert_eq!(failure.client_stage, Some(ReplicationClientStage::SendStarted));
+    assert_eq!(failure.code, "replication-connect-failed");
+    assert_ne!(failure.correlation_id.as_deref(), Some(timeout_id.as_str()));
+}
+
+#[tokio::test]
+async fn failure_stage_does_not_invent_a_connect_for_a_pooled_connection() {
+    use crate::replication::ReplicationClientStage;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        read_request(&mut stream).await;
+        std::future::pending::<()>().await;
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(250))
+        .connector_layer(ExchangeConnectLayer)
+        .build().unwrap();
+    client.get(format!("http://{address}/prime")).send().await.unwrap()
+        .bytes().await.unwrap();
+    let peer = PeerConfig { name: "cedar".into(), url: format!("http://{address}") };
+    let error = post_signed_to::<_, serde_json::Value>(
+        &client, &peer, "birch", &FleetAuth::test("test-fleet", b"test-secret"),
+        &FleetContext::legacy(Default::default()), EXCHANGE_PATH,
+        &serde_json::json!({}), false,
+    ).await.unwrap_err();
+    let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+    assert_eq!(failure.client_stage, Some(ReplicationClientStage::PooledOrUnknown));
+    assert_eq!(failure.code, "replication-timeout");
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn a_refused_connection_is_a_connect_error() {
     // A socket bound without listening holds its port and refuses every connection.
     let socket = TcpSocket::new_v4().unwrap();

@@ -1269,6 +1269,29 @@ Success records omit `failure`. Older worker requests and older observations wit
 details remain readable and do not invent a cause. Carrier-only client sync notices
 remain unchanged; use replication-status JSON for the diagnostic details.
 
+For HTTP failures, `failure.correlation_id` identifies one request (each overload
+poll has its own ID), and `failure.client_stage` names the last observed client
+boundary: `send-started`, `connected`, `headers-received`, or `pooled-or-unknown`.
+`connected` means request-scoped connector middleware observed a fresh connection;
+on a Fabric route this is the local tunnel connection, not proof that the remote
+daemon received the request. Pool acquisition is not exposed by reqwest, so a
+pooled or unattributable connection remains `pooled-or-unknown`, never inferred.
+A refused fresh connection stays at `send-started`; a fresh server connection
+accepting without answering times out at `connected`. Failures before HTTP
+dispatch can omit these fields.
+
+Structured `smallclaims::replication` info events carry `correlation_id`, `stage`,
+`unix_ms` (UTC), and `elapsed_us` (monotonic time since this host's request start).
+Search both hosts' journals for the ID from the failed record. The client emits
+`client-send-start`, `connect-done`, `client-headers-received`, and `client-failed`;
+the server emits `server-ingress`, `backend-done`, and `response-headers-ready`.
+Ingress means the handler entered after Axum extracted the body. Headers-ready
+means the signed/compressed response was handed to Axum, not that the socket write
+completed. A retained backend job logs completion with its originating request ID;
+later polls can reuse that answer without starting another job. Compare monotonic
+durations only within one host/request; cross-host UTC comparison requires clock
+synchronization. IDs are diagnostic metadata, not authenticated identities.
+
 The worker captures a Fabric route before converting it to its loopback tunnel
 URL. Fabric currently supplies no direct/relay evidence for that exact dial or
 stream. Probe transport, connection presence snapshots and session lifetime

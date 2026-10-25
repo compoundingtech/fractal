@@ -107,6 +107,8 @@ fn exchange_carrier_records_are_independent_local_and_cleared_on_restart() {
         elapsed_ms: 1_234,
         http_status: Some(500),
         cause: "authenticated peer rejected the exchange; body withheld".into(),
+        correlation_id: Some("019aa000-0000-7000-8000-000000000001".into()),
+        client_stage: Some(smallclaims::replication::ReplicationClientStage::HeadersReceived),
     };
     let record;
     {
