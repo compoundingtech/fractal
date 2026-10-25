@@ -11,6 +11,7 @@ test-support = ["fractal-telemetry/test-support", "smallclaims/test-support"]
 
 [dependencies]
 fractal-kernel = { path = "../fractal-kernel" }
+fractal-schema = { path = "../fractal-schema" }
 fractal-telemetry = { path = "../fractal-telemetry" }
 anyhow = "1"
 base64 = "0.22"

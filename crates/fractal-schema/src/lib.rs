@@ -5,6 +5,7 @@ pub mod custom;
 pub mod accountable;
 pub mod directive_notes;
 pub mod deploy;
+pub mod deploy_policy;
 pub mod full_value;
 pub mod glasses;
 pub mod harness_questions;
