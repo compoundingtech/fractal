@@ -847,6 +847,72 @@ class StTest(unittest.TestCase):
                 self.assertTrue(st_test.pool_root().name.startswith('c-'))  # no origin: its own git common dir
         finally:
             os.chdir(before)
+    def main_commits(self, name, content):
+        """A commit on main after the branch left it (pushed), then back on the feature branch."""
+        git(self.work, 'checkout', '-q', 'main')
+        (self.work / name).parent.mkdir(parents=True, exist_ok=True)
+        (self.work / name).write_text(content)
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', f'main: {name}')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+
+    def branch_from_a_base_with_the_gate(self):
+        """main gets the real gate (the rule the CI gate runs), the feature branch leaves it and commits."""
+        git(self.work, 'checkout', '-q', 'main')
+        shutil.copy(ROOT / 'scripts/ci-evidence-gate', self.work / 'scripts/ci-evidence-gate')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'main: the gate')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', '-B', 'feature')
+        self.commit('b.txt', 'two')
+
+    def test_when_protected_files_moved_on_main_the_merge_tree_is_what_is_signed_and_what_status_asks_about(self):
+        self.branch_from_a_base_with_the_gate()
+        head_tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
+        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))  # a protected file, after the branch point
+        git(self.work, 'fetch', '-q', 'origin')
+        expected = git(self.work, 'merge-tree', '--write-tree', '--no-messages', 'HEAD', 'origin/main').split()[0]
+        self.assertNotEqual(expected, head_tree)
+        code, out, err = self.run_st_test('--status')
+        self.assertEqual(code, 3, out + err)  # not covered: the head tree is not what CI will judge
+        self.assertIn('protected files differ from the branch point', out)
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('CI will judge the merge of this branch with origin/main', out)
+        statement, = self.statements()
+        self.assertIn(expected, json.dumps(statement))  # the note is for the merge tree
+        code, out, err = self.run_st_test('--status', '--check', 'demo')
+        self.assertEqual(code, 0, out + err)  # now the tree CI judges is covered
+        # the pool tree was the merge, at no cost to the branch: HEAD of the clone did not move
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD^{tree}'), head_tree)
+
+    def test_when_main_moved_only_unprotected_files_the_head_tree_is_signed_as_before(self):
+        self.branch_from_a_base_with_the_gate()
+        head_tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
+        self.main_commits('elsewhere.txt', 'main moved')
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('CI will judge the merge', out)
+        statement, = self.statements()
+        self.assertIn(head_tree, json.dumps(statement))
+
+    def test_a_branch_that_cannot_be_merged_with_main_is_told_to_merge_it_first(self):
+        self.branch_from_a_base_with_the_gate()
+        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(POLICY, indent=3))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'branch edits the policy too')
+        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertRegex(str(code), r'does not merge cleanly: merge origin/main into the branch first')
+        self.assertEqual(self.statements(), [])
+
+    def test_a_base_without_the_shared_rule_signs_the_head_as_before(self):
+        self.commit('b.txt', 'two')  # the base of this fixture has no gate script at all
+        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('CI will judge the merge', out)
 
     def test_a_pool_tree_that_is_not_a_worktree_of_this_repository_is_replaced(self):
         self.commit('b.txt', 'two')

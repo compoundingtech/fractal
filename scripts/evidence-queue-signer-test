@@ -33,6 +33,15 @@ if '--seed' in argv:
     seed = argv[argv.index('--seed') + 1]
     with open(os.environ['STUB_LOG'], 'a') as log:
         log.write(json.dumps({'seed': seed, 'head': head, 'checks': checks}) + '\\n')
+    stop = os.environ.get('STUB_SEED_STOP')
+    if stop:
+        # Load rises during the run, before or after nextest started: the watcher stops it.
+        if stop == 'after':
+            print('    Starting 3 tests across 1 binaries', flush=True)
+        with open(os.environ['EVIDENCE_PRESIGN_PRESSURE'], 'w') as pressure:
+            pressure.write('some avg10=40 avg60=40.00 avg300=40 total=1\\n')
+        import time
+        time.sleep(60)
     print('st-test: tree 0123456789ab (HEAD), in a clean worktree')
     print(f'  {"rust-tests":<20} {os.environ.get("STUB_SEED", "passed"):<12} {60:>6}s  2 of 2 crates run and signed')
     for crate in json.loads(os.environ.get('STUB_SEED_FAILED', '[]')):
@@ -118,7 +127,7 @@ class QueueSigner(unittest.TestCase):
         return dict(CLEAN, HOME=self.tmp.name, EVIDENCE_QUEUE_CONFIG=str(self.config), EVIDENCE_QUEUE_STATE=str(self.state),
                     EVIDENCE_PRESIGN_CONFIG=str(self.presign), EVIDENCE_PRESIGN_REMOTE=str(self.origin),
                     EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo),
-                    EVIDENCE_PRESIGN_ADMISSION='/nonexistent', EVIDENCE_QUEUE_PROC=str(self.proc), EVIDENCE_QUEUE_GH=str(Path(self.tmp.name) / 'gh'),
+                    EVIDENCE_PRESIGN_ADMISSION='/nonexistent', EVIDENCE_QUEUE_PROC=str(self.proc), ST_TEST_POOL_MAX_GB='170', EVIDENCE_QUEUE_GH=str(Path(self.tmp.name) / 'gh'),
                     STUB_GH=str(self.gh_data), STUB_LOG=str(self.log), **extra)
 
     def run_signer(self, *args, **extra):
@@ -294,6 +303,36 @@ class QueueSigner(unittest.TestCase):
         done = subprocess.run([sys.executable, '-I', str(SIGNER), 'report'], capture_output=True, text=True, env=self.env())
         report = json.loads(done.stdout)
         self.assertEqual((report['seeds'], report['seed_outcomes']), (3, {'covered': 1, 'failed': 1, 'seeded': 1}))
+
+    def calm(self):
+        self.pressure.write_text('some avg10=1 avg60=1.00 avg300=1 total=1\n')
+
+    def test_a_seed_stopped_for_load_before_its_tests_start_tries_the_same_tip_again_up_to_six_times(self):
+        for _ in range(7):
+            self.calm()
+            self.run_signer('seed', STUB_SEED_STOP='before')
+        seeds = self.lines('seeds.jsonl')
+        self.assertEqual([(s['commit'], s['try'], s['outcome'], s['retry']) for s in seeds],
+                         [(self.main, n, 'deferred', n < 6) for n in range(1, 7)])
+        self.assertEqual(len(self.runs()), 6)
+        self.assertFalse(seeds[0]['tests_started'])
+        self.assertEqual(seeds[0]['pool_max_gb'], '170')
+        # A newer merge replaces the tip: it is seeded, the old one is not tried again.
+        self.calm()
+        tip = self.merge_to_main('next')
+        self.run_signer('seed')
+        self.run_signer('seed')
+        self.assertEqual([run['seed'] for run in self.runs()][6:], [tip])
+        done = subprocess.run([sys.executable, '-I', str(SIGNER), 'report'], capture_output=True, text=True, env=self.env())
+        self.assertEqual(json.loads(done.stdout)['seed_retries'], 5)
+
+    def test_a_seed_stopped_after_its_tests_started_is_not_tried_again(self):
+        self.run_signer('seed', STUB_SEED_STOP='after')
+        self.calm()
+        self.run_signer('seed')
+        seeds = self.lines('seeds.jsonl')
+        self.assertEqual([(s['outcome'], s['tests_started'], s['retry']) for s in seeds], [('deferred', True, False)])
+        self.assertEqual(len(self.runs()), 1)
 
     def test_seed_waits_while_another_seed_runs_or_the_host_is_busy(self):
         # Another seat's st-test --seed on the host: this tick starts nothing, and the next one, once it ended, seeds the tip.

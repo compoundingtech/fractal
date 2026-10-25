@@ -206,13 +206,74 @@ def text(done):
 TARGET = []  # [commit] when --seed names the tree to sign instead of HEAD
 
 
-def target_commit(base):
-    """The commit that is signed: HEAD, the commit being pushed (with --seed, the commit it names).
+GATE_TREE = {}  # (head, base commit) -> (commit, why): the commit whose tree the CI gate will judge, and the reason when it is not HEAD
 
-    A pull request check is reported on the head commit, and the CI gate looks up the note for the head's own tree (see
-    docs/st3/gate-evidence.md, "Which tree a pull request run asks about"), so the tree an agent built and signed is the
-    tree that counts, whether or not main has moved since. The merge queue still tests the integrated tree."""
+
+def head_commit():
     return TARGET[0] if TARGET else text(git('rev-parse', 'HEAD'))
+
+
+def load_base_gate(base_commit):
+    """scripts/ci-evidence-gate as it is at the accepted base, as a module (None when the base has none): the very code the CI gate runs."""
+    shown = git('show', f'{base_commit}:scripts/ci-evidence-gate', check=False)
+    if shown.returncode != 0:
+        return None
+    path = Path(tempfile.mkdtemp(prefix='st-test-gate-')) / 'ci-evidence-gate'
+    path.write_bytes(shown.stdout)
+    loader = importlib.machinery.SourceFileLoader('ci_evidence_gate_at_base', str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        loader.exec_module(module)
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(path.parent, ignore_errors=True)
+    return module
+
+
+def gate_commit(base):
+    """(commit, why): the commit whose tree the CI gate will judge for the branch being pushed.
+
+    Normally the head itself (docs/st3/gate-evidence.md, "Which tree a pull request run asks about"): the tree an agent built and signed
+    is the tree that counts, whether or not main has moved since. But when protected files moved on main since the branch point (or the
+    branch is far behind), the gate falls back to the MERGE tree, which nobody signed: so a signature on the head voids. The rule is the
+    gate's own, taken from the base (`branch_point_verdict`, the function choose_tree calls). In that case this makes the merge of the
+    head with the base (git merge-tree: nothing is checked out here) as a commit, and the run signs and checks that. `why` is empty
+    when it is the head."""
+    head = head_commit()
+    if TARGET:  # --seed names the tree to sign
+        return head, ''
+    base_commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
+    if not base_commit:
+        return head, ''
+    key = (head, base_commit)
+    if key in GATE_TREE:
+        return GATE_TREE[key]
+    result = (head, '')
+    if git('merge-base', '--is-ancestor', base_commit, head, check=False).returncode != 0:  # the base is in the head already: the merge is the head
+        gate = load_base_gate(base_commit)
+        verdict = getattr(gate, 'branch_point_verdict', None)
+        if verdict:
+            try:
+                verdict(text(git('merge-base', base_commit, head)), head, base_commit, base_commit)
+            except Exception as reason:  # the gate's Fallback, or anything its rule raises: it asks about the merge tree
+                merged = git('merge-tree', '--write-tree', '--no-messages', head, base_commit, check=False)
+                if merged.returncode != 0:
+                    raise Failure(f'CI will judge the merge of this branch with {base} ({reason}), and it does not merge cleanly: merge {base} into the branch first')
+                tree = merged.stdout.decode().split()[0]
+                env = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid', 'GIT_COMMITTER_NAME': 'st-test',
+                       'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
+                commit = text(git('commit-tree', tree, '-p', head, '-p', base_commit, '-m', f'merge of {head[:12]} with {base}', env=env))
+                result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
+    GATE_TREE[key] = result
+    return result
+
+
+def target_commit(base):
+    """The commit that is signed: the one whose tree the CI gate will judge (gate_commit: the head, or the merge with the base when
+    the gate falls back to it); with --seed, the commit it names."""
+    return gate_commit(base)[0]
 
 
 def branch_point(commit, base):
@@ -352,7 +413,7 @@ def lane_edits(verifier_path, directory, base, check, tree):
 
 def behind(base):
     """How many commits of the base this branch lacks (0 when it holds the base's tip)."""
-    done = git('rev-list', '--count', f'{target_commit(base)}..{base}', check=False)
+    done = git('rev-list', '--count', f'{head_commit()}..{base}', check=False)
     return int(text(done)) if done.returncode == 0 and text(done).isdigit() else None
 
 
@@ -1200,7 +1261,9 @@ def main(argv):
         git('fetch', '-q', remote, branch)  # the base moves; the lag and the policy are read at its current tip
     base_commit = text(git('rev-parse', '--verify', '-q', args.base + '^{commit}'))
     if args.status:
-        commit = target_commit(args.base)
+        commit, why_merge = gate_commit(args.base)
+        if why_merge:
+            print(f'st-test: {why_merge}')
         tree = text(git('rev-parse', f'{commit}^{{tree}}'))
         lane_base = branch_point(commit, base_commit)
         with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
@@ -1256,6 +1319,8 @@ def main(argv):
         try:
             if pool_trees:
                 commit, root = target_commit(args.base), pool_root()
+                if gate_commit(args.base)[1]:
+                    print(f'st-test: {gate_commit(args.base)[1]}', flush=True)
                 n, tree_lock = acquire_tree(root, pool_trees)
                 if pool_max_gb():
                     evict_to_cap(pool_base(), pool_max_gb(), keep=(root, n))

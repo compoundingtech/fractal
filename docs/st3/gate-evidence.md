@@ -1020,7 +1020,7 @@ is a reviewed change to the list (policy, `.st/required-lanes.json`, and the lis
 `crates/`, `apps/` or the whole tree (`evidence-verify-test`, `check-ci-test-paths`, `ci-fractal-web-test`, `rust-test-keys-test`) stay in `genie-freshness` with the lints, the
 licenses and `genie --check`; its key is still the whole tree and its run is about a minute. Both scripts run their tests in parallel
 (`scripts/ci-parallel-tests`, `GENIE_FRESHNESS_JOBS`, default 6). The new check has a gate job, a workflow job, a lane, a `scripts/st-test` entry and the
-same levels as `genie-freshness`; it becomes a required check in the ruleset only after the change has merged and its job has run green on `main`.
+same levels as `genie-freshness`; it is **not a required context of its own** (a head from before the check existed has no run of it, and a required context would block every such head): the `linux-gate` job, which every head reports and which always waits for the long stages, needs it and fails the gate when it failed or was cancelled (`skipped` counts only when its own gate decided to skip), so new heads enforce it and old heads are unaffected.
 
 `isolation-vm` and `mail-redelivery-canaries` had entries of their own with the same list until 2026-10-23, when they moved to the daily
 run; they have no policy entry now, so nothing on a pull request or in the queue waits on them.
@@ -1140,6 +1140,16 @@ trusted note, 254 of which would have skipped (the rest were sampled or touched 
 real job; the published notes' shadow verification (`evidence-shadow v1`) was `ok` for every lane in every merge-group run since it landed. The
 sampled one in five keeps comparing the note with a real run. Each further check is its own reviewed change to this table, the policy and the
 `enforced` lists in `ci-evidence-gate-test` and `evidence-verify-test`.
+
+### Which checks our pull requests skipped (`scripts/evidence-skip-report`)
+
+`scripts/evidence-skip-report [--hours 24] [--actor LOGIN]... [--receipts FILE]... [--markdown]` counts, for the pull request runs in the
+window (started by the given accounts), each check as `skipped` or as run, and why it ran: `lane_edit` (the pull request changes a file
+of the check's lane, so a local run could not sign it), `merge_tree` (the gate asked about the merge tree, `tree_of=merge`, because a
+protected file changed since the branch point, an author is not listed or the branch is too far behind, and no note covered it), `not_signed` (no note covered the tree although the lane is untouched: pushed
+unsigned), `failed` (the note recorded a failure), `protected` (a file that decides skipping changed), `sampled` (the one-in-five canary),
+`shadow` (the skip is not turned on) or `other`. It lists the not-signed pull requests with their branch and, from pre-push receipts
+(JSON lines with `branch` and `agent`), the seat that pushed them. Read only; it reuses `scripts/evidence-flip-ready`'s GitHub reads.
 
 ### When a check is ready to flip (`scripts/evidence-flip-ready`)
 
@@ -1426,6 +1436,13 @@ end and seconds, and the time it spent waiting in the build admission queue (the
 get a UTC stamp, and the waits are counted and added up per stage), in a table at the end. Each stage's output is also kept in
 `~/.cache/ci-local-logs/run-TIME-PID/STAGE.log` (`CI_LOCAL_LOG_DIR` names another place; the latest 10 runs stay), because the scratch home
 of the stages is removed afterwards.
+**The tree it signs is the tree the CI gate will judge.** Usually that is the pushed head. But when protected files moved on main since the branch
+point (or the branch is more than `HEAD_TREE_MAX_BEHIND` commits behind), the gate falls back to the MERGE tree (`head_tree=fallback:...` in its
+output), which a signature on the head does not cover. `st-test` asks the base's own `scripts/ci-evidence-gate` (`branch_point_verdict`, the function
+`choose_tree` calls: one rule, not a copy). When it says fallback, `st-test` makes the merge of the head with the base as a commit (`git merge-tree`,
+nothing is checked out in your clone), signs and tests THAT tree in its pool tree, and says so; if the branch does not merge cleanly it refuses and tells
+you to merge the base into the branch first. `st-test --status`, which the pre-push hook asks, judges the same tree, so a push is refused when the tree CI
+will judge is not covered even if the head tree is.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
 counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); unless `--check` names checks, every check of the skip
 policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
@@ -1641,8 +1658,10 @@ whose key has none yet, so a pull request branched from main reuses them; most m
 all of them. Main's code is merged code, the code every run on the host already builds under a pull request, so no author rule applies.
 It starts on the same terms as `sign`, and not while another `st-test --seed` runs on the host (that tick is skipped; the next tries
 again); its nextest takes the build slots through the admission shim like any `st-test` build. A tip is seeded once whatever the outcome
-(the next merge's seed covers what one left missing), and each appends a line to `seeds.jsonl` (wait from the merge to the start,
-seconds, and the crates that did not sign). `evidence-queue-signer report` sums a window, and `~/.config/evidence-queue-signer/off` stops
+(the next merge's seed covers what one left missing), except that a seed load stopped before its tests started (waiting for a build
+slot, or building; nextest's `Starting N tests` line is the boundary) tries the same tip again on the next tick, up to six tries, until
+a newer merge replaces it. Each try appends a line to `seeds.jsonl` (wait from the merge to the start, seconds, the try number, whether
+the tests had started, the pool cap `ST_TEST_POOL_MAX_GB` it ran with, and the crates that did not sign). `evidence-queue-signer report` sums a window, and `~/.config/evidence-queue-signer/off` stops
 all three.
 
 ### When the gate says skip
