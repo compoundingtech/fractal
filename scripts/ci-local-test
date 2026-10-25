@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import tempfile
+import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -225,10 +226,23 @@ class CiLocal(unittest.TestCase):
         # the limit may be a file in the account's config, and a load that drops during the wait lets the run through
         (self.home / '.config/st-test').mkdir(parents=True)
         (self.home / '.config/st-test/max-load').write_text('20\n')
-        dropper = subprocess.Popen(['bash', '-c', f'sleep 0.6; echo "5.00 5.00 5.00 1/100 1" > {loadavg}'])
-        self.addCleanup(dropper.wait)
-        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(loadavg), ST_TEST_LOAD_WAIT_MINUTES='1',
+        # The first read of the load gets 34 from a pipe that is then replaced by a file saying 5: the drop follows the run's own first read
+        # (the one that announces the wait), not a clock a loaded runner can outrun.
+        pipe = Path(self.tmp.name) / 'loadavg.once'
+        os.mkfifo(pipe)
+        def serve():
+            with open(pipe, 'w') as out:  # waits for the run's first read
+                out.write('34.00 20.00 10.00 1/100 1234\n')
+            low = pipe.with_name('loadavg.low')
+            low.write_text('5.00 5.00 5.00 1/100 1\n')
+            os.replace(low, pipe)
+        server = threading.Thread(target=serve, daemon=True)
+        server.start()
+        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(pipe), ST_TEST_LOAD_WAIT_MINUTES='1',
                                      CI_LOCAL_LOAD_POLL='0.1')
+        if server.is_alive():  # the run never read the load: let the writer waiting for a reader finish
+            os.close(os.open(pipe, os.O_RDONLY | os.O_NONBLOCK))
+        server.join(5)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn('waiting: load1 34.00 > 20 (host limit)', done.stderr)
         self.assertTrue(calls)
