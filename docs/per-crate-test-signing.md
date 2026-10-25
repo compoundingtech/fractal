@@ -218,6 +218,15 @@ for the crates that lack one, runs only those crates, and pushes the notes (to `
 exits 0 when every crate is covered or signed, and `--crate NAME` narrows it. Measured: a full seeding of 52 crates is about 12 minutes on this host
 (prep 158 s, nextest 480 s, signing 53 s); after a merge that touched 2 crates it runs only those 2.
 
+For a separate publisher, `scripts/st-test --seed [REF] --out DIR` exports `<record>.pack` and `<record>.json` for every selected
+crate, including crates already covered locally, and does not implicitly push to `origin`. The same `--out DIR` works with
+`--check rust-tests` and with the full suite (including linux-gate's aggregate and per-crate records from its shared nextest report).
+The output directory is resolved against the caller's working directory, not the clean worktree; nested relative directories work.
+`--out` is incompatible with `--push`. Export mode deliberately reruns the selection to produce a complete set rather than copying
+existing notes. It does not import the packs, so success means passing checks and exported packs, not verified coverage: publication
+and verification belong to the publisher. Failures still export failure records and fail the run; lane-edit refusals remain unsigned.
+
+
 ## 12. Verification and push time (measured 2026-10-24)
 
 Two warm full runs on hetz2 took 935 s and 1116 s against the 12-minute budget, with 123 to 270 s outside every check row. Where it went, and what

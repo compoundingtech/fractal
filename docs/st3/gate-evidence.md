@@ -1417,6 +1417,17 @@ changes the result.
 A check the tree already has a passing signature for (the verifier's answer, the same one `st-test` asks after a run) is not run again:
 it prints `already signed` and, with `--push`, pushes that note as it is, so re-running on an unchanged tree is near instant. A failed
 record is not a signature. `--rerun` runs the check anyway. The megarepo members are fetched only once a check has to run.
+
+For a separate publisher, use `scripts/st-test --out DIR` instead of `--push REMOTE` (the two are mutually exclusive). The
+directory is made absolute relative to the caller's working directory before any clean worktree is entered. Each wrapper writes
+`DIR/<record>.pack` and `DIR/<record>.json`, without importing notes, pushing refs or nudging the log. To keep the exported set
+complete, export mode reruns every selected, relevant check even if a local note already covers it, including every selected
+`rust-tests` crate. When `linux-gate` and `rust-tests` run together, the aggregate and per-crate packs still share the gate's nextest
+report. Lane-edit refusals and irrelevant checks retain their usual behavior. Failed runs still export failure records and fail the
+command. A successful export reports `packs exported, not imported or verified`: the publisher must publish and verify the records;
+export alone does not establish coverage, and `--status` continues to judge imported notes normally. `--seed [REF] --out DIR`
+exports all selected crates of that ref (the base by default), without seed mode's usual implicit push to `origin`.
+
 Every check runs with one fixed `PATH` (`~/.local/bin`, `~/.cargo/bin`, `/run/current-system/sw/bin`, `/nix/var/nix/profiles/default/bin`, `/usr/bin`,
 `/bin` and the directory of `nix`, those that exist) instead of the caller's (`~/.cargo/bin` stays because the clippy ratchet's baseline holds
 the `clippy 0.1.97` that `cargo clippy -V` prints with it, not the longer one it prints without): cargo's build scripts record `PATH`, so two seats whose
