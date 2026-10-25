@@ -296,3 +296,36 @@ not bound replicated observer claim history.
 exceptions: invented time/origin/position mutations, repair membership, deletion,
 savepoints and preparation closures. These exercise invalidation and rollback;
 they are not new production value producers or permission to relax wire limits.
+
+## Deploy verification inventory review (PR #3823)
+
+The [deploy verification change](https://github.com/compoundingtech/fractal/pull/3823)
+reads existing claim, signature and receipt representations without adding a
+production writer or changing their storage format. The responsible maintainers
+are those of `fractal_store::store::deploy` and its `tests` module. These
+transitional exceptions do not prove byte-size or execution-cost bounds.
+
+- `lv-hcd60d83de7b8` resolves a claim by ID and decodes its existing inline body,
+  predecessors and variable identity fields. `lv-he4d379218d03` binds GO/local
+  origin strings and reads claim IDs/origins for authenticated clock evidence.
+  `lv-h5e7d6e0f3a53` reads IDs/kinds in store order for revocation, consumption,
+  STOP and lift verification. The formatted predicates retain the existing
+  unrepaired-claim and replica exclusions. All three remain inline to preserve
+  exact canonical authorization and historical claim decoding; the producer
+  maintainer owns `trace-statement-and-value-representation`: connect formatted
+  statements, variable TEXT/index keys and decoded claim values to the shared
+  bounded/reference representation while retaining snapshot, signature and
+  eligible-origin/local-clock ratchet semantics.
+- Fixture-only `lv-h493aa8cab034` and `lv-h63250a64d298` mutate/remove the
+  host-b replication receipt; `lv-haeca40cf61e3` inserts an unsupported raw
+  revocation envelope and variable timestamp/state fields. They deliberately
+  retain the actual inline receipt/transport representation to test stale,
+  missing and unreadable evidence. The test-module maintainer owns
+  `chunk-or-reference-exact-wire-values`: adapt these fixtures to the shared
+  representation while preserving exact raw-envelope rejection coverage.
+- Fixture-only `lv-h8c4ce07dd4ee` changes principal-migration state to legacy;
+  `lv-h455635f8de24` inserts a variable claim ID into repaired membership.
+  These direct mutations exercise incomplete authority and repaired-release
+  rejection, not new production value producers. The test-module maintainer
+  owns `bound-or-reference-values-and-reclamation`: carry those assertions to
+  the bounded membership/state representation and its cleanup semantics.

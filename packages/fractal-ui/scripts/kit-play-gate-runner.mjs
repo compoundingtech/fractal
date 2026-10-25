@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { playWorkers } from './kit-play-workers.mjs'
 import { readFile, stat, mkdir, writeFile, appendFile } from 'node:fs/promises'
 import { resolve, sep, extname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -75,7 +76,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   const busyMilliseconds = () => cpus().reduce((sum, { times }) => sum + times.user + times.nice + times.sys + times.irq, 0)
   const busyStarted = busyMilliseconds(), loadStarted = loadavg()
   const rows = []
-  const workers = Math.min(6, availableParallelism())
+  const workers = playWorkers(process.env, availableParallelism())
   let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError
   await mkdir(outputDirectory, { recursive: true })
   const writeReceipt = async () => {

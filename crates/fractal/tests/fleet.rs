@@ -151,9 +151,16 @@ impl Node {
         fs::set_permissions(&pty, fs::Permissions::from_mode(0o755)).unwrap();
         // A release without --pty-binary finds pty through the login shell's PATH.
         let profile = format!("export PATH=\"{}:$PATH\"\n", root.join("bin").display());
-        for file in [".profile", ".bash_profile", ".zprofile"] {
+        for file in [".profile", ".bash_profile", ".zprofile", ".zshrc"] {
             fs::write(root.join("home").join(file), &profile).unwrap();
         }
+        // Fish uses XDG_CONFIG_HOME rather than the POSIX login profiles above.
+        fs::create_dir_all(root.join("config/fish")).unwrap();
+        fs::write(
+            root.join("config/fish/config.fish"),
+            format!("set -gx PATH '{}' $PATH\n", root.join("bin").display()),
+        )
+        .unwrap();
         Self {
             name: name.into(),
             binary: PathBuf::from(st3()),
@@ -4155,17 +4162,33 @@ async fn the_fabric_transport_works_through_the_worker_alone() {
     a.wait_listening().await;
     a.note("over-fabric-a").await;
 
-    // The code travels as a Fabric file and never appears in an argument list.
-    a.st_ok(&[
-        "fleet",
-        "invite",
-        "b",
-        "--via",
-        "fabric",
-        "--send-fabric",
-        "--as",
-        PERSON,
-    ]);
+    // This fixture isolates already-trusted worker tunnels and inbox delivery.
+    // Issue the legacy transport invitation through the daemon authority, not
+    // the CLI's separate restricted-pairing bootstrap (covered by pairing tests).
+    let invitation: fractal_daemon::api::FleetInviteCreated = a.client().post(
+        "/v1/internal/fleet/invites",
+        &fractal_daemon::api::FleetInviteRequest {
+            name: Some("b".into()),
+            expires_seconds: 600,
+            via: Some("fabric".into()),
+            migrate: false,
+            person: PERSON.into(),
+        },
+    ).await.unwrap();
+    let code_file = root.path().join("worker-transport.code");
+    fractal_daemon::fleet::join::write_private(&code_file, invitation.code.as_bytes()).unwrap();
+    let delivered_name = format!(
+        "st-fleet-join-{}.code",
+        invitation.invite.trim_start_matches("fleet-invite/")
+    );
+    assert!(Command::new(&shim_a)
+        .args(["send-file", "b"])
+        .arg(&code_file)
+        .args(["--as", &delivered_name])
+        .status()
+        .unwrap()
+        .success());
+    fs::remove_file(code_file).unwrap();
     let mut b = Node::new(root.path(), "b");
     b.env.push((
         "FABRIC_HOME".into(),
