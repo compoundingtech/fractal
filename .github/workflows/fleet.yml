@@ -926,7 +926,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-ci-script-tests":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-gate-rust-tests":[],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-fractal-web","evidence-gate-rust-tests"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"ci-script-tests":["pick-runner","evidence-gate-ci-script-tests"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","evidence-gate-rust-tests"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","genie-freshness","ci-script-tests","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-typescript-client","evidence-gate-fractal-web","evidence-gate-rust-tests"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-ci-script-tests":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-gate-rust-tests":[],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-fractal-web","evidence-gate-rust-tests"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"ci-script-tests":["pick-runner","evidence-gate-ci-script-tests"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","evidence-gate-rust-tests"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","genie-freshness","ci-script-tests","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-typescript-client","evidence-gate-fractal-web","evidence-gate-rust-tests"],"evidence-note-rust-tests":["linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","evidence-gate-linux-gate","evidence-gate-rust-tests"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -2036,10 +2036,15 @@ jobs:
       - name: Prove shards form the complete selected inventory
         shell: bash
         run: nix develop -c python3 scripts/ci-test-partitions
+      - name: Make room for the JUnit report
+        continue-on-error: true
+        run: mkdir -p "$RUNNER_TEMP/rust-test-junit"
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
         id: nextest
+        env:
+          CI_TEST_JUNIT: ${{ format('{0}/rust-test-junit/junit.xml', runner.temp) }}
       - name: Name the flaky test count
         if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
         continue-on-error: true
@@ -2049,6 +2054,22 @@ jobs:
           path: "${{ runner.temp }}/nextest-flaky.txt"
           if-no-files-found: ignore
           retention-days: 1
+      - name: Describe the JUnit report for the per-crate notes
+        if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+        continue-on-error: true
+        env:
+          SHARD_JOB: linux-tests
+          NEXTEST_OUTCOME: ${{ steps.nextest.outcome }}
+        run: python3 scripts/ci-rust-test-notes describe --out "$RUNNER_TEMP/rust-test-junit/shard.json"
+      - name: Retain the JUnit report for the per-crate notes
+        if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "rust-test-junit-linux-tests-${{ github.run_attempt }}"
+          path: "${{ runner.temp }}/rust-test-junit/"
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -2236,10 +2257,15 @@ jobs:
         run: nix develop -c bash scripts/ci-install-built-hooks
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
+      - name: Make room for the JUnit report
+        continue-on-error: true
+        run: mkdir -p "$RUNNER_TEMP/rust-test-junit"
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
         id: nextest
+        env:
+          CI_TEST_JUNIT: ${{ format('{0}/rust-test-junit/junit.xml', runner.temp) }}
       - name: Name the flaky test count
         if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
         continue-on-error: true
@@ -2249,6 +2275,22 @@ jobs:
           path: "${{ runner.temp }}/nextest-flaky.txt"
           if-no-files-found: ignore
           retention-days: 1
+      - name: Describe the JUnit report for the per-crate notes
+        if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+        continue-on-error: true
+        env:
+          SHARD_JOB: linux-tests-shard-2
+          NEXTEST_OUTCOME: ${{ steps.nextest.outcome }}
+        run: python3 scripts/ci-rust-test-notes describe --out "$RUNNER_TEMP/rust-test-junit/shard.json"
+      - name: Retain the JUnit report for the per-crate notes
+        if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "rust-test-junit-linux-tests-shard-2-${{ github.run_attempt }}"
+          path: "${{ runner.temp }}/rust-test-junit/"
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -2436,10 +2478,15 @@ jobs:
         run: nix develop -c bash scripts/ci-install-built-hooks
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
+      - name: Make room for the JUnit report
+        continue-on-error: true
+        run: mkdir -p "$RUNNER_TEMP/rust-test-junit"
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
         id: nextest
+        env:
+          CI_TEST_JUNIT: ${{ format('{0}/rust-test-junit/junit.xml', runner.temp) }}
       - name: Name the flaky test count
         if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
         continue-on-error: true
@@ -2449,6 +2496,22 @@ jobs:
           path: "${{ runner.temp }}/nextest-flaky.txt"
           if-no-files-found: ignore
           retention-days: 1
+      - name: Describe the JUnit report for the per-crate notes
+        if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+        continue-on-error: true
+        env:
+          SHARD_JOB: linux-tests-shard-3
+          NEXTEST_OUTCOME: ${{ steps.nextest.outcome }}
+        run: python3 scripts/ci-rust-test-notes describe --out "$RUNNER_TEMP/rust-test-junit/shard.json"
+      - name: Retain the JUnit report for the per-crate notes
+        if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "rust-test-junit-linux-tests-shard-3-${{ github.run_attempt }}"
+          path: "${{ runner.temp }}/rust-test-junit/"
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -2636,10 +2699,15 @@ jobs:
         run: nix develop -c bash scripts/ci-install-built-hooks
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
+      - name: Make room for the JUnit report
+        continue-on-error: true
+        run: mkdir -p "$RUNNER_TEMP/rust-test-junit"
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
         id: nextest
+        env:
+          CI_TEST_JUNIT: ${{ format('{0}/rust-test-junit/junit.xml', runner.temp) }}
       - name: Name the flaky test count
         if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
         continue-on-error: true
@@ -2649,6 +2717,22 @@ jobs:
           path: "${{ runner.temp }}/nextest-flaky.txt"
           if-no-files-found: ignore
           retention-days: 1
+      - name: Describe the JUnit report for the per-crate notes
+        if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+        continue-on-error: true
+        env:
+          SHARD_JOB: linux-tests-shard-4
+          NEXTEST_OUTCOME: ${{ steps.nextest.outcome }}
+        run: python3 scripts/ci-rust-test-notes describe --out "$RUNNER_TEMP/rust-test-junit/shard.json"
+      - name: Retain the JUnit report for the per-crate notes
+        if: ${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "rust-test-junit-linux-tests-shard-4-${{ github.run_attempt }}"
+          path: "${{ runner.temp }}/rust-test-junit/"
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -3351,6 +3435,112 @@ jobs:
         shell: bash
         env:
           CACHE_REASON: Signs the aggregate gate result from workflow context; builds nothing.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  evidence-note-rust-tests:
+    name: evidence-note-rust-tests
+    needs:
+      - linux-tests
+      - linux-tests-shard-2
+      - linux-tests-shard-3
+      - linux-tests-shard-4
+      - evidence-gate-linux-gate
+      - evidence-gate-rust-tests
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))) }}
+    runs-on: ubuntu-latest
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
+    permissions:
+      contents: write
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      EVIDENCE_PUSH_TOKEN: ${{ github.token }}
+      NEEDS_JSON: ${{ toJSON(needs) }}
+      BASE_SHA: ${{ github.event.merge_group.base_sha || github.sha }}
+    steps:
+      - name: Check out the tested commit
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        continue-on-error: true
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Take the signer scripts from the base commit
+        id: base
+        continue-on-error: true
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - name: Collect the test shards' JUnit reports
+        if: ${{ steps.base.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rust-test-junit-*
+          path: "${{ runner.temp }}/rust-test-junit"
+      - name: Decide which crates may be signed
+        id: plan
+        if: ${{ steps.base.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          [ -f "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" ] || { echo "no ci-rust-test-notes at the base commit; nothing is signed"; exit 1; }
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" plan --reports "$RUNNER_TEMP/rust-test-junit" --out "$RUNNER_TEMP/rust-test-plan"
+      - name: May this job use the signing key?
+        id: guard
+        if: ${{ steps.plan.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" guard
+      - name: Write the signer configuration and key
+        id: configure
+        if: ${{ steps.guard.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - name: Sign the per-crate rust-tests notes
+        id: sign
+        if: ${{ steps.configure.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" once rust-tests
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" sign --plan "$RUNNER_TEMP/rust-test-plan" --out "$RUNNER_TEMP/rust-test-notes"
+      - name: Publish the notes that verify
+        if: ${{ steps.configure.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          [ -d "$RUNNER_TEMP/rust-test-notes" ] || { echo "nothing was signed"; exit 0; }
+          git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+          python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/rust-test-notes" --keys "$RUNNER_TEMP/evidence-keys" \
+            --checks rust-tests --limit 400 --remote origin
+      - name: Remove the key
+        if: always()
+        continue-on-error: true
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Signs per-crate notes from the test shards' JUnit reports; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   fractal-web-changes:
     name: fractal-web-changes
