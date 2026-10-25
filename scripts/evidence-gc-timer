@@ -11,7 +11,7 @@
 #   evidence-gc-timer --relock-only   turn the protection back on and check it (the unit's ExecStopPost)
 set -euo pipefail
 state=${EVIDENCE_GC_STATE:-$HOME/.local/state/evidence-gc}
-remote=${EVIDENCE_GC_REMOTE:-https://github.com/compoundingtech/smalltalk.git}
+remote=${EVIDENCE_GC_REMOTE:-https://github.com/compoundingtech/fractal.git}
 lock=${EVIDENCE_GC_LOCK:-$HOME/.config/evidence-gc/lock.json}
 document=${EVIDENCE_GC_DOCUMENT:-doc/fleet/factory/evidence-gc/runs}
 log_timer=${EVIDENCE_GC_LOG_TIMER:-$HOME/.local/bin/evidence-log-timer}

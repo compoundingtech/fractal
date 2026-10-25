@@ -9,6 +9,17 @@ import { commitSetCases, fullCases, FULL_CASE_OVERRIDES, validateCaseOverrides }
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
 import { shardStories } from './kit-play-shards.mjs'
 import { readinessTimings, summarizeTimings } from './kit-play-timings.mjs'
+export function assertStrictEvidence(records, id, a11y) {
+  if (records.length !== 1 || records[0].finished.length !== 1) {
+    throw new Error('expected exactly one completed strict story record')
+  }
+  const { payload } = records[0].finished[0]
+  if (payload.storyId !== id || payload.status !== 'success') throw new Error('storyFinished evidence is not a successful completion of the requested story')
+  const reports = (payload.reporters ?? []).filter(report => report.type === 'a11y')
+  if (a11y === 'on' && !(reports.length === 1 && reports[0].status === 'passed')) throw new Error(`a11y on: expected one passed a11y report, got ${JSON.stringify(reports)}`)
+  if (a11y === 'off' && reports.length) throw new Error(`a11y off: axe still ran: ${JSON.stringify(reports)}`)
+}
+
 
 // The CLI always supplies the reviewed source policy; fixture tests may inject theirs directly.
 export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES }) {
@@ -155,15 +166,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
             a11yStart: a11yMark('start'), a11yEnd: a11yMark('end'),
           }, a11y === 'on'))
         }
-        if (!guard.records.every(record => record.finished.every(event => event.payload.storyId === id))) {
-          throw new Error('storyFinished evidence belongs to a different story')
-        }
-        // With a11y on, every finished story carries a passed axe report; with it off, none.
-        for (const { payload } of guard.records.flatMap(record => record.finished)) {
-          const reports = (payload.reporters ?? []).filter(report => report.type === 'a11y')
-          if (a11y === 'on' && !(reports.length === 1 && reports[0].status === 'passed')) throw new Error(`a11y on: expected one passed a11y report, got ${JSON.stringify(reports)}`)
-          if (a11y === 'off' && reports.length) throw new Error(`a11y off: axe still ran: ${JSON.stringify(reports)}`)
-        }
+        assertStrictEvidence(guard.records, id, a11y)
         row.timings.assertionsMilliseconds = performance.now() - storyReady
         row.pass = true
       } catch (error) {

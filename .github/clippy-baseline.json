@@ -31,7 +31,6 @@
       "clippy::unnecessary_lazy_evaluations": 1
     },
     "fractal-api-core": {
-      "clippy::collapsible_if": 2,
       "clippy::manual_next_back": 1
     },
     "fractal-client": {

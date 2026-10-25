@@ -140,6 +140,23 @@ wrong until the host is repaired; exchanges cannot fix it.
 The terminal UI's sidebar and palette expose Now, Agents, Missions, Fleet, and Usage.
 The phone tabs are Now, Resources, Fleet, and Spaces.
 
+Terminal workspace tabs derive presentation identity from their existing pane keys,
+like the web strip's `data-tab-kind` (never from the displayed or custom title).
+`A`, `M`, and `I` identify agent, mission, and Inbox/alert panes. Agent tabs show
+reported activity (`>` working/compacting, `-` idle, `x` down/stopped/retired,
+`◆` needs a person or a login, `!` fault, `~` starting/unknown). `◆N` is the number of
+open alerts in that subject's attention window, excluding informational updates and
+recently closed items; zero is omitted, and an unavailable window shows `◆?`.
+A separate `?` means live attention reports an open question prompt. Native question
+kind or an exact question-tool call identity establishes its type, independently of
+available client-answer actions (whose submission window can expire). Cached calls
+without an open live prompt never establish that a question is still pending.
+Mission tabs include current question prompts of agents assigned to that mission;
+Inbox includes all current question prompts. Counts disappear before
+type/activity/question identity when space is tight. Subject membership indexes are
+rebuilt on observation updates, not per tab per frame; none of this chrome is persisted.
+
+
 ### Now: what needs you
 
 - Grouped by tier (`words.json` → `tier`): somebody is stopped on you, something broke, today,
@@ -192,7 +209,7 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
 - Grouped by the mission word (`words.json` → `mission`), in this order: needs you, stalled,
   unstaffed, unclaimed, queued, working, watching, held, idle, done, failed, cancelled, not started. Each group heading
   explains itself through the word's `explain` text in the detail view.
-- Tree view (toggle): the mission path as folders (`fleet/smalltalk/ci/watch/…`).
+- Tree view (toggle): the mission path as folders (`fleet/fractal/ci/watch/…`).
 - Detail: word pill, title, explanation; goals; **the decision card embedded** when a person is
   needed (the same card as Now, answerable in place); a **what you can do** card for stalled,
   failed and unstaffed missions (the stuck step, its blockers, restart the agent, retry the step,
@@ -256,7 +273,7 @@ Today only Rust and the phone run the fixtures; `noise` and `claude-skill` run o
 and only the phone runs `conversation-style.json`. Fractal cleans conversations in
 `apps/fractal-web/src/conversation/` without `st3-views` and runs none of them. Adding that
 test is the first step of this rule
-([#2647](https://github.com/compoundingtech/smalltalk/issues/2647)).
+([#2647](https://github.com/compoundingtech/fractal/issues/2647)).
 Once the [conversation projection](#conversation-stream) is served, it is the derivation the
 fixtures pin, and a Fractal PR that changes the fixtures changes the projection with them.
 
@@ -353,7 +370,7 @@ Today the terminal UI derives mission words, agent states and Now cards in Rust,
 derives its own copies in TypeScript, and the web app would need a third. The copies already
 disagree. st serves each of these once, as a presentation projection, so every client reads the
 same answer and one place is measured and optimized
-([#2646](https://github.com/compoundingtech/smalltalk/issues/2646)).
+([#2646](https://github.com/compoundingtech/fractal/issues/2646)).
 
 ### Rules for every projection
 
@@ -592,7 +609,7 @@ rule.
 
 Each person has one Sidebar arrangement, at the reserved subject
 `arrangement/person/NAME/00000000-0000-7000-8000-000000000001`
-([#2043](https://github.com/compoundingtech/smalltalk/issues/2043)). The generated Rust, Swift
+([#2043](https://github.com/compoundingtech/fractal/issues/2043)). The generated Rust, Swift
 and TypeScript clients expose that UUID as `SIDEBAR_ARRANGEMENT_UUID` (Swift:
 `st3SidebarArrangementUuid`), from `constants` in `operations.json`. Every client picks the same
 Sidebar:
@@ -635,7 +652,7 @@ small PRs. The daemon PR carries the schema and regenerated clients, the refresh
 `words.json` check, the SLO entries and the `daemon_load` window. Separate PRs then move the
 terminal UI and the phone onto the projection and delete their derivations. When a projection
 merges, its route and collection are posted on
-[#2646](https://github.com/compoundingtech/smalltalk/issues/2646) for Fractal to adopt; Fractal
+[#2646](https://github.com/compoundingtech/fractal/issues/2646) for Fractal to adopt; Fractal
 asks there for any field it needs that is not listed here.
 
 ## iOS, the Expo way

@@ -31,7 +31,8 @@ mkdir -p "$hooks"
 cat > "$hook.tmp" <<'STUB'
 #!/usr/bin/env bash
 # st-evidence-prepush: written by scripts/install-git-hooks
-# Never blocks a push. Runs the base branch's copy of scripts/evidence-prepush, never the pushed tree's.
+# Runs the base branch's copy of scripts/evidence-prepush, never the pushed tree's. It blocks a push only when that copy refuses it
+# (exit 3: an agent's tree that is not covered); any other outcome, a crash included, lets the push go.
 remote=${1:-origin}
 # git exports GIT_DIR and friends to a hook: note where we are, drop the variables that select a repository or an identity, and let git
 # find the repository from the working directory again, so nothing started below can reach the caller's repository through them
@@ -57,6 +58,7 @@ git archive "refs/remotes/$remote/main" scripts/evidence-prepush scripts/st-test
 [ -f "$work/scripts/evidence-prepush" ] || exit 0
 if command -v python3 >/dev/null 2>&1; then
   python3 "$work/scripts/evidence-prepush" "$@"
+  [ $? -ne 3 ] || exit 1
 else
   echo "evidence: python3 is not on PATH; not signing" >&2
 fi

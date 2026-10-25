@@ -203,7 +203,7 @@ impl Node {
         if let Some(shell) = std::env::var_os("SHELL") {
             command.env("SHELL", shell);
         }
-        if let Some(root) = std::env::var_os("SMALLTALK_FLEET_LEAVE_DIAGNOSTICS") {
+        if let Some(root) = std::env::var_os("FRACTAL_FLEET_LEAVE_DIAGNOSTICS") {
             command.env("RUST_LOG", "st3=trace,smallclaims=trace");
             fs::write(Path::new(&root).join("command.json"), serde_json::to_vec(&json!({
                 "node": self.name, "operation": arguments.iter().take(2).collect::<Vec<_>>()
@@ -263,10 +263,13 @@ impl Node {
     pub(super) async fn start(&mut self) {
         let pty = self.root.join("bin/pty");
         let log = |name: &str| fs::File::create(self.root.join(name)).unwrap();
+        // No browser UI: its default address (127.0.0.1:7410) is a fixed port, and a host that already
+        // listens there (a developer's web server) made the previous release exit at once with
+        // "Address already in use". Both releases accept `--web-listen off`.
         let up: Vec<&str> = if self.binary == Path::new(st3()) {
-            vec!["up", "--pty-binary", pty.to_str().unwrap()]
+            vec!["up", "--pty-binary", pty.to_str().unwrap(), "--web-listen", "off"]
         } else {
-            vec!["up"]
+            vec!["up", "--web-listen", "off"]
         };
         let daemon = self
             .command(&up)
@@ -2440,7 +2443,7 @@ async fn leave_drains_everything_before_it_leaves() {
         return;
     }
     let temporary_root = tempfile::tempdir().unwrap();
-    let root = std::env::var_os("SMALLTALK_FLEET_LEAVE_DIAGNOSTICS")
+    let root = std::env::var_os("FRACTAL_FLEET_LEAVE_DIAGNOSTICS")
         .map(PathBuf::from).unwrap_or_else(|| temporary_root.path().to_owned());
     let phase = |stage: &str| fs::write(root.join("phase.txt"), stage).unwrap();
     phase("create and start anchor a");
@@ -2503,7 +2506,7 @@ fn supervise_leave_with_diagnostics() -> bool {
     {
         use std::io::Write as _;
         let name = "fleet::leave_drains_everything_before_it_leaves";
-        if std::env::var("SMALLTALK_TEST_SUPERVISED").as_deref() == Ok(name) {
+        if std::env::var("FRACTAL_TEST_SUPERVISED").as_deref() == Ok(name) {
             return false;
         }
         let scripts = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts");
@@ -2517,7 +2520,7 @@ fn supervise_leave_with_diagnostics() -> bool {
             .arg("--")
             .arg(std::env::current_exe().unwrap())
             .args(["--exact", name, "--nocapture", "--include-ignored"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")
-            .env("SMALLTALK_TEST_SUPERVISED", name)
+            .env("FRACTAL_TEST_SUPERVISED", name)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .output().expect("launch bounded fleet leave guardian");
         std::io::stdout().write_all(&output.stdout).unwrap();

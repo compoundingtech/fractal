@@ -15,7 +15,7 @@ def write_json(path, value, **options):
 
 
 def register(root, evidence):
-    manifest = os.environ.get("SMALLTALK_TEST_EVIDENCE_MANIFEST")
+    manifest = os.environ.get("FRACTAL_TEST_EVIDENCE_MANIFEST")
     if not manifest:
         raise RuntimeError("fixture evidence requires its process guardian")
     evidence.mkdir(parents=True, exist_ok=True)
