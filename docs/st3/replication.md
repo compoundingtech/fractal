@@ -1269,6 +1269,41 @@ Success records omit `failure`. Older worker requests and older observations wit
 details remain readable and do not invent a cause. Carrier-only client sync notices
 remain unchanged; use replication-status JSON for the diagnostic details.
 
+For HTTP failures, `failure.correlation_id` identifies one request (each overload
+poll has its own ID), and `failure.client_stage` names the last observed client
+boundary: `send-started`, `connected`, `headers-received`, or `pooled-or-unknown`.
+`connected` means request-scoped connector middleware observed a fresh connection;
+on a Fabric route this is the local tunnel connection, not proof that the remote
+daemon received the request. Pool acquisition is not exposed by reqwest, so a
+pooled or unattributable connection remains `pooled-or-unknown`, never inferred.
+A refused fresh connection stays at `send-started`; a fresh server connection
+accepting without answering times out at `connected`. Failures before HTTP
+dispatch can omit these fields.
+
+Structured `smallclaims::replication` events carry `correlation_id`, `stage`,
+`unix_ms` (UTC), and `elapsed_us` (monotonic time since this host's request start).
+Fast successful clients log boundaries at DEBUG. A locally failed client exchange
+or one crossing five seconds promotes retained boundaries to INFO with their
+original timestamps; subsequent client boundaries remain INFO. The client emits
+`client-send-start`, `connect-done`, `client-headers-received`, and `client-failed`.
+
+Every handled server request emits exactly one INFO `replication exchange server
+summary`, including fast successes whose response never reaches the client.
+Search both hosts' journals for the ID from the failed record; no DEBUG logging
+is required. The summary includes `status`, `server_ingress_unix_ms`,
+`server_ingress_elapsed_us`, `backend_done_unix_ms`, `backend_done_elapsed_us`,
+`response_headers_ready_unix_ms`, and `response_headers_ready_elapsed_us`.
+`backend_done: false` and absent backend timestamps mean no completed backend
+answer was observed at response handoff (for example an overload or early refusal).
+The server's individual boundaries remain DEBUG, including late backend completion.
+Ingress means the handler entered after Axum extracted the body. Headers-ready
+means the signed/compressed response was handed to Axum, not that the socket write
+completed. A retained backend job records completion with its originating request
+ID; a later poll reusing the answer timestamps when that poll observed it.
+Compare monotonic
+durations only within one host/request; cross-host UTC comparison requires clock
+synchronization. IDs are diagnostic metadata, not authenticated identities.
+
 The worker captures a Fabric route before converting it to its loopback tunnel
 URL. Fabric currently supplies no direct/relay evidence for that exact dial or
 stream. Probe transport, connection presence snapshots and session lifetime
