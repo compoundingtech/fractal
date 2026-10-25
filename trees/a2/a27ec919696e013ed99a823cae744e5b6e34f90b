@@ -5,3 +5,9 @@ record 3d60ca309789516855a88191c4d23613e39aa5f2 linux-gate 0 host/forge 2026-10-
 record 598de13191500bee3f8d66f71bdecd131caad656 rust-tests 0 host/forge 2026-10-25T23:19:14Z
 record 9cf097bb500ce40519bf4fa6ec58cad9a0778c71 rust-tests 0 host/forge 2026-10-25T23:19:14Z
 record bfdb42f8da8a45cd554424372b04b2febea78a94 rust-tests 0 host/forge 2026-10-25T23:19:06Z
+record 0b126a0c88aec2fe104eb352da044d43533a2766 linux-tests 0 fleet/ci 2026-10-25T23:33:08Z
+record 590ec9faa9473c8b620539982e1ba2b7234fcfd4 linux-gate 0 fleet/ci 2026-10-25T23:37:14Z
+record 6022437024b1eac9fe614765162419e5fdf363ea linux-fleet-compat 0 fleet/ci 2026-10-25T23:27:08Z
+record 8a979cbbdf2c50087b8208ed2bf170bcd455fb1a genie-freshness 0 fleet/ci 2026-10-25T23:25:19Z
+record e9d4ba28cc09aa758d7c11d3581171cae6ee1dfc linux-clippy 0 fleet/ci 2026-10-25T23:25:37Z
+record fa52611ce63685e988a377915615e4da0afcb899 linux-tests-shard-2 0 fleet/ci 2026-10-25T23:36:05Z
