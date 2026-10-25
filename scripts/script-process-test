@@ -117,7 +117,7 @@ class SignalOwnershipTests(unittest.TestCase):
                                f'python3 {str(HERE / "st3_test_process.py")!r} --is-supervised\n'
                                'exit 17\n')
             result = subprocess.run(['bash', str(fixture)], timeout=5,
-                env={**os.environ, 'SMALLTALK_TEST_SUPERVISOR': 'stale-marker'})
+                env={**os.environ, 'FRACTAL_TEST_SUPERVISOR': 'stale-marker'})
             self.assertEqual(result.returncode, 17)
 
     def test_parent_kill_fixtures_are_confined_to_the_guest(self):

@@ -7,17 +7,17 @@
         "tsgo": "tsgo"
       },
       "locked": {
-        "lastModified": 1792158490,
-        "narHash": "sha256-GP7bnij+dYa/Dzsay6m1kCG234GqdO1V0UoWa8MhlhQ=",
+        "lastModified": 1792838257,
+        "narHash": "sha256-P+ejK0JO9kpj/8AY1IlkBfvLr4gm2LGEPJrlCwIkNWc=",
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "8cb2135bd4a852b99ca3f677c0815d0268766ff5",
+        "rev": "1e294f81aeec43c2e1f25ba25bb731c1c8336beb",
         "type": "github"
       },
       "original": {
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "8cb2135bd4a852b99ca3f677c0815d0268766ff5",
+        "rev": "1e294f81aeec43c2e1f25ba25bb731c1c8336beb",
         "type": "github"
       }
     },
@@ -42,6 +42,27 @@
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
         "rev": "3089f7e1faa82d7a4cb4de0e8d485164f837708b",
+        "type": "github"
+      }
+    },
+    "fabric": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1792912755,
+        "narHash": "sha256-Zs+3vv/BbQTFVbuMpC3+ENdnjVIDiOwlrPjyhP23RUk=",
+        "owner": "compoundingtech",
+        "repo": "fabric",
+        "rev": "1e6e93e9a662a40749f91d63eeecc4e98de114bd",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "fabric",
+        "rev": "1e6e93e9a662a40749f91d63eeecc4e98de114bd",
         "type": "github"
       }
     },
@@ -258,6 +279,7 @@
     "root": {
       "inputs": {
         "effect-utils": "effect-utils",
+        "fabric": "fabric",
         "fenix": "fenix",
         "flake-utils": "flake-utils_2",
         "nixpkgs": "nixpkgs_3",

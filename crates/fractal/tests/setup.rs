@@ -16,7 +16,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = fractal_daemon::test_support::canonical_tempdir();
+        let root = fractal_daemon::test_support::memory_tempdir();
         for dir in ["home/.config/st3", "run", "archive", "bin"] {
             fs::create_dir_all(root.path().join(dir)).unwrap();
         }
@@ -233,6 +233,7 @@ fn uninstall_and_fleet_conflicts_precede_settings_mutations() {
         vec!["fleet", "mode", "dial-out"],
         vec!["fleet", "transports", "add", "fabric"],
         vec!["fleet", "transports", "remove", "fabric"],
+        vec!["fleet", "transports", "prefer", "tailscale"],
         vec!["fleet", "migrate", "--finish"],
         vec!["fleet", "migrate", "--unfinish"],
         vec!["fleet", "migrate", "--anchor"],

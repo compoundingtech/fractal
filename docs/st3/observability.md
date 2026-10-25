@@ -336,6 +336,7 @@ values map to `other`; routes are matched templates, not raw paths.
 | Wake `cause`, FIFO `queue`, startup `phase`, replication `result` | Closed registries |
 | Replication `peer` | Fleet node membership |
 | Allocator heap `state` | `allocated`, `free`, `mmapped`, `arena`, `releasable` |
+| Projection `collection` | `missions`, `agents`, `attention`, else `other` |
 
 `ClientClass::as_str` defines the closed `st3.client.class` vocabulary. Classification uses
 the trimmed `x-st3-client` header, limited to 120 characters, with case-insensitive matching.
@@ -620,6 +621,19 @@ Excluded from FIFO telemetry are coalesced Notify/watch states, caches,
 durable inbox and seat queues, driver-side mailbox `Subscription` queues, and
 ping sidecar queues.
 
+## Projection freshness telemetry
+
+The `projection-fresh` target (docs/clients/ui-contract.md, SLOs) does not sample a publication
+more than 10,000 claims after its collection's previous one: it follows a catch-up, and finding
+its first local commit would scan those claims on the refresher's path. Each such publication
+adds one to a counter, so a catch-up is seen rather than hidden from the target.
+
+| Instrument | Type | Unit | Complete attribute set |
+| --- | --- | --- | --- |
+| `st.slo.projection_fresh.skipped` | Counter | `{publication}` | `collection=missions`, `agents`, `attention`, or `other` |
+
+It contributes at most 4 attribute series and counts only while daemon metrics are enabled.
+
 ## Daemon startup telemetry (O11Y-R10, O11Y-R11, O11Y-R14, O11Y-R16, O11Y-R18)
 
 ```text
@@ -830,7 +844,7 @@ treats any present `st` key as collector-owned sampling, so only sampled externa
 
 The typed Rust client's optional `trace-propagation` feature owns its OTel API and tracing
 bridge dependencies, not an exporter or SDK initializer. `st3` enables the feature;
-`stui` and the client TUI example leave it disabled. Without the feature, injection is
+`fractal-tui` and the client TUI example leave it disabled. Without the feature, injection is
 a no-op with no context lookup, trace headers, or OTel dependencies. The embedding
 application owns subscriber and propagator setup. The client source is generated from
 `crates/fractal-client-codegen/templates/lib.rs.in`; the

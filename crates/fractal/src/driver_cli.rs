@@ -446,11 +446,15 @@ fn spawn_st3_provider(
             environment,
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
         ) => match driver.as_str() {
-            "claude" => fractal_drivers::claude_session::run_controlled_paths(
+            "claude" => fractal_drivers::claude_session::run_controlled_paths_with_primary_ownership(
                 &paths.resolved(),
                 paths.identity,
                 paths.runtime_id,
                 argv,
+                // The owning daemon read the same install Config (including --config/instance)
+                // and overrides this launch value even when off. Sample only for a fresh claim;
+                // ProviderStart::Adopt below never reads it or changes a generation's choice.
+                std::env::var(fractal_drivers::claude_process::ENFORCEMENT_ENV).as_deref() == Ok("1"),
             ),
             "pi" => fractal_drivers::pi_session::run_native(
                 &paths.resolved(),
@@ -1619,6 +1623,7 @@ async fn run_pi_channel(
                     Some(fractal_daemon::mailbox::Frame::Drain { operation }) => {
                         if let Some(subscription) = &subscription { subscription.acknowledge_drain(operation); }
                     },
+                    Some(fractal_daemon::mailbox::Frame::Attachment { .. }) => {},
                     Some(fractal_daemon::mailbox::Frame::Seat { seat }) => {
                         let frame = json!({"type":"seat", "seat":seat});
                         stdout.write_all(format!("{}\n", serde_json::to_string(&frame)?).as_bytes()).await?;

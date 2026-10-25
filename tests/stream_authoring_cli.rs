@@ -5,6 +5,10 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+/// How long a stream's session may take to start or retire on a loaded host. Each wait ends as soon
+/// as the session is where the test expects it; a slow first start once missed three quick polls.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn write_agent(root: &Path) {
     let directory = root.join("agents/example-linux/worker");
     fs::create_dir_all(&directory).unwrap();
@@ -276,7 +280,8 @@ fn launched_stream_removal_retires_runtime_before_source_publication() {
         String::from_utf8_lossy(&add.stderr)
     );
     let runner = fractal_legacy_runner::SystemRunner::new(catalog.path().to_path_buf(), fractal_legacy_runner::exec_state_dir("example-linux"));
-    for _ in 0..3 {
+    let deadline = std::time::Instant::now() + SETTLE;
+    while std::time::Instant::now() < deadline {
         let report = fractal_legacy_runner::up_once(catalog.path(), "example-linux", &runner).unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         if runner
@@ -316,7 +321,8 @@ fn launched_stream_removal_retires_runtime_before_source_publication() {
         String::from_utf8_lossy(&remove.stderr)
     );
     let mut retired = false;
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + SETTLE;
+    while std::time::Instant::now() < deadline {
         retired = runner
             .list_sessions()
             .unwrap()
@@ -370,7 +376,8 @@ fn launched_stream_removal_escalates_an_ignoring_adapter_before_forgetting_it() 
             .is_empty()
     );
     let runtime_id = "example-linux.worker.stream-stubborn";
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + SETTLE;
+    while std::time::Instant::now() < deadline {
         if runner
             .list_sessions()
             .unwrap()
@@ -469,7 +476,8 @@ fn failed_source_publish_after_stop_keeps_declaration_relaunchable() {
             .contains("stream \"live\"")
     );
 
-    for _ in 0..3 {
+    let deadline = std::time::Instant::now() + SETTLE;
+    while std::time::Instant::now() < deadline {
         let report = fractal_legacy_runner::up_once(catalog.path(), "example-linux", &runner).unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         if runner

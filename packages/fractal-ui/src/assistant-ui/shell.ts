@@ -1,6 +1,8 @@
 /** Runtime-free workbench presentation. Conversation runtimes load with the thread surface. */
 export { AgentRow, StatusGlyph } from './composition/Sidebar.tsx'
-export { ThreadHeader, ResizableSplit, TerminalDrawer } from './composition/Shell.tsx'
+export { ThreadHeader, PhoneTerminalToggle, ResizableSplit, TerminalDrawer } from './composition/Shell.tsx'
+export { SidePanel } from './composition/SidePanel.tsx'
+export type { SidePanelProps } from './composition/SidePanel.tsx'
 export { DockedSplit, dockedSplitBounds, dockedSplitStorageKey, readDockedSize, type DockedSplitProps } from './composition/DockedSplit.tsx'
 export { Pane, PaneHeader, PaneHeaderButton, PaneHeaderToggle, type PaneProps, type PaneTabItem } from './composition/Pane.tsx'
 export { ChromeControl } from './composition/ChromeControl.tsx'
@@ -14,7 +16,7 @@ export { AgentRowActions, type AgentRowActionsProps } from './sidebar/SidebarAge
 export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
 export { usageScopeLabel } from './sidebar/model.ts'
-export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
+export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, SidebarMissionContext, SidebarMissionInfo, SidebarMissionProgress, SidebarMissionStep, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
 export { ShowMenu, ShowMenuItem } from './sidebar/SidebarShowMenu.tsx'
 export type { ShowMenuEntry, ShowMenuGroup, ShowMenuProps } from './sidebar/SidebarShowMenu.tsx'
 export { DeclarationPanel } from './declaration/DeclarationPanel.tsx'

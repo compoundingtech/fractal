@@ -2753,7 +2753,7 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
     let upgraded = Store::open(&path, "worker").unwrap();
     assert_eq!(
         upgraded
-            .smalltalk
+            .fractal
             .work_extension_roots_rebuilt
             .load(Ordering::Relaxed),
         1
@@ -2796,7 +2796,7 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
     let reopened = Store::open(&path, "worker").unwrap();
     assert_eq!(
         reopened
-            .smalltalk
+            .fractal
             .work_extension_roots_rebuilt
             .load(Ordering::Relaxed),
         0
@@ -3567,6 +3567,50 @@ fn a_late_claim_in_a_standing_tree_rebuilds_only_its_own_child() {
     assert_eq!(
         (&projected.status, &projected.blocked_reason),
         (&replayed.status, &replayed.blocked_reason)
+    );
+}
+
+/// The projection lend that rebuilds a late claim's part names the rebuild as its own stage,
+/// apart from `incremental`, and counts the part and the claims it replayed. The staged
+/// lends are kept process-wide; CI runs each test in its own process (nextest).
+#[test]
+fn a_late_claim_rebuild_is_its_own_stage_of_the_projection_lend() {
+    let (controller, worker, _root, children) = replicated_run_tree(8);
+    let late = children[3].steps[0].subject.clone();
+    let earlier = worker
+        .claims_for(&children[0].subject, None)
+        .unwrap()
+        .iter()
+        .map(|claim| claim.accepted_at_unix_ms)
+        .min()
+        .unwrap();
+    worker
+        .set_step_state(
+            &children[7].steps[0].subject,
+            "blocked",
+            Some("waits on a person"),
+        )
+        .unwrap();
+    controller.set_write_clock_at(earlier).unwrap();
+    controller
+        .set_step_state(&late, "blocked", Some("the controller blocks it early"))
+        .unwrap();
+    assert!(!projection_replayed(&worker, "controller", &controller));
+    let staged = smallclaims::windows::holds::recent_staged();
+    let rebuild = staged.iter().rev().find_map(|(stages, rebuilt)| {
+        let named = |label: &str| stages.iter().any(|(stage, _)| *stage == label);
+        let counted = rebuilt
+            .iter()
+            .find(|(stage, _)| *stage == "rebuild-part")
+            .map(|(_, rebuilt)| *rebuilt)?;
+        (named("incremental") && named("rebuild-part")).then_some(counted)
+    });
+    let rebuild =
+        rebuild.unwrap_or_else(|| panic!("no staged lend rebuilt a part: {staged:?}"));
+    assert!(rebuild.aggregates >= 1, "{rebuild:?}");
+    assert!(
+        rebuild.claims >= 1,
+        "the part's claims are counted: {rebuild:?}"
     );
 }
 
@@ -10666,6 +10710,7 @@ mission "typecase" state="ready" {
         .withdraw_attention(
             "attention/other-fault",
             &AttentionWithdrawRequest {
+                episode: None,
                 reason: "cleared".into(),
                 actor: "agent/node.requester".into(),
                 idempotency_key: "other-fault-withdrawn".into(),

@@ -39,6 +39,27 @@ pub async fn run(
     runtime_id: &str,
 ) -> Result<()> {
     let agent_dir = &paths.agent_dir;
+    let session = std::env::var(fractal_drivers::claude_session::SESSION_ENV).unwrap_or_default();
+    let sequence = std::env::var(fractal_drivers::claude_session::SESSION_SEQ_ENV)
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let ownership = fractal_drivers::claude_process::with_caller(agent_dir, &session, sequence,
+        std::process::id(), None, fractal_drivers::claude_process::Caller::Channel, Ok);
+    let legacy = match ownership {
+        Ok(fractal_drivers::claude_process::Admission::Primary) => false,
+        // The report and initialization claim below retain the ownership warning.
+        // Accepted legacy startup must not write into the person's terminal.
+        Ok(fractal_drivers::claude_process::Admission::Legacy) => true,
+        Err(error) => {
+            eprintln!("st: {}", fractal_drivers::claude_process::diagnostic(&error));
+            if fractal_drivers::claude_process::failure_kind(&error)
+                == Some(fractal_drivers::claude_process::FailureKind::Refused) {
+                return run_idle().await;
+            }
+            // Unavailable proof is not proof of secondary ownership. Report startup failure
+            // rather than silently parking a legitimate primary in the unscoped protocol.
+            return Err(error);
+        }
+    };
     let ledger_path = agent_dir.join("native-channel-handoffs.json");
     let mut state = if let Some(path) =
         fractal_drivers::reexec::resume_path(fractal_drivers::reexec::CHANNEL_RESUME_ENV)
@@ -110,13 +131,18 @@ pub async fn run(
         "image":fractal_drivers::reexec::running_identity().map(|i| i.token()),
         "follows":fractal_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
         "channel":{"pid":std::process::id(),"image":fractal_drivers::reexec::running_identity().map(|i| i.token()),"age_ms":0},
-        "ready":state.initialized})
+        "ready":state.initialized,
+        "reason":legacy.then_some("legacy ownership: unprotected until next natural restart")})
     };
     let mut subscription = Subscription::start(client.clone(), state.fence.clone(), report());
     let mut watch = fractal_drivers::reexec::ReplacementWatch::for_current_process();
     // Retry the identical claim after a failed acknowledgement. The existing tick
     // schedules retries; polling the POST separately keeps MCP input and EOF live.
-    let initialization_input = channel_initialization_claim(&state.fence);
+    let mut initialization_input = channel_initialization_claim(&state.fence);
+    if legacy {
+        initialization_input.fields.insert("reason".into(), json!(
+            "legacy ownership: unprotected until next natural restart; MCP initialized under legacy admission"));
+    }
     let initialization = announce_initialization(client, &initialization_input);
     tokio::pin!(initialization);
     let mut initialization_recorded = false;
@@ -150,6 +176,7 @@ pub async fn run(
                 Some(Frame::Replay { nonce }) => subscription.acknowledge_replay(nonce),
                 Some(Frame::Drain { operation }) => subscription.acknowledge_drain(operation),
                 Some(Frame::Seat { .. }) => {}, // the outer driver owns the PTY title
+                Some(Frame::Attachment { .. }) => {}, // sent only to the outer driver's title stream
                 Some(Frame::Fenced { reason }) => anyhow::bail!("{reason}"),
                 None => return Ok(()),
             },
@@ -175,7 +202,8 @@ pub async fn run(
                     "image":fractal_drivers::reexec::running_identity().map(|i| i.token()),
                     "follows":fractal_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
                     "channel":{"pid":std::process::id(),"image":fractal_drivers::reexec::running_identity().map(|i| i.token()),"age_ms":0},
-                    "ready":state.initialized}));
+                    "ready":state.initialized,
+                    "reason":legacy.then_some("legacy ownership: unprotected until next natural restart")}));
                 if state.initialized && replayed {
                     // The stream grants eligibility only to live mail. Retained handoffs can
                     // still acquire missing receipts from native proof, without another offer.

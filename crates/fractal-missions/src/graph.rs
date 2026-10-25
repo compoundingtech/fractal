@@ -1,4 +1,4 @@
-//! The part of `graph` that moved up from st3-store.
+//! The part of `graph` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use kdl::{KdlDocument, KdlNode, KdlValue};
@@ -397,7 +397,7 @@ version 2
         time-limit "5m"
       }
       gate "the suite passes on main" {
-        cargo-test "log_diet" package="st3"
+        cargo-test "log_diet" package="fractal"
         workspace "repo"
       }
       gate "the handoff is published" { document "doc/acme/handoff" }
@@ -447,7 +447,7 @@ version 2
         assert_eq!(
             mechanical(3),
             (
-                r#""$ST3_BIN" gate cargo-test log_diet --package st3 --ref origin/main"#,
+                r#""$ST3_BIN" gate cargo-test log_diet --package fractal --ref origin/main"#,
                 "node-a",
                 "repo",
                 3_600_000

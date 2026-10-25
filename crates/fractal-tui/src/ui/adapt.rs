@@ -43,6 +43,10 @@ pub struct Extras {
     pub summary: Option<fractal_client::Summary>,
     pub inventory_supported: Option<bool>,
     pub inventory_partial: Vec<String>,
+    /// Objectives and budgets read on demand while the Usage view shows, and the history of
+    /// each one that was selected.
+    pub slo: Load<Vec<fractal_client::SloRow>>,
+    pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
 }
 
 fn now() -> String {
@@ -70,7 +74,7 @@ fn loaded_or_why<T>(snapshot: bool, items: Vec<T>, why: Option<&String>) -> Load
     }
 }
 
-/// The host this stui talks to, from whichever window has loaded.
+/// The host this Fractal TUI talks to, from whichever window has loaded.
 fn gateway(model: &Model) -> Option<String> {
     [&model.missions, &model.agents, &model.now, &model.sessions]
         .into_iter()
@@ -118,15 +122,15 @@ fn short(id: &str) -> String {
         .to_owned()
 }
 
-fn missions(model: &Model) -> Vec<Mission> {
+fn missions(model: &Model, person: &str) -> Vec<Mission> {
     fractal_ui_model::missions::adapt(
         model.missions(),
         model.agents(),
         model.attention(),
+        person,
         &now(),
         &fractal_ui_model::missions::Display {
             mission_label: &crate::mission_display_label,
-            agent_label: &crate::agent_label,
             age_label: &crate::age_label,
             clean_text: &clean_message_text,
         },
@@ -167,13 +171,19 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         .map(|host| host.trim_start_matches("host/").to_owned())
         .unwrap_or_else(|| "this machine".into());
     let attention = attention(model, extras);
-    let missions = missions(model);
+    let missions = missions(model, person);
     let quiet = missions
         .iter()
         .filter(|mission| {
             !matches!(
                 mission.word,
-                Word::Decision | Word::Done | Word::Failed | Word::Cancelled | Word::NotStarted
+                // A mission st serves no word for is not known to be quiet.
+                Word::Decision
+                    | Word::Done
+                    | Word::Failed
+                    | Word::Cancelled
+                    | Word::NotStarted
+                    | Word::Unknown
             ) && !mission.system
         })
         .count();
@@ -256,6 +266,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             Some(Ok(period)) => period.agent_messages.clone(),
             _ => None,
         },
+        slo: extras.slo.clone(),
+        slo_history: extras.slo_history.clone(),
         clients: match &model.clients {
             Some(Ok(list)) => Load::Ready(
                 list.items
@@ -313,6 +325,10 @@ fn older_than_member(client: &str, member: &str) -> bool {
 // ------------------------------------------------------------------ attention
 
 fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
+    let question_agents: std::collections::BTreeSet<_> = model.agents()
+        .filter(|agent| extras.agents_live && agent.ask.as_deref() == Some("question"))
+        .map(|agent| agent.header.id.as_str())
+        .collect();
     model
         .attention()
         .filter_map(|item| {
@@ -434,6 +450,7 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                         seat: requester_name(model, Some(&item.source_id)),
                         seat_id: item.source_id.clone(),
                         text: clean_message_text(&item.detail),
+                        question: question_agents.contains(item.source_id.as_str()),
                         answers: item
                             .action_parameters
                             .get("prompt.respond")
@@ -743,6 +760,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                     .first()
                     .map(|relation| relation.agent_id.clone()),
                 details: AgentDetails {
+                    mail_custody: agent.mail_custody.as_ref().map(|custody| format!("retired; mail held for {}", custody.successor)),
                     progress: work
                         .and_then(|work| {
                             let reported = step_progress(missions, &work.id);
@@ -1024,6 +1042,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retired_agent_card_shows_pending_mail_custodian_in_plain_words() {
+        let mut model = Model::default();
+        model.agents = window(vec![serde_json::json!({
+            "id":"agent/example/old", "kind":"agent", "revision":"retirement",
+            "updated_at":"2026-10-15T10:00:00Z", "name":"example/old",
+            "state":"retired", "reachability":"unknown", "runtime_ids":[], "under":[],
+            "mail_custody":{"successor":"agent/example/new","state":"pending"}
+        })]);
+        let cards = agents(&model, &[]);
+        assert_eq!(cards[0].details.mail_custody.as_deref(),
+            Some("retired; mail held for agent/example/new"));
+    }
+
+    #[test]
     fn standalone_native_image_blocks_get_a_focusable_inline_row() {
         let timeline = serde_json::from_value::<Vec<TimelineEntry>>(json!([{
             "id":"picture","sequence":1,"revision":1,"timestamp":"2026-10-08T10:00:00Z",
@@ -1146,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn small_talk_in_the_timeline_draws_as_mail_and_step_pings_as_events() {
+    fn fractal_in_the_timeline_draws_as_mail_and_step_pings_as_events() {
         let timeline: Vec<TimelineEntry> = serde_json::from_value(serde_json::json!([
             {"id":"e1","sequence":4,"revision":1,"timestamp":"2026-09-29T10:00:00Z","role":"user","type":"message","final":true,
              "body":{"message_id":"message/one","from":"agent/example/harbor","to":"agent/example/cos","title":"A question"}},
@@ -1184,7 +1216,7 @@ mod tests {
         assert!(
             matches!(&entries[1].body, Body::Event(title) if title == "Mission step ready: review")
         );
-        // A harness turn's own message header is not Small Talk.
+        // A harness turn's own message header is not Fractal.
         assert!(matches!(&entries[2].body, Body::Assistant(text) if text == "On it."));
     }
 
@@ -2069,6 +2101,25 @@ mod tests {
         let items = attention(&model, &Extras::default());
         let AttentionKind::Prompt { answers, .. } = &items[0].kind else { panic!() };
         assert!(answers.is_empty());
+    }
+
+    #[test]
+    fn tab_badge_question_identity_survives_missing_client_answer_actions() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.agents = window(vec![serde_json::json!({
+            "id": "agent/example/atlas", "kind": "agent", "revision": "r1",
+            "updated_at": "2026-10-10T12:00:00Z", "name": "example/atlas",
+            "state": "running", "reachability": "local", "harness_state": "blocked",
+            "ask": "question", "runtime_ids": [], "under": [],
+        })]);
+        model.now.items.push(serde_json::from_value(prompt_card(false)).unwrap());
+        let extras = Extras { agents_live: true, ..Extras::default() };
+        let items = attention(&model, &extras);
+        let AttentionKind::Prompt { question, answers, .. } = &items[0].kind else { panic!() };
+        assert!(*question);
+        assert!(answers.is_empty());
+        assert!(items[0].actions.is_empty());
     }
 
     #[test]

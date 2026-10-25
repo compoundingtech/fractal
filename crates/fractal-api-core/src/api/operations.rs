@@ -1,9 +1,9 @@
 use crate::MailboxWakesStore;
 use crate::CoordinationStore;
-use crate::MissionsStore;
 use crate::LimitsStore;
 use crate::SeatsStore;
 use crate::SeatsStoreCore;
+use crate::RuntimeStartsStore;
 use super::*;
 
 pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
@@ -14,7 +14,14 @@ pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
     Ok(Json(harnesses))
 }
 
-pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, ApiError> {
+/// Startup observation supplied by the embedded browser listener.
+#[derive(Clone)]
+pub struct LocalWebStatus(pub DoctorCheck);
+
+pub async fn doctor(
+    State(state): State<AppState>,
+    web: Option<Extension<LocalWebStatus>>,
+) -> Result<Json<DoctorReport>, ApiError> {
     let reader_store = state.store.clone();
     let environment = crate::api::read_deadline::spawn_blocking(crate::environment::snapshot)
         .await
@@ -44,6 +51,9 @@ pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>,
         .await
         .map_err(ApiError::internal)??
         .0;
+    if let Some(Extension(web)) = web {
+        report.checks.push(web.0);
+    }
     if let Some(build_tools) = build_tools {
         report.checks.push(build_tools_check(
             &build_tools.await.map_err(ApiError::internal)?,
@@ -198,55 +208,165 @@ fn build_tools_check(tools: &crate::environment::BuildTools) -> DoctorCheck {
     }
 }
 
+#[derive(Default, Deserialize)]
+pub struct OperationalRepairQuery {
+    subjects: Option<String>,
+    classes: Option<String>,
+}
+
+fn repair_filter_values(value: Option<String>) -> Result<Vec<String>, ApiError> {
+    value.map(|value| serde_json::from_str(&value)
+        .map_err(|_| ApiError::bad(St3Error::new("invalid-repair-filter", "repair filters must be JSON string arrays"))))
+        .transpose().map(Option::unwrap_or_default)
+}
+
 pub async fn operational_repair_plan(
     State(state): State<AppState>,
+    Query(query): Query<OperationalRepairQuery>,
 ) -> Result<Json<OperationalRepairPlan>, ApiError> {
-    let store = state.store.clone();
-    blocking_store(move || store.operational_repair_plan())
-        .await
-        .map(Json)
+    let subjects = repair_filter_values(query.subjects)?;
+    let classes = repair_filter_values(query.classes)?;
+    blocking_store(move || owner_operational_repair_plan_with_filter(&state, &subjects, &classes)).await.map(Json)
 }
 
 pub async fn apply_operational_repair(
     State(state): State<AppState>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
-    let store = state.store.clone();
-    let result = blocking_action(move || store.apply_operational_repair(&request.token)).await?;
+    let effect_state = state.clone();
+    let result = blocking_action(move || {
+        let (subjects, classes) = Store::operational_repair_token_filters(&request.token)?;
+        let (_guards, evidence) = legacy_start_repair_evidence(&effect_state, &subjects, &classes)
+            .map_err(legacy_start_proof_error)?;
+        effect_state.store.apply_operational_repair_with_legacy_starts(&request.token, &evidence)
+    }).await?;
     if result.applied != 0 {
         signal_changed(&state);
     }
     Ok(Json(result))
 }
 
-/// Spool one snapshot on a read worker; a slow downloader never holds the SQLite snapshot.
+pub(super) fn owner_operational_repair_plan(state: &AppState) -> anyhow::Result<OperationalRepairPlan> {
+    owner_operational_repair_plan_with_filter(state, &[], &[])
+}
+
+fn owner_operational_repair_plan_with_filter(
+    state: &AppState, subjects: &[String], classes: &[String],
+) -> anyhow::Result<OperationalRepairPlan> {
+    let (_guards, evidence) = legacy_start_repair_evidence(state, subjects, classes)
+        .map_err(legacy_start_proof_error)?;
+    state.store.operational_repair_plan_with_legacy_starts_and_filter(&evidence, subjects, classes)
+}
+
+fn legacy_start_proof_error(error: anyhow::Error) -> St3Error {
+    let mut refusal = St3Error::new(
+        "legacy-start-proof-unavailable",
+        "could not prove the legacy runtime start is closed",
+    );
+    if let Some(procfs) = error.downcast_ref::<fractal_runtime::ProcfsHidesProcesses>() {
+        refusal = refusal.with_detail("stage", "procfs-visibility")
+            .with_detail("reason", procfs.detail);
+        if let Some(options) = &procfs.mount_options {
+            refusal = refusal.with_detail("mount_options", options.as_str());
+        }
+        return refusal;
+    }
+    if let Some(process) = error.downcast_ref::<fractal_runtime::LegacyStartProofUnavailable>() {
+        refusal = refusal.with_detail("stage", process.stage).with_detail("pid", process.pid);
+        if let Some(errno) = process.errno {
+            refusal = refusal.with_detail("errno", errno);
+        }
+    } else {
+        refusal = refusal.with_detail("stage", "native-capture");
+        if let Some(errno) = error.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error) {
+            refusal = refusal.with_detail("errno", errno);
+        }
+    }
+    refusal
+}
+
+pub(super) fn operational_repair_check(
+    result: anyhow::Result<OperationalRepairPlan>,
+) -> Result<DoctorCheck, ApiError> {
+    match result {
+        Ok(plan) if plan.items.is_empty() => Ok(DoctorCheck {
+            name: "operational-repair".into(),
+            status: "pass".into(),
+            message: "the graph has no repairable operational contradictions".into(),
+        }),
+        Ok(plan) => Ok(DoctorCheck {
+            name: "operational-repair".into(),
+            status: "warn".into(),
+            message: format!(
+                "{} graph-authorized repairs are available; inspect `st repair dry-run` token {}",
+                plan.items.len(), plan.token
+            ),
+        }),
+        Err(error) => {
+            if let Some(refusal) = error.downcast_ref::<St3Error>()
+                && refusal.code == "legacy-start-proof-unavailable"
+            {
+                return Err(ApiError::internal(error));
+            }
+            Ok(DoctorCheck {
+                name: "operational-repair".into(),
+                status: "fail".into(),
+                message: format!("could not compute the operational repair plan: {error}"),
+            })
+        }
+    }
+}
+
+/// Physical evidence comes only from this owner daemon, never the repair request.
+/// Keep each native spawn-lock guard alive through the normal writer transaction.
+fn legacy_start_repair_evidence(
+    state: &AppState,
+    subjects: &[String],
+    classes: &[String],
+) -> anyhow::Result<(Vec<fractal_runtime::LegacyStartClosureProof>, Vec<Value>)> {
+    let runtime = daemon_pty(state)?;
+    let mut guards = Vec::new();
+    let mut evidence = Vec::new();
+    if !classes.is_empty() && !classes.iter().any(|class| class == "revoked-legacy-runtime-start") {
+        return Ok((guards, evidence));
+    }
+    for operation in state.store.pending_runtime_starts()? {
+        if !subjects.is_empty() && !subjects.contains(&operation.subject) { continue; }
+        if !operation.finished || !operation.applied || operation.revoked_by.is_none() || operation.cleanup_verified {
+            continue;
+        }
+        let Some(member) = operation.body.get("member") else { continue; };
+        if member["terminal"] != true || member["host"].as_str() != Some(state.node.as_str()) {
+            continue;
+        }
+        let Some(runtime_id) = member["runtime_id"].as_str() else { continue; };
+        if let Some(proof) = runtime.legacy_start_closure(runtime_id, &operation.id)? {
+            let mut value = serde_json::to_value(&proof.evidence)?;
+            value["legacy"] = Value::from(true);
+            evidence.push(value);
+            guards.push(proof);
+        }
+    }
+    Ok((guards, evidence))
+}
+
+mod backup_export;
+
+/// Return export headers before preparing the archive; its stream owns the work.
 pub async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let permit = backup_export::reserve()?;
     let store = state.store.clone();
+    // A bounded metadata check keeps ordinary precondition failures as HTTP errors.
+    // The producer checks again in the snapshot that actually backs up the data.
+    blocking_store(move || store.check_backup_projection()).await?;
     let bodies = message_body::bodies(&state.state_dir);
-    let file = blocking_store(move || {
+    Ok(backup_export::response(permit, move || {
         let mut file = tempfile::tempfile()?;
-        store.write_backup_with_bodies(&mut file, Some(&bodies))?;
+        state.store.write_backup_with_bodies(&mut file, Some(&bodies))?;
         use std::io::{Seek, SeekFrom};
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
-    })
-    .await?;
-    let file = tokio::fs::File::from_std(file);
-    let stream = futures_util::stream::try_unfold(file, |mut file| async move {
-        use tokio::io::AsyncReadExt;
-        let mut bytes = vec![0_u8; 64 * 1024];
-        let read = file.read(&mut bytes).await?;
-        if read == 0 {
-            return Ok::<_, std::io::Error>(None);
-        }
-        bytes.truncate(read);
-        Ok(Some((bytes, file)))
-    });
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
-        Body::from_stream(stream),
-    )
-        .into_response())
+    }))
 }
 
 #[derive(Deserialize)]
@@ -469,7 +589,7 @@ pub async fn status(
 ) -> Result<Json<StatusResponse>, ApiError> {
     let store = state.store.clone();
     blocking_store(move || {
-        if let (true, false, Some(subject)) = (query.harness_only, query.history, &query.subject) {
+        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &query.subject) {
             store.status_harness_only(subject)
         } else if query.history {
             store.status_history(
@@ -483,7 +603,26 @@ pub async fn status(
                 query.owner_run.as_deref(),
                 query.at_index,
             )
+        }?;
+        // Exact schedule reads gain an optional local observation. Keep broad/agent reads and
+        // primary-only schedules on their existing path; this is never a persisted projection.
+        if query.subject.as_deref().is_some_and(|subject| subject.starts_with("schedule/")) {
+            for subject in &mut response.subjects {
+                let origin = store.selected_desired_origin(&subject.subject)?.unwrap_or_else(|| store.origin.clone());
+                let Some(spec) = subject.desired.as_ref().and_then(|desired| crate::graph::schedule_spec(desired, &origin)) else { continue };
+                if let Some(mut shown) = crate::schedule_standby::display(&store, &subject.subject, &spec) {
+                    if query.at_index.is_some() || query.history {
+                        shown["eligibility"] = json!("unknown");
+                        shown["primary_heartbeat_age_ms"] = Value::Null;
+                        shown["heartbeat_basis"] = json!("unknown");
+                        shown["observed_primary_view"] = Value::Null;
+                        shown["reason"] = json!("historical declaration; no current eligibility assertion");
+                    }
+                    subject.actual.get_or_insert_with(|| json!({}))["schedule_standby"] = shown;
+                }
+            }
         }
+        Ok(response)
     })
     .await
     .map(Json)
@@ -551,5 +690,74 @@ pub async fn events(
             )
                 .into_response());
         }
+    }
+}
+
+#[cfg(test)]
+mod legacy_proof_refusal_tests {
+    use super::*;
+    #[test]
+    fn hidden_or_unknown_procfs_is_a_typed_422_refusal() {
+        for (reason, options) in [
+            ("procfs-hides-processes", Some("rw;rw,hidepid=invisible".to_owned())),
+            ("mountinfo-unreadable", None),
+            ("mountinfo-invalid", None),
+            ("procfs-mount-not-found", None),
+        ] {
+            let error = legacy_start_proof_error(fractal_runtime::ProcfsHidesProcesses {
+                detail: reason, mount_options: options.clone(),
+            }.into());
+            let error = ApiError::internal(error);
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error.code, "legacy-start-proof-unavailable");
+            assert_eq!(error.details.get("stage"), Some(&json!("procfs-visibility")));
+            assert_eq!(error.details.get("reason"), Some(&json!(reason)));
+            assert_eq!(error.details.get("mount_options"), options.as_ref().map(|options| json!(options)).as_ref());
+        }
+    }
+
+
+    fn capture_error() -> St3Error {
+        legacy_start_proof_error(anyhow::Error::new(
+            fractal_runtime::LegacyStartProofUnavailable {
+                stage: "proc-environ",
+                pid: 123,
+                errno: Some(13), // Linux EACCES; no raw environment or path is exposed.
+            },
+        ).context("PRIVATE_TOKEN=must-not-appear"))
+    }
+
+    fn assert_refusal(error: ApiError) {
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "legacy-start-proof-unavailable");
+        assert_eq!(error.details.get("stage"), Some(&json!("proc-environ")));
+        assert_eq!(error.details.get("pid"), Some(&json!(123)));
+        assert_eq!(error.details.get("errno"), Some(&json!(13)));
+        assert!(!error.message.contains("PRIVATE_TOKEN"));
+        assert_eq!(error.details.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn legacy_proof_refusal_is_typed_for_dry_run_apply_and_doctor() {
+        let dry_run = blocking_store(|| {
+            Err::<OperationalRepairPlan, _>(capture_error().into())
+        }).await;
+        assert_refusal(dry_run.err().unwrap());
+        let apply = blocking_action(|| {
+            Err::<OperationalRepairResult, _>(capture_error())
+        }).await;
+        assert_refusal(apply.err().unwrap());
+        assert_refusal(operational_repair_check(Err(capture_error().into())).err().unwrap());
+    }
+
+    #[test]
+    fn legacy_proof_refusal_redacts_unstructured_capture_errors() {
+        let error = legacy_start_proof_error(anyhow::anyhow!("private path and environment"));
+        assert_eq!(error.code, "legacy-start-proof-unavailable");
+        assert_eq!(error.details.get("stage"), Some(&json!("native-capture")));
+        assert!(!error.message.contains("private path"));
+        assert_eq!(error.details.len(), 1);
+        let check = operational_repair_check(Err(anyhow::anyhow!("unrelated graph error"))).unwrap();
+        assert_eq!(check.status, "fail");
     }
 }

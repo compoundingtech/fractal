@@ -2,7 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Dialog, DialogTrigger, Popover, Tooltip, TooltipTrigger } from 'react-aria-components'
-import { syncLine, type SyncLineInput, type SyncLineValue } from './sync-line'
+import { syncLine, canRetrySyncFailure, type SyncLineInput, type SyncLineValue } from './sync-line'
 import { interactionVars as interaction, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { useClockLabel } from '../../time/clock'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
@@ -17,7 +17,7 @@ export const SyncLine = React.memo(function SyncLine({ status: observation, labe
   const snapshot = useClockLabel(now => JSON.stringify(syncLine({ status: observation, label, now, observedAt, gateway, socket }) ?? null), now)
   const line: SyncLineValue | undefined = JSON.parse(snapshot) ?? undefined
   const failed = observation._tag === 'Failed' && line !== undefined
-  const retryable = failed && !(observation.cause._tag === 'Server' && (observation.cause.code === 'unsupported' || observation.cause.code === 'forbidden'))
+  const retryable = failed && canRetrySyncFailure(observation.cause)
   const fit = pill || inline
   const fullReason = inline && observation._tag === 'Failed'
     ? [line?.text, observation.cause._tag === 'Server' ? observation.cause.message : observation.cause._tag === 'Local' ? observation.cause.detail?.message : undefined].filter(Boolean).join(' · ')

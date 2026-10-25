@@ -225,7 +225,7 @@ describe('native trace gateway adapter', () => {
         expect(trace.meters.tokens.input._tag).toBe('Unknown')
         expect(trace.native_session_id).toEqual({
           _tag: 'Unknown', reason: mode === 'missing' || mode === 'ambiguous' ? 'not-attributed' : 'failed',
-          ...(mode === 'failed' || mode === 'invalid' ? { detail: 'Native usage is unavailable' } : {}),
+          ...(mode === 'failed' || mode === 'invalid' ? { detail: 'Session usage is unavailable' } : {}),
         })
         expect(requests.some((url) => url.pathname.includes('/agents/'))).toBe(false)
       }

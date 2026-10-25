@@ -44,8 +44,8 @@ pub const DEFAULT_ASSISTANT_RESPONSE_BYTES: usize = 4096;
 pub const MAX_ASSISTANT_RESPONSE_BYTES: usize = 16384;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
 const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-const RAW_TERMINAL_SUBPROTOCOL: &str = "st3.client.pty.v0";
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
+const RAW_TERMINAL_SUBPROTOCOL: &str = "fractal.client.pty.v0";
 const RAW_TERMINAL_CHUNK_BYTES: usize = 16_384;
 
 /// Resolve the local daemon socket in the same order as the `st3` CLI.
@@ -995,6 +995,8 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
+        | ErrorCode::InvalidCustodySuccessor
+        | ErrorCode::CustodyPending
         | ErrorCode::MessageSelectorsNotReady
         | ErrorCode::Unknown => message.to_owned(),
     }
@@ -2032,6 +2034,29 @@ impl Client {
         self.launch_children(launch_id, "approvals", cursor, limit)
             .await
     }
+    pub async fn schedules_list(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        unheard_after_ms: Option<u64>,
+    ) -> Result<Envelope<SchedulesPage>, ClientError> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        if let Some(age) = unheard_after_ms {
+            query.push(format!("unheard_after_ms={age}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/client/schedules{suffix}")).await
+    }
     pub async fn missions_list(
         &self,
         cursor: Option<&str>,
@@ -2210,6 +2235,15 @@ impl Client {
         history: bool,
     ) -> Result<Envelope<Page>, ClientError> {
         self.list_internal("terminals", cursor, limit, history)
+            .await
+    }
+    pub async fn runtime_starts_list(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        history: bool,
+    ) -> Result<Envelope<Page>, ClientError> {
+        self.list_internal("runtime-starts", cursor, limit, history)
             .await
     }
     pub async fn operations_list(
@@ -3455,10 +3489,10 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // WebSocket names switch independently of the unchanged HTTP headers.
             let protocols = capability.map_or_else(
                 || RAW_TERMINAL_SUBPROTOCOL.to_owned(),
-                |capability| format!("{RAW_TERMINAL_SUBPROTOCOL}, st3.cap.{capability}"),
+                |capability| format!("{RAW_TERMINAL_SUBPROTOCOL}, fractal.cap.{capability}"),
             );
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
@@ -3612,10 +3646,10 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // Offer one alias: #3430 receivers reject dual surface offers.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
-                hyper::header::HeaderValue::from_static("st3.client.collections.v0"),
+                hyper::header::HeaderValue::from_static("fractal.client.collections.v0"),
             );
             Ok(request)
         };
@@ -3717,10 +3751,10 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // Offer one alias: #3430 receivers reject dual surface offers.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
-                hyper::header::HeaderValue::from_static("st3.client.conversation.v0"),
+                hyper::header::HeaderValue::from_static("fractal.client.conversation.v0"),
             );
             Ok(request)
         };
@@ -3977,6 +4011,26 @@ impl Client {
             .and_then(|result| result);
         let (status, bytes) = outcome?;
         if !(200..300).contains(&status) {
+            // A schedule collection has no missing-item 404. An older router may answer an
+            // empty Axum 404 rather than a client envelope: report unsupported, never scan.
+            if status == 404 && path.split('?').next() == Some("/v1/client/schedules") {
+                let error = ErrorEnvelope {
+                    api_version: "st3.client.v0".into(),
+                    error_version: "st3.client.error.v0".into(),
+                    request_id: String::new(),
+                    code: ErrorCode::UnsupportedCapability,
+                    message: "this server does not support schedules.list; upgrade the server"
+                        .into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    details: Default::default(),
+                };
+                return Err(ClientError::Api(
+                    error.code.clone(),
+                    error.message.clone(),
+                    Box::new(error),
+                ));
+            }
             if status == 404 && bytes.is_empty() && path.starts_with("/v1/client/launches/") {
                 let error = ErrorEnvelope {
                     api_version: "st3.client.v0".into(),
@@ -4159,7 +4213,7 @@ fn append_bounded(bytes: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(),
     Ok(())
 }
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+// WebSocket-only sender cutover; HTTP header names remain deployed spellings.
 fn websocket_request(
     url: &str,
     credential: Option<&str>,
@@ -4178,7 +4232,7 @@ fn websocket_request(
     request.headers_mut().insert(
         hyper::header::SEC_WEBSOCKET_PROTOCOL,
         hyper::header::HeaderValue::from_str(&match stream_capability {
-            Some(capability) => format!("{TERMINAL_SUBPROTOCOL}, st3.cap.{capability}"),
+            Some(capability) => format!("{TERMINAL_SUBPROTOCOL}, fractal.cap.{capability}"),
             None => TERMINAL_SUBPROTOCOL.into(),
         })
         .map_err(|error| ClientError::Protocol(error.to_string()))?,
@@ -4209,8 +4263,8 @@ fn websocket_request(
 }
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
-// Sunset: 60 days after the first release shipping this bridge. Requests still offer
-// only the deployed spelling; tungstenite must continue rejecting unoffered protocols.
+// Sunset: 2026-11-01 (#3032 R5). Senders offer only Fractal protocols after every
+// host runs #3430; tungstenite must continue rejecting unoffered protocols.
 fn selected_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Option<&str> {
@@ -4226,7 +4280,13 @@ fn wire_protocol_matches(selected: &str, expected: &str) -> bool {
     selected == expected
         || expected
             .strip_prefix("st3.")
-            .is_some_and(|suffix| selected.strip_prefix("fractal.") == Some(suffix))
+            .or_else(|| expected.strip_prefix("fractal."))
+            .is_some_and(|suffix| {
+                selected
+                    .strip_prefix("st3.")
+                    .or_else(|| selected.strip_prefix("fractal."))
+                    == Some(suffix)
+            })
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 
@@ -4240,8 +4300,8 @@ mod wire_receiver_tests {
             &tokio_tungstenite::tungstenite::handshake::client::Response,
         ) -> Result<(), ClientError>;
         let receivers: [(&str, Validator); 4] = [
-            (RAW_TERMINAL_SUBPROTOCOL, validate_raw_terminal_subprotocol),
-            (TERMINAL_SUBPROTOCOL, validate_terminal_subprotocol),
+            ("st3.client.pty.v0", validate_raw_terminal_subprotocol),
+            ("st3.client.terminal.v0", validate_terminal_subprotocol),
             (
                 "st3.client.conversation.v0",
                 validate_conversation_subprotocol,
@@ -4312,7 +4372,7 @@ mod wire_receiver_tests {
             assert_eq!(decoded.error_version, error);
             assert_eq!(decoded.code, ErrorCode::NotFound);
         }
-        // Alias readers must never change emitted request bytes.
+        // WebSocket sender cutover does not change the HTTP API/error versions.
         let request = websocket_request(
             "ws://localhost/stream",
             None,
@@ -4327,6 +4387,20 @@ mod wire_receiver_tests {
         );
         assert_eq!(API_VERSION, "st3.client.v0");
         assert_eq!(ERROR_VERSION, "st3.client.error.v0");
+        assert_eq!(TERMINAL_SUBPROTOCOL, "fractal.client.terminal.v0");
+        assert_eq!(RAW_TERMINAL_SUBPROTOCOL, "fractal.client.pty.v0");
+        let request = websocket_request(
+            "ws://localhost/stream",
+            None,
+            None,
+            Some("secret"),
+            "custom-subjects.v1, conversation-blocks.v1",
+        )
+        .unwrap();
+        assert_eq!(
+            request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
+            "fractal.client.terminal.v0, fractal.cap.secret"
+        );
     }
 }
 
@@ -5063,6 +5137,37 @@ mod tests {
     }
 
     #[test]
+    fn schedule_models_preserve_unknown_fields_and_state_strings() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/schedules-page.json"
+        ))
+        .unwrap();
+        let decoded: Envelope<SchedulesPage> = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.value.items[0].state, "future-state");
+        assert_eq!(decoded.value.items[0].standby_state, "future-state");
+        assert_eq!(decoded.value.items[0].knowledge.completeness, "unknown");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+    }
+    #[test]
+    fn schedule_reads_encode_explicit_parameters_and_keep_old_server_unsupported() {
+        runtime().block_on(async {
+            let fixture=include_str!("../../../docs/st3/client-v0/fixtures/schedules-page.json");
+            let directory=tempfile::tempdir().unwrap(); let socket=directory.path().join("schedules.sock");
+            let error=serde_json::json!({"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/old","code":"not-found","message":"unknown route","retryable":false,"details":{}}).to_string();
+            let server=scripted_server(&socket,vec![(0,200,fixture.into()),(0,404,error),(0,404,String::new())]);
+            let client=Client::unix_as(&socket,"person/ada");
+            let page=client.schedules_list(Some("next&cursor"),Some(1),Some(300000)).await.unwrap();
+            assert_eq!(page.value.items.len(),1);
+            assert!(matches!(client.schedules_list(None,None,None).await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            assert!(matches!(client.schedules_list(None,None,None).await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            let lines=server.await.unwrap();
+            assert_eq!(lines.len(),3);
+            assert_eq!(lines[0],"GET /v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000 HTTP/1.1");
+            assert_eq!(lines[1],"GET /v1/client/schedules HTTP/1.1");
+        });
+    }
+
+    #[test]
     fn agents_reads_keep_legacy_fresh_and_add_an_explicit_host_local_cut() {
         runtime().block_on(async {
             let page = EMPTY_PAGE
@@ -5452,7 +5557,7 @@ mod tests {
                                 .unwrap()
                                 .to_str()
                                 .unwrap(),
-                            format!("{TERMINAL_SUBPROTOCOL}, st3.cap.fixture-stream-capability-0000000000000000")
+                            format!("{TERMINAL_SUBPROTOCOL}, fractal.cap.fixture-stream-capability-0000000000000000")
                         );
                         response.headers_mut().insert(
                             hyper::header::SEC_WEBSOCKET_PROTOCOL,
