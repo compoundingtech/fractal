@@ -335,6 +335,9 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                 fs::write(root.path().join(path), PLUGIN_SETTINGS).unwrap();
             }
             let mut state = crate::api::tests_shared::state(root.path());
+            // The daemon routes write claims while this test reads them; a shared-cache memory
+            // store answers that overlap with SQLITE_LOCKED at once, where a file store waits.
+            state.store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
             // Hosted Linux uses the pinned devShell ptyPackage (flake.nix), never a skip.
             state.pty_binary =
                 std::env::split_paths(&std::env::var_os("PATH").expect("hosted PATH"))

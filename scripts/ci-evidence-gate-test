@@ -118,6 +118,8 @@ class Classify(unittest.TestCase):
             ((1, {'satisfied': False, 'reason': 'no_record'}), 'no_note'),
             ((1, {'satisfied': False, 'reason': 'stale_tree'}), 'no_note'),
             ((1, {'satisfied': False, 'reason': 'wrong_check'}), 'no_note'),
+            # per crate: some crate has no note for its key, which is no note, not a refused one
+            ((1, {'satisfied': False, 'reason': 'crate_uncovered', 'missing': {'base': 'no_record'}, 'members': 2}), 'no_note'),
             ((1, {'satisfied': False, 'reason': 'bad_signature'}), 'rejected'),
             ((1, {'satisfied': False, 'reason': 'untrusted_signer'}), 'rejected'),
             ((1, {'satisfied': False, 'reason': 'too_old'}), 'rejected'),

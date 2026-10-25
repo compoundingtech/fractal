@@ -236,3 +236,11 @@ changed:
 - **What did not change.** Signing 52 crates still costs about 48 s: the post-sign check inside `evidence-wrap` (6.8 s per record, in its own process)
   is the base tool's, and a change to it is its own trust review.
 
+## 13. The check after signing is the crate's own (2026-10-25)
+
+`evidence-wrap` verifies each new record before it pushes it, by asking the verifier about the check on the record's tree. For a per-crate check
+that asked for the tree's newest `rust-tests` record whatever its crate, so one crate's failed record on the tree made every record signed after it
+come back "did not verify locally" (50 of 52 crates on hetz2 at feefaa9c95 when a mailbox test failed). A record that signs a `crate` and a
+`source_inputs` key is now verified with `--crate-key CRATE=KEY`: as that crate's, the same rule the gate and `st-test` use. Nothing about the record
+or the verifier's rules changes.
+
