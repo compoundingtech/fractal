@@ -1197,9 +1197,7 @@ valid note. `.st/required-lanes.json` (read from the accepted base, strictly val
 IDENTICAL in the verified tree and at BASE, otherwise `definition_changed` (the change edits its own checker, so the signed path is refused and CI
 runs); and the note must carry `lane_definition_sha256`, the digest of those blobs at BASE plus the argv, otherwise `wrong_definition`. A check with
 no lane entry is `no_lane`; a broken lane file or a definition path missing at the base is an error (exit 2 under `--require-all`), never a reject.
-The committed file lists every lane `scripts/st-test` can run, with the same argv (a test pins that) and deliberately wide definition paths
-(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for most lanes): a change to any script then always runs in CI. They are to be tightened
-only with a read trace of the lane (a later change). The file is in use: `scripts/st-test` and `scripts/evidence-wrap` write the digest, the
+The committed file lists every lane `scripts/st-test` can run, with the same argv (a test pins that). The file is in use: `scripts/st-test` and `scripts/evidence-wrap` write the digest, the
 verifier holds every lane-bound signer level (`"lane": true`) to it, and the gate reads it from the base, so `.st/required-lanes.json` is one of
 the gate's protected paths. A pull request's head is held to the definition at its branch point (see "Which lane definition a pull request is held
 to").
@@ -1207,9 +1205,37 @@ to").
 Producer half: `scripts/evidence-wrap --lanes-from BASE` (and `scripts/st-test`, which passes its base for every check the base's lane file defines)
 refuses any command that is not the lane's argv, refuses a tree whose lane definition differs from BASE (nothing is signed; CI runs the check, and the
 message names the paths), and records `lane_definition_sha256`, the digest the verifier recomputes from the same base. Without a lane file at the base
-nothing changes. A lane's `definition_paths` are a hand-declared list: a helper script it reads but the list omits is not covered, which is what the closure
-control below checks. So this alone must never let a signed note skip a queue lane; shadow reporting and the pull-request signing path are the only
+nothing changes. So this alone must never let a signed note skip a queue lane; shadow reporting and the pull-request signing path are the only
 uses until every lane a gate relies on has a clean trace (typescript-client has; genie-freshness has not been traced).
+
+#### Definition paths are the lane's command closure (`scripts/lane-definition-closure`)
+
+A file the lane's commands execute or read that `definition_paths` leaves out would let a tree change the check and still be signed, and a file
+listed that the lane never reads makes every change to it an unsignable lane edit. So the list is derived, not written by hand:
+`scripts/lane-definition-closure` starts from each lane's `argv` and statically follows what the command graph runs, sources, imports or reads by
+name, transitively: the shell words, Python string constants and imports, JavaScript literals and relative imports that name a tracked file
+(`bash scripts/x`, `. "$(dirname "$0")/x"`, `$root/scripts/x`, `SourceFileLoader(..., 'scripts/x')`, `open('.github/clippy-baseline.json')`, an
+f-string such as `.github/{name}-compat-baseline.json` as a glob), the part of `flake.nix` that defines the dev shell the lane enters (its
+shellHook's scripts), the package.json whose script a `pnpm` call runs, and the files a tool reads by convention (`cargo` `.cargo/config.toml`,
+`nextest` `.config/nextest.toml`, `pnpm` the root manifest, lockfile and workspace file). A mention counts like a call, so it errs wide. Its
+docstring lists the rules and the few explicit tables (an edge no reference shows, such as rust-tests' JUnit report coming from the tests stage;
+`scripts/install-git-hooks`, whose pre-push stub runs the base's scripts at push time, not in the lane). The walk ends at the tree under test (the
+Rust workspace and the pnpm workspace packages, the lanes' `tree_inputs`; a lint that reads a crate's build.rs reads its subject, not its
+definition) except the lanes' runners inside them (`apps/fractal-web/scripts/ci`, `packages/fractal-ui/scripts`); a file outside the lanes' code
+directories (`scripts/`, `nix/`, those runners) is read as data, not followed; and a directory the code lists (iterdir, glob, `find`,
+`dir/*.json`) counts whole inside those directories and is reported, not added, elsewhere (a lint over `crates/`, every release note).
+
+`scripts/lane-definition-closure --why` prints each lane's closure with the file that names each path; `--write` sets every lane's
+`definition_paths` to it (review the diff: it changes each lane's `lane_definition_sha256`, so a note signed under the old list is
+`wrong_definition` once the change is the base, and the tree is signed again); `--check` exits 1 naming any path a lane reads that its list does not
+cover. `scripts/lane-definition-closure-test` (in ci-script-tests) tests each reference form on fixtures and holds the committed lanes to their
+closure in that check's sparse copy, and `scripts/ci-genie-freshness` runs `--check` over the whole tree, so a change that makes a lane run or read
+a new file fails until the lane file lists it. A superset is allowed (a parent directory covers the files below it): `ci-script-tests` and
+`genie-freshness` keep all of `scripts/`, which one of their tests lists. Narrowed on 2026-10-25 from all of `scripts/` and `.st/` for five lanes:
+a change to a script now is a lane edit only for the lanes that run or read it. The lanes' `.st` paths are the `.st` files their own commands read
+in the tree (`linux-gate` and `rust-tests`: `.st/module-layers.json`; the web lanes none); the gate and the verifier read the policy, keys and
+lanes from the base, never the tree. Limits: the closure is static, so a path built at run time from names it cannot see needs a table entry, and
+the sparse copy sees only ci-script-tests' inputs (the whole-tree `--check` sees the rest).
 
 #### Lane closure: what the lane really touches (`scripts/evidence-lane-trace`)
 

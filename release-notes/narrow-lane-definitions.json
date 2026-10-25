@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Each lane's definition_paths in .st/required-lanes.json are now the files its commands execute or read, derived by scripts/lane-definition-closure instead of all of scripts/ and .st/, so a change to a CI script is a lane edit (signed only in CI) for the lanes that run or read it, not for every lane; scripts/lane-definition-closure-test and a whole-tree --check in genie-freshness keep the lists covering the closure",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "No schema change; the lane file keeps its keys and shape."},
+  "rules": {"status": "changed", "detail": "Which tree edits count as lane edits changes per lane: linux-gate and rust-tests now list the test, clippy and fleet-compat stage scripts and the baselines and workflows they read; fractal-web its web scripts, runners and Buck and pnpm files; typescript-client also the package manifests whose test scripts it runs and the web shell's pnpm-source-inputs.json; ci-script-tests and genie-freshness keep scripts/ and add the docs, workflows and release notes their self-tests read by name."},
+  "compatibility": {"status": "changed", "detail": "Every lane's lane_definition_sha256 changes, so notes signed before this merges are wrong_definition against a base that has it, and pull requests opened earlier are held to the new definition (their branch point's lane file differs): sign such a head again with scripts/st-test, or CI runs the check."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None. After a change that makes a lane run or read a new file, run scripts/lane-definition-closure --write and review the diff."},
+  "recovery": {"status": "none", "detail": "Revert .st/required-lanes.json to the wide lists; the lane file is read from the base, so it takes effect for runs after the revert merges."}
+}
