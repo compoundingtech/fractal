@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-BUNDLE_ID = "com.compoundingtech.smalltalk"
+BUNDLE_ID = "com.compoundingtech.fractal"
 
 
 def run(argv, *, cwd=None, capture=False, env=None, timeout=None):
@@ -227,7 +227,10 @@ def build_release(args):
          "CODE_SIGN_STYLE=Automatic", f"DEVELOPMENT_TEAM={args.team}",
          "CODE_SIGN_IDENTITY=Apple Development", "-allowProvisioningUpdates", "build"],
         cwd=app, env=env)
-    apps = list((derived / "Build/Products/Release-iphoneos").glob("*.app"))
+    # DerivedData survives native identity changes. Select only the current Expo
+    # product; unrelated products from earlier generated workspaces may remain.
+    # Bundle ID, native commit and embedded JS stamp are still verified below.
+    apps = list((derived / "Build/Products/Release-iphoneos").glob(f"{workspace.stem}.app"))
     if len(apps) != 1:
         raise ValueError("Expected one successful Release app")
     with (apps[0] / "Info.plist").open("rb") as file:
@@ -459,7 +462,7 @@ class Delivery:
                 self.persist()
             # Xcode 27 exposes executable/PID, not foreground status. Conservatively
             # treat a running daily app as active, but stop deferring at 40 minutes.
-            running = any("/smalltalk.app/" in process.get("executable", "").lower() for process in processes)
+            running = any("/fractal.app/" in process.get("executable", "").lower() for process in processes)
             if running and time.time() - pending["since"] < self.args.max_deferral:
                 self.record("install_deferred", commit=pending["commit"], reason="daily_app_running")
                 return

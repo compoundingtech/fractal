@@ -1,4 +1,4 @@
-//! The part of `store::mailbox_lease` that moved up from st3-store.
+//! The part of `store::mailbox_lease` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -534,7 +534,7 @@ impl MailboxLeaseStore for Store {
         ).map_err(internal)?;
         check_mailbox_fence(&tx, fence, &self.origin)?;
         tx.commit().map_err(internal)?;
-        if let Some(wakes) = self.smalltalk.mailbox_wakes.get() {
+        if let Some(wakes) = self.fractal.mailbox_wakes.get() {
             wakes.owner_changed(&fence.subject, &fence.component);
         }
         Ok(true)

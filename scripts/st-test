@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
-  scripts/st-test [--check NAME]... [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
+  scripts/st-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
   scripts/st-test --seed [REF] [--base origin/main] [--push REMOTE]
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
@@ -13,10 +13,13 @@ asks the verifier, from the accepted base, whether the tree is now covered, and 
 
 The tree: HEAD, the commit you are pushing. The CI gate looks up the note for the pull request head's own tree, so the tree
 you built and signed is the tree that counts even when main has moved since; the merge queue still tests the integrated tree.
-It tells you how far behind the base the branch is. The command always runs in a clean worktree of that commit, never
+A check this tree already has a passing signature for (the verifier's answer, the one asked after a run) is not run again: it
+prints `already signed`, so re-running on an unchanged tree is near instant (with --push its note is pushed as it is, so
+the remote has it too); --rerun runs it anyway. It tells you how far behind the base the branch is.
+The command always runs in a clean worktree of that commit, never
 in this checkout, so untracked or ignored files here cannot change the result. The worktree is one of a small pool of persistent
 ones per repository (~/.cache/st-test/<hash of the git common dir>/tree-N, one flock each, so no two runs share one), reset to the
-commit and stripped of untracked and ignored files before every run: the same path every time keeps cargo's fingerprints and
+commit and stripped of untracked and ignored files (except the megarepo members, node_modules and target/compat-baselines) before every run: the same path every time keeps cargo's fingerprints and
 sccache's absolute-path keys valid, so a second run is warm. Nothing is linked in from here: when the tree
 has a megarepo.lock, its members are materialized under repos/ first, with the command CI's `megarepoApplyStep` runs
 (`mr apply`, from the flake's effect-utils pin), because both lanes read repos/effect-utils and their dev shells no longer
@@ -117,12 +120,19 @@ BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
 # the tree's lock, so nobody else uses it). ST_EVIDENCE_TARGET=PATH names one shared target for all trees instead (kept as before:
 # trimmed only while no other run uses it); ST_EVIDENCE_TARGET=off builds in the tree itself; a CARGO_TARGET_DIR the caller set is
 # left alone.
-TARGET_MAX_GB = 25.0  # operations' terms for a kept target on a shared host (as the pre-sign worker had)
+# One run (test build + clippy + fleet-compat profiles) ends near 60 GB; with incremental compilation on, a quarter to a half of that is debug/incremental
+# (a build host, 2026-10-23: target-0 99 GB of which incremental 40, deps 55, examples 5). The check is only made before a run, so a limit below one run's
+# size would empty the target every time and nothing would ever be warm: 80 GB lets one run's output stay.
+TARGET_MAX_GB = 80.0
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
 POOL_WAIT_SECONDS = 5
-POOL_SETTINGS = {}  # the ST_TEST_* settings (pool, signing jobs, member limit, runs file) as the caller set them: read before the seat scrub drops every ST_* name
-SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT', 'ST_TEST_RUNS')
+# Ignored inputs a pool tree keeps between runs (git clean -e): the megarepo members, the installed dependencies and the downloaded
+# compat baselines cost minutes to materialize, install and download again. They are not tracked files, so the tree stays exact.
+POOL_KEEP = ('/repos/', 'node_modules/', '/target/compat-baselines/')
+POOL_SETTINGS = {}  # the ST_TEST_* settings (pool, pool cap, signing jobs, member limit, runs file) as the caller set them: read before the seat scrub drops every ST_* name
+SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_POOL_MAX_GB', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT', 'ST_TEST_RUNS')
+POOL_MAX_GB = 60.0  # all repositories' pools together under the pool directory; ST_TEST_POOL_MAX_GB (0 or off: no cap) replaces it
 
 
 class Failure(Exception):
@@ -143,6 +153,26 @@ def selecting(name):
 
 SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'CLAUDE', 'ANTHROPIC_')
 KEPT_SEAT = ('ST_AGENT', 'ST_SKIP_EVIDENCE')  # exact names, plus every ST_EVIDENCE* switch; this list is the only exception mechanism
+
+
+# The directories every check's PATH is made of, in this order (those that exist), plus the one `nix` is in: cargo's build scripts record
+# PATH, so two seats whose PATHs differ (their own tools, state directories, dev shells) would rebuild nearly the whole workspace in one
+# pool tree. The perf dev shell fixes its PATH the same way. ~/.cargo/bin stays in it: `cargo clippy -V` prints `clippy 0.1.97` with it and
+# `clippy 0.1.97 (2d8144b788 2026-07-07)` without, and the clippy ratchet's baseline holds the former (measured on a build host, 2026-10-23).
+# ST_EVIDENCE_PATH=keep leaves the caller's PATH alone.
+CHECK_PATH = ('~/.local/bin', '~/.cargo/bin', '/run/current-system/sw/bin', '/nix/var/nix/profiles/default/bin', '/usr/bin', '/bin')
+
+
+def check_path():
+    entries = [os.path.expanduser(entry) for entry in CHECK_PATH]
+    nix = shutil.which('nix')
+    if nix:
+        entries.append(os.path.dirname(nix))
+    kept = []
+    for entry in entries:
+        if os.path.isdir(entry) and entry not in kept:
+            kept.append(entry)
+    return ':'.join(kept)
 
 
 def scrub_seat_environment():
@@ -176,13 +206,74 @@ def text(done):
 TARGET = []  # [commit] when --seed names the tree to sign instead of HEAD
 
 
-def target_commit(base):
-    """The commit that is signed: HEAD, the commit being pushed (with --seed, the commit it names).
+GATE_TREE = {}  # (head, base commit) -> (commit, why): the commit whose tree the CI gate will judge, and the reason when it is not HEAD
 
-    A pull request check is reported on the head commit, and the CI gate looks up the note for the head's own tree (see
-    docs/st3/gate-evidence.md, "Which tree a pull request run asks about"), so the tree an agent built and signed is the
-    tree that counts, whether or not main has moved since. The merge queue still tests the integrated tree."""
+
+def head_commit():
     return TARGET[0] if TARGET else text(git('rev-parse', 'HEAD'))
+
+
+def load_base_gate(base_commit):
+    """scripts/ci-evidence-gate as it is at the accepted base, as a module (None when the base has none): the very code the CI gate runs."""
+    shown = git('show', f'{base_commit}:scripts/ci-evidence-gate', check=False)
+    if shown.returncode != 0:
+        return None
+    path = Path(tempfile.mkdtemp(prefix='st-test-gate-')) / 'ci-evidence-gate'
+    path.write_bytes(shown.stdout)
+    loader = importlib.machinery.SourceFileLoader('ci_evidence_gate_at_base', str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        loader.exec_module(module)
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(path.parent, ignore_errors=True)
+    return module
+
+
+def gate_commit(base):
+    """(commit, why): the commit whose tree the CI gate will judge for the branch being pushed.
+
+    Normally the head itself (docs/st3/gate-evidence.md, "Which tree a pull request run asks about"): the tree an agent built and signed
+    is the tree that counts, whether or not main has moved since. But when protected files moved on main since the branch point (or the
+    branch is far behind), the gate falls back to the MERGE tree, which nobody signed: so a signature on the head voids. The rule is the
+    gate's own, taken from the base (`branch_point_verdict`, the function choose_tree calls). In that case this makes the merge of the
+    head with the base (git merge-tree: nothing is checked out here) as a commit, and the run signs and checks that. `why` is empty
+    when it is the head."""
+    head = head_commit()
+    if TARGET:  # --seed names the tree to sign
+        return head, ''
+    base_commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
+    if not base_commit:
+        return head, ''
+    key = (head, base_commit)
+    if key in GATE_TREE:
+        return GATE_TREE[key]
+    result = (head, '')
+    if git('merge-base', '--is-ancestor', base_commit, head, check=False).returncode != 0:  # the base is in the head already: the merge is the head
+        gate = load_base_gate(base_commit)
+        verdict = getattr(gate, 'branch_point_verdict', None)
+        if verdict:
+            try:
+                verdict(text(git('merge-base', base_commit, head)), head, base_commit, base_commit)
+            except Exception as reason:  # the gate's Fallback, or anything its rule raises: it asks about the merge tree
+                merged = git('merge-tree', '--write-tree', '--no-messages', head, base_commit, check=False)
+                if merged.returncode != 0:
+                    raise Failure(f'CI will judge the merge of this branch with {base} ({reason}), and it does not merge cleanly: merge {base} into the branch first')
+                tree = merged.stdout.decode().split()[0]
+                env = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid', 'GIT_COMMITTER_NAME': 'st-test',
+                       'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
+                commit = text(git('commit-tree', tree, '-p', head, '-p', base_commit, '-m', f'merge of {head[:12]} with {base}', env=env))
+                result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
+    GATE_TREE[key] = result
+    return result
+
+
+def target_commit(base):
+    """The commit that is signed: the one whose tree the CI gate will judge (gate_commit: the head, or the merge with the base when
+    the gate falls back to it); with --seed, the commit it names."""
+    return gate_commit(base)[0]
 
 
 def branch_point(commit, base):
@@ -254,8 +345,9 @@ def governed(argv, name):
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
     runtime = os.environ.get('XDG_RUNTIME_DIR')
-    if shutil.which('systemd-run') and runtime and Path(runtime, 'bus').exists():
-        return ['systemd-run', '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--'] + argv
+    scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
+    if scope and runtime and Path(runtime, 'bus').exists():
+        return [scope, '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--'] + argv
     print(f'st-test: {name} runs without the host build cap (no user systemd bus for a builds.slice scope)', file=sys.stderr)
     return argv
 
@@ -321,7 +413,7 @@ def lane_edits(verifier_path, directory, base, check, tree):
 
 def behind(base):
     """How many commits of the base this branch lacks (0 when it holds the base's tip)."""
-    done = git('rev-list', '--count', f'{target_commit(base)}..{base}', check=False)
+    done = git('rev-list', '--count', f'{head_commit()}..{base}', check=False)
     return int(text(done)) if done.returncode == 0 and text(done).isdigit() else None
 
 
@@ -356,7 +448,87 @@ def pool_root():
     """This repository's pool: one directory per git common dir, so clones and worktrees of one repository share it."""
     common = text(git('rev-parse', '--path-format=absolute', '--git-common-dir'))
     key = hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:16]
-    return Path(POOL_SETTINGS.get('ST_TEST_POOL') or Path.home() / '.cache/st-test') / key
+    return pool_base() / key
+
+
+def pool_base():
+    return Path(POOL_SETTINGS.get('ST_TEST_POOL') or Path.home() / '.cache/st-test')
+
+
+def pool_max_gb():
+    value = POOL_SETTINGS.get('ST_TEST_POOL_MAX_GB', '')
+    if value in ('off', '0'):
+        return None
+    if not value:
+        return POOL_MAX_GB
+    try:
+        limit = float(value)
+    except ValueError:
+        raise Failure(f'ST_TEST_POOL_MAX_GB={value!r} must be a number of GB, 0 or "off"')
+    if limit < 0:
+        raise Failure(f'ST_TEST_POOL_MAX_GB={value!r} must not be negative')
+    return limit or None
+
+
+def du_gb(path):
+    """The disk a directory holds, in GB (du, which is far quicker than walking a 60 GB build tree from here)."""
+    done = subprocess.run(['du', '-sk', '--', str(path)], capture_output=True, text=True, check=False)
+    try:
+        return int(done.stdout.split()[0]) * 1024 / 1e9
+    except (IndexError, ValueError):
+        return size_gb(path)
+
+
+def pool_units(base):
+    """[(last used, directory of the unit's lock, N, [paths])]: every pool tree with its target, across all the repositories' pools."""
+    units = {}
+    for repo in sorted(path for path in base.iterdir() if path.is_dir()) if base.is_dir() else []:
+        for entry in repo.iterdir():
+            match = re.fullmatch(r'(tree|target)-(\d+)(\.lock)?', entry.name)
+            if match:
+                units.setdefault((repo, int(match.group(2))), []).append(entry)
+    found = []
+    for (repo, n), paths in units.items():
+        lock = repo / f'tree-{n}.lock'
+        try:
+            used = lock.stat().st_mtime
+        except OSError:
+            used = min((path.stat().st_mtime for path in paths if path.exists()), default=0)
+        found.append((used, repo, n, [path for path in paths if path.name != lock.name]))
+    return sorted(found)
+
+
+def evict_to_cap(base, limit_gb, keep=None):
+    """Keep the pool directory under `limit_gb` GB in all: before a run, remove the least recently used trees and their targets whose lock
+    is free, oldest first, until it fits. A unit someone holds is never touched (`keep` is the one this run holds). Says what it removed."""
+    units = pool_units(base)
+    sizes = {(repo, n): sum(du_gb(path) for path in paths) for _, repo, n, paths in units}
+    total = sum(sizes.values())
+    for used, repo, n, paths in units:
+        if total <= limit_gb:
+            break
+        if (repo, n) == keep:
+            continue
+        try:
+            lock = open(repo / f'tree-{n}.lock', 'a')
+        except OSError:
+            continue
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            continue
+        try:
+            for path in paths:
+                subprocess.run(['chmod', '-R', 'u+rwX', '--', str(path)], check=False, capture_output=True)
+                shutil.rmtree(path, ignore_errors=True)
+            total -= sizes[(repo, n)]
+            idle = max(0, int((time.time() - used) / 60))
+            print(f'st-test: pool over {limit_gb:g} GB: evicted {repo.name}/tree-{n} and target-{n} ({sizes[(repo, n)]:.1f} GB, idle {idle} min)', file=sys.stderr)
+        finally:
+            lock.close()
+    if total > limit_gb:
+        print(f'st-test: pool is {total:.1f} GB, over {limit_gb:g} GB, and every other tree is in use', file=sys.stderr)
 
 
 def acquire_tree(root, size):
@@ -398,11 +570,13 @@ def prepare_tree(root, n, commit):
         git('checkout', '--detach', '-q', '-f', commit, cwd=directory)
     else:
         git('worktree', 'add', '--detach', '--force', '-q', str(directory), commit)
-    if git('clean', '-ffdxq', cwd=directory, check=False).returncode != 0:
+    clean = ['clean', '-ffdxq', *[f'--exclude={pattern}' for pattern in POOL_KEEP]]
+    if git(*clean, cwd=directory, check=False).returncode != 0:
         # A check can leave read-only directories (copies of nix store paths, under .devenv/ and repos/): make them writable, once.
         subprocess.run(['chmod', '-R', 'u+rwX', '--', str(directory)], check=False, capture_output=True)
-        git('clean', '-ffdxq', cwd=directory)
-    dirty = text(git('status', '--porcelain', cwd=directory))
+        git(*clean, cwd=directory)
+    # The tracked files must equal the commit (the signature is for it); what is kept above is ignored input, not a tracked file.
+    dirty = text(git('status', '--porcelain', '--untracked-files=no', cwd=directory))
     if dirty:
         raise Failure(f'pool tree {directory} is not clean after resetting it to {commit[:12]}: {dirty.splitlines()[0]}')
     return directory
@@ -488,7 +662,8 @@ def reap_stale():
     git('worktree', 'prune', check=False)
 
 
-def covered(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
+def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
+    """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None."""
     command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--keys-from', base]
     if crate_key:
         command += ['--crate-key', crate_key]
@@ -500,10 +675,33 @@ def covered(verifier, directory, tree, check, base, repository, lane_base=None, 
     try:
         result = json.loads(done.stdout)
     except ValueError:
-        return False, 'verifier gave no answer: ' + (done.stderr.strip().splitlines() or ['-'])[-1][:120]
+        return False, 'verifier gave no answer: ' + (done.stderr.strip().splitlines() or ['-'])[-1][:120], None
     if done.returncode == 0:
-        return True, f'covered by {result.get("kind")} {result.get("record", "")[:12]}'
-    return False, result.get('reason') or 'not covered'
+        return True, f'covered by {result.get("kind")} {result.get("record", "")[:12]}', result.get('record')
+    return False, result.get('reason') or 'not covered', None
+
+
+def covered(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
+    return ask_verifier(verifier, directory, tree, check, base, repository, lane_base, crate_key)[:2]
+
+
+def push_record(directory, remote, tree, record):
+    """Push the tag and note of an existing record (as evidence-wrap pushes a new one: the token travels in the environment, never in an
+    argument). Returns None, or why it failed. A record with no local refs came from the remote: nothing to push."""
+    refs = [ref for ref in (f'refs/tags/evidence/{tree}/{record}', f'refs/notes/evidence/{tree}/{record}')
+            if git('rev-parse', '--verify', '-q', ref, cwd=directory, check=False).returncode == 0]
+    if not refs:
+        return None
+    extra = {}
+    token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
+    if token:
+        header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+        extra = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader', 'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
+    pushed = git('push', '--quiet', remote, *[f'{ref}:{ref}' for ref in refs], cwd=directory, env=extra, check=False)
+    if pushed.returncode != 0:
+        message = pushed.stderr.decode(errors='replace')
+        return message.replace(token, '***').strip()[-400:] if token else message.strip()[-400:]
+    return None
 
 
 LOG_UNIT = 'evidence-log.service'
@@ -754,7 +952,9 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         run_sha = hashlib.sha256(json.dumps([LOCAL['linux-gate']]).encode()).hexdigest()
     else:
         junit = Path(scratch) / 'nextest-junit.xml'
-        environment = dict(os.environ, CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit))
+        environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
+        environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit))
+        environment.setdefault('CARGO_INCREMENTAL', '0')  # as the other checks: no incremental state in a one-shot build
         if target:
             environment['CARGO_TARGET_DIR'] = str(target)
         started = time.monotonic()
@@ -969,6 +1169,7 @@ def main(argv):
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
     parser.add_argument('--push', metavar='REMOTE', help='push the signed notes here after they verify')
     parser.add_argument('--repository', metavar='OWNER/NAME', help='default: from the remote\'s GitHub URL; without it the policy is not applied')
+    parser.add_argument('--rerun', action='store_true', help='run a check even when this tree already has a passing signature for it')
     parser.add_argument('--crate', action='append', default=[], metavar='NAME', help='with --check rust-tests: only these crates (repeatable)')
     parser.add_argument('--attempt', default='1')
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
@@ -1009,7 +1210,9 @@ def main(argv):
         git('fetch', '-q', remote, branch)  # the base moves; the lag and the policy are read at its current tip
     base_commit = text(git('rev-parse', '--verify', '-q', args.base + '^{commit}'))
     if args.status:
-        commit = target_commit(args.base)
+        commit, why_merge = gate_commit(args.base)
+        if why_merge:
+            print(f'st-test: {why_merge}')
         tree = text(git('rev-parse', f'{commit}^{{tree}}'))
         lane_base = branch_point(commit, base_commit)
         with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
@@ -1065,7 +1268,11 @@ def main(argv):
         try:
             if pool_trees:
                 commit, root = target_commit(args.base), pool_root()
+                if gate_commit(args.base)[1]:
+                    print(f'st-test: {gate_commit(args.base)[1]}', flush=True)
                 n, tree_lock = acquire_tree(root, pool_trees)
+                if pool_max_gb():
+                    evict_to_cap(pool_base(), pool_max_gb(), keep=(root, n))
                 directory, tree_target = prepare_tree(root, n, commit), root / f'target-{n}'
             else:
                 directory, commit = target_worktree(args.base, scratch)
@@ -1079,18 +1286,28 @@ def main(argv):
             lanes = lane_names(args.base)
             target, target_lock = shared_target(tree_target) if any(name in BUILDS for name in checks) else (None, None)
             warm = target_warm(target) if any(name in BUILDS for name in checks) else None  # before anything builds in it
-            unmaterialized = materialize_members(directory)
-            setup_seconds = round(time.monotonic() - main_started)  # fetch, the clean tree, the members: nothing a check row counts
+            # The members are fetched once, and only when a check has to run: a tree whose checks are all signed needs none. The light
+            # lane runs in a thread, so the first caller fetches under a lock.
+            members_lock, members_state = threading.Lock(), []
+
+            def members():
+                with members_lock:
+                    if not members_state:
+                        members_state.append(materialize_members(directory))
+                    return members_state[0]
+
+            setup_seconds = round(time.monotonic() - main_started)  # fetch and the clean tree (the members are fetched when a check first needs them)
             gate_report = Path(scratch) / 'linux-gate-nextest-junit.xml'
             stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
             def run_one(name, output=None):
                 """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
-                if unmaterialized:
-                    return (name, 'NOT RUN', 0, unmaterialized), True, False
                 edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in lanes else []
                 if edits:
                     return (name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'), False, True
                 if name == RUST_TESTS:
+                    problem = members()
+                    if problem:
+                        return (name, 'NOT RUN', 0, problem), True, False
                     # One run, one row for the run and one for each crate that did not sign (a list: the collector below takes either).
                     new_rows, bad = run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes,
                                                    target, report=gate_report)
@@ -1098,6 +1315,16 @@ def main(argv):
                 unchanged = web_unchanged(args.base) if name == WEB else None
                 if unchanged:
                     return (name, 'not relevant', 0, unchanged), False, False  # nothing to run, nothing to sign: not a failure
+                if not args.rerun:
+                    # Already signed for this tree (or its input key): nothing to measure again. Asked the way it is asked after a run.
+                    signed, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                    if signed:
+                        # With --push the covering note must also be on the remote (an earlier run may not have pushed it): push it as it is.
+                        failure = push_record(directory, args.push, tree, record) if args.push else None
+                        return (name, 'already signed' if not failure else 'push failed', 0, why if not failure else failure), bool(failure), False
+                problem = members()
+                if problem:
+                    return (name, 'NOT RUN', 0, problem), True, False
                 wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
                         '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
                 if name in lanes:
@@ -1108,15 +1335,18 @@ def main(argv):
                     wrap += ['--toolchain-sha256', args.toolchain_sha256]
                 if args.push:
                     wrap += ['--push', args.push]
-                environment = dict(os.environ, CARGO_TARGET_DIR=str(target)) if target and name in BUILDS else None
+                environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
+                environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
+                if target and name in BUILDS:
+                    environment['CARGO_TARGET_DIR'] = str(target)
                 if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
                     # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
-                    environment = dict(environment or os.environ, CI_TEST_JUNIT=str(gate_report))
+                    environment['CI_TEST_JUNIT'] = str(gate_report)
                 if name in BASE_BOUND:
                     # clippy's ratchet compares with the base, as CI compares with the event's base: the base as just fetched,
                     # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.
                     wrap += ['--input', f'clippy_base_sha={base_commit}']
-                    environment = dict(environment or os.environ, CLIPPY_BASE_SHA=base_commit)
+                    environment['CLIPPY_BASE_SHA'] = base_commit
                 if name == WEB:
                     wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
                 started = time.monotonic()
@@ -1178,9 +1408,12 @@ def main(argv):
                 failed = failed or check_failed
                 unsigned = unsigned or check_unsigned
             print(f'\nst-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
-            rows.insert(0, ('setup', 'done', setup_seconds, 'fetch, the clean tree, the megarepo members (before any check)'))
+            rows.insert(0, ('setup', 'done', setup_seconds, 'fetch and the clean tree (the megarepo members are fetched when a check first needs them)'))
             for name, result, seconds, why in rows:
                 print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
+            if tree_target and target and target == tree_target and target.exists():
+                print(f'  target-{n}: {du_gb(target):.1f} GB (emptied before a run past {TARGET_MAX_GB:g} GB; the pool is capped at the sum of all, '
+                      f'ST_TEST_POOL_MAX_GB)')
             if args.push and any(result != 'NOT RUN' for _, result, _, _ in rows):
                 line = nudge_log()
                 if line:
@@ -1197,6 +1430,7 @@ def main(argv):
             if not pool_trees and directory.exists():
                 git('worktree', 'remove', '--force', str(directory), check=False)
             if tree_lock:
+                os.utime(tree_lock.name)  # last used: now, for the eviction order
                 tree_lock.close()
 
 

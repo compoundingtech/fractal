@@ -170,8 +170,8 @@ export function pingPresentation(text: string): { from: string | null; text: str
   return ping ? { from: senderName(ping[1]), text: ping[2].trim() } : { from: null, text: withoutReference };
 }
 
-// st joins Small Talk to or from an agent into its conversation: who wrote to whom, and the title.
-export function smallTalkPresentation(body: unknown): { from: string; text: string } {
+// st joins Fractal to or from an agent into its conversation: who wrote to whom, and the title.
+export function fractalPresentation(body: unknown): { from: string; text: string } {
   const message = (body && typeof body === 'object' ? body : {}) as { from?: unknown; to?: unknown; title?: unknown };
   const name = (id: unknown) => typeof id === 'string' ? senderName(id) : 'someone';
   return { from: `${name(message.from)} → ${name(message.to)}`, text: typeof message.title === 'string' && message.title.trim() ? message.title : 'Fractal' };

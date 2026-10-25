@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the built TUI (spaces) in a real PTY, with or without a local st daemon.
 
-Run with ST3_PERSON=person/<you> python3 crates/stui/tests/pty_smoke.py.
+Run with ST3_PERSON=person/<you> python3 crates/fractal-tui/tests/pty_smoke.py.
 The script reports only checks and byte counts; it never prints terminal contents.
 """
 
@@ -33,7 +33,7 @@ def plain(output: bytes) -> bytes:
 
 
 def answer_queries(master: int, chunk: bytes) -> None:
-    """Answer stui's device-attributes query as a terminal does, so its keyboard-protocol
+    """Answer Fractal TUI's device-attributes query as a terminal does, so its keyboard-protocol
     probe ends at once instead of waiting out its timeout."""
     if b"\x1b[c" in chunk:
         os.write(master, b"\x1b[?62;c")
@@ -261,7 +261,7 @@ def tmux_hangup_case(binary: str) -> None:
 
 def shifted_keys_case(binary: str) -> None:
     """A terminal that reports every key as an escape code sends Shift+i as `i` with Shift.
-    Play one: answer the keyboard-protocol query, check what stui asks for, and type shifted keys
+    Play one: answer the keyboard-protocol query, check what Fractal TUI asks for, and type shifted keys
     into the palette's search box, as such a terminal would send them."""
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
@@ -290,9 +290,9 @@ def shifted_keys_case(binary: str) -> None:
     try:
         collect(1.5)
         pushed = re.findall(rb"\x1b\[>(\d+)u", bytes(captured))
-        assert pushed, "stui did not ask the terminal for the keyboard protocol"
+        assert pushed, "Fractal TUI did not ask the terminal for the keyboard protocol"
         flags = int(pushed[-1])
-        assert flags & 4, f"stui did not ask for alternate keys (flags {flags})"
+        assert flags & 4, f"Fractal TUI did not ask for alternate keys (flags {flags})"
         os.write(master, b"\x0b")  # Ctrl+K: the palette and its search box.
         collect(0.5)
         # Shift+i and Shift+; with the layout's character given, then Shift+j with none given.
@@ -323,7 +323,7 @@ if __name__ == "__main__":
         sys.exit(0)
     skip_panic = "--no-panic" in sys.argv[2:]
     if "--only-shifted-keys" in sys.argv[2:]:
-        # The one case `cargo test` runs (../st3/tests/typed_keys.rs): keys as a terminal sends them.
+        # The one case `cargo test` runs (../fractal/tests/typed_keys.rs): keys as a terminal sends them.
         shifted_keys_case(binary)
         sys.exit(0)
     for case in ("normal", "signal", "panic"):

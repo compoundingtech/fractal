@@ -175,9 +175,9 @@ not an optional later enhancement. A non-opted old client receives neither
 field and never receives `resync-snapshot`.
 
 Consumers that recognize the new frame include the TypeScript client, Swift
-client, `fractal-client` Rust collection follower, `fractal-feed`/stui, and the iOS
+client, `fractal-client` Rust collection follower, `fractal-feed`/Fractal TUI, and the iOS
 and web collection adapters that use them. Their handling must be updated or
-explicitly remain on v1. Coordinate `fractal-feed`/stui with concurrent #3166;
+explicitly remain on v1. Coordinate `fractal-feed`/Fractal TUI with concurrent #3166;
 this isolated worktree does not edit those files. A new client talking to an
 old daemon follows the v1 path. An old client talking to a v2 daemon never
 opts in and keeps the current path.
