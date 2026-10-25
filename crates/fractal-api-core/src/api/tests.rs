@@ -57,6 +57,72 @@ async fn fleet_leave_state_proxies_live_worker_snapshot_and_rejects_another_inca
 }
 
 #[tokio::test]
+async fn fleet_pairing_admission_pins_the_live_worker_incarnation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("fleet-pairing-test".into());
+    let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+    let public = key.public().to_owned();
+    state.store.set_member_key(Some(Arc::new(key))).unwrap();
+    let directory = state.state_dir.join("fleet");
+    std::fs::create_dir_all(&directory).unwrap();
+    let listener = tokio::net::UnixListener::bind(
+        smallclaims::sync::leave_state_socket(&state.state_dir),
+    )
+    .unwrap();
+    let expected_public = public.clone();
+    let app = Router::new().route(
+        "/v1/internal/fleet/pairing-admission",
+        post(move |Json(body): Json<Value>| {
+            let expected_public = expected_public.clone();
+            async move {
+                assert_eq!(body["expected_fleet_id"], "fleet-pairing-test");
+                assert_eq!(body["expected_sponsor_key"], expected_public);
+                assert_eq!(body["node_id"], "bound-node");
+                assert_eq!(body["request"]["node_id"], "bound-node");
+                // A stale/different worker must not pass even if it returns valid JSON.
+                Json(json!({
+                    "protocol": "st3-join-v1",
+                    "sponsor": "other",
+                    "sponsor_key": "different-key",
+                    "ephemeral": "",
+                    "nonce": "",
+                    "sealed": "",
+                    "signature": ""
+                }))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/internal/fleet/pairing-admission")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "node_id": "bound-node",
+                "request": {
+                    "protocol": "st3-join-v1",
+                    "invite": "invite",
+                    "name": "beacon",
+                    "mode": "listening",
+                    "member_key": "member",
+                    "node_id": "bound-node",
+                    "ephemeral": "",
+                    "build": "test",
+                    "proof": "",
+                    "signature": ""
+                }
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let response = router(state).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    server.abort();
+}
+
+#[tokio::test]
 async fn child_session_detail_resolves_readable_transcript_outside_session_inventory() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("native");

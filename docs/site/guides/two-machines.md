@@ -36,6 +36,22 @@ Success means both machines show the expected membership and initial synchroniza
 
 ## Using Fabric
 
-With Fabric running and the machines already trusted, substitute `--transports fabric` at create and join and `--via fabric` when inviting. Grant the exact advertised fleet protocol to the other machine in Fabric before joining. Fractal manages the local tunnel; do not add a second manual peer configuration for the same route.
+Run Fabric with `--runtime-peers` and install `st-fabric-adapter` on both machines. Keep the external adapter running as a separate service on the sponsor. Create the fleet with `--transports fabric`; the machines need no prior Fabric trust or manual grants.
+
+On studio:
+
+```sh
+fractal fleet invite beacon
+```
+
+On beacon:
+
+```sh
+fractal fleet join CODE
+```
+
+Prefer the private prompt (`fractal fleet join`) rather than putting the credential in shell history. The code pins the sponsor's Fabric identity and carries an expiring, single-use pairing permit. Pending attempts grant no ordinary access. The adapter verifies signed fleet admission before granting exactly `st3/fleet/FLEET_ID` and `st3-client-v0` under owner `st/fleet/FLEET_ID`; the joiner authenticates the sponsor before reciprocal access.
+
+Terminal access requires an explicit static operator grant for `st3/pty/FLEET_ID`, which the adapter never edits. Unconfirmed attempts expire after a Fabric restart; issue a fresh invitation rather than manually granting trust. Preserve adapter journals across restarts so uncertain confirmation can be recovered with the original code, name and local member key. Static or other-owner grants are not revoked by pairing or membership reconciliation.
 
 See [Fleet membership](fleet-join.md) for trust and invitation behavior and [replication](https://github.com/compoundingtech/fractal/blob/main/docs/st3/replication.md) for digests and recovery. Keep raw state and keys when investigating inconsistent history; do not reset a replica merely to make its status look healthy.

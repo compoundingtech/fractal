@@ -9,6 +9,9 @@
     # The runtime, Rust crates and native terminal library share one producer revision.
     pty.url = "github:compoundingtech/pty/e237afa8587fb953cc589c35e0c9a252f7192444";
     pty.inputs.nixpkgs.follows = "nixpkgs";
+    # Merged pairing stack, including the daemon-identity restricted client.
+    fabric.url = "github:compoundingtech/fabric/1e6e93e9a662a40749f91d63eeecc4e98de114bd";
+    fabric.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
@@ -22,6 +25,7 @@
       flake-utils,
       fenix,
       pty,
+      fabric,
       effect-utils,
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -627,6 +631,8 @@
           # generator formats the Rust client it checks with rustfmt.
           nativeCheckInputs = [
             pkgs.bashInteractive
+            # Fleet pairing integration drives the external helper over local HTTP.
+            pkgs.curl
             # The completion tests drive the stub in each supported shell.
             pkgs.fish
             pkgs.zsh
@@ -1065,6 +1071,8 @@
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
         packages.st-fabric-adapter = stFabricAdapter;
+        # Isolated bootstrap/live proofs use the exact pairing API revision.
+        packages.fabric-pairing = fabric.packages.${system}.default;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         packages.st2-wasm-resolver = st2WasmResolver;
