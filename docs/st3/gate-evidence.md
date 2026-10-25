@@ -1442,6 +1442,11 @@ end and seconds, and the time it spent waiting in the build admission queue (the
 get a UTC stamp, and the waits are counted and added up per stage), in a table at the end. Each stage's output is also kept in
 `~/.cache/ci-local-logs/run-TIME-PID/STAGE.log` (`CI_LOCAL_LOG_DIR` names another place; the latest 10 runs stay), because the scratch home
 of the stages is removed afterwards.
+A host can set a **load limit** that no repository file names: a number in `~/.config/st-test/max-load` (or `ST_TEST_MAX_LOAD`; `0` or no file is no limit).
+While the 1-minute load average is above it, `st-test` (before it takes a tree or starts any check) and `scripts/ci-local` (before its stages) WAIT, saying
+`waiting: load1 34 > 20 (host limit)` at the start and every minute, and after `ST_TEST_LOAD_WAIT_MINUTES` (default 30) fail with that reason (`st-test`
+exit 2, `ci-local` exit 3) and nothing started: never a silent refusal. It exists because work no build slot governs (verifier runs, test fixtures) can
+push a shared host's load high enough to starve its daemons. Whoever runs the host sets the number; the repository names no host.
 **The tree it signs is the tree the CI gate will judge.** Usually that is the pushed head. But when protected files moved on main since the branch
 point (or the branch is more than `HEAD_TREE_MAX_BEHIND` commits behind), the gate falls back to the MERGE tree (`head_tree=fallback:...` in its
 output), which a signature on the head does not cover. `st-test` asks the base's own `scripts/ci-evidence-gate` (`branch_point_verdict`, the function
