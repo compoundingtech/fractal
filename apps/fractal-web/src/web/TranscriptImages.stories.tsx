@@ -6,7 +6,8 @@ import { EmbraceRuntimeProvider, Transcript, assistantDarkTheme, liveAccentTheme
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import type { Attachment } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-data/model.ts'
 import { surfaceVars as surface, spaceVars as space, textVars as text } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import type { AttachmentPort } from '../data/source.ts'
+import type { AttachmentPort, ConversationPortResult } from '../data/source.ts'
+import type { BlobChunk } from '@fractal/client/schema'
 import { createTranscriptImages } from './transcriptImages.ts'
 
 /** A 240×150 PNG of a sketched review layout; it fits the 320×240 thumbnail box unscaled. */
@@ -35,7 +36,7 @@ function TranscriptImages({ scheme, width = 'desktop', fixture, gated = false }:
   const [requests, setRequests] = React.useState<readonly ChunkRequest[]>([])
   const [{ images, release }] = React.useState(() => {
     const waiting: Array<() => void> = []
-    const answer = (): ReturnType<AttachmentPort['chunk']> => {
+    const answer = (): Promise<ConversationPortResult<BlobChunk>> => {
       switch (fixture) {
         case 'loading': return Promise.withResolvers<never>().promise
         case 'unauthorized': return Promise.resolve({ _tag: 'Refused', reason: 'ungranted', detail: 'This session may not read attachment bytes.' })
@@ -72,10 +73,10 @@ function TranscriptImages({ scheme, width = 'desktop', fixture, gated = false }:
   }
   const turns: readonly TranscriptTurn[] = [{ id: prompt.id, prompt, items: [], work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false } }]
   return <NarrowLayoutContext.Provider value={width === 'phone'}>
-    <section aria-label={`Transcript image ${fixture}`} data-fixture={fixture} data-scheme={scheme} {...stylex.props(styles.surface, width === 'phone' ? styles.phone : styles.desktop, scheme === 'dark' && assistantDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
+    <section aria-label={`Transcript image ${fixture} ${width}`} data-fixture={fixture} data-scheme={scheme} {...stylex.props(styles.surface, width === 'phone' ? styles.phone : styles.desktop, scheme === 'dark' && assistantDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
       <div {...stylex.props(styles.transcript)}>
         <EmbraceRuntimeProvider options={{ messages: [prompt], onNew: async () => {} }}>
-        <Transcript turns={turns} title="Image review" showHeader={false} sync={{ _tag: 'Live', since: 0 }} now={1792909271000} observedAt={1792909271000} attachmentImages={attachmentImages} />
+        <Transcript turns={turns} title="Image review" landmarkContext={`${fixture}, ${width}`} showHeader={false} sync={{ _tag: 'Live', since: 0 }} now={1792909271000} observedAt={1792909271000} attachmentImages={attachmentImages} />
         </EmbraceRuntimeProvider>
       </div>
       <ol aria-label="Fixture chunk reads" {...stylex.props(styles.reads)}>{requests.map((request, index) => <li key={index} data-sha256={request.sha256} data-message={request.message} data-offset={request.offset ?? 0}>{`Read ${request.sha256.slice(0, 8)} at ${request.offset ?? 0}`}</li>)}</ol>
