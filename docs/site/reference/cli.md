@@ -36,6 +36,13 @@ Use the installed build's help for exact flags, required arguments, and actor ru
 
 `fractal apply FILE --as ACTOR --dry-run` previews KDL without publishing. Omit `--dry-run` to publish it. `fractal missions start` creates a run; publishing a definition does not start it. `fractal launch` creates and reviews a planner-backed candidate.
 
+With `--json`, the preview names a `predicted_actions` entry for every changed
+subject. `publish-only` means publishing a declaration without a member launch
+change, including description/grouping-only agent edits with or without a
+harness. Launch changes retain their existing actions (such as
+`observe-or-start` or `restart`); runtime interruption and suspension decisions
+still take precedence.
+
 For small independent authorized work, use `fractal work start`. Claim before executing assigned work, record progress, and complete with evidence. Use `fractal work revise` for an explicit new generation of an existing run.
 
 ## Operating a machine
