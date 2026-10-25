@@ -1,4 +1,4 @@
-//! The part of `api` that moved up from st3-api.
+//! The part of `api` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
@@ -134,8 +134,8 @@ pub use fractal_api_core::api::{router_with, serve_reserved_unix_with_ready, ser
 pub use fractal_api_core::api::{unix_reservation_path};
 pub mod mailbox;
 
-/// This crate's route family. st3-daemon serves it beside every other family (its `api::router`);
-/// this crate's router is st3-api's routes and the mailbox routes, for its own tests.
+/// This crate's route family. fractal-daemon serves it beside every other family (its `api::router`);
+/// this crate's router is fractal-api-core's routes and the mailbox routes, for its own tests.
 const ROUTE_FAMILIES: &[RouteFamily] = &[mailbox::routes];
 
 /// Build routes only. The owner starts background publications with

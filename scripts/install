@@ -107,7 +107,7 @@ if ! $macos; then
       [[ -L $path_dir/fractal && $(readlink "$path_dir/fractal") == "$bin_dir/st3" ]] || foreign_path=true
     fi
   done
-  # Only these exact targets identify a link installed by Smalltalk.
+  # Only these exact targets identify a link installed by Fractal.
   if [[ -L $bin_dir/fractal && ( $(readlink "$bin_dir/fractal") == st3 || $(readlink "$bin_dir/fractal") == "$bin_dir/st3" ) ]]; then
     link=$(mktemp -u "$bin_dir/.fractal.install.XXXXXX")
     ln -s st3 "$link"

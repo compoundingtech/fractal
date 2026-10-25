@@ -165,13 +165,13 @@ let
 in
 {
   options.programs.smalltalk.fractalBinary.enable = mkEnableOption ''
-    the opt-in fractal alias in the Home Manager-owned Smalltalk stable bin directory.
+    the opt-in fractal alias in the Home Manager-owned Fractal stable bin directory.
     Requires services.smalltalk.enable; ignored when services.smalltalk.binary.path is set
   '';
 
 
   options.services.smalltalk = {
-    enable = mkEnableOption "the smalltalk user daemon";
+    enable = mkEnableOption "the Fractal user daemon";
     # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
     fractalMigration.phase = mkOption {
       type = types.enum [ "legacy" "stage" "completed" ];
@@ -191,7 +191,7 @@ in
     binary.path = mkOption {
       type = types.nullOr types.str;
       default = null;
-      example = "/opt/smalltalk/bin/st3";
+      example = "/opt/fractal/bin/st3";
       description = ''
         Stable absolute executable path owned by an external deployer. When set,
         Home Manager neither installs the st3 package nor copies its executable,
@@ -343,7 +343,7 @@ in
       [ (if pkgs.stdenv.hostPlatform.isLinux then "reloadSystemd" else "setupLaunchAgents") ]
       [ "writeBoundary" ] ''
         if [[ -n "''${DRY_RUN_CMD:-}" ]]; then
-          verboseEcho "Would install the smalltalk executable at ${executable}"
+          verboseEcho "Would install the Fractal executable at ${executable}"
         else
           (
             set -eu
@@ -438,7 +438,7 @@ in
       # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk-apply.
       smalltalk-apply = {
         Unit = {
-          Description = "Apply smalltalk KDL declarations";
+          Description = "Apply Fractal KDL declarations";
           After = [ "smalltalk.service" ];
           Requires = [ "smalltalk.service" ];
         };

@@ -4,7 +4,7 @@
 //!
 //! Every request and response carries the fleet's HMAC and, on a member, its member key's
 //! signature; [`FleetAuth`] makes and checks both. The worker reaches its store through a
-//! [`Backend`]: a program that holds the store itself uses [`Local`], and smalltalk hands the
+//! [`Backend`]: a program that holds the store itself uses [`Local`], and Fractal hands the
 //! calls to its daemon, the store's only writer.
 
 use std::fs;
@@ -428,7 +428,7 @@ fn headers(
     Ok(headers)
 }
 
-/// The envelope of every signed peer answer. Its layout and version are the ones smalltalk's
+/// The envelope of every signed peer answer. Its layout and version are the ones Fractal's
 /// client API answers with, so members on older builds read it unchanged.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PeerResponse<T> {

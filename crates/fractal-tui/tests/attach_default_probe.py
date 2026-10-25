@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Open an agent in stui's real terminal tab and check what the person sees, through real PTYs.
+"""Open an agent in Fractal TUI's real terminal tab and check what the person sees, through real PTYs.
 
 stui (a production Ui, in the unit-test executable's worker) runs under one PTY, and the
 agent's program under the packaged `pty` daemon. Between them is a transparent relay that this
@@ -64,7 +64,7 @@ def screen(status):
 
 
 class Stui:
-    """One stui worker, its program, and the relay between them."""
+    """One Fractal TUI worker, its program, and the relay between them."""
 
     def __init__(self, worker, directory, prefs=None):
         self.root = Path(directory)

@@ -1,4 +1,4 @@
-//! The part of `store::message_subscriptions` that moved up from st3-store.
+//! The part of `store::message_subscriptions` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::MissionsStore;
 use super::*;
@@ -30,7 +30,7 @@ mod tests {
         );
         let before = store.desired_subjects().unwrap();
         let observer = store
-            .selected_desired_revision("observer/github/compoundingtech/smalltalk")
+            .selected_desired_revision("observer/github/compoundingtech/fractal")
             .unwrap();
         let plan = store
             .mission(
@@ -86,7 +86,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .selected_desired_revision("observer/github/compoundingtech/smalltalk")
+                .selected_desired_revision("observer/github/compoundingtech/fractal")
                 .unwrap(),
             observer
         );
@@ -100,7 +100,7 @@ mod tests {
             .unwrap();
         let spec = crate::graph::subscription_spec(&desired.desired).unwrap();
         assert_eq!(spec.fields, ["main_performance_failures"]);
-        assert_eq!(spec.observer, "observer/github/compoundingtech/smalltalk");
+        assert_eq!(spec.observer, "observer/github/compoundingtech/fractal");
         assert_eq!(spec.to, "agent/fleet/fixture-project/speed");
     }
 
@@ -152,7 +152,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.code, "invalid-registration-actor");
         let stop = crate::graph::parse_internal_intent(
-            "version 2\nobserver \"github/compoundingtech/smalltalk\" { stop }",
+            "version 2\nobserver \"github/compoundingtech/fractal\" { stop }",
             "node",
         )
         .unwrap();
@@ -234,7 +234,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "message-registration-author");
         let different = PERFORMANCE_REGISTRATION.replace(
-            "observer/github/compoundingtech/smalltalk",
+            "observer/github/compoundingtech/fractal",
             "observer/elsewhere",
         );
         let different = crate::graph::parse_intent(&different, "node").unwrap();

@@ -48,8 +48,8 @@ There is no App Store or TestFlight build; build it yourself on a Mac with full 
 
 ```sh
 mkdir -p ~/src
-git clone https://github.com/compoundingtech/smalltalk.git ~/src/smalltalk
-cd ~/src/smalltalk
+git clone https://github.com/compoundingtech/fractal.git ~/src/fractal
+cd ~/src/fractal
 corepack enable
 pnpm install --frozen-lockfile
 cd apps/ios

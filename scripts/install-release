@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-# Install an extracted Smalltalk release without restarting any service.
+# Install an extracted Fractal release without restarting any service.
 set -Eeuo pipefail
 source_dir=$(cd "$(dirname "$0")" && pwd)/bin
 bin_dir=""
