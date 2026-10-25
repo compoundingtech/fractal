@@ -8,6 +8,24 @@ const block = (kind: string, fields: object) => ({ id: `block/${kind}`, kind, so
 const frame = (items: readonly unknown[], header?: unknown) => decodeConversationChunk({ kind: 'conversation', collection: 'conversation', id: 'follow/example', session_id: 'session/example', replace: true, has_more: false, items, header })
 
 describe('optional native block facts', () => {
+  it.each(['tool_call', 'error'])('uses final %s owner facts instead of an earlier assistant response', kind => {
+    const timeline = new LiveTimeline()
+    const metadata = { model: 'latest-model', usage: { total: 84, cost_usd: 0.012 } }
+    timeline.apply(frame([
+      entry('content', 1, { text: 'Earlier response', media_type: 'text/plain', blocks: [block('text', { metadata: { model: 'earlier-model', usage: { total: 42 } } })] }),
+      entry(kind, 2, kind === 'tool_call'
+        ? { call_id: 'call/latest', name: 'bash', arguments: {}, blocks: [block(kind, { metadata })] }
+        : { message: 'Retry response', code: 'retry', retryable: true, blocks: [block(kind, { metadata })] }),
+    ]))
+    expect(nativeTurnFacts({ items: timeline.project().items })).toEqual({ model: 'latest-model', tokens: 84, costUsd: 0.012 })
+  })
+  it('does not interpret tool-result metadata as assistant usage', () => {
+    const timeline = new LiveTimeline()
+    timeline.apply(frame([entry('tool_result', 1, { call_id: 'call/result', content: 'ready', media_type: 'text/plain', status: 'success', blocks: [
+      block('tool_output', { metadata: { model: 'not-an-assistant', usage: { total: 999 }, wallTimeMs: 12 } }),
+    ] })]))
+    expect(nativeTurnFacts({ items: timeline.project().items })).toBeUndefined()
+  })
   it('reads deployed result metadata and retains negotiated views through SDK decoding', () => {
     const timeline = new LiveTimeline()
     timeline.apply(frame([

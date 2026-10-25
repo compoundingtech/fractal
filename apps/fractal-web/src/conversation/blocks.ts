@@ -16,7 +16,7 @@ export const blockFacts = (body: unknown): {
   if (!isRecordValue(body) || !isBlocks(body.blocks)) return {}
   const blocks = body.blocks
   const view = blocks.find(block => block.view !== undefined)?.view
-  const assistant = blocks.find(block => (block.kind === 'text' || block.kind === 'reasoning') && block.metadata !== undefined)?.metadata
+  const assistant = blocks.findLast(block => (block.kind === 'text' || block.kind === 'reasoning' || block.kind === 'tool_call' || block.kind === 'error') && block.metadata !== undefined)?.metadata
   return { blocks, ...(view === undefined ? {} : { view }),
     ...(assistant === undefined ? {} : { assistantMetadata: assistant }) }
 }

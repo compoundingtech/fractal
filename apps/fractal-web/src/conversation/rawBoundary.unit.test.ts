@@ -18,6 +18,21 @@ const hiddenEvent = (visible: object = {}) => [{ _tag: 'UnknownEvent', ...visibl
 const withoutHidden = <T extends { readonly _tag: string }>(items: ReadonlyArray<T>) => items.filter(item => item._tag !== 'UnknownEvent')
 
 describe('native closed transcript boundary', () => {
+  it.each(['internal', 'hidden-by-harness'])('keeps shared prose hidden when a malformed %s block is dropped', visibility => {
+    const blocks = [block('text', { visibility: 'visible' }), block('text', { id: 'block/hidden', kind: 23, visibility })]
+    const items = project(entry(blocks, { role: 'assistant', body: {
+      text: 'Visible text and INTERNAL_SHARED_TEXT', media_type: 'text/plain', blocks,
+    } }))
+    expect(items).toMatchObject([{ _tag: 'UnknownEvent', mixedContent: true }])
+    const turns = prepareTranscriptTurns(items, { showSystemEvents: false, firstTurnComplete: true })
+    expect(turns.flatMap(turn => turn.items).some(item => item._tag === 'Text')).toBe(false)
+  })
+  it('preserves native body-reference status and actionable errors without views', () => {
+    expect(project(entry([], { type: 'status', body: { status: 'completed', detail: 'Read finished', blocks: [block('status', { payload: { body_ref: true } })] } })))
+      .toMatchObject([{ _tag: 'Status', status: 'completed', detail: 'Read finished' }])
+    expect(project(entry([], { type: 'error', body: { message: 'Transcript unreadable', code: 'transcript_read', retryable: true, blocks: [block('error', { payload: { body_ref: true } })] } })))
+      .toMatchObject([{ _tag: 'Notice', kind: 'error', text: 'Transcript unreadable', detail: 'transcript_read', retryable: true }])
+  })
   it('keeps internal tool starts out of prose as an inspectable event', () => {
     expect(project(entry([block('status', { visibility: 'internal', view: { type: 'tool_start', call_id: 'call/a', tool: 'bash', started_at: '2026-10-12T12:00:00Z' } })]))).toMatchObject(hiddenEvent({ eventType: 'tool_start' }))
   })

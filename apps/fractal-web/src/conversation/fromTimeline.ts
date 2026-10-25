@@ -164,9 +164,14 @@ const hiddenNativeEvent = (entry: Exclude<Entry, { type: 'truncation' } | Unreco
   if (!('blocks' in entry.body)) return undefined
   const all = (entry.body as { readonly blocks?: ReadonlyArray<TimelineBlock> }).blocks
   const blocks = all?.filter((block) => block.kind !== 'source_record')
-  if (!blocks?.some(isHiddenBlock)) return undefined
-  const mixedContent = blocks.some((block) => !isHiddenBlock(block))
-  const primaryType = blocks[0]?.view?.type
+  const hiddenDropped = entry.type !== 'reasoning' && entry.degraded?.some(block => {
+    if (block._tag !== 'BlockDropped' || block.kind === 'source_record') return false
+    const raw = recordValue(block.raw)
+    return raw?.visibility === 'internal' || raw?.visibility === 'hidden-by-harness'
+  })
+  if (!blocks?.some(isHiddenBlock) && !hiddenDropped) return undefined
+  const mixedContent = blocks?.some((block) => !isHiddenBlock(block)) ?? false
+  const primaryType = blocks?.[0]?.view?.type
   return {
     _tag: 'UnknownEvent',
     id: entry.id,
@@ -355,6 +360,10 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
     if (meaning?._tag === 'Item') { if (!selected) { primary = meaning.item; selected = true }; continue }
     if (meaning?._tag === 'Tool') { if (!selected) { selected = true; fallback = entry.type !== 'content' }; continue }
     if (role === 'typed') {
+      if (block.view === undefined && ((entry.type === 'status' && block.kind === 'status') || (entry.type === 'error' && block.kind === 'error'))) {
+        if (!selected) { selected = true; fallback = true }
+        continue
+      }
       const parsed = entry.type === 'content' ? q101OmpEnvelopeStopgap({ id: entry.id, at, role: 'system', text }) : undefined
       if (parsed === undefined) marker('missing-view')
       else if (!selected) { primary = parsed; selected = true }

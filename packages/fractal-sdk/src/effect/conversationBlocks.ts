@@ -82,6 +82,7 @@ const decodeBlock = (raw: unknown): BlockDecode => {
 export const decodeConversationEntry = (raw: unknown): EntryDecode => {
   const body = isJson(raw) && isJson(raw['body']) ? raw['body'] : undefined
   const rawBlocks = body?.['blocks']
+  if (body !== undefined && 'blocks' in body && !Array.isArray(rawBlocks)) return { _tag: 'BadEntry', issue: 'body.blocks must be an array when present' }
   const lifted = !isJson(raw) || body === undefined || !('blocks' in body) ? raw : { ...raw, body: withoutBlocks(body) }
   const exit = decodeTimelineEntry(lifted)
   if (Exit.isFailure(exit)) return { _tag: 'BadEntry', issue: issueOf(exit) }

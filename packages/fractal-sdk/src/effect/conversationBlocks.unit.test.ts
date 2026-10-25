@@ -6,6 +6,12 @@ const rawEntry = (blocks: readonly unknown[]) => ({ id: 'timeline-entry/per-bloc
 const block = { id: 'block/a', kind: 'tool_output', source_type: 'omp', payload: {} }
 
 describe('per-block conversation decoding', () => {
+  it.each([{}, 'invalid', null])('rejects a present non-array blocks collection: %j', blocks => {
+    const raw = { ...rawEntry([]), body: { text: 'Must not become legacy prose', media_type: 'text/plain', blocks }, type: 'content' }
+    expect(decodeConversationEntry(raw)).toMatchObject({ _tag: 'BadEntry', issue: 'body.blocks must be an array when present' })
+    const chunk = decodeConversationChunk({ kind: 'conversation', collection: 'conversation', id: 'follow/a', session_id: 'session/a', replace: true, items: [raw] })
+    expect(chunk.entries[0]).toMatchObject({ type: 'unrecognized', raw })
+  })
   it('keeps a float wall_ms bash result without its invalid view', () => {
     const decoded = decodeConversationEntry(rawEntry([{ ...block, view: { type: 'bash', tool: 'bash', env_keys: [], wall_ms: 1.25 } }]))
     expect(decoded).toMatchObject({ _tag: 'Entry', entry: { type: 'tool_result', body: { blocks: [block] }, degraded: [{ _tag: 'ViewDropped', kind: 'tool_output', viewType: 'bash' }] } })
