@@ -187,6 +187,8 @@ with tempfile.TemporaryDirectory() as scratch:
     # main moved on with a web change; a Rust-only PR based on the older main stays Rust-only.
     git(repo, "checkout", "--quiet", "main")
     advanced = commit(repo, "main web", write=["pnpm-workspace.yaml"])
+    git(repo, "checkout", "--quiet", "-b", "rust-only-queue", advanced)
+    queued_rust = commit(repo, "queued Rust only", write=["src/main.rs"])
     for index, path in enumerate(("megarepo.kdl", "megarepo.lock", "flake.lock")):
         git(repo, "checkout", "--quiet", "-b", f"dependency-pin-{index}", base)
         pin = commit(repo, f"dependency pin {path}", write=[path])
@@ -203,7 +205,7 @@ with tempfile.TemporaryDirectory() as scratch:
     check("deletion executes", detect(repo, "pull_request", base, deleted), (0, "relevant=true"))
     check("root-only patterns do not match nested files", detect(repo, "pull_request", base, nested), (0, "relevant=false"))
     check("a web path containing a newline executes", detect(repo, "pull_request", base, newline), (0, "relevant=true"))
-    check("Rust-only merge group schedules no web execution", detect(repo, "merge_group", base, rust), (0, "relevant=false"))
+    check("Rust-only merge group schedules no web execution", detect(repo, "merge_group", advanced, queued_rust), (0, "relevant=false"))
     check("merge group excludes changes already on current main", detect(repo, "merge_group", base, advanced), (0, "relevant=false"))
     check("manual runs force execution", detect(repo, "workflow_dispatch"), (0, "relevant=true"))
     for event in ("pull_request", "merge_group", "push"):
