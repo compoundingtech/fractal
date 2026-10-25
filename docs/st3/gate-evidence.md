@@ -1431,6 +1431,13 @@ end and seconds, and the time it spent waiting in the build admission queue (the
 get a UTC stamp, and the waits are counted and added up per stage), in a table at the end. Each stage's output is also kept in
 `~/.cache/ci-local-logs/run-TIME-PID/STAGE.log` (`CI_LOCAL_LOG_DIR` names another place; the latest 10 runs stay), because the scratch home
 of the stages is removed afterwards.
+**The tree it signs is the tree the CI gate will judge.** Usually that is the pushed head. But when protected files moved on main since the branch
+point (or the branch is more than `HEAD_TREE_MAX_BEHIND` commits behind), the gate falls back to the MERGE tree (`head_tree=fallback:...` in its
+output), which a signature on the head does not cover. `st-test` asks the base's own `scripts/ci-evidence-gate` (`branch_point_verdict`, the function
+`choose_tree` calls: one rule, not a copy). When it says fallback, `st-test` makes the merge of the head with the base as a commit (`git merge-tree`,
+nothing is checked out in your clone), signs and tests THAT tree in its pool tree, and says so; if the branch does not merge cleanly it refuses and tells
+you to merge the base into the branch first. `st-test --status`, which the pre-push hook asks, judges the same tree, so a push is refused when the tree CI
+will judge is not covered even if the head tree is.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
 counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); unless `--check` names checks, every check of the skip
 policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
