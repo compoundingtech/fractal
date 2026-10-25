@@ -317,7 +317,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn reconcile_start_operation(
+    pub(super) fn reconcile_start_operation(
         &self,
         mut operation: RuntimeStartOperation,
         snapshot: &PassPtySnapshot,
@@ -342,12 +342,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             // The kernel lock, not a PID guess, establishes that no old launch worker holds
             // admission. Late producer ownership still needs exact operation provenance.
             if let Some(_lock) = self.store.try_runtime_start_lock(&operation.subject)? {
-                self.revoke_start(&operation.subject)?;
-                self.store.finish_runtime_start(
-                    &operation.id,
-                    &serde_json::json!({"error": "launch owner ended before its result"}),
-                )?;
-                self.start_changed(&operation.subject);
+                // A worker records its result before it releases the lock and leaves `live`, so
+                // this pass's earlier read can predate a launch that has since finished. Only a
+                // start that is still unfinished under the lock has lost its owner.
+                let unfinished = self
+                    .store
+                    .pending_runtime_starts()?
+                    .into_iter()
+                    .any(|fresh| fresh.id == operation.id && !fresh.finished);
+                if unfinished {
+                    self.revoke_start(&operation.subject)?;
+                    self.store.finish_runtime_start(
+                        &operation.id,
+                        &serde_json::json!({"error": "launch owner ended before its result"}),
+                    )?;
+                    self.start_changed(&operation.subject);
+                }
             }
             return Ok(());
         }

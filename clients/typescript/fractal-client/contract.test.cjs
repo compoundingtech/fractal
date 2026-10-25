@@ -510,6 +510,53 @@ test('preserves versioned cursor gap errors', async () => {
     });
 });
 
+test('non-JSON HTTP rejections expose status through ClientError', async () => {
+    for (const [body, status, statusText, contentType] of [
+        ['length limit exceeded', 413, 'Payload Too Large', 'text/plain'],
+        ['<html>Bad Gateway</html>', 502, 'Bad Gateway', 'text/html'],
+        ['', 403, '', 'text/plain'],
+        ['{invalid', 500, 'Internal Server Error', 'application/json'],
+    ]) {
+        const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () =>
+            new Response(body, { status, statusText, headers: { 'Content-Type': contentType, 'Retry-After': '2' } }),
+        });
+        await assert.rejects(client.uploadBlob(new Uint8Array([1]), 'image/png'), error => {
+            assert.ok(error instanceof ClientError);
+            assert.equal(error.status, status);
+            assert.equal(error.response.code, 'http-error');
+            assert.equal(error.message, `HTTP ${status}${statusText ? ` ${statusText}` : ''}`);
+            assert.equal(error.response.retryable, false);
+            assert.equal(error.retryAfterMs, 2000);
+            return true;
+        });
+    }
+});
+
+test('structured HTTP errors keep their complete server envelope', async () => {
+    const wire = { ...cursorGapFixture, code: 'blob-too-large', message: 'Image exceeds 10 MiB', details: { max_bytes: 10485760 } };
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () =>
+        new Response(JSON.stringify(wire), { status: 413, headers: { 'Content-Type': 'text/plain', 'Retry-After': '3' } }),
+    });
+    await assert.rejects(client.uploadBlob(new Uint8Array([1]), 'image/png'), error => {
+        assert.ok(error instanceof ClientError);
+        assert.deepEqual(error.response, wire);
+        assert.equal(error.status, 413);
+        assert.equal(error.retryAfterMs, 3000);
+        return true;
+    });
+});
+
+test('successful malformed JSON and failed body reads are not HTTP rejections', async () => {
+    const malformed = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => new Response('not JSON') });
+    await assert.rejects(malformed.uploadBlob(new Uint8Array([1]), 'image/png'), SyntaxError);
+
+    const failure = new TypeError('response body interrupted');
+    const interrupted = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () =>
+        new Response(new ReadableStream({ start(controller) { controller.error(failure); } }), { status: 413 }),
+    });
+    await assert.rejects(interrupted.uploadBlob(new Uint8Array([1]), 'image/png'), error => error === failure);
+});
+
 test('completes pairing with either canonical or bare pairing ID', async () => {
     const calls = [];
     const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {

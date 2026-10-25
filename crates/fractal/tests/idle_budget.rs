@@ -566,7 +566,20 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
     std::fs::create_dir_all(&workspace).unwrap();
     // A file-backed store, as a member runs: its reads and writes cost what they cost there.
     let store = Arc::new(Store::open(&root.join("claims.sqlite3"), NODE).unwrap());
+    // Seeding is about 1,450 single-claim commits, and with synchronous=FULL each waited on
+    // an fsync: 21 s before the daemon started. The window below measures the daemon at the
+    // member's own setting, so only the seeding skips the fsync.
+    let synchronous = |mode: i64| {
+        let connection = store.connection.write();
+        let before: i64 = connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        connection.pragma_update(None, "synchronous", mode).unwrap();
+        before
+    };
+    let member = synchronous(0);
     seed(&store, &workspace);
+    synchronous(member);
 
     let notify = Arc::new(Notify::new());
     let event_notify = watch::channel(0_u64).0;

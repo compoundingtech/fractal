@@ -26,6 +26,237 @@ use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
 
+fn legacy_repair_fixture(store: &Store) -> Value {
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-haf973508711e owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "INSERT INTO local_runtime_starts(id,subject,owner,body,revoked_by,finished,result,applied,cleanup_verified,dispatched,receipted)
+         VALUES('legacy-op','agent/example-legacy','worker-owner',?1,'stop-request',1,?2,1,0,1,1)",
+        params![
+            json!({"member":{"host":"node","runtime_id":"legacy-runtime","terminal":true,
+                    "environment":{"PRIVATE_TOKEN":"private-launch-secret"}},
+                "launch_member":{"environment":{"PRIVATE_TOKEN":"private-launch-secret"}},
+                "desired_token":"legacy-desired","selected_token":"legacy-selected"}).to_string(),
+            json!({"error":"legacy start returned without closure proof",
+                "private_result":"private-result-secret"}).to_string(),
+        ],
+    ).unwrap();
+    // Internal-only fixture: the native layer owns the physical-fact schema.
+    json!({"operation_id":"legacy-op","runtime_id":"legacy-runtime","legacy":true,
+        "native_fixture":{"closed":true,"capture":"first"}})
+}
+
+#[test]
+fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "node").unwrap();
+    let evidence = legacy_repair_fixture(&store);
+    let plan = store.operational_repair_plan_with_legacy_starts(std::slice::from_ref(&evidence)).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].class, "revoked-legacy-runtime-start");
+    assert_eq!(plan.items[0].details["native_evidence"], evidence);
+    assert_eq!(plan.items[0].details["operation"]["revoked_by"], "stop-request");
+    assert!(plan.items[0].details["operation_fence"].is_string());
+    assert!(plan.items[0].details["operation"].get("body").is_none());
+    assert!(plan.items[0].details["operation"].get("result").is_none());
+    let public_plan = serde_json::to_string(&plan).unwrap();
+    for private in ["environment", "private-launch-secret", "private-result-secret"] {
+        assert!(!public_plan.contains(private), "repair plan exposed {private}");
+    }
+
+    let mut changed = evidence.clone();
+    changed["native_fixture"]["capture"] = json!("second");
+    for fresh in [vec![], vec![changed]] {
+        assert_eq!(
+            store.apply_operational_repair_with_legacy_starts(&plan.token, &fresh).unwrap_err().code,
+            "stale-repair-plan",
+        );
+    }
+    let wrong_token = format!("orpv0:{}", "0".repeat(64));
+    assert_eq!(
+        store.apply_operational_repair_with_legacy_starts(&wrong_token, std::slice::from_ref(&evidence))
+            .unwrap_err().code,
+        "stale-repair-plan",
+    );
+    let result = store.apply_operational_repair_with_legacy_starts(
+        &plan.token, std::slice::from_ref(&evidence),
+    ).unwrap();
+    assert_eq!(result.applied, 1);
+    assert_eq!(result.affected_subjects, vec!["agent/example-legacy"]);
+    let receipt_id = result.receipt_claim_id.unwrap();
+    drop(store);
+
+    let reopened = Store::open(&path, "node").unwrap();
+    let connection = reopened.readers.get();
+    let operation = connection.query_row(
+        "SELECT * FROM local_runtime_starts WHERE id='legacy-op'", [], runtime_starts::read,
+    ).unwrap();
+    assert!(operation.cleanup_verified);
+    let closed = operation.result.unwrap();
+    assert_eq!(closed["producer_closed"], true);
+    assert_eq!(closed["verification"], "producer-closed");
+    assert_eq!(closed["closure_proof"]["witness"]["native_evidence"], evidence);
+    assert_eq!(closed["closure_proof_id"], json!(format!(
+        "start-proof/{}", canonical_hash(&closed["closure_proof"]).unwrap(),
+    )));
+    let receipt: String = connection.query_row(
+        "SELECT body FROM claims WHERE id=?1 AND kind='repair.applied'",
+        [&receipt_id], |row| row.get(0),
+    ).unwrap();
+    let receipt: Value = serde_json::from_str(&receipt).unwrap();
+    assert!(receipt["fields"].get("legacy_runtime_start_closures").is_none());
+    let closures: Value = serde_json::from_str(
+        receipt["fields"]["reason"].as_str().unwrap().split_once("; legacy runtime start closures: ").unwrap().1,
+    ).unwrap();
+    assert_eq!(closures[0]["operation_id"], "legacy-op");
+    assert_eq!(closures[0]["native_evidence"], evidence);
+    assert_eq!(receipt["fields"].as_object().unwrap().len(), 4);
+    assert!(reopened.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty());
+    assert!(reopened.apply_operational_repair(&plan.token).unwrap().already_applied);
+}
+
+#[test]
+fn legacy_runtime_repair_rejects_ineligible_local_rows_and_evidence() {
+    for (column, value) in [
+        ("revoked_by", Value::Null),
+        ("finished", json!(0)),
+        ("cleanup_verified", json!(1)),
+        ("applied", json!(0)),
+        ("body", json!({"member":{"host":"node","runtime_id":"legacy-runtime","terminal":false}})),
+        ("body", json!({"member":{"host":"other","runtime_id":"legacy-runtime","terminal":true}})),
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let evidence = legacy_repair_fixture(&store);
+        let sql_value = match value {
+            Value::Null => rusqlite::types::Value::Null,
+            Value::Number(n) => rusqlite::types::Value::Integer(n.as_i64().unwrap()),
+            value => rusqlite::types::Value::Text(value.to_string()),
+        };
+        store.connection.write().execute(
+            &format!(/* sqlite-large-value: allow-for-now lv-h936ac0b978c0 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET {column}=?1 WHERE id='legacy-op'"),
+            [sql_value],
+        ).unwrap();
+        assert!(store.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty(),
+            "accepted ineligible {column}");
+    }
+    for (field, value) in [
+        ("operation_id", json!("wrong-operation")),
+        ("runtime_id", json!("wrong-runtime")),
+        ("legacy", json!(false)),
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let mut evidence = legacy_repair_fixture(&store);
+        evidence[field] = value;
+        assert!(store.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty());
+    }
+}
+
+#[test]
+fn legacy_runtime_repair_token_binds_every_local_operation_field() {
+    for update in [
+        /* sqlite-large-value: allow-for-now lv-hf155f0a6aecc owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET revoked_by='another-stop'",
+        /* sqlite-large-value: allow-for-now lv-hf8a0350b3acd owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET result='{\"error\":\"changed\"}'",
+        /* sqlite-large-value: allow-for-now lv-hc656b9055239 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET owner='another-owner'",
+        /* sqlite-large-value: allow-for-now lv-hb359d984f1b4 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET receipted=0",
+        /* sqlite-large-value: allow-for-now lv-h422c075ced29 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET dispatched=0",
+        /* sqlite-large-value: allow-for-now lv-hff01ab86b211 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET body=json_set(body,'$.desired_token','changed')",
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let evidence = legacy_repair_fixture(&store);
+        let plan = store.operational_repair_plan_with_legacy_starts(std::slice::from_ref(&evidence)).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb1926b4fb61f owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ update, []).unwrap();
+        assert_eq!(store.apply_operational_repair_with_legacy_starts(
+            &plan.token, &[evidence],
+        ).unwrap_err().code, "stale-repair-plan");
+    }
+}
+
+#[test]
+fn filtered_legacy_runtime_repair_token_never_applies_unselected_items() {
+    let store = Store::open_memory("node").unwrap();
+    let selected = legacy_repair_fixture(&store);
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hfe21be49c4b0 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "INSERT INTO local_runtime_starts
+         SELECT 'unselected-op','agent/example-unselected',owner,
+           json_set(body,'$.member.runtime_id','unselected-runtime'),
+           revoked_by,finished,result,applied,cleanup_verified,dispatched,receipted
+         FROM local_runtime_starts WHERE id='legacy-op'", [],
+    ).unwrap();
+    let mut unselected = selected.clone();
+    unselected["operation_id"] = json!("unselected-op");
+    unselected["runtime_id"] = json!("unselected-runtime");
+    let evidence = vec![selected, unselected];
+    let subjects = vec!["agent/example-legacy".to_owned()];
+    let classes = vec!["revoked-legacy-runtime-start".to_owned()];
+    let all = store.operational_repair_plan_with_legacy_starts(&evidence).unwrap();
+    assert_eq!(all.items.len(), 2);
+    let filtered = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &subjects, &classes,
+    ).unwrap();
+    assert_eq!(filtered.items.len(), 1);
+    assert_ne!(filtered.token, all.token);
+    assert_eq!(Store::operational_repair_token_filters(&filtered.token).unwrap(),
+        (subjects.clone(), classes.clone()));
+    let repeated = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &[subjects[0].clone(), subjects[0].clone()], &classes,
+    ).unwrap();
+    assert_eq!(filtered.token, repeated.token);
+
+    // Reusing the digest while widening/removing its embedded filter cannot
+    // turn the approval into an unfiltered mutation.
+    let digest = filtered.token.split(':').nth(1).unwrap();
+    let widened = OperationalRepairFilter::new(&[], &classes);
+    let tampered = format!("orpv0:{digest}:{}", hex::encode(serde_json::to_vec(&widened).unwrap()));
+    for token in [format!("orpv0:{digest}"), tampered] {
+        assert_eq!(store.apply_operational_repair_with_legacy_starts(&token, &evidence)
+            .unwrap_err().code, "stale-repair-plan");
+    }
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h316e34fd2d7a owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET result='{\"error\":\"unselected changed\"}' WHERE id='unselected-op'",
+        [],
+    ).unwrap();
+    let result = store.apply_operational_repair_with_legacy_starts(&filtered.token, &evidence).unwrap();
+    assert_eq!(result.applied, 1);
+    let connection = store.readers.get();
+    let closed: bool = connection.query_row(
+        "SELECT cleanup_verified FROM local_runtime_starts WHERE id='legacy-op'", [], |row| row.get(0),
+    ).unwrap();
+    let untouched: bool = connection.query_row(
+        "SELECT cleanup_verified FROM local_runtime_starts WHERE id='unselected-op'", [], |row| row.get(0),
+    ).unwrap();
+    assert!(closed);
+    assert!(!untouched);
+}
+
+#[test]
+fn filtered_legacy_runtime_repair_refuses_changed_selected_set_and_class() {
+    let store = Store::open_memory("node").unwrap();
+    let evidence = vec![legacy_repair_fixture(&store)];
+    let subjects = vec!["agent/example-legacy".to_owned()];
+    let classes = vec!["expired-claim".to_owned()];
+    let empty = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &subjects, &classes,
+    ).unwrap();
+    assert!(empty.items.is_empty());
+    let selected = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &subjects, &["revoked-legacy-runtime-start".into()],
+    ).unwrap();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h1dbcb8c5613a owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE local_runtime_starts SET revoked_by='changed-stop' WHERE id='legacy-op'", [],
+    ).unwrap();
+    assert_eq!(store.apply_operational_repair_with_legacy_starts(&selected.token, &evidence)
+        .unwrap_err().code, "stale-repair-plan");
+}
+
 mod resource_pending_receive_tests {
     
 }
@@ -3924,6 +4155,122 @@ fn one_invalid_or_unknown_claim_does_not_block_its_valid_sibling_or_later_envelo
         );
         assert_eq!(target.replica_records(true).unwrap().len(), 1);
     }
+}
+
+#[test]
+fn deploy_reader_old_peer_quarantines_all_kinds_without_changing_projection() {
+    let current = Store::open_memory("host-a").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("deploy.sqlite");
+    let older = Store::open(&path, "host-b").unwrap();
+    let mut registry = fractal_schema::registry().clone();
+    for kind in fractal_schema::deploy::KINDS {
+        assert!(registry.claims.remove(kind).is_some());
+    }
+    older.set_claim_registry(registry);
+    let observe = |status: &str| {
+        current.append_claim(&ClaimInput {
+            subject: "host/host-a".into(),
+            kind: "transport.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([("status".into(), json!(status))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap()
+    };
+    observe("up");
+    receive_and_project(
+        &older, "host-a", &exchange_from(&current, &ReplicationInventory::default()),
+    );
+    let before_digest = graph_digest_of(&older);
+    let before_subjects = serde_json::to_value(older.status(None).unwrap().subjects).unwrap();
+    FULL_REPLAYS.with(|count| count.set(0));
+    let examples = [
+        json!({
+            "version": 1, "host": "host-a", "actor": "agent/example-executor",
+            "operation": "install", "trainId": "train/example",
+            "old": {"packagePath": "/nix/store/old-example", "narHash": "sha256-example-old", "commit": "a".repeat(40)},
+            "new": {"packagePath": "/nix/store/new-example", "narHash": "sha256-example-new", "commit": "b".repeat(40)},
+            "issuedAt": "2026-10-24T10:00:00Z", "expiresAt": "2026-10-24T14:00:00Z",
+            "failureRestore": false, "previewDigest": "example-preview-digest",
+            "compatSignoffId": "example-signoff",
+            "combined": {"stopId": "example-stop", "planId": "example-plan"}
+        }),
+        json!({"version": 1, "goId": "example-go"}),
+        json!({"version": 1, "goId": "example-go", "operation": "install", "result": "succeeded"}),
+        json!({"version": 1, "stopId": "example-stop", "scope": "installer-entry", "hosts": ["host-a", "host-b"], "liftCondition": "example release"}),
+        json!({"version": 1, "stopId": "example-stop", "releaseGoId": "example-release"}),
+        json!({"version": 1, "trainId": "train/example", "oldCommit": "a".repeat(40), "newCommit": "b".repeat(40)}),
+    ];
+    let claims = fractal_schema::deploy::KINDS.into_iter().zip(examples).map(|(kind, fields)| {
+        current.append_claim(&ClaimInput {
+            subject: "resource/deploy/example".into(), kind: kind.into(),
+            actor: Some("agent/example-executor".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    }).collect::<Vec<_>>();
+    let exchange = exchange_from(&current, &older.replication_inventory().unwrap());
+    assert_eq!(exchange.envelopes.len(), 6);
+    let admission = receive_and_project(&older, "host-a", &exchange);
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (0, 6, 0));
+    assert_eq!(graph_digest_of(&older), before_digest);
+    assert_eq!(serde_json::to_value(older.status(None).unwrap().subjects).unwrap(), before_subjects);
+    let records = older.replica_records(true).unwrap();
+    assert_eq!(records.len(), 6);
+    let raw = claims.iter().map(|claim| {
+        let record = records.iter().find(|record| record.claim_id.as_deref() == Some(claim.id.as_str())).unwrap();
+        assert_eq!(record.state, "unknown");
+        assert_eq!(record.error_code.as_deref(), Some("unknown-claim-kind"));
+        assert!(older.claims_for(&claim.subject, Some(&claim.kind)).unwrap().is_empty());
+        older.readers.get().query_row(
+            "SELECT raw FROM replica_records WHERE claim_id=?1", [&claim.id],
+            |row| row.get::<_, Vec<u8>>(0),
+        ).unwrap()
+    }).collect::<Vec<_>>();
+    assert!(raw.iter().all(|bytes| !bytes.is_empty()));
+    let later = observe("down");
+    let admission = receive_and_project(
+        &older, "host-a", &exchange_from(&current, &older.replication_inventory().unwrap()),
+    );
+    // Backlog validation retries retained unknowns as well as the new known record.
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (1, 6, 0));
+    assert_eq!(older.latest_claim("host/host-a", Some("transport.observed")).unwrap().unwrap().id, later.id);
+    assert_eq!(older.replica_records(true).unwrap().len(), 6);
+    assert!(!older.replication_projection_needs_recovery().unwrap());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    drop(older);
+
+    // Upgrading retries the quarantined records, without rewriting their bytes
+    // or losing the unrelated known claim that followed them in the writer chain.
+    let upgraded = Store::open(&path, "host-b").unwrap();
+    let admission = upgraded.validate_replication_backlog().unwrap();
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (6, 0, 0));
+    upgraded.project_replication_backlog().unwrap();
+    for (claim, original_raw) in claims.iter().zip(raw) {
+        let retained = upgraded.claims_for(&claim.subject, Some(&claim.kind)).unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id, claim.id);
+        assert_eq!(retained[0].body, claim.body);
+        let retried_raw = upgraded.readers.get().query_row(
+            "SELECT raw FROM replica_records WHERE claim_id=?1", [&claim.id],
+            |row| row.get::<_, Vec<u8>>(0),
+        ).unwrap();
+        assert_eq!(retried_raw, original_raw);
+    }
+    assert!(upgraded.replica_records(true).unwrap().is_empty());
+    assert_eq!(upgraded.latest_claim("host/host-a", Some("transport.observed")).unwrap().unwrap().id, later.id);
+    let relay = exchange_from(&upgraded, &ReplicationInventory::default());
+    for original in exchange.envelopes {
+        let retained = relay.envelopes.iter().find(|envelope| {
+            envelope.writer == original.writer && envelope.sequence == original.sequence
+        }).unwrap();
+        assert_eq!(retained.hash, original.hash);
+        assert_eq!(retained.payload.bytes().unwrap(), original.payload.bytes().unwrap());
+    }
+    assert!(!upgraded.replication_projection_needs_recovery().unwrap());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
 }
 
 #[test]
@@ -9634,6 +9981,61 @@ fn a_codex_permission_prompt_is_answered_and_records_its_driver() {
             .code,
         "stale-fence"
     );
+}
+
+#[test]
+fn runtime_status_generation_includes_authored_work_activity() {
+    for kind in ["work.claimed", "work.progress"] {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/node.worker";
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running", "runtime_id":"node.worker",
+                "terminal":true, "incarnation_id":"current"})),
+            ("harness.observed", json!({"state":"idle", "driver":"codex",
+                "incarnation_id":"current"})),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let before_cut = store.index().unwrap();
+        let before = store.status_for_claim_kind_at(
+            "runtime.observed", Some(before_cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        assert_eq!(before.subjects[0].harness.as_ref().unwrap().state, "idle");
+        let work = {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            let work = append_claim_tx(
+                &tx, "node", "step-run/activity/work", kind, Some(subject),
+                &json!({"fields":{"status":"working", "attempt":1, "readiness_epoch":1,
+                    "claimant":subject, "claim_incarnation":"current",
+                    "claim_expires_at_unix_ms":now_ms().saturating_add(60_000)}}),
+                &[], None,
+            ).unwrap();
+            tx.commit().unwrap();
+            work
+        };
+        let cut = store.index().unwrap();
+        let warm = store.status_for_claim_kind_at(
+            "runtime.observed", Some(cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        *store.smalltalk.subject_cache.lock().unwrap_or_else(PoisonError::into_inner) = SubjectCache::default();
+        let cold = store.status_for_claim_kind_at(
+            "runtime.observed", Some(cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        let harness = cold.subjects[0].harness.as_ref().unwrap();
+        assert_eq!(harness.state, "working", "{kind}");
+        assert_eq!(harness.claim, work.id, "{kind}");
+        assert_eq!(serde_json::to_value(warm).unwrap(), serde_json::to_value(cold).unwrap(),
+            "a warm runtime reduction must observe authored {kind}");
+        let historical = store.status_for_claim_kind_at(
+            "runtime.observed", Some(before_cut), false, ClaimsReduction::Runtime,
+        ).unwrap();
+        assert_eq!(serde_json::to_value(historical).unwrap(), serde_json::to_value(before).unwrap());
+    }
 }
 
 #[test]
