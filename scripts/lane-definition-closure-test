@@ -299,6 +299,12 @@ class CommandLine(Fixture):
         done = run('--check')
         self.assertEqual(done.returncode, 1)
         self.assertIn('kept: 1 file(s) the lane executes are not in its definition_paths', done.stdout)
+        (self.root / '.github/baseline.json').unlink()
+        subprocess.run(['git', '-C', str(self.root), 'add', '-A'], check=True, env=GIT_ENV)
+        self.lanes(['.github/baseline.json', 'scripts/a'], kept=['scripts'])
+        done = run('--check')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('demo: verdict data .github/baseline.json is not a tracked file', done.stdout)
 
 
 class CommittedLanes(unittest.TestCase):
@@ -325,11 +331,12 @@ class CommittedLanes(unittest.TestCase):
             self.assertIn(f'--check {lane}', (ROOT / runner).read_text(), f'{runner} no longer runs in a sparse copy')
             for path in sorted(ldc.VERDICT_DATA.get(lane, {})):
                 self.assertTrue(ldc.covered(path, inputs), path)
+        # This runs in ci-script-tests' sparse copy, which holds only that check's inputs: a verdict-data file outside them is absent
+        # here, and the whole-tree `--check` in genie-freshness holds it to existing instead.
+        inputs = ldc.sparse_inputs(repo, 'ci-script-tests')
         for lane, paths in sorted(ldc.VERDICT_DATA.items()):
-            for path in sorted(paths):  # the sparse copy holds only ci-script-tests' inputs; the whole-tree --check sees the rest
-                in_copy = ldc.covered(path, ldc.sparse_inputs(repo, 'ci-script-tests')) or (ROOT / 'scripts/ci-genie-freshness').exists()
-                if (ROOT / '.git').exists() or in_copy and (ROOT / path).exists():
-                    self.assertTrue((ROOT / path).is_file(), f'VERDICT_DATA {lane}: {path} does not exist')
+            for path in sorted(p for p in paths if ldc.covered(p, inputs)):
+                self.assertIn(path, repo.files, f'VERDICT_DATA {lane}: {path} is not a tracked file')
         for path in sorted(ldc.NOT_FOLLOWED | set(ldc.NOT_READ)):
             self.assertTrue(path.startswith('scripts/') and (ROOT / path).is_file(), path)  # scripts/ is in the sparse copy too
         for referrer, paths in sorted(ldc.NOT_READ.items()):

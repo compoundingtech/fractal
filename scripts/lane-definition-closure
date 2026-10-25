@@ -803,8 +803,11 @@ def main(argv):
             declared = lanes[name]['definition_paths']
             missing = [p for p in closure.paths() if not covered(p, declared)]
             missing_verdict = [p for p in sorted(verdict) if not covered(p, declared)]
-            if missing or missing_verdict:
+            absent = [p for p in sorted(verdict) if p not in repo.files]
+            if missing or missing_verdict or absent:
                 failed = True
+            for path in absent:
+                print(f'{name}: verdict data {path} is not a tracked file (drop it from VERDICT_DATA or fix the path)')
             if missing:
                 print(f'{name}: {len(missing)} file(s) the lane executes are not in its definition_paths:')
                 for path in missing:
@@ -813,7 +816,7 @@ def main(argv):
                 print(f'{name}: {len(missing_verdict)} verdict-data file(s) are not in its definition_paths:')
                 for path in missing_verdict:
                     print(f'  {path}   ({verdict[path]})')
-            if not missing and not missing_verdict:
+            if not missing and not missing_verdict and not absent:
                 print(f'{name}: the {len(closure.paths())} path(s) it executes and its {len(verdict)} verdict-data file(s) '
                       'are covered by its definition_paths')
         elif args.write:
