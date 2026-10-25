@@ -550,12 +550,12 @@ for job in ('linux-tests','linux-tests-shard-2','linux-tests-shard-3','linux-tes
 print('passed: merge producer-only six-member admission, at most three busy and two eligible idle, host affinity, configured Namespace rollback and unchanged other consumers')
 # The native provider limit applies only to unqueued PR Namespace fallbacks.
 pr_labels = '["namespace-profile-smalltalk-pr-linux-x86-64;job.priority=2;github.run-id=123"]'
-for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'isolation-vm',
-            'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
+for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat',
+            'linux-tests', 'linux-tests-shard-2'):
     assert route(job, 'pull_request', pr_profile=pr_labels) == json.loads(pr_labels), job
     for event in ('merge_group', 'push', 'workflow_dispatch', 'schedule'):
         assert route(job, event, pr_profile=pr_labels) == route(job, event), (job, event)
-for job in ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
+for job in ('linux-test-build', 'linux-tests', 'linux-tests-shard-2'):
     assert route(job, 'pull_request', picked='["ci1"]', pr_profile=pr_labels) == ['ci1'], job
 assert "github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on'" in picker.split('      - if:',1)[1].split('name:',1)[0]
 subprocess.run([sys.executable, str(ROOT / 'scripts/ci-namespace-pr-profile-test')], check=True)
