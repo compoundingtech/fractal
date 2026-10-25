@@ -1324,7 +1324,7 @@ class CommittedPolicy(unittest.TestCase):
             for path in rules['definition_paths']:
                 target = f.repo / path / 'file' if (ROOT / path).is_dir() else f.repo / path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(f'{path}\n')
+                target.write_text('# fixture\n' if target.name == '.gitignore' else f'{path}\n')  # a .gitignore naming itself is not added
             f.git('add', '-A')
             f.git('commit', '-q', '--allow-empty', '-m', f'base {lane}')
             base_tree = f.git('rev-parse', 'HEAD^{tree}')
