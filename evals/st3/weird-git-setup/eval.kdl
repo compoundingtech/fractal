@@ -71,7 +71,7 @@ version 2
         }
         step "report-requester" {
           title "The requester receives the verified worktree result"
-          goal "Send person/eval-requester exactly one Small Talk message. Include the revision, branch, linked-worktree evidence, and green test command. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/final-report resource.observed --actor agent/${ST_MISSION_RUN}/wg.dev --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send person/eval-requester exactly one Fractal message. Include the revision, branch, linked-worktree evidence, and green test command. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/final-report resource.observed --actor agent/${ST_MISSION_RUN}/wg.dev --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "publish-feature-revision" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/final-report" { kind "custom.st3.message-receipt"; state "published" } }
         }

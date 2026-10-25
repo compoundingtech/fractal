@@ -1,4 +1,4 @@
-//! The part of `api` that moved up from st3-api.
+//! The part of `api` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
@@ -134,8 +134,8 @@ pub use fractal_api_core::api::{response_envelope, router_with, serve_reserved_u
 pub use fractal_api_core::api::{signal_message_changed, signal_visible_change, slo_rows, start_agent_roster, start_native_session_discovery, start_operation_report, unix_reservation_path, work};
 pub mod client_v0;
 
-/// This crate's route family. st3-daemon serves it beside every other family (its `api::router`);
-/// this crate's router is st3-api's routes and the client-v0 routes, for its own tests.
+/// This crate's route family. fractal-daemon serves it beside every other family (its `api::router`);
+/// this crate's router is fractal-api-core's routes and the client-v0 routes, for its own tests.
 const ROUTE_FAMILIES: &[RouteFamily] = &[client_v0::routes];
 
 /// Build routes only. The owner starts background publications with

@@ -82,7 +82,7 @@ def binaries(app):
 
 
 # The terminal client's speech helper (apps/macos/listen), when built: its own app inside SmallTalk.app, so the
-# microphone prompt names Small Talk with the helper's usage strings.
+# microphone prompt names Fractal with the helper's usage strings.
 HELPER = 'StListen.app'
 
 
@@ -358,7 +358,7 @@ def install(app, home, job, stage_fractal=False):
         raise RuntimeError('refusing to remove directory: ' + str(retired))
     swap(app, home, job, 'install')
     links = dict(binaries(fixed(home)))
-    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     links['st'] = Path('st3')
     # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
     for name, path in links.items():

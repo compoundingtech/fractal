@@ -15,7 +15,7 @@ const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-vers
 // the tag trigger above, and a tag made with the workflow token starts no workflow in any case.
 export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
-  "name": "Smalltalk tag release",
+  "name": "Fractal tag release",
   "on": {
     "push": {
       "branches": [
@@ -66,7 +66,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
     "actions": "read"
   },
   "concurrency": {
-    "group": "smalltalk-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
+    "group": "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
   },
   "jobs": {
@@ -242,7 +242,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       "timeout-minutes": 15,
       // One edge at a time; a superseded pending run is dropped, and the script never moves edge backwards.
       "concurrency": {
-        "group": "smalltalk-edge-publish",
+        "group": "fractal-edge-publish",
         "cancel-in-progress": false
       },
       "permissions": {

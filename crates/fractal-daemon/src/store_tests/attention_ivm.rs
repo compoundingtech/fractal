@@ -1,4 +1,4 @@
-//! Attention IVM tests that read through the API; they live in st3-daemon because the API does.
+//! Attention IVM tests that read through the API; they live in fractal-daemon because the API does.
 
 #![allow(unused_imports)]
 
