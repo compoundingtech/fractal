@@ -118,6 +118,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
     ),
     (
+        "POST /v1/internal/fleet/pairing-admission",
+        "explicit one-use fleet admission proxies the bounded signed request to the live worker; uses the existing invite redemption and verified membership fold, not a polling read path",
+    ),
+    (
         "GET /v1/internal/fleet/admission-residue",
         "the scan doctor's fleet-admission check runs inside GET /v1/doctor, which is measured; st fleet wait reads it once as it ends",
     ),

@@ -18,8 +18,8 @@ two-capture recovery: a client can mark or clear the retained window on the
 first frame before the second arrives, and the two captures add read and
 delivery work to a gap recovery. Some clients choose to resubscribe on
 `resync`, adding another first snapshot: the generated Swift collection streams
-in `clients/swift/St3Client/Sources/St3Client/Client.swift` send the subscribe
-command again on `resync`; `apps/fractal-web/packages/st3-sdk/src/effect/mod.ts`
+in `clients/swift/FractalClient/Sources/FractalClient/Client.swift` send the subscribe
+command again on `resync`; `apps/fractal-web/packages/fractal-sdk/src/effect/mod.ts`
 emits `Stale` and schedules retry, and `apps/ios/feed.ts` schedules a window
 retry. These are current client-path evidence, not a measured production SLO
 regression. This proposal does not claim to fix
