@@ -1126,6 +1126,60 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 3, out + err)  # a web change: the lane runs, and nothing covers it yet
         self.assertRegex(out, r'fractal-web +not covered ')
 
+    def web_base(self):
+        """The base decides web relevance (the real change-detection script) and the policy requires and orders kit_inputs, as the committed one."""
+        (self.work / 'scripts').mkdir(exist_ok=True)
+        shutil.copy(ROOT / 'scripts/ci-fractal-web-changes', self.work / 'scripts/ci-fractal-web-changes')
+        policy = json.loads(json.dumps(POLICY))
+        demo = policy['checks']['demo']
+        web = json.loads(json.dumps(demo))
+        wrapper = web['kinds']['wrapper']
+        wrapper['required_inputs'] = sorted(set(wrapper['required_inputs']) | set(st_test.WEB_INPUTS))
+        wrapper['input_order'] = {'kit_inputs': ['true', 'false']}
+        policy['checks']['fractal-web'] = web
+        git(self.work, 'checkout', '-q', 'main')
+        (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'the base requires and orders kit_inputs for fractal-web')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        git(self.work, 'merge', '-q', 'main')
+        st_test.LOCAL['fractal-web'] = ['sh', '-c', 'echo ran']
+
+    def test_a_signed_fractal_web_tree_reads_as_covered_through_status_with_the_run_input_the_gate_passes(self):
+        self.web_base()
+        (self.work / 'apps/fractal-web/src/web').mkdir(parents=True)
+        self.commit('apps/fractal-web/src/web/AgentActions.tsx', 'export const kit = 1\n')  # a kit input: kit_inputs=true
+        code, out, err = self.run_st_test('--check', 'fractal-web', '--status')
+        self.assertEqual(code, 3, out + err)
+        self.assertRegex(out, r'fractal-web +not covered ')
+        code, out, err = self.run_st_test('--check', 'fractal-web')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'fractal-web +passed')
+        code, out, err = self.run_st_test('--check', 'fractal-web', '--status')
+        self.assertEqual(code, 0, out + err)  # was 'not covered: no_run_input' while the verifier was never told the run's kit_inputs
+        self.assertRegex(out, r'fractal-web +covered ')
+        code, out, err = self.run_st_test('--check', 'fractal-web')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'fractal-web +already signed')
+
+    def test_the_kit_inputs_a_status_passes_follow_the_diff_not_a_constant(self):
+        self.web_base()
+        self.commit('crates.txt', 'no web input')
+        self.assertEqual(st_test.run_input_arguments('demo', 'origin/main'), [])  # other checks have none
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            self.assertEqual(st_test.run_input_arguments('fractal-web', 'origin/main'), ['--run-input', 'kit_inputs=false'])
+            (self.work / 'apps/fractal-web').mkdir(parents=True, exist_ok=True)
+            self.commit('apps/fractal-web/page.ts', 'export const page = 1\n')  # web-relevant but not a kit input
+            self.assertEqual(st_test.run_input_arguments('fractal-web', 'origin/main'), ['--run-input', 'kit_inputs=false'])
+            (self.work / 'apps/fractal-web/src/web').mkdir(parents=True)
+            self.commit('apps/fractal-web/src/web/AgentActions.tsx', 'export const kit = 1\n')
+            self.assertEqual(st_test.run_input_arguments('fractal-web', 'origin/main'), ['--run-input', 'kit_inputs=true'])
+        finally:
+            os.chdir(cwd)
+
     def test_the_web_inputs_a_local_run_records_pass_the_committed_policy_s_value_rules(self):
         loader = importlib.machinery.SourceFileLoader('evidence_verify_for_web', str(ROOT / 'scripts/evidence-verify'))
         verify = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
