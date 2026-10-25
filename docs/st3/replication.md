@@ -1280,8 +1280,13 @@ A refused fresh connection stays at `send-started`; a fresh server connection
 accepting without answering times out at `connected`. Failures before HTTP
 dispatch can omit these fields.
 
-Structured `smallclaims::replication` info events carry `correlation_id`, `stage`,
+Structured `smallclaims::replication` events carry `correlation_id`, `stage`,
 `unix_ms` (UTC), and `elapsed_us` (monotonic time since this host's request start).
+Fast successful exchanges log boundaries at DEBUG. A locally failed exchange or
+one crossing five seconds promotes its retained boundaries to INFO with their
+original timestamps; subsequent boundaries remain INFO. Enable DEBUG for this
+target on both hosts during a reproduction to also retain a fast successful
+server response whose client never received it.
 Search both hosts' journals for the ID from the failed record. The client emits
 `client-send-start`, `connect-done`, `client-headers-received`, and `client-failed`;
 the server emits `server-ingress`, `backend-done`, and `response-headers-ready`.

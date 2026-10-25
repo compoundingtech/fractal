@@ -109,6 +109,33 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> usize {
     length
 }
 
+#[test]
+fn timing_promotes_original_boundaries_only_for_failures_or_slow_exchanges() {
+    let timing = ExchangeTiming {
+        id: uuid::Uuid::now_v7().to_string(),
+        started: std::time::Instant::now(),
+        boundaries: Default::default(),
+    };
+    timing.record("client-send-start");
+    let original = timing.boundaries.lock().unwrap().0[0].unwrap();
+    assert!(!timing.boundaries.lock().unwrap().1);
+    timing.record("client-failed");
+    let state = timing.boundaries.lock().unwrap();
+    assert!(state.1);
+    assert!(state.0.iter().all(Option::is_none));
+    drop(state);
+    assert_eq!(original.stage, "client-send-start");
+    assert!(original.unix_ms > 0);
+
+    let slow = ExchangeTiming {
+        id: uuid::Uuid::now_v7().to_string(),
+        started: std::time::Instant::now() - Duration::from_secs(6),
+        boundaries: Default::default(),
+    };
+    slow.record("response-headers-ready");
+    assert!(slow.boundaries.lock().unwrap().1);
+}
+
 #[tokio::test]
 async fn failure_stage_distinguishes_connected_timeout_from_refused_connect() {
     use crate::replication::ReplicationClientStage;

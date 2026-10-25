@@ -2251,16 +2251,68 @@ const EXCHANGE_CORRELATION_HEADER: &str = "x-fractal-exchange-id";
 struct ExchangeTiming {
     id: String,
     started: std::time::Instant,
+    // Retain original timestamps so failures/slow requests can promote earlier
+    // DEBUG boundaries without emitting INFO for every healthy exchange.
+    boundaries: std::sync::Mutex<([Option<ExchangeBoundary>; 8], bool)>,
+}
+
+#[derive(Clone, Copy)]
+struct ExchangeBoundary {
+    stage: &'static str,
+    unix_ms: u128,
+    elapsed_us: u128,
 }
 
 impl ExchangeTiming {
     fn record(&self, stage: &'static str) {
-        tracing::info!(
+        let boundary = ExchangeBoundary {
+            stage,
+            unix_ms: crate::store::now_ms(),
+            elapsed_us: self.started.elapsed().as_micros(),
+        };
+        let mut boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        if boundaries.1 {
+            self.emit_info(boundary);
+            return;
+        }
+        tracing::debug!(
             target: "smallclaims::replication",
             correlation_id = %self.id,
             stage,
-            unix_ms = %crate::store::now_ms(),
-            elapsed_us = %self.started.elapsed().as_micros(),
+            unix_ms = %boundary.unix_ms,
+            elapsed_us = %boundary.elapsed_us,
+            "replication exchange boundary"
+        );
+        if let Some(slot) = boundaries.0.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(boundary);
+        } else {
+            // Bounded storage even if a future caller adds more boundaries.
+            self.emit_info(boundary);
+            drop(boundaries);
+            self.promote();
+            return;
+        }
+        drop(boundaries);
+        if stage == "client-failed" || self.started.elapsed() >= Duration::from_secs(5) {
+            self.promote();
+        }
+    }
+
+    fn promote(&self) {
+        let mut boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        boundaries.1 = true;
+        for boundary in boundaries.0.iter_mut().filter_map(Option::take) {
+            self.emit_info(boundary);
+        }
+    }
+
+    fn emit_info(&self, boundary: ExchangeBoundary) {
+        tracing::info!(
+            target: "smallclaims::replication",
+            correlation_id = %self.id,
+            stage = boundary.stage,
+            unix_ms = %boundary.unix_ms,
+            elapsed_us = %boundary.elapsed_us,
             "replication exchange boundary"
         );
     }
@@ -2330,18 +2382,22 @@ async fn receive_exchange<B: Backend>(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let timing = ExchangeTiming {
+    let timing = Arc::new(ExchangeTiming {
         // Unauthenticated diagnostic input, never an identity or authorization decision.
         id: headers.get(EXCHANGE_CORRELATION_HEADER)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| uuid::Uuid::parse_str(value).ok())
             .map_or_else(|| uuid::Uuid::now_v7().to_string(), |id| id.to_string()),
         started: std::time::Instant::now(),
-    };
+        boundaries: Default::default(),
+    });
     timing.record("server-ingress");
     let response = receive_exchange_inner(State(state), headers, body, &timing).await;
     // Axum owns socket writes. This is the handoff boundary, not a wire-write timestamp.
     timing.record("response-headers-ready");
+    if !response.status().is_success() {
+        timing.promote();
+    }
     response
 }
 
@@ -2349,7 +2405,7 @@ async fn receive_exchange_inner<B: Backend>(
     State(state): State<PeerState<B>>,
     headers: HeaderMap,
     body: Bytes,
-    timing: &ExchangeTiming,
+    timing: &Arc<ExchangeTiming>,
 ) -> Response {
     let body = if deflated(&headers) {
         match inflate(&body, "an exchange request") {
@@ -2447,10 +2503,7 @@ async fn receive_exchange_inner<B: Backend>(
             );
             let state = state.clone();
             let relay = relay.clone();
-            let backend_timing = ExchangeTiming {
-                id: timing.id.clone(),
-                started: timing.started,
-            };
+            let backend_timing = Arc::clone(timing);
             tokio::spawn(crate::task_cpu::account(
                 "replication.exchange",
                 async move {
@@ -2492,6 +2545,9 @@ async fn receive_exchange_inner<B: Backend>(
                         &error, ReplicationFailurePhase::LocalReceive, started.elapsed(), None,
                     ));
                     backend_timing.record("backend-done");
+                    if result.is_err() {
+                        backend_timing.promote();
+                    }
                     done.send_replace(Some(result));
                 },
             ));
@@ -3609,6 +3665,7 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
         timing: ExchangeTiming {
             id: uuid::Uuid::now_v7().to_string(),
             started: std::time::Instant::now(),
+            boundaries: Default::default(),
         },
         state: std::sync::atomic::AtomicU8::new(0),
     });
@@ -3631,7 +3688,8 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
             }
             failure.client_stage = Some(stage);
             timing.record("client-failed");
-            error.context(failure)
+            let display = error.to_string();
+            error.context(failure).context(display)
         })
 }
 
