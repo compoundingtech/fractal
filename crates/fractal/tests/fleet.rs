@@ -151,9 +151,16 @@ impl Node {
         fs::set_permissions(&pty, fs::Permissions::from_mode(0o755)).unwrap();
         // A release without --pty-binary finds pty through the login shell's PATH.
         let profile = format!("export PATH=\"{}:$PATH\"\n", root.join("bin").display());
-        for file in [".profile", ".bash_profile", ".zprofile"] {
+        for file in [".profile", ".bash_profile", ".zprofile", ".zshrc"] {
             fs::write(root.join("home").join(file), &profile).unwrap();
         }
+        // Fish uses XDG_CONFIG_HOME rather than the POSIX login profiles above.
+        fs::create_dir_all(root.join("config/fish")).unwrap();
+        fs::write(
+            root.join("config/fish/config.fish"),
+            format!("set -gx PATH '{}' $PATH\n", root.join("bin").display()),
+        )
+        .unwrap();
         Self {
             name: name.into(),
             binary: PathBuf::from(st3()),

@@ -196,7 +196,7 @@ undone by the merge queue's full run, and one run in five is sampled. The order,
    then one fetch of every branch and tag with the negative refspec `^refs/tags/evidence/*`. Deepening the shallow clone
    took 21 s against 11 s for a full fetch, so the step drops the shallow marker, fetches as a fresh clone would
    (`--refetch`, git 2.36 or later) and checks connectivity: 15 s in all, against 11 s for `fetch-depth: 0` today
-   (2026-10-20, from hetz2). `scripts/ci-evidence-signing-test` allows only literal positive depths and runs that fetch
+   (2026-10-20, from a build host). `scripts/ci-evidence-signing-test` allows only literal positive depths and runs that fetch
    against a real repository.
    A plain `git fetch` does not follow these tags either: a record's tag points at a commit no fetched branch holds.
    A fresh `git clone` does fetch them.
@@ -700,7 +700,7 @@ standard system directories, or the `path` in its configuration (`EVIDENCE_TOOL_
 A required check that runs in the Nix sandbox can be a check derivation (`checks.<system>.<check>` in `flake.nix`). It only
 produces output when its tests pass, and the output path hashes every input (source, `flake.lock`, toolchain, build script),
 so a valid path is both the proof that these inputs passed and a cache: an unchanged tree needs no rebuild. Today
-The first one built this way is `checks.genie-freshness` (about 163 s cold, 0.4 s warm on hetz2; a change to any file in the flake
+The first one built this way is `checks.genie-freshness` (about 163 s cold, 0.4 s warm on a build host; a change to any file in the flake
 source still rebuilds it, because its source is the whole flake).
 
 `scripts/nix-check-facts --check NAME --out FILE` builds the derivation and writes the facts for
@@ -1207,9 +1207,7 @@ valid note. `.st/required-lanes.json` (read from the accepted base, strictly val
 IDENTICAL in the verified tree and at BASE, otherwise `definition_changed` (the change edits its own checker, so the signed path is refused and CI
 runs); and the note must carry `lane_definition_sha256`, the digest of those blobs at BASE plus the argv, otherwise `wrong_definition`. A check with
 no lane entry is `no_lane`; a broken lane file or a definition path missing at the base is an error (exit 2 under `--require-all`), never a reject.
-The committed file lists every lane `scripts/st-test` can run, with the same argv (a test pins that) and deliberately wide definition paths
-(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for most lanes): a change to any script then always runs in CI. They are to be tightened
-only with a read trace of the lane (a later change). The file is in use: `scripts/st-test` and `scripts/evidence-wrap` write the digest, the
+The committed file lists every lane `scripts/st-test` can run, with the same argv (a test pins that). The file is in use: `scripts/st-test` and `scripts/evidence-wrap` write the digest, the
 verifier holds every lane-bound signer level (`"lane": true`) to it, and the gate reads it from the base, so `.st/required-lanes.json` is one of
 the gate's protected paths. A pull request's head is held to the definition at its branch point (see "Which lane definition a pull request is held
 to").
@@ -1217,9 +1215,54 @@ to").
 Producer half: `scripts/evidence-wrap --lanes-from BASE` (and `scripts/st-test`, which passes its base for every check the base's lane file defines)
 refuses any command that is not the lane's argv, refuses a tree whose lane definition differs from BASE (nothing is signed; CI runs the check, and the
 message names the paths), and records `lane_definition_sha256`, the digest the verifier recomputes from the same base. Without a lane file at the base
-nothing changes. A lane's `definition_paths` are a hand-declared list: a helper script it reads but the list omits is not covered, which is what the closure
-control below checks. So this alone must never let a signed note skip a queue lane; shadow reporting and the pull-request signing path are the only
+nothing changes. So this alone must never let a signed note skip a queue lane; shadow reporting and the pull-request signing path are the only
 uses until every lane a gate relies on has a clean trace (typescript-client has; genie-freshness has not been traced).
+
+#### Definition paths are what the lane executes, plus its verdict data (`scripts/lane-definition-closure`)
+
+A lane's definition is what defines its verdict: the files it executes, plus the data that sets the bar (baselines, splits, budgets,
+allowlists), declared as verdict data. A file a test merely checks for consistency is part of the tree under test, and the signed run tested
+it. A file the lane executes that `definition_paths` leaves out would let a tree change the check and still be signed; a file listed that does
+not define the verdict makes every change to it an unsignable lane edit. So the list is derived, not written by hand.
+
+`scripts/lane-definition-closure` starts from each lane's `argv` and statically follows what the command graph runs, sources, imports or names,
+transitively: the shell words, Python string constants and imports, JavaScript literals and relative imports that name a tracked file
+(`bash scripts/x`, `. "$(dirname "$0")/x"`, `$root/scripts/x`, `SourceFileLoader(..., 'scripts/x')`, `open('.github/clippy-baseline.json')`, an
+f-string such as `.github/{name}-compat-baseline.json` as a glob). It sorts each file it reaches into one of two kinds:
+
+- **Executed**: the lanes' own code and its data in their code directories (`scripts/`; `nix/` when Nix code imports it; a lane's runners inside a
+  package, such as fractal-web's `apps/fractal-web/scripts/ci` and `packages/fractal-ui/scripts`), the part of `flake.nix` that defines the dev
+  shell the lane enters and what that Nix code reads, the package.json whose script a `pnpm` call runs, and the files a tool the lane runs reads
+  by convention (`cargo` `.cargo/config.toml`, `nextest` `.config/nextest.toml`, `pnpm` the root manifest, lockfile and workspace file, `buck2`
+  its cell, root, targets and toolchains). A tool counts when a shell word or a whole string constant names it, not a word inside an assert's
+  text. Only executed code is followed, and a mention counts like a call, so it errs wide.
+- **Read**: any other file the code names (a workflow, a doc, a fixture outside the code directories). This is the tree under test unless the
+  lane declares it as verdict data (the `VERDICT_DATA` table, one reason per file: linux-gate's clippy baseline and splits, its compat
+  baselines and the daily-only filterset; rust-tests' filterset and messaging compat baseline; fractal-web's license inventory and the web
+  dev shell's input spec). A file that executed code reads as configuration of the environment it builds (`jq --slurpfile`, `--argfile`,
+  `--rawfile` or `-f`, `nix eval|build --file`) must be executed or declared: `--check` fails on one that is neither, for every lane but
+  the two kept by hand, whose script tests read the other lanes' configuration to test the scripts that read it.
+
+The walk ends at the tree under test (the Rust workspace and the pnpm workspace packages, the lanes' `tree_inputs`; a lint that reads a
+crate's build.rs reads its subject, not its definition). A lane's runners inside a package are followed only for that lane: for genie-freshness,
+which imports `kit-play-shards.mjs` to test it, they are the tree under test. A lane whose tests run in a sparse copy (ci-script-tests) is walked
+only inside that copy's inputs. A directory the code lists (iterdir, glob, `find`, `dir/*.json`) counts whole inside the code directories and is
+reported, not added, elsewhere (a lint over `crates/`, every release note). The docstring lists the rules and the few explicit tables (an edge
+no reference shows, such as rust-tests' JUnit report coming from the tests stage; `scripts/install-git-hooks`, whose pre-push stub runs the
+base's scripts at push time, not in the lane).
+
+`--why` prints each lane's executed paths and verdict data with the file that names each one, and what it only reads; `--write` sets each lane's
+`definition_paths` to executed plus verdict data (review the diff: it changes each lane's `lane_definition_sha256`, so a note signed under the
+old list is `wrong_definition` once the change is the base, and the tree is signed again); `--check` exits 1 naming any executed path or
+declared verdict-data file that a lane's list does not cover. That is the rule it enforces: executed is a subset of definition for every lane,
+and verdict data is a subset of definition where declared. `scripts/lane-definition-closure-test` (in ci-script-tests) tests each form on
+fixtures and holds the committed lanes to it in that check's sparse copy, and `scripts/ci-genie-freshness` runs `--check` over the whole tree,
+so a change that makes a lane execute a new file fails until the lane file lists it. A superset is allowed (a parent directory covers the files
+below it): `ci-script-tests` and `genie-freshness` are kept by hand (`KEPT`): all of `scripts/` and `.st/`, the flake, and the few files outside
+them that the walk finds they execute. Narrowed on 2026-10-25 from all of `scripts/` and `.st/` for the other four lanes: a change to a script
+now is a lane edit only for the lanes that run it, and a change to a workflow or a doc that a test checks is not a lane edit at all. The gate and
+the verifier read the policy, keys and lanes from the base, never the tree. Limits: the walk is static, so a path built at run time from names it
+cannot see needs a table entry, and it cannot tell a test that runs a script from one that reads it as text (it errs wide).
 
 #### Lane closure: what the lane really touches (`scripts/evidence-lane-trace`)
 
@@ -1454,6 +1497,10 @@ output), which a signature on the head does not cover. `st-test` asks the base's
 nothing is checked out in your clone), signs and tests THAT tree in its pool tree, and says so; if the branch does not merge cleanly it refuses and tells
 you to merge the base into the branch first. `st-test --status`, which the pre-push hook asks, judges the same tree, so a push is refused when the tree CI
 will judge is not covered even if the head tree is.
+A check whose base policy compares a note's input with the run's own value (`input_order`: `fractal-web`'s `kit_inputs`) is judged the way the CI gate
+judges it: `st-test` passes the verifier `--run-input kit_inputs=...`, computed by the base's `scripts/ci-fractal-web-changes` (`kit_paths` of the diff
+from the merge base; `true` when that cannot be told) in `--status`, in the pre-push hook (which only asks `--status`) and in the skip of an
+already-signed check. Without it a signed `fractal-web` tree read as `not covered: no_run_input`.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
 counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); unless `--check` names checks, every check of the skip
 policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
@@ -1537,7 +1584,7 @@ there with the key within reach (cooperative trust, see Host keys). It changes n
 
 **The signer starts with a scrubbed loader environment.** `evidence-sign` refuses to start when the loader or the interpreter was
 told to load code (`LD_PRELOAD` and the rest of its `REFUSED_ENVIRONMENT`): a preloaded library inside the signer is an injection
-point, and the refusal stays. Some hosts set `LD_PRELOAD` for every process (hetz2 preloads jemalloc), which made every signed push
+point, and the refusal stays. Some hosts set `LD_PRELOAD` for every process (one build host preloads jemalloc), which made every signed push
 there report "a check failed". So the launcher scrubs instead: `evidence-wrap` resolves the signer program with the caller's PATH,
 then starts it by absolute path without any `LD_*`, `DYLD_*` or `PYTHON*` variable, `GLIBC_TUNABLES`, `GCONV_PATH` or `NLSPATH`,
 and with `PATH=/run/current-system/sw/bin:/usr/bin:/bin`; `st-test` starts the signer's interpreter with `-I`. The checks themselves

@@ -236,6 +236,11 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(done.returncode, 2)
         self.assertIn('must be a number', done.stderr)
 
+    def test_a_failing_property_test_cannot_leave_a_regressions_file_in_the_tree_the_signer_checks(self):
+        done, calls = self.run_local('mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(calls[-1]['env'].get('PROPTEST_DISABLE_FAILURE_PERSISTENCE'), '1')
+
     def test_each_test_process_gets_a_tmpdir_of_its_own_through_the_cargo_target_runner(self):
         done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TARGET_TRIPLE='x86_64-unknown-linux-gnu')
         self.assertEqual(done.returncode, 0, done.stderr)
