@@ -1356,7 +1356,7 @@ class PerCrate(StTest):
 
     def test_the_gate_asks_whether_every_member_has_a_note_for_its_own_key(self):
         fields = self.gate()
-        self.assertEqual((fields['outcome'], fields['reason'], fields['members'], fields['missing']), ('rejected', 'crate_uncovered', '2', '2'), fields)
+        self.assertEqual((fields['outcome'], fields['reason'], fields['members'], fields['missing']), ('no_note', 'crate_uncovered', '2', '2'), fields)
         self.assertEqual(self.run_crates('--push', 'origin')[0], 0)
         fields = self.gate()
         # Satisfied, in shadow: the committed rust-tests entry does not enforce, so the decision is still run.
@@ -1364,7 +1364,7 @@ class PerCrate(StTest):
         self.assertIn(fields['members_fetch'], ('ok', 'none'))
         self.commit('crates/top/src/lib.rs', '// changed\n')
         fields = self.gate()
-        self.assertEqual((fields['outcome'], fields['reason'], fields['missing']), ('rejected', 'crate_uncovered', '1'), fields)
+        self.assertEqual((fields['outcome'], fields['reason'], fields['missing']), ('no_note', 'crate_uncovered', '1'), fields)
 
     def test_the_verifier_is_satisfied_only_when_every_member_has_a_note_for_its_own_key(self):
         code, result = self.members()
@@ -1541,6 +1541,20 @@ class PerCrate(StTest):
             code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
         self.assertEqual(code, 3, out + err)
         self.assertIn('to run: top', out)
+
+    def test_one_crate_with_a_failed_test_does_not_make_the_other_crates_records_unverified(self):
+        # evidence-wrap's check after signing used to ask for the tree's newest rust-tests record whatever its crate: with a failed crate's record
+        # on the tree (signed first, here), every crate signed after it came back "did not verify locally" (50 of 52 on hetz2 at feefaa9c95).
+        code, out, err = self.run_crates('--push', 'origin', FAKE_FAIL='base')
+        self.assertEqual(code, 1, out + err)
+        self.assertNotIn('did not verify locally', out)
+        self.assertNotIn('FAILED (record)', out)
+        self.assertEqual(self.crate_records(), [('base', 1), ('top', 0)])
+        self.assertIn('rust-tests:base', out)
+        self.assertIn('1 of 2 crates run and signed', out)
+        pushed = subprocess.run(['git', '-C', str(Path(self.tmp.name) / 'origin.git'), 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/input/'],
+                                capture_output=True, text=True).stdout.split()
+        self.assertEqual(len(pushed), 1, 'top (which passed) was pushed; base (which failed) was not')
 
     def test_the_table_shows_the_setup_time_and_where_the_rust_tests_time_went(self):
         code, out, err = self.run_crates()
