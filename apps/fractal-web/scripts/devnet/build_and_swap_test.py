@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Networkless concurrency smoke for immutable build snapshot leases."""
+"""Networkless snapshot smoke with a stubbed sandbox boundary, not isolation."""
 import fcntl
 import json
 import os
@@ -8,11 +8,12 @@ import select
 import signal
 import shutil
 import subprocess
-import tempfile
 import sys
+import tempfile
 import unittest
 
 from dependency_cache import INSTALL_INPUTS, install_key
+from candidate_sandbox import DEPENDENCY_POLICY
 
 
 HELPER = Path(__file__).with_name('build-and-swap.sh').resolve()
@@ -30,6 +31,41 @@ class SnapshotLeaseTest(unittest.TestCase):
             cache = fixture / 'dependency-cache'
             binary = fixture / 'bin'
             binary.mkdir()
+            # Only the sandbox CLI is intercepted; host Python operations still
+            # use the real interpreter. Isolation itself is covered by runner tests.
+            python = binary / 'python3'
+            python.write_text(f'#!{sys.executable}\n' + '''
+import json, os, pathlib, sys
+args = sys.argv[1:]
+if args[:1] == ['-I']:
+    args = args[1:]
+if args and pathlib.Path(args[0]).name == 'candidate_sandbox.py':
+    if args[1:2] == ['--prepare-removal']:
+        os.execv(sys.executable, [sys.executable, '-I', *args])
+    args = args[1:]
+    root = pathlib.Path(os.environ['SNAPSHOT_LEASE_FIXTURE'])
+    with (root / 'sandbox-calls.jsonl').open('a') as stream:
+        stream.write(json.dumps(args) + '\\n')
+    if args == ['--check-config']:
+        raise SystemExit(0)
+    if args == ['--print-policy']:
+        print(os.environ['SNAPSHOT_LEASE_POLICY'])
+        raise SystemExit(0)
+    assert len(args) == 15, args
+    assert args[0] == '--worktree' and args[2:5] == ['--shell', 'web', '--output'], args
+    assert args[6:8] == ['--readonly-dependencies', '--directory'], args
+    assert args[9:12] == ['--', 'node', 'private/build-live.mjs'], args
+    worktree, output = pathlib.Path(args[1]), pathlib.Path(args[5])
+    assert worktree.is_absolute() and output.is_absolute(), args
+    assert args[8] == str(worktree / 'apps/fractal-web'), args
+    assert args[12] == str(output), args
+    os.chdir(args[8])
+    os.environ['SNAPSHOT_LEASE_SANDBOX'] = '1'
+    os.execvp(args[10], args[10:])
+'''+ f'\nos.execv({sys.executable!r}, [{sys.executable!r}, "-I", *args])\n')
+            python.chmod(0o755)
+            (source / '.git').mkdir(parents=True)
+            (source / '.git/config').write_text('')
             for relative in ('apps/fractal-web/private/build-live.mjs',
                              'apps/fractal-web/vendor/utils/src/node/cli-build-identity.js',
                              'node_modules/fixture/index.js'):
@@ -38,14 +74,22 @@ class SnapshotLeaseTest(unittest.TestCase):
                 path.write_text('// synthetic fixture\n')
             for name in INSTALL_INPUTS:
                 (source / name).write_text(name + '\n')
+            (source / 'megarepo.lock').write_text('{"members": {}}')
             git = binary / 'git'
             git.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, shutil, sys
 root = pathlib.Path(os.environ['SNAPSHOT_LEASE_FIXTURE'])
-args = sys.argv[3:]
+args = sys.argv[1:]
+while args[:1] == ['-c']:
+    args = args[2:]
+if args[:1] == ['config'] and '--file' in args:
+    os.execv(os.environ['SNAPSHOT_LEASE_REAL_GIT'], ['git', *args])
+args = args[2:]
 with (root / 'git-calls.jsonl').open('a') as stream:
     stream.write(json.dumps(args) + '\\n')
-if args[0] == 'rev-parse':
+if args[0] == 'config':
+    raise SystemExit(1)
+elif args[0] == 'rev-parse':
     print(os.environ['SNAPSHOT_LEASE_SHA'])
 elif args[:2] == ['worktree', 'add']:
     (pathlib.Path(args[3]) / 'apps/fractal-web').mkdir(parents=True)
@@ -59,6 +103,7 @@ else:
             node = binary / 'node'
             node.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, sys
+assert os.environ.get('SNAPSHOT_LEASE_SANDBOX') == '1', 'builder bypassed sandbox CLI'
 if os.environ.get('SNAPSHOT_LEASE_HOLD') == '1':
     print('READY:' + os.getcwd(), flush=True)
     with pathlib.Path(os.environ['SNAPSHOT_LEASE_RELEASE']).open() as stream:
@@ -69,6 +114,12 @@ build, sha = pathlib.Path(sys.argv[2]), sys.argv[4]
 (build / 'launch.sh').write_text('#!/bin/sh\\n')
 (build / 'build-receipt.json').write_text(json.dumps({
     'buildIdentity': {'rev': sha, 'dirty': False}, 'stackHead': sha}))
+for name in ('json.py', 're.py', 'sitecustomize.py', 'usercustomize.py'):
+    pathlib.Path(name).write_text('raise RuntimeError(\"candidate module reached host\")\\n')
+sealed = pathlib.Path('.devenv/pnpm-source-inputs/sealed')
+sealed.mkdir(parents=True)
+(sealed / 'payload').write_text('published source input')
+sealed.chmod(0o500)
 ''')
             git.chmod(0o755)
             node.chmod(0o755)
@@ -81,7 +132,8 @@ try:
     os.getcwd()
 except FileNotFoundError:
     raise SystemExit("command wrapper refuses deleted cwd")
-if os.environ.get("SNAPSHOT_CLEANUP_FAIL_LOCK") == "1" and sys.argv[-1].endswith(".lock"):
+if (os.environ.get("SNAPSHOT_CLEANUP_FAIL_LOCK") == "1" and sys.argv[-1].endswith(".lock")
+        and pathlib.Path(sys.argv[-1]).name.startswith(os.environ["SNAPSHOT_LEASE_SHA"] + "-")):
     raise SystemExit("injected recoverable lock-file cleanup failure")
 os.execv({shutil.which('rm')!r}, ["rm", *sys.argv[1:]])
 ''')
@@ -107,6 +159,8 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                 'PATH': str(binary) + ':' + os.environ['PATH'],
                 'SNAPSHOT_LEASE_FIXTURE': str(fixture),
                 'SNAPSHOT_LEASE_RELEASE': str(release),
+                'SNAPSHOT_LEASE_POLICY': DEPENDENCY_POLICY,
+                'SNAPSHOT_LEASE_REAL_GIT': shutil.which('git'),
                 'FRACTAL_BUILD_SNAPSHOT_ROOT': str(snapshot_root),
                 'FRACTAL_DEP_CACHE': str(cache),
                 'FRACTAL_BUILD_ADMISSION': 'fallback',
@@ -128,11 +182,17 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 key = install_key(source)
-                generation = cache / key
+                generation = cache / DEPENDENCY_POLICY / key
+                self.assertFalse((cache / key).exists(), 'sandbox reused an unnamespaced parent generation')
                 dependency = generation / 'node_modules/fixture/index.js'
                 original_stat = dependency.stat()
                 self.assertNotEqual(original_stat.st_ino, (source / 'node_modules/fixture/index.js').stat().st_ino)
                 self.assertEqual((live_snapshot / 'node_modules/fixture/index.js').stat().st_ino, original_stat.st_ino)
+                stale_snapshot = snapshot_root / 'shared' / ('c' * 40 + '-123')
+                stale_sealed = stale_snapshot / '.devenv/pnpm-source-inputs/sealed'
+                stale_sealed.mkdir(parents=True)
+                (stale_sealed / 'payload').write_text('stale sealed input')
+                stale_sealed.chmod(0o500)
                 with (generation / '.lease').open() as lease:
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -149,12 +209,20 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                 self.assertEqual(dependency.read_text(), '// synthetic fixture\n')
                 self.assertEqual(dependency.stat().st_ino, original_stat.st_ino)
                 self.assertEqual(dependency.stat().st_mtime_ns, original_stat.st_mtime_ns)
+                self.assertEqual(dependency.stat().st_mode, original_stat.st_mode)
                 receipt = json.loads((fixture / 'build-root-b/shared/builds' / second_sha / 'build-receipt.json').read_text())
                 self.assertEqual(receipt['dependencyKey'], second_key)
                 self.assertEqual(receipt['dependencyFiles'], {'linked': 1, 'copied': 0})
+                self.assertEqual(receipt['devShell']['source'], 'trusted-launcher-checkout')
+                self.assertTrue(receipt['devShell']['candidateDiffers'])
+                self.assertIsNone(receipt['devShell']['files']['flake.nix']['candidateSha256'])
+                self.assertIn('until merged', receipt['devShell']['note'])
                 logged = json.loads((fixture / 'build-root-b/shared/builds.jsonl').read_text())
                 self.assertEqual(logged['outcome'], 'built')
                 self.assertIn('cannot remove snapshot lock file', logged['cleanupWarnings'])
+                self.assertNotIn('cannot remove snapshot worktree', logged['cleanupWarnings'])
+                self.assertFalse(any(p.is_dir() for p in (snapshot_root / 'shared').glob(second_sha + '-*')))
+                self.assertFalse(stale_snapshot.exists(), 'stale sealed snapshot was not reclaimed')
                 calls = [json.loads(line) for line in (fixture / 'git-calls.jsonl').read_text().splitlines()]
                 self.assertFalse(any(args[:2] == ['worktree', 'remove'] and args[3] == str(live_snapshot)
                                      for args in calls))
@@ -198,6 +266,16 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                 self.assertEqual(failure_log['reason'], 'rollback-failed')
                 self.assertTrue(any('preserving failed build' in warning
                                     for warning in failure_log['cleanupWarnings']))
+                sandbox_calls = [json.loads(line) for line in
+                                 (fixture / 'sandbox-calls.jsonl').read_text().splitlines()]
+                self.assertEqual(sandbox_calls.count(['--check-config']), 4)
+                self.assertEqual(sandbox_calls.count(['--print-policy']), 4)
+                executions = [args for args in sandbox_calls if args not in (['--check-config'], ['--print-policy'])]
+                self.assertEqual(len(executions), 4)
+                self.assertEqual({args[5] for args in executions},
+                                 {str(fixture / 'build-root-a/shared/builds' / first_sha),
+                                  str(fixture / 'build-root-b/shared/builds' / second_sha),
+                                  str(relative_build), str(preserved)})
             finally:
                 if first.poll() is None:
                     os.killpg(first.pid, signal.SIGTERM)
