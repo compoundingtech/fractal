@@ -107,7 +107,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='verify and print the notes; publish nothing')
     args = parser.parse_args()
     repo = pathlib.Path(__file__).resolve().parent.parent
-    repository = os.environ.get('GH_REPO', 'compoundingtech/smalltalk')
+    repository = os.environ.get('GH_REPO', 'compoundingtech/fractal')
     if not SHA.fullmatch(args.source):
         raise SystemExit('release-smalltalk-edge: --source must be a full lowercase commit hash')
 

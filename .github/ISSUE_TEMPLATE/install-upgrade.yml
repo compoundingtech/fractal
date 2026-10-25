@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Start with [the troubleshooting guide](https://github.com/compoundingtech/smalltalk/blob/main/docs/when-something-is-wrong.md). The Smalltalk distribution agent owns initial triage and routes runtime failures to the appropriate maintainer.
+        Start with [the troubleshooting guide](https://github.com/compoundingtech/fractal/blob/main/docs/when-something-is-wrong.md). The Smalltalk distribution agent owns initial triage and routes runtime failures to the appropriate maintainer.
         Review every excerpt before posting. Use invented host names, paths and person and seat IDs. Remove credentials, keys, pairing/invite secrets, transcript prompts, claim/document bodies and exported environment values. Never attach a database, backup, config file or full transcript. Keep source hashes, versions, error codes and timing.
   - type: input
     id: platform

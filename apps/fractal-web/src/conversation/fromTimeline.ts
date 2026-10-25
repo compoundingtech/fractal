@@ -133,7 +133,7 @@ const unrecognizedOmpItem = (
 /**
  * String convention emitted by st's external_sessions.rs `push_native_block`, matching the
  * reasoning-label semantics in st3-conversation-ui/src/adapt.rs. No duration is available.
- * TODO(st#2010): typed reasoning — https://github.com/compoundingtech/smalltalk/issues/2010
+ * TODO(st#2010): typed reasoning — https://github.com/compoundingtech/fractal/issues/2010
  */
 const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): ConversationItem | undefined => {
   const prefix = '[reasoning]\n'

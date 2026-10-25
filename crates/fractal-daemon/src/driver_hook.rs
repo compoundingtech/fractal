@@ -55,7 +55,7 @@ fn hook_var(env: &dyn HookEnv, name: &str) -> Option<String> {
     fractal_drivers::contracts::env_with(name, &|key| env.raw_var(key))
 }
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 pub(crate) fn identity_conflict(env: &dyn HookEnv) -> bool {
     fractal_drivers::contracts::identity_conflict_with(&|name| env.raw_var(name))
 }
