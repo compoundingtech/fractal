@@ -1519,6 +1519,7 @@ exit 0
             socket_path: PathBuf::from("bad.sock"),
             pid: Some(-1),
             status: pty_core::registry::SessionStatus::Running,
+            identity: pty_core::registry::DaemonIdentityCheck::Unknown,
             metadata: None,
         };
         let observed = observation(record).unwrap();
