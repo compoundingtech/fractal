@@ -3076,6 +3076,34 @@ fn control_initializes_before_recording_the_first_thread_only() {
     assert!(state.subscribed());
 }
 
+/// Waits until the persisted control state matches, reading it after each pump event. The pump
+/// persists before it sends, but it can run several frames ahead of the test thread on a loaded
+/// host, so a fixed number of events can all be ones sent before the state the caller waits for.
+fn wait_for_observed_state(
+    state_path: &Path,
+    events: &mpsc::Receiver<ControlEvent>,
+    wanted: impl Fn(&CodexObservedState) -> bool,
+) -> bool {
+    let matches = || {
+        fs::read(state_path).ok().is_some_and(|bytes| {
+            serde_json::from_slice::<CodexControlState>(&bytes)
+                .ok()
+                .is_some_and(|state| wanted(state.observed()))
+        })
+    };
+    let deadline = Instant::now() + TEST_EVENT_TIMEOUT;
+    loop {
+        if matches() {
+            return true;
+        }
+        match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return matches(),
+            Err(mpsc::RecvTimeoutError::Timeout) => return false,
+        }
+    }
+}
+
 #[test]
 fn live_control_request_blocks_until_the_bound_thread_resolves_it() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3153,45 +3181,23 @@ fn live_control_request_blocks_until_the_bound_thread_resolves_it() {
             events_tx,
         )
     });
-    let mut blocked = false;
-    for _ in 0..4 {
-        events_rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap();
-        if let Ok(bytes) = fs::read(&state_path)
-            && serde_json::from_slice::<CodexControlState>(&bytes)
-                .ok()
-                .is_some_and(|state| {
-                    matches!(
-                        state.observed(),
-                        CodexObservedState::Held {
-                            reason: CodexHoldReason::WaitingOnApproval,
-                            ..
-                        }
-                    )
-                })
-        {
-            blocked = true;
-            break;
-        }
-    }
+    let blocked = wait_for_observed_state(&state_path, &events_rx, |observed| {
+        matches!(
+            observed,
+            CodexObservedState::Held {
+                reason: CodexHoldReason::WaitingOnApproval,
+                ..
+            }
+        )
+    });
     assert!(
         blocked,
         "the control stream did not publish the approval hold"
     );
     release_tx.send(()).unwrap();
-    let mut released = false;
-    for _ in 0..3 {
-        if events_rx.recv_timeout(TEST_EVENT_TIMEOUT).is_err() {
-            break;
-        }
-        if let Ok(bytes) = fs::read(&state_path)
-            && serde_json::from_slice::<CodexControlState>(&bytes)
-                .ok()
-                .is_some_and(|state| matches!(state.observed(), CodexObservedState::Active { .. }))
-        {
-            released = true;
-            break;
-        }
-    }
+    let released = wait_for_observed_state(&state_path, &events_rx, |observed| {
+        matches!(observed, CodexObservedState::Active { .. })
+    });
     assert!(
         released,
         "the matching status did not release the approval hold"
