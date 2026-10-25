@@ -15,7 +15,7 @@ describe('optional native block facts', () => {
       entry('content', 1, { text: 'Earlier response', media_type: 'text/plain', blocks: [block('text', { metadata: { model: 'earlier-model', usage: { total: 42 } } })] }),
       entry(kind, 2, kind === 'tool_call'
         ? { call_id: 'call/latest', name: 'bash', arguments: {}, blocks: [block(kind, { metadata })] }
-        : { message: 'Retry response', code: 'retry', retryable: true, blocks: [block(kind, { metadata })] }),
+        : { message: 'Retry response', code: 'retry', details: {}, retryable: true, blocks: [block(kind, { metadata })] }),
     ]))
     expect(nativeTurnFacts({ items: timeline.project().items })).toEqual({ model: 'latest-model', tokens: 84, costUsd: 0.012 })
   })

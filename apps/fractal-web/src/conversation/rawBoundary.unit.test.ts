@@ -30,7 +30,7 @@ describe('native closed transcript boundary', () => {
   it('preserves native body-reference status and actionable errors without views', () => {
     expect(project(entry([], { type: 'status', body: { status: 'completed', detail: 'Read finished', blocks: [block('status', { payload: { body_ref: true } })] } })))
       .toMatchObject([{ _tag: 'Status', status: 'completed', detail: 'Read finished' }])
-    expect(project(entry([], { type: 'error', body: { message: 'Transcript unreadable', code: 'transcript_read', retryable: true, blocks: [block('error', { payload: { body_ref: true } })] } })))
+    expect(project(entry([], { type: 'error', body: { message: 'Transcript unreadable', code: 'transcript_read', details: {}, retryable: true, blocks: [block('error', { payload: { body_ref: true } })] } })))
       .toMatchObject([{ _tag: 'Notice', kind: 'error', text: 'Transcript unreadable', detail: 'transcript_read', retryable: true }])
   })
   it('keeps internal tool starts out of prose as an inspectable event', () => {
