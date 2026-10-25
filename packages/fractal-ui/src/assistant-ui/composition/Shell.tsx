@@ -12,7 +12,7 @@ import type { AgentStatus } from '../sidebar/model'
 
 /**
  * Keyboard/pointer resizable separator. Arrow ±8, Shift+Arrow ±32,
- * Home/End min/max, Enter collapses, double-click resets; size persists.
+ * Home/End min/max, Enter collapses, double-click resets; Escape rolls back a held drag.
  */
 export function ResizableSplit({ id, value, min, max, onChange, onToggle, onReset, collapsed, label, onCommit, reverse = false, orientation = 'vertical' }: {
   onCommit?: (value: number) => void
@@ -28,6 +28,12 @@ export function ResizableSplit({ id, value, min, max, onChange, onToggle, onRese
   label: string
   orientation?: 'vertical' | 'horizontal'
 }) {
+  const canResize = Number.isFinite(min) && Number.isFinite(max) && max > min
+  const activeDrag = React.useRef<(() => void) | undefined>(undefined)
+  // Commit before any separator removal, including a frozen range while the split stays mounted.
+  const separatorRef = React.useCallback((node: HTMLDivElement | null) => {
+    if (node === null) activeDrag.current?.()
+  }, [])
   const save = React.useCallback((next: number) => {
     const clamped = Math.min(max, Math.max(min, Math.round(next)))
     onChange(clamped)
@@ -35,7 +41,7 @@ export function ResizableSplit({ id, value, min, max, onChange, onToggle, onRese
     else try { window.localStorage.setItem(`composition.${id}`, String(clamped)) } catch { /* persistence is best-effort */ }
   }, [id, min, max, onChange, onCommit])
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (collapsed || event.button !== 0) return
+    if (!canResize || collapsed || event.button !== 0) return
     event.preventDefault()
     const node = event.currentTarget
     const start = orientation === 'vertical' ? event.clientX : event.clientY
@@ -53,33 +59,47 @@ export function ResizableSplit({ id, value, min, max, onChange, onToggle, onRese
     const finish = (cancelled: boolean) => {
       if (finished) return
       finished = true
+      activeDrag.current = undefined
       if (frame !== undefined) window.cancelAnimationFrame(frame)
       node.removeEventListener('pointermove', move)
       node.removeEventListener('pointerup', up)
       node.removeEventListener('pointercancel', cancel)
       node.removeEventListener('lostpointercapture', cancel)
+      node.ownerDocument.removeEventListener('keydown', escape, true)
       if (cancelled) onChange(before)
       else save(latest)
       if (node.hasPointerCapture(event.pointerId)) node.releasePointerCapture(event.pointerId)
     }
     const up = () => finish(false)
     const cancel = () => finish(true)
+    const escape = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key !== 'Escape') return
+      keyEvent.preventDefault()
+      keyEvent.stopPropagation()
+      finish(true)
+    }
+    activeDrag.current = () => finish(false)
     node.addEventListener('pointermove', move)
     node.addEventListener('pointerup', up)
     node.addEventListener('pointercancel', cancel)
     node.addEventListener('lostpointercapture', cancel)
+    // Pointer capture does not move keyboard focus; cancel even when another control is focused.
+    node.ownerDocument.addEventListener('keydown', escape, true)
   }
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const step = event.shiftKey ? 32 : 8
+    const delta = reverse ? -step : step
     const grow = orientation === 'vertical' ? ['ArrowRight', 'ArrowDown'] : ['ArrowDown']
     const shrink = orientation === 'vertical' ? ['ArrowLeft', 'ArrowUp'] : ['ArrowUp']
-    if (grow.includes(event.key)) { event.preventDefault(); save(value + step) }
-    else if (shrink.includes(event.key)) { event.preventDefault(); save(value - step) }
+    if (grow.includes(event.key)) { event.preventDefault(); save(value + delta) }
+    else if (shrink.includes(event.key)) { event.preventDefault(); save(value - delta) }
     else if (event.key === 'Home') { event.preventDefault(); save(min) }
     else if (event.key === 'End') { event.preventDefault(); save(max) }
     else if (event.key === 'Enter') { event.preventDefault(); onToggle() }
   }
-  return <div
+  return <div data-resizer-track={id} aria-hidden={canResize ? undefined : true} {...stylex.props(orientation === 'vertical' ? styles.splitVertical : styles.splitHorizontal)}>
+    {canResize && <div
+    ref={separatorRef}
     role="separator"
     aria-label={label}
     aria-orientation={orientation}
@@ -91,8 +111,9 @@ export function ResizableSplit({ id, value, min, max, onChange, onToggle, onRese
     onPointerDown={onPointerDown}
     onKeyDown={onKeyDown}
     onDoubleClick={onReset}
-    {...stylex.props(orientation === 'vertical' ? styles.splitVertical : styles.splitHorizontal)}
-  />
+    {...stylex.props(orientation === 'vertical' ? styles.resizeVertical : styles.resizeHorizontal)}
+  />}
+  </div>
 }
 
 /** Restores a persisted size once, client-side only. */
@@ -125,6 +146,7 @@ export function ThreadHeader({
   onToggleDrawer,
   sidebarCollapsed = false,
   onToggleSidebar,
+  sidebarToggleRef,
   sidebarSheet,
   narrow = false,
 }: {
@@ -154,6 +176,7 @@ export function ThreadHeader({
   /** When the sidebar is collapsed its separator is gone; the header carries the expand toggle. */
   sidebarCollapsed?: boolean
   onToggleSidebar?: () => void
+  sidebarToggleRef?: React.Ref<HTMLButtonElement>
   /** The expand toggle opens the sidebar as a sheet (narrow hosts): its open state and dialog id, for `aria-expanded`/`aria-controls`. */
   sidebarSheet?: { readonly open: boolean; readonly id: string }
   /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, the terminal control leaves the header (the host renders `PhoneTerminalToggle` in its tab row), and one Agent details button opens `panelOpen`'s sheet. Every header control becomes a 44px touch target and the header clears the left/right safe-area insets; the host owns the top inset. */
@@ -165,7 +188,7 @@ export function ThreadHeader({
     <NarrowLayoutContext.Provider value={narrow === true || inheritedNarrow}>
     <header data-testid="thread-header" {...stylex.props(styles.header, !narrow && paneHeaderStyles.header, !narrow && styles.laneContainer, narrow && styles.headerNarrow)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
-        <ChromeControl icon="chevron-right" label="Expand sidebar" edge="lead" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { popup: 'dialog' as const, expanded: sidebarSheet.open, ...(sidebarSheet.open ? { controls: sidebarSheet.id } : {}) })} />
+        <ChromeControl ref={sidebarToggleRef} icon="chevron-right" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" edge="lead" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { popup: 'dialog' as const, expanded: sidebarSheet.open, ...(sidebarSheet.open ? { controls: sidebarSheet.id } : {}) })} />
       ) : null}
       <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
         {folder !== undefined ? <>
@@ -227,8 +250,11 @@ export function TerminalDrawer({ lines, open, height, onHeight }: { lines: reado
 }
 
 const styles = stylex.create({
-  splitVertical: { width: 1, alignSelf: 'stretch', backgroundColor: c.borderStrong, cursor: 'col-resize', position: 'relative', flexShrink: 0, touchAction: 'none', '::after': { content: '""', position: 'absolute', insetInline: -3, insetBlock: 0 }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
-  splitHorizontal: { height: 1, width: '100%', backgroundColor: c.borderStrong, cursor: 'row-resize', position: 'relative', flexShrink: 0, touchAction: 'none', '::after': { content: '""', insetInline: 0, insetBlock: -3, position: 'absolute' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
+  // Full 1px layout rules; fixed chrome owns the last raster row and the sidebar owns the crossing hit area.
+  splitVertical: { width: 1, alignSelf: 'stretch', backgroundColor: c.borderStrong, position: 'relative', overflow: 'visible', flexShrink: 0 },
+  splitHorizontal: { height: 1, width: '100%', backgroundColor: c.borderStrong, position: 'relative', overflow: 'visible', flexShrink: 0 },
+  resizeVertical: { position: 'absolute', insetBlockStart: 0, insetBlockEnd: 1, insetInlineStart: 0, width: 1, cursor: 'col-resize', zIndex: 2, touchAction: 'none', '::after': { content: '""', position: 'absolute', insetInline: -3, insetBlock: 0 }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
+  resizeHorizontal: { position: 'absolute', insetInlineStart: 0, insetInlineEnd: 4, insetBlockStart: 0, height: 1, cursor: 'row-resize', zIndex: 2, touchAction: 'none', '::after': { content: '""', insetInline: 0, insetBlock: -3, position: 'absolute' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -1 } },
   header: { height: g.band, display: 'flex', alignItems: 'center', gap: g.gutter, paddingInline: g.gutter, flexShrink: 0, minWidth: 0 },
   laneContainer: { containerType: 'inline-size', containerName: 'thread-header' },
   desktopFolder: { display: { default: 'inline', '@container thread-header (max-width: 560px)': 'none' } },
