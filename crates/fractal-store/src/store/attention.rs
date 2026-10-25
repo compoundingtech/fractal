@@ -897,7 +897,7 @@ fn attention_closing_step(
     })
 }
 
-fn attention_target_state_tx(connection: &Connection, target: &str) -> Result<Option<TargetState>> {
+pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -> Result<Option<TargetState>> {
     let row = |sql: &str, id: &str| -> Result<Option<TargetState>> {
         connection
             .query_row(/* sqlite-large-value: allow-for-now lv-h734e628c2a7c owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ sql, [id], |row| {
@@ -1360,7 +1360,7 @@ fn attention_target_can_end(connection: &Connection, target: &str) -> Result<boo
         || pull_request_state_tx(connection, target)?.is_some())
 }
 
-type TargetState = (String, Option<u128>);
+pub(crate) type TargetState = (String, Option<u128>);
 
 /// Target kinds whose own state can end an attention request; see
 /// the retained legacy request metadata. A pull request resource

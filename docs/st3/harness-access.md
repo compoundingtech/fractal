@@ -42,7 +42,7 @@ This section is written for a person's own agent to read and act on at their req
   before editing `config.toml`.
 - **How to change it.** Set `access_mode = "auto"` or `access_mode = "bypass"` in that file
   (add the line when it is missing, leave the other keys alone), run `st service restart`
-  (the daemon adopts live seats; see [upgrading st](../upgrading-st.md#restart-the-services-and-verify)),
+  (the daemon adopts live seats; see [upgrading st](../site/guides/upgrading.md#install-and-restart-deliberately)),
   and run `st doctor`: its `harness-access-mode` check names the mode the daemon started with.
   Seats already running keep the permissions they started with until
   `st agents restart AGENT --as PERSON` restarts them.
@@ -116,7 +116,7 @@ branch, deleting remote branches, merging or closing pull requests, and any othe
 With it the push succeeded 10 times in 10. The wording matters ("the operator authorized" was rejected)
 and is a behavior of that model version; `scripts/st3-codex-minimal-eval/push-check` re-runs the probe.
 Nothing is opted in by this change; opting a seat in is the operator's decision, made in its declaration.
-st does not restrict who may publish that declaration: in [free mode](kdl-lifecycle.md#free-mode) any person
+st does not restrict who may publish that declaration: in [free mode](../site/reference/configuration.md#free-mode) any person
 or agent may publish a seat declaration as itself, so an agent that can publish can write this entry into a
 declaration, including its own. The control is review of the declarations before they are published,
 not an st check. The "not authorized" list is advice to a model and was not tested adversarially. The real boundary is

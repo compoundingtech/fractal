@@ -1,5 +1,6 @@
 //! The part of `store` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+pub use fractal_missions::store::identities;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::shared::*;
@@ -142,6 +143,7 @@ pub mod retirements;
 pub mod revision_seats;
 pub mod rollouts;
 pub mod roster_admission;
+pub mod runtime_start_diagnostics;
 pub mod runtime_starts;
 pub mod seat_status;
 pub mod seats;

@@ -1,3 +1,4 @@
+use crate::RetirementsStore;
 use crate::DeliveryStore;
 use crate::DelegationStore;
 use super::*;
@@ -51,7 +52,12 @@ pub async fn message_by_key(
             .message(&claim.subject)
             .map_err(ApiError::internal)?
             .ok_or_else(not_sent)?;
+        let requested_recipient = message.to.clone();
+        let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
         Ok(Json(MessageSendReceipt {
+            requested_recipient,
+            recipient,
+            recipient_identity,
             kind: Some(
                 if crate::silent::is_held(&message) {
                     "silent"
@@ -116,6 +122,7 @@ pub struct MessagesPageQuery {
     from: Option<String>,
     subject: Option<String>,
     subject_prefix: Option<String>,
+    acting_as: Option<String>,
     #[serde(default)]
     include_closed: bool,
     cursor: Option<String>,
@@ -153,6 +160,8 @@ struct MessagesPageCursor {
     subject: Option<String>,
     #[serde(default)]
     subject_prefix: Option<String>,
+    #[serde(default)]
+    acting_as: Option<String>,
     include_closed: bool,
     limit: usize,
 }
@@ -163,9 +172,11 @@ impl MessagesPageCursor {
         query: &MessagesPageQuery,
         to: Option<&str>,
         from: Option<&str>,
+        acting_as: Option<&str>,
         limit: usize,
     ) -> Result<(), ApiError> {
         let matches = self.to.as_deref() == to
+            && self.acting_as.as_deref() == acting_as
             && self.from.as_deref() == from
             && self.subject == query.subject
             && self.subject_prefix == query.subject_prefix
@@ -189,7 +200,26 @@ pub async fn list_messages_page(
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
     let to = query.to.as_deref().map(normalize_message_party);
     let from = query.from.as_deref().map(normalize_message_party);
+    let acting_as = query.acting_as.as_deref().map(normalize_message_party);
     query.validate_filters()?;
+    if acting_as.is_some() && to.is_none() {
+        return Err(ApiError::bad(St3Error::new(
+            "validation-failed", "acting_as needs one explicit mailbox",
+        )));
+    }
+    if let (Some(to), Some(actor)) = (to.as_deref(), acting_as.as_deref()) {
+        let retirement = if to.starts_with("agent/") {
+            state.store.agent_retirement(to).map_err(ApiError::bad)?
+        } else { None };
+        let permitted = if let Some(retirement) = retirement.as_ref() {
+            retirement.body["fields"]["successor"].as_str() == Some(actor)
+        } else { to == actor };
+        if !permitted {
+            return Err(ApiError::bad(St3Error::new("wrong-message-recipient", format!(
+                "`{actor}` has no mail custody for `{to}`"
+            ))));
+        }
+    }
     if let (Some(to), Some(report)) = (to.as_deref(), query.delivery.as_deref()) {
         delivery_presence::record(to, report);
     } else {
@@ -211,7 +241,7 @@ pub async fn list_messages_page(
             let cursor: MessagesPageCursor = serde_json::from_slice(&bytes).map_err(|_| {
                 ApiError::bad(St3Error::new("validation-failed", "invalid message cursor"))
             })?;
-            cursor.validate(&query, to.as_deref(), from.as_deref(), limit)?;
+            cursor.validate(&query, to.as_deref(), from.as_deref(), acting_as.as_deref(), limit)?;
             Ok(cursor)
         })
         .transpose()?;
@@ -260,6 +290,7 @@ pub async fn list_messages_page(
                 from: query.from.as_deref().map(normalize_message_party),
                 subject: query.subject.clone(),
                 subject_prefix: query.subject_prefix.clone(),
+                acting_as: query.acting_as.as_deref().map(normalize_message_party),
                 include_closed: query.include_closed,
                 limit,
             };
@@ -375,7 +406,15 @@ pub async fn post_message_claim(
             ))
         })?;
         let actor = normalize_message_party(&actor);
-        if actor != message.to
+        let retirement = if message.to.starts_with("agent/") {
+            store.agent_retirement(&message.to).map_err(ApiError::bad)?
+        } else { None };
+        let acting_for = retirement.as_ref().and_then(|claim| {
+            (matches!(kind, "message.read" | "message.closed")
+                && claim.body["fields"]["successor"].as_str() == Some(actor.as_str()))
+                .then(|| message.to.clone())
+        });
+        if acting_for.is_none() && (retirement.is_some() || actor != message.to)
             && !request
                 .delegation
                 .as_ref()
@@ -392,6 +431,10 @@ pub async fn post_message_claim(
         let mut fields =
             BTreeMap::from([("status".into(), Value::String(request.lifecycle.clone()))]);
         let mut evidence = request.evidence;
+        if let Some(acting_for) = acting_for {
+            fields.insert("acting_for".into(), Value::String(acting_for));
+            evidence.push(retirement.as_ref().unwrap().id.clone());
+        }
         if let Some(proof) = &request.delegation {
             crate::store::delegation::add_fields(&mut fields, proof);
             store.delegation_evidence(&mut evidence, proof).map_err(ApiError::bad)?;
@@ -448,7 +491,7 @@ mod page_cursor_tests {
             let query: MessagesPageQuery = serde_json::from_value(value).unwrap();
             let to = query.to.as_deref().map(normalize_message_party);
             let from = query.from.as_deref().map(normalize_message_party);
-            cursor.validate(&query, to.as_deref(), from.as_deref(), query.limit.unwrap())
+            cursor.validate(&query, to.as_deref(), from.as_deref(), None, query.limit.unwrap())
         };
         assert!(validate(binding.clone()).is_ok());
         for (field, value) in [
@@ -479,13 +522,13 @@ mod page_cursor_tests {
             "include_closed": true, "limit": 2
         }))
         .unwrap();
-        assert!(cursor.validate(&query, None, None, 2).is_ok());
+        assert!(cursor.validate(&query, None, None, None, 2).is_ok());
         query.subject_prefix = Some("literal_%".into());
-        assert!(cursor.validate(&query, None, None, 2).is_err());
+        assert!(cursor.validate(&query, None, None, None, 2).is_err());
         cursor.subject_prefix = query.subject_prefix.clone();
-        assert!(cursor.validate(&query, None, None, 2).is_ok());
+        assert!(cursor.validate(&query, None, None, None, 2).is_ok());
         query.subject_prefix = Some("literal".into());
-        assert!(cursor.validate(&query, None, None, 2).is_err());
+        assert!(cursor.validate(&query, None, None, None, 2).is_err());
     }
 }
 

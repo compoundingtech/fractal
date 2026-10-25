@@ -12,7 +12,7 @@ use crate::message_body::BodyAttachment as _;
 
 pub use crate::store::backup_format::{
     FORMAT, Header, MessageBodyRecord, Record, RestoreReport, TableDigest, VERSION,
-    VERSION_WITH_BODIES,
+    VERSION_WITH_BODIES, VERSION_WITH_LEDGERS,
 };
 pub use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
 
@@ -118,7 +118,7 @@ fn read_record(input: &mut impl BufRead) -> Result<Option<(Record, Vec<u8>)>> {
 fn check_header(header: &Header) -> Result<()> {
     ensure!(
         header.format == FORMAT
-            && (header.version == VERSION || header.version == VERSION_WITH_BODIES),
+            && [VERSION, VERSION_WITH_BODIES, VERSION_WITH_LEDGERS].contains(&header.version),
         "unsupported claim backup format/version"
     );
     ensure!(
@@ -148,8 +148,11 @@ fn body_bytes(body: &MessageBodyRecord) -> Result<Vec<u8>> {
 /// Check framing and completeness without admitting anything.
 pub fn verify_file(path: &Path) -> Result<Header> {
     let mut input = BufReader::new(fs::File::open(path)?);
-    let (Record::Header(header), bytes) = read_record(&mut input)?.context("empty backup")? else {
-        anyhow::bail!("backup must start with a header");
+    let (first, bytes) = read_record(&mut input)?.context("empty backup")?;
+    let header = match first {
+        Record::Header(header) => header,
+        Record::Failure { code, message } => anyhow::bail!("backup export failed ({code}): {message}"),
+        _ => anyhow::bail!("backup must start with a header"),
     };
     check_header(&header)?;
     let mut hash = Sha256::new();
@@ -158,6 +161,7 @@ pub fn verify_file(path: &Path) -> Result<Header> {
     loop {
         let (record, bytes) = read_record(&mut input)?.context("backup has no end record")?;
         match record {
+            Record::Failure { code, message } => anyhow::bail!("backup export failed ({code}): {message}"),
             Record::Envelope(_) => envelopes += 1,
             Record::Checkpoint(_) | Record::Signatures(_) => {}
             Record::MessageBody(body) => {
@@ -167,6 +171,10 @@ pub fn verify_file(path: &Path) -> Result<Header> {
                 );
                 body_bytes(&body)?;
             }
+            Record::Ledger(_) => ensure!(
+                header.version >= VERSION_WITH_LEDGERS,
+                "a ledger page in an archive that does not declare them"
+            ),
             Record::End {
                 envelopes: expected,
                 sha256,
@@ -239,6 +247,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
     loop {
         let (record, bytes) = read_record(&mut input)?.context("backup ended during restore")?;
         match record {
+            Record::Failure { code, message } => anyhow::bail!("backup export failed ({code}): {message}"),
             Record::MessageBody(body) => {
                 let bytes = body_bytes(&body)?;
                 let staged = crate::message_body::bodies(stage.path());
@@ -256,6 +265,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
             Record::Signatures(signatures) => {
                 store.receive_backup_signatures(&header, &signatures)?
             }
+            Record::Ledger(page) => store.receive_backup_ledger(&page)?,
             Record::Checkpoint(page) => {
                 ensure!(!checkpoint_finished, "duplicate checkpoint manifest");
                 let manifest = checkpoint.get_or_insert_with(|| CheckpointManifest {

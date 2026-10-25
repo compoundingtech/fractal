@@ -64,6 +64,17 @@ pub fn synthetic_mailbox_protocol_router_with(state: AppState, subject: &str, fa
         archives_inbox: false,
     }))
 }
+/// Resolve only the requested address. The transport peer remains the immutable
+/// physical principal: a public rename must never create new mailbox custody.
+fn storage_fence(state: &AppState, mut fence: Fence) -> Result<Fence, ApiError> {
+    fence.subject = crate::store::identities::resolve_reference_conn(
+        &state.store.readers.get(), &fence.subject,
+    ).map_err(ApiError::bad)?;
+    Ok(fence)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod ownership_process_tests;
 
 pub async fn subscribe(
     State(state): State<AppState>,
@@ -71,12 +82,13 @@ pub async fn subscribe(
     peer: Option<Extension<NativeDeliveryPeer>>,
     websocket: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
+    let fence = storage_fence(&state, fence)?;
     authorize(&fence, peer.as_ref().map(|p| &p.0))?;
     let checked_state = state.clone();
     let binding = fence.clone();
     let peer = peer.expect("authorize checked the native peer").0;
     let checked_peer = peer.clone();
-    let native = blocking_action(move || {
+    let (native, primary_wrapper) = blocking_action(move || authority::with_claude_primary(&checked_state, &binding, &checked_peer, None, || {
         if !cfg!(target_os = "linux") { return checked_state.store.check_mailbox(&binding).map(|_| false); }
         if authority::with_argv_channel(&checked_state, &binding, &checked_peer, |member, validate| {
             if binding.epoch == 0 {
@@ -92,10 +104,10 @@ pub async fn subscribe(
             checked_state.store.repair_mailbox_checked(&binding, owner, validate).map(|_| ())
         }
         }).map(|_| true)
-    }).await?;
+    })).await?;
     // Wake the predecessor immediately, even when no graph content changed.
     signal_local_change(&state);
-    Ok(websocket.on_upgrade(move |socket| stream(state, fence, socket, peer, native)))
+    Ok(websocket.on_upgrade(move |socket| stream(state, fence, socket, peer, native, primary_wrapper)))
 }
 
 pub async fn bind(
@@ -103,10 +115,11 @@ pub async fn bind(
     peer: Option<Extension<NativeDeliveryPeer>>,
     Json(request): Json<Fence>,
 ) -> Result<Json<Fence>, ApiError> {
+    let request = storage_fence(&state, request)?;
     authorize(&request, peer.as_ref().map(|p| &p.0))?;
     let bind_state = state.clone();
     let peer = peer.expect("authorize checked the native peer").0;
-    let bound = blocking_action(move || {
+    let bound = blocking_action(move || authority::with_claude_primary(&bind_state, &request, &peer, None, || {
         if !cfg!(target_os = "linux") { return bind_state.store.bind_mailbox(&request); }
         if let Some(bound) = authority::with_argv_channel(&bind_state, &request, &peer, |member, validate| {
             bind_state.store.bind_argv_mailbox_checked(&request, member, validate)
@@ -114,9 +127,9 @@ pub async fn bind(
         authority::with_authority(&bind_state, &request, &peer, |owner, validate| {
             bind_state.store.bind_mailbox_with_lease_checked(&request, Some(owner), validate)
         })
-    }).await?;
+    })).await?;
     signal_local_change(&state);
-    Ok(Json(bound))
+    Ok(Json(bound.0))
 }
 
 // Explicit already-admitted protocol fixtures lack a physical PTY/provider lease.
@@ -127,6 +140,7 @@ pub async fn bind_admitted_fixture(
     peer: Option<Extension<NativeDeliveryPeer>>,
     Json(request): Json<Fence>,
 ) -> Result<Json<Value>, ApiError> {
+    let request = storage_fence(&state, request)?;
     authorize(&request, peer.as_ref().map(|peer| &peer.0))?;
     let bound = blocking_action(move || state.store.bind_mailbox(&request)).await?;
     Ok(Json(json!({"api_version":"st3.v1","value":bound})))
@@ -139,6 +153,7 @@ pub async fn subscribe_admitted_fixture(
     peer: Option<Extension<NativeDeliveryPeer>>,
     websocket: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
+    let fence = storage_fence(&state, fence)?;
     authorize(&fence, peer.as_ref().map(|peer| &peer.0))?;
     state.store.check_mailbox(&fence).map_err(ApiError::bad)?;
     signal_local_change(&state);
@@ -150,11 +165,19 @@ pub async fn attachment(
     Query(fence): Query<Fence>,
     peer: Option<Extension<NativeDeliveryPeer>>,
 ) -> Result<Json<crate::mailbox::Attachment>, ApiError> {
+    let fence = storage_fence(&state, fence)?;
     authorize(&fence, peer.as_ref().map(|p| &p.0))?;
     let store = state.store.clone();
     let checked_state = state.clone();
     let peer = peer.expect("authorize checked the native peer").0;
-    let attached = blocking_action(move || {
+    let attached = blocking_action(move || authority::with_claude_primary(&checked_state, &fence, &peer, None, || {
+        // Classified from this daemon's own state, never from the request. A push-capable
+        // binding's GET is not thereby proven to be an admission.
+        crate::profile::note(if delivery_presence::push_capable(&fence) {
+            "attachment-get push-capable"
+        } else {
+            "attachment-get unnegotiated"
+        });
         if store.has_mailbox_lease(&fence)? {
             authority::with_authority(&checked_state, &fence, &peer, |owner, validate| {
                 validate()?;
@@ -170,9 +193,9 @@ pub async fn attachment(
             &fence.subject,
             &fence.incarnation,
         ))
-    })
+    }))
     .await?;
-    Ok(Json(crate::mailbox::Attachment { attached }))
+    Ok(Json(crate::mailbox::Attachment { attached: attached.0 }))
 }
 
 fn authorize(fence: &Fence, peer: Option<&NativeDeliveryPeer>) -> Result<(), ApiError> {
@@ -196,6 +219,8 @@ pub async fn receipt(
     peer: Option<Extension<NativeDeliveryPeer>>,
     Json(request): Json<Receipt>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
+    let mut request = request;
+    request.fence = storage_fence(&state, request.fence)?;
     authorize(&request.fence, peer.as_ref().map(|p| &p.0))?;
     if request.fence.component != "delivery"
         || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read")
@@ -233,7 +258,7 @@ pub async fn receipt(
     let checked_state = state.clone();
     let checked_peer = peer.expect("authorize checked the native peer").0;
     let kind = input.kind.clone();
-    let (record, appended, work_wake) = blocking_action(move || {
+    let ((record, appended, work_wake), _) = blocking_action(move || authority::with_claude_primary(&checked_state, &request.fence, &checked_peer, None, || {
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
             authority::with_authority(&checked_state, &request.fence, &checked_peer, |owner, validate| {
                 validate()?;
@@ -250,7 +275,7 @@ pub async fn receipt(
             .flatten()
             .is_none_or(|message| super::is_work_wake(&message.tags));
         Ok((record, appended, work_wake))
-    })
+    }))
     .await?;
     // A repeated or already-settled receipt changes nothing; only a new claim wakes readers.
     if appended {
@@ -601,7 +626,8 @@ fn own_post_reactor(state: &AppState, fence: &Fence) -> tokio::sync::mpsc::Sende
 /// Maximum gap between durable change checks, including when a notification is missed.
 const MAILBOX_RECHECK: Duration = Duration::from_secs(30);
 
-async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDeliveryPeer, native: bool) {
+async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDeliveryPeer, native: bool,
+    primary_wrapper: Option<fractal_drivers::claude_process::Process>) {
     #[cfg(feature = "test-support")]
     let mut control = crate::test_support::fixture_mailbox_transport(&state.store, &fence.subject);
     #[cfg(feature = "test-support")]
@@ -618,7 +644,9 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         timer.tick().await;
         Some(((), timer))
     });
-    let stream = stream_with_timers_inner(state.clone(), fence.clone(), socket, raw_snapshot, safety, heartbeat, StreamControl::new(native.then(|| peer.clone())));
+    let mut stream_control = StreamControl::new(native.then(|| peer.clone()));
+    stream_control.primary_peer = (peer.transport == "claude-channel").then(|| (peer.clone(), primary_wrapper));
+    let stream = stream_with_timers_inner(state.clone(), fence.clone(), socket, raw_snapshot, safety, heartbeat, stream_control);
     #[cfg(not(feature = "test-support"))]
     stream.await;
     #[cfg(feature = "test-support")]
@@ -660,15 +688,64 @@ fn safety_timer(fence: &Fence) -> tokio::time::Interval {
     timer
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ProofDecision {
+    Valid,
+    Unavailable,
+    Refused,
+}
+struct StreamProof {
+    fence: Fence,
+    failures: u8,
+    owner: u64,
+}
+impl StreamProof {
+    fn new(fence: Fence) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            fence,
+            failures: 0,
+            owner: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+    fn observe<T, E>(&mut self, result: Result<Result<T, St3Error>, E>) -> ProofDecision {
+        match result {
+            Ok(Ok(_)) => {
+                self.failures = 0;
+                delivery_presence::clear_proof_pending(&self.fence, self.owner, true);
+                ProofDecision::Valid
+            }
+            Ok(Err(error)) if error.code == "stale-mailbox-session" => ProofDecision::Refused,
+            _ => {
+                let before = self.failures;
+                self.failures = self.failures.saturating_add(1).min(3);
+                delivery_presence::proof_pending(&self.fence, self.owner, self.failures);
+                if before == 0 || (before < 3 && self.failures == 3) {
+                    // Only two bounded diagnostics per episode: the first and the cap crossing.
+                    tracing::warn!(subject = %self.fence.subject, checks = self.failures,
+                        "Claude ownership proof unavailable; established stream retained; new effects held");
+                }
+                ProofDecision::Unavailable
+            }
+        }
+    }
+}
+impl Drop for StreamProof {
+    fn drop(&mut self) {
+        delivery_presence::clear_proof_pending(&self.fence, self.owner, false);
+    }
+}
+
 struct StreamControl {
     peer: Option<NativeDeliveryPeer>,
+    primary_peer: Option<(NativeDeliveryPeer, Option<fractal_drivers::claude_process::Process>)>,
     #[cfg(any(test, feature = "test-support"))]
     dirty_gate: Option<Arc<FixtureDirtyGate>>,
 }
 
 impl StreamControl {
     fn new(peer: Option<NativeDeliveryPeer>) -> Self {
-        Self { peer, #[cfg(any(test, feature = "test-support"))] dirty_gate: None }
+        Self { peer, primary_peer: None, #[cfg(any(test, feature = "test-support"))] dirty_gate: None }
     }
 }
 
@@ -681,6 +758,8 @@ async fn stream_with_timers_inner<F, S, H>(
     H: futures_util::Stream<Item = ()> + Send + 'static,
 {
     let peer = control.peer;
+    let primary_peer = control.primary_peer;
+    let _pushed = ForgetPushed(fence.clone());
     futures_util::pin_mut!(safety, heartbeat);
     let since = client_now_ms();
     let through = match state.store.index() {
@@ -702,8 +781,17 @@ async fn stream_with_timers_inner<F, S, H>(
     let mut order = MailboxOrder::new();
     let own_posts = own_post_reactor(&state, &fence);
     let mut dirty = true;
+    let mut proof = StreamProof::new(fence.clone());
     let mut pending_caller = crate::otel::MailboxFenceCaller::DirtyPass;
     let mut last: Option<(crate::store::MailboxWatermark, Snapshot)> = None;
+    // Attachment push, once this title stream's driver reports `attachment_push`. The value is
+    // re-evaluated after each durable pass, on a presence change and at its own expiry; never
+    // on a timer of its own.
+    let mut attachment_push = false;
+    let mut attachment_due = false;
+    let mut attachment_sent: Option<(bool, Option<u64>)> = None;
+    let mut attachment_deadline: Option<tokio::time::Instant> = None;
+    let mut attachment_watch: Option<delivery_presence::AttachmentWatch> = None;
     loop {
         #[cfg(test)]
         let process_dirty = control.dirty_gate.as_ref().is_none_or(|gate|
@@ -711,6 +799,17 @@ async fn stream_with_timers_inner<F, S, H>(
         #[cfg(not(test))]
         let process_dirty = true;
         if dirty && process_dirty {
+            if let Some((primary, wrapper)) = primary_peer.clone() {
+                let state = state.clone();
+                let fence = fence.clone();
+                let admitted = crate::api::read_deadline::spawn_blocking(move ||
+                    authority::with_claude_primary(&state, &fence, &primary, wrapper, || Ok(()))).await;
+                match proof.observe(admitted) {
+                    ProofDecision::Valid => {},
+                    ProofDecision::Refused => return,
+                    ProofDecision::Unavailable => { dirty = false; continue; },
+                }
+            }
             // Retain consumed replay across ordinary wakes. A new unresolved loss
             // or changed authority input requires a fresh proof of the same nonce.
             if let (Some(proof), Some(peer)) = (replay_proven.take(), peer.as_ref()) {
@@ -797,6 +896,7 @@ async fn stream_with_timers_inner<F, S, H>(
                 }
                 Err(_) => return,
             };
+            attachment_due = true;
             for subject in closures {
                 if let Err(error) = own_posts.try_send(subject) {
                     // A full bounded queue never blocks delivery or loses its maintenance
@@ -877,7 +977,78 @@ async fn stream_with_timers_inner<F, S, H>(
             }
             dirty = false;
         }
+        if attachment_push && attachment_due {
+            attachment_due = false;
+            #[cfg(test)]
+            if let Some(gate) = &control.dirty_gate {
+                gate.attachment_evaluations
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let store = state.store.clone();
+            let binding = fence.clone();
+            let evaluated = crate::api::read_deadline::spawn_blocking(move || {
+                // Presence and deadline wakes skip the durable pass, so check this stream's own
+                // binding too. A stale one sends nothing; the next pass ends the stream.
+                store.check_mailbox(&binding).ok()?;
+                Some(crate::api::claude_channel_attachment(
+                    &store,
+                    &binding.subject,
+                    &binding.incarnation,
+                ))
+            })
+            .await;
+            match evaluated {
+                Ok(Some(proof)) => {
+                    // While another stream's ownership proof for this binding is pending, a new
+                    // attachment is a new effect and is held: only a stream that already pushed
+                    // `attached: true` keeps it. The poll answers the same way. The pending
+                    // proof's clearing wakes this stream again.
+                    let held = proof.is_some()
+                        && !matches!(attachment_sent, Some((true, _)))
+                        && delivery_presence::pending_proof(&fence.subject, &fence.incarnation)
+                            .is_some();
+                    let proof = if held { None } else { proof };
+                    // The proof holds through `until` inclusive, so wake just after it.
+                    attachment_deadline = proof
+                        .as_ref()
+                        .map(|(_, until)| *until + Duration::from_millis(1));
+                    let value = (proof.is_some(), proof.map(|(delivery, _)| delivery.epoch));
+                    if attachment_sent != Some(value) {
+                        let frame = Frame::Attachment {
+                            attached: value.0,
+                            delivery_epoch: value.1,
+                        };
+                        if send(&mut socket, &frame).await.is_err() {
+                            return;
+                        }
+                        if attachment_sent.is_none() {
+                            delivery_presence::note_pushed(&fence);
+                        }
+                        attachment_sent = Some(value);
+                    }
+                }
+                Ok(None) => {
+                    // A stale binding is left to the next durable pass. Disarm the deadline, or a
+                    // past instant would make every loop re-evaluate until that pass ends us.
+                    attachment_deadline = None;
+                    dirty = true;
+                }
+                Err(_) => return,
+            }
+        }
         tokio::select! {
+            _ = async {
+                match attachment_watch.as_mut() {
+                    Some(watch) => watch.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => { attachment_due = true; },
+            _ = async {
+                match attachment_deadline {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => { attachment_due = true; },
             event = subscription.changed.changed() => {
                 if event.is_err() { return; }
                 #[cfg(test)]
@@ -894,6 +1065,20 @@ async fn stream_with_timers_inner<F, S, H>(
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(WsMessage::Text(report))) => {
+                    // A Claude primary proves its physical generation before its report is admitted.
+                    if let Some((primary, wrapper)) = primary_peer.clone()
+                        && state.store.check_mailbox(&fence).is_ok()
+                    {
+                        let state = state.clone();
+                        let fence = fence.clone();
+                        let checked = crate::api::read_deadline::spawn_blocking(move ||
+                            authority::with_claude_primary(&state, &fence, &primary, wrapper, || Ok(()))).await;
+                        match proof.observe(checked) {
+                            ProofDecision::Valid => {},
+                            ProofDecision::Refused => return,
+                            ProofDecision::Unavailable => { dirty = false; continue; },
+                        }
+                    }
                     let authenticated = if let Some(peer) = peer.clone() {
                         let checked_state = state.clone();
                         let binding = fence.clone();
@@ -925,6 +1110,13 @@ async fn stream_with_timers_inner<F, S, H>(
                         let recorded = record_admitted_report(&fence, &report);
                         let value = serde_json::from_str::<Value>(&report).unwrap_or(Value::Null);
                         replay_supported |= peer.is_some() && value["mailbox_replay_ack"] == true;
+                        if fence.component == "title" && !attachment_push && value["attachment_push"] == true {
+                            // Watch before the first evaluation, so no change falls between them.
+                            attachment_watch = Some(delivery_presence::watch_attachment(&fence.subject));
+                            subscription.owner_of(&fence.subject, "delivery");
+                            attachment_push = true;
+                            attachment_due = true;
+                        }
                         if fence.component == "delivery" && replay_supported && !previous_mailbox.is_empty() && !replay_challenge_sent {
                             if send(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }).await.is_err() { return; }
                             replay_challenge_sent = true;
@@ -969,6 +1161,16 @@ async fn stream_with_timers_inner<F, S, H>(
                 pending_caller = crate::otel::MailboxFenceCaller::Heartbeat;
                 if socket.send(WsMessage::Ping(Vec::new().into())).await.is_err() { return; }
             },
+        }
+    }
+}
+
+/// Whatever ends a stream, its title binding stops counting as push-capable.
+struct ForgetPushed(Fence);
+impl Drop for ForgetPushed {
+    fn drop(&mut self) {
+        if self.0.component == "title" {
+            delivery_presence::forget_pushed(&self.0);
         }
     }
 }
@@ -1218,6 +1420,53 @@ mod tests {
         assert!(admitted_report(&title, &report).is_none());
     }
 
+    #[test]
+    fn established_stream_unavailable_is_unknown_not_loss_and_refusal_is_distinct() {
+        let fence = Fence::new("agent/stream-proof-unit", "fixture", "delivery");
+        let mut old = StreamProof::new(fence.clone());
+        for _ in 0..4 {
+            assert_eq!(old.observe::<(), ()>(Ok(Err(St3Error::new("mailbox-authority-unavailable", "fixture")))), ProofDecision::Unavailable);
+        }
+        assert_eq!(old.failures, 3);
+        let assessment = delivery_presence::assess_current(&fence.subject, "claude", Some(&fence.incarnation));
+        assert_eq!(assessment.state, "unknown");
+        assert!(assessment.reason.unwrap().contains("suspect after three checks"));
+        let mut next = StreamProof::new(fence.clone());
+        assert_eq!(next.observe::<(), ()>(Ok(Ok(()))), ProofDecision::Valid);
+        assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_none());
+        assert_eq!(next.observe::<(), ()>(Err(())), ProofDecision::Unavailable);
+        drop(old);
+        assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_some(), "old stream drop cannot clear the replacement's uncertainty");
+        assert_eq!(next.observe::<(), ()>(Ok(Err(St3Error::new("stale-mailbox-session", "proven mismatch")))), ProofDecision::Refused);
+        drop(next);
+        assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_none());
+    }
+
+    #[test]
+    fn protected_claude_admission_cannot_downgrade_or_rotate_the_primary_epoch() {
+        let root=tempfile::tempdir().unwrap();
+        let state=crate::api::tests_shared::state(root.path());
+        crate::store::mailbox_tests::ready(&state.store,"current");
+        let subject="agent/eval.worker";
+        let current=state.store.bind_mailbox(&Fence::new(subject,"current","delivery")).unwrap();
+        let candidate=Fence::new(subject,"current","delivery");
+        let peer=NativeDeliveryPeer { agent:subject.into(),transport:"claude-channel",
+            pid:std::process::id(),archives_inbox:false };
+        let physical=fractal_drivers::claude_process::process(std::process::id()).unwrap();
+        // This gate is outside the platform switch: Darwin cannot fall through to its old
+        // unfenced bind when a previously admitted protected generation loses its witness.
+        let rejected=authority::with_claude_primary(&state,&candidate,&peer,Some(physical),||
+            state.store.bind_mailbox(&candidate));
+        assert!(rejected.is_err());
+        state.store.check_mailbox(&current).unwrap();
+        // Explicit legacy admission is a separate compatibility branch, not primary proof.
+        let legacy=authority::with_claude_primary(&state,&candidate,&peer,None,||
+            state.store.bind_mailbox(&candidate)).unwrap();
+        assert!(legacy.1.is_none());
+        state.store.check_mailbox(&legacy.0).unwrap();
+        assert!(state.store.check_mailbox(&current).is_err());
+    }
+
     #[tokio::test]
     async fn attachment_checks_both_runtime_and_current_delivery_epoch() {
         let root = tempfile::tempdir().unwrap();
@@ -1246,7 +1495,342 @@ mod tests {
         assert!(attachment(State(state.clone()), Query(title.clone()), Some(Extension(peer.clone()))).await.unwrap().0.attached);
         let mut foreign = title;
         foreign.incarnation = "previous".into();
-        assert!(attachment(State(state), Query(foreign), Some(Extension(peer))).await.is_err());
+        assert!(
+            attachment(State(state), Query(foreign), Some(Extension(peer)))
+                .await
+                .is_err()
+        );
+    }
+
+    /// A Claude seat with a running incarnation and current title and delivery bindings.
+    fn attachment_seat(state: &AppState, subject: &str) -> (Fence, Fence) {
+        let runtime = subject.trim_start_matches("agent/");
+        for (kind, fields) in [
+            (
+                "runtime.observed",
+                json!({"status":"running","runtime_id":runtime,"incarnation_id":"current"}),
+            ),
+            (
+                "harness.observed",
+                json!({"state":"idle","driver":"claude","incarnation_id":"current"}),
+            ),
+        ] {
+            state
+                .store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: kind.into(),
+                    actor: Some(subject.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: Some(format!("{subject}:{kind}")),
+                })
+                .unwrap();
+        }
+        let title = state
+            .store
+            .bind_mailbox(&Fence::new(subject, "current", "title"))
+            .unwrap();
+        let delivery = state
+            .store
+            .bind_mailbox(&Fence::new(subject, "current", "delivery"))
+            .unwrap();
+        (title, delivery)
+    }
+
+    fn channel_report(ready: bool, age_ms: u64) -> String {
+        json!({"transport":"claude-channel","ready":ready,"channel":{"pid":8,"age_ms":age_ms}})
+            .to_string()
+    }
+
+    async fn report_title(stream: &mut ControlledStream, attachment_push: bool) {
+        let mut report = json!({"transport":"claude-channel","ready":false});
+        if attachment_push {
+            report["attachment_push"] = json!(true);
+        }
+        stream
+            .socket
+            .send(Message::Text(report.to_string().into()))
+            .await
+            .unwrap();
+    }
+
+    async fn next_attachment(stream: &mut ControlledStream) -> (bool, Option<u64>) {
+        loop {
+            match next(&mut stream.socket).await {
+                Frame::Attachment {
+                    attached,
+                    delivery_epoch,
+                } => return (attached, delivery_epoch),
+                Frame::Seat { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    // Planned T8 and T2. No safety tick is ever sent, and the one heartbeat precedes the
+    // capability, so every frame after it comes from a presence change alone.
+    #[tokio::test]
+    async fn attachment_is_pushed_only_after_the_driver_offers_it_and_without_a_tick() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let subject = "agent/attachment-push-wakes";
+        let (title, delivery) = attachment_seat(&state, subject);
+        // A proof window far longer than next()'s 15 s wait (MAILBOX_RECHECK / 2). With the
+        // default 10 s window the deadline re-evaluation could stand in for the wake under test,
+        // so a missing wake would only make a frame late. Do not shorten it.
+        delivery_presence::shorten_window(subject, Duration::from_secs(120));
+        let mut stream =
+            controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        // An older driver never offers the capability and is never sent the frame, even
+        // across a durable pass.
+        report_title(&mut stream, false).await;
+        stream.heartbeat.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), next(&mut stream.socket))
+                .await
+                .is_err(),
+            "no attachment frame without the capability"
+        );
+        report_title(&mut stream, true).await;
+        assert_eq!(
+            next_attachment(&mut stream).await,
+            (true, Some(delivery.epoch))
+        );
+        delivery_presence::record_fenced(&delivery, &channel_report(false, 0));
+        assert_eq!(next_attachment(&mut stream).await, (false, None));
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        assert_eq!(
+            next_attachment(&mut stream).await,
+            (true, Some(delivery.epoch))
+        );
+        assert!(delivery_presence::push_capable(&title));
+        let mut other = title.clone();
+        other.epoch += 1;
+        assert!(
+            !delivery_presence::push_capable(&other),
+            "only the exact pushed binding"
+        );
+    }
+
+    // While another stream's ownership proof for the binding is pending, a new push stream is
+    // told "not attached" (the poll answers the same), and the clearing of that proof pushes the
+    // attachment. A stream that already pushed `attached: true` keeps it when a proof goes
+    // pending, even across a beat refresh.
+    #[tokio::test]
+    async fn pending_ownership_proof_holds_a_new_attachment_push_but_not_an_established_one() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let subject = "agent/attachment-push-pending-proof";
+        let (title, delivery) = attachment_seat(&state, subject);
+        // As in the wake test above: the deadline must not stand in for the wake under test.
+        delivery_presence::shorten_window(subject, Duration::from_secs(120));
+        delivery_presence::proof_pending(&delivery, 1, 1);
+        let mut stream =
+            controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        report_title(&mut stream, true).await;
+        assert_eq!(next_attachment(&mut stream).await, (false, None));
+        assert!(
+            !crate::api::claude_channel_attached(&state.store, subject, "current"),
+            "the poll agrees while the proof is pending"
+        );
+        delivery_presence::clear_proof_pending(&delivery, 1, true);
+        assert_eq!(
+            next_attachment(&mut stream).await,
+            (true, Some(delivery.epoch))
+        );
+        delivery_presence::proof_pending(&delivery, 2, 1);
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), next(&mut stream.socket))
+                .await
+                .is_err(),
+            "an established stream keeps its attachment while a proof is pending"
+        );
+        delivery_presence::clear_proof_pending(&delivery, 2, true);
+    }
+
+    // Planned T3: a channel that stops reporting is pushed unattached at its own deadline.
+    // The beat is refreshed past several windows first, so each deadline finds it refreshed
+    // and must arm again. No tick is sent: only the deadline can push the expiry. The window
+    // is shortened to one second for this recipient (a controlled stream's real socket and
+    // blocking reads rule out tokio's paused clock); the poll and the deadline still share it.
+    #[tokio::test]
+    async fn a_silent_channel_is_pushed_unattached_at_its_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let subject = "agent/attachment-push-deadline";
+        let window = Duration::from_secs(1);
+        delivery_presence::shorten_window(subject, window);
+        let (title, delivery) = attachment_seat(&state, subject);
+        let mut stream =
+            controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        report_title(&mut stream, true).await;
+        assert!(next_attachment(&mut stream).await.0);
+        for _ in 0..15 {
+            tokio::time::sleep(window / 5).await;
+            delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        }
+        let last = std::time::Instant::now();
+        let expired = tokio::time::timeout(window * 5, next_attachment(&mut stream))
+            .await
+            .expect("the deadline pushes the expiry");
+        let waited = last.elapsed();
+        assert_eq!(expired, (false, None));
+        assert!(
+            waited >= window - Duration::from_millis(50),
+            "pushed before the window ended: {waited:?}"
+        );
+    }
+
+    // A stale title binding found by a deadline evaluation sends nothing and must disarm the
+    // past deadline: one evaluation, then the durable pass ends the stream.
+    #[tokio::test]
+    async fn a_stale_title_binding_is_evaluated_once_then_fenced() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let subject = "agent/attachment-push-stale-title";
+        delivery_presence::shorten_window(subject, Duration::from_millis(300));
+        let (title, delivery) = attachment_seat(&state, subject);
+        let mut stream =
+            controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        report_title(&mut stream, true).await;
+        assert!(next_attachment(&mut stream).await.0);
+        // Hold durable passes so only the deadline can evaluate, then supersede the title.
+        stream.dirty_gate.allowed.store(false, SeqCst);
+        let before = stream.dirty_gate.attachment_evaluations.load(SeqCst);
+        state
+            .store
+            .bind_mailbox(&Fence::new(subject, "current", "title"))
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let evaluations = stream.dirty_gate.attachment_evaluations.load(SeqCst) - before;
+        assert_eq!(
+            evaluations, 1,
+            "a past deadline must not re-run the evaluation"
+        );
+        stream.dirty_gate.allowed.store(true, SeqCst);
+        stream.heartbeat.send(()).unwrap();
+        assert!(matches!(
+            next(&mut stream.socket).await,
+            Frame::Fenced { .. }
+        ));
+    }
+
+    // Planned T5: a new delivery binding is a durable owner change, not a claim. It must wake
+    // the title stream by itself, with no tick.
+    #[tokio::test]
+    async fn a_delivery_rebind_reaches_the_title_stream_without_a_tick() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let subject = "agent/attachment-push-rebind";
+        let (title, delivery) = attachment_seat(&state, subject);
+        // A proof window far longer than next()'s 15 s wait (MAILBOX_RECHECK / 2). With the
+        // default 10 s window the deadline re-evaluation could stand in for the wake under test,
+        // so a missing wake would only make a frame late. Do not shorten it.
+        delivery_presence::shorten_window(subject, Duration::from_secs(120));
+        let mut stream =
+            controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        report_title(&mut stream, true).await;
+        assert_eq!(
+            next_attachment(&mut stream).await,
+            (true, Some(delivery.epoch))
+        );
+        let rebound = state
+            .store
+            .bind_mailbox(&Fence::new(subject, "current", "delivery"))
+            .unwrap();
+        assert_ne!(rebound.epoch, delivery.epoch);
+        // The live report still names the superseded binding.
+        assert_eq!(next_attachment(&mut stream).await, (false, None));
+        delivery_presence::record_fenced(&rebound, &channel_report(true, 0));
+        assert_eq!(
+            next_attachment(&mut stream).await,
+            (true, Some(rebound.epoch))
+        );
+    }
+
+    // Planned T9, as a fixed script: after each step and one durable pass, the pushed value
+    // is what the old GET handler answers at that moment. Only latency may differ.
+    #[tokio::test]
+    async fn the_pushed_value_is_what_the_poll_answers() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let subject = "agent/attachment-push-oracle";
+        let (title, mut delivery) = attachment_seat(&state, subject);
+        let peer = NativeDeliveryPeer {
+            agent: subject.into(),
+            transport: "claude-channel",
+            pid: 7,
+            archives_inbox: true,
+        };
+        let mut stream =
+            controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
+        report_title(&mut stream, true).await;
+        let mut pushed = next_attachment(&mut stream).await.0;
+        for step in [
+            "ready",
+            "unready",
+            "ready",
+            "foreign-incarnation",
+            "ready",
+            "age-10000",
+            "age-10001",
+            "ready",
+            "rebind",
+            "ready",
+            "lapse",
+            "ready",
+        ] {
+            match step {
+                "ready" => {
+                    delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+                }
+                "unready" => {
+                    delivery_presence::record_fenced(&delivery, &channel_report(false, 0));
+                }
+                "foreign-incarnation" => {
+                    let mut foreign = delivery.clone();
+                    foreign.incarnation = "previous".into();
+                    delivery_presence::record_fenced(&foreign, &channel_report(true, 0));
+                }
+                "age-10000" => {
+                    delivery_presence::record_fenced(&delivery, &channel_report(true, 10_000));
+                }
+                "age-10001" => {
+                    delivery_presence::record_fenced(&delivery, &channel_report(true, 10_001));
+                }
+                "rebind" => {
+                    delivery = state
+                        .store
+                        .bind_mailbox(&Fence::new(subject, "current", "delivery"))
+                        .unwrap();
+                }
+                "lapse" => delivery_presence::backdate(subject, false, Duration::from_secs(11)),
+                _ => unreachable!(),
+            }
+            stream.heartbeat.send(()).unwrap();
+            let polled = attachment(
+                State(state.clone()),
+                Query(title.clone()),
+                Some(Extension(peer.clone())),
+            )
+            .await
+            .unwrap()
+            .0
+            .attached;
+            if polled != pushed {
+                pushed = next_attachment(&mut stream).await.0;
+            }
+            assert_eq!(pushed, polled, "{step}");
+        }
     }
 
     async fn next(
@@ -2591,6 +3175,7 @@ mod tests {
             allowed: std::sync::atomic::AtomicBool::new(true),
             notifications: std::sync::atomic::AtomicUsize::new(0),
             replay_proofs: std::sync::atomic::AtomicUsize::new(0),
+            attachment_evaluations: std::sync::atomic::AtomicUsize::new(0),
         });
         let fixture_gate = dirty_gate.clone();
         let app = Router::new()
@@ -2628,7 +3213,7 @@ mod tests {
                                             receiver.recv().await.map(|()| ((), receiver))
                                         },
                                     ),
-                                    StreamControl { peer, dirty_gate: Some(fixture_gate) },
+                                    StreamControl { peer, primary_peer: None, dirty_gate: Some(fixture_gate) },
                                 )
                             })
                         }
@@ -2651,9 +3236,14 @@ mod tests {
         }
         let client = Client::new(Endpoint::Unix(path.to_owned()));
         let mut socket = client.open_mailbox(fence).await.unwrap();
-        let mut initial = next(&mut socket).await;
-        if matches!(initial, Frame::Seat { .. }) { initial = next(&mut socket).await; }
-        assert!(matches!(initial, Frame::Mailbox { messages } if messages.is_empty()));
+        // Only a delivery stream carries mail; a title stream starts silent.
+        if fence.component == "delivery" {
+            let mut initial = next(&mut socket).await;
+            if matches!(initial, Frame::Seat { .. }) {
+                initial = next(&mut socket).await;
+            }
+            assert!(matches!(initial, Frame::Mailbox { messages } if messages.is_empty()));
+        }
         ControlledStream {
             dirty_gate,
             socket,

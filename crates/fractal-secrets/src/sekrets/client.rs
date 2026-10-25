@@ -77,7 +77,14 @@ impl Connection {
     }
 
     fn request(&self, request: &Request, fds: &[RawFd]) -> Result<Reply> {
-        protocol::send(&self.stream, request, fds).context("send to the sekrets gateway")?;
+        if let Err(error) = protocol::send(&self.stream, request, fds) {
+            // A gateway that refuses a caller writes why and closes, which can be before it
+            // reads this request: the write then breaks, and the reason is still there to read.
+            if let Ok(Some((Reply::Error { message }, _))) = protocol::recv::<Reply>(&self.stream) {
+                bail!("sekrets gateway: {message}");
+            }
+            return Err(error).context("send to the sekrets gateway");
+        }
         let Some((reply, _)) =
             protocol::recv::<Reply>(&self.stream).context("read from the sekrets gateway")?
         else {
@@ -361,5 +368,39 @@ impl SignalPipe {
             Ok(1) => Some(i32::from(byte[0])),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_written_before_the_request_is_read_is_reported_not_the_broken_pipe() {
+        let (stream, gateway) = UnixStream::pair().unwrap();
+        // The gateway refuses, as it does a caller it cannot identify, and closes first.
+        protocol::send(
+            &gateway,
+            &Reply::Error {
+                message: "Unix user 1000 is both a person".into(),
+            },
+            &[],
+        )
+        .unwrap();
+        drop(gateway);
+        let connection = Connection {
+            stream,
+            caller: CallerView::Unidentified {
+                person: String::new(),
+                reason: String::new(),
+            },
+            nonce: String::new(),
+            gateway: String::new(),
+        };
+        let refused = connection.call(&Request::ProfileList).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("both a person"),
+            "{refused:#}"
+        );
     }
 }

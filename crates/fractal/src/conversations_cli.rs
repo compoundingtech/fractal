@@ -195,10 +195,11 @@ pub(super) async fn run_message(
         }
         MessageCommand::Ls(args) => {
             let identity = message_list_identity(
-                args.identity.or(args.actor),
+                args.identity.clone().or(args.actor.clone()),
                 fractal_drivers::contracts::env("ST_AGENT"),
             )?;
-            reject_foreign_agent_actor(&identity)?;
+            let actor = args.actor.as_deref().map(normalize_message_subject).unwrap_or_else(|| identity.clone());
+            reject_foreign_agent_actor(&actor)?;
             let sender = args.sender.map(|sender| normalize_message_subject(&sender));
             let mut count = 0_u64;
             let mut first = true;
@@ -210,6 +211,7 @@ pub(super) async fn run_message(
                 from: sender.as_deref(),
                 subject: args.subject.as_deref(),
                 subject_prefix: args.subject_prefix.as_deref(),
+                acting_as: Some(&actor),
             };
             let mut cursor = None;
             loop {
@@ -270,6 +272,7 @@ pub(super) async fn run_message(
             } else if json_output {
                 println!("]");
             } else {
+                if actor != identity { println!("Mail for {identity}; acting as {actor} on its behalf"); }
                 print!(
                     "{}",
                     render_mailbox(&identity, sender.as_deref(), args.archive, &rows)

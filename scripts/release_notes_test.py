@@ -404,6 +404,8 @@ class ReleaseNotes(unittest.TestCase):
         notes, report = render(self.repo, 'v0.3.0', source, 'v0.3.1')
         self.assertEqual(list(report['coverage']), [source])
         self.assertIn('[Add a feature](https://github.com/compoundingtech/smalltalk/pull/42)', notes)
+        self.assertEqual(report['change_links'], {
+            'release-notes/feature.json': 'https://github.com/compoundingtech/smalltalk/pull/42'})
 
     def test_unknown_conditional_replay_manual_steps_and_observations(self):
         value = fragment()

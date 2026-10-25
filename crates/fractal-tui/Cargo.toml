@@ -15,6 +15,7 @@ fractal-client = { path = "../fractal-client" }
 fractal-terminal-direct = { path = "../fractal-terminal-direct" }
 fractal-feed = { path = "../fractal-feed" }
 fractal-conversation-ui = { path = "../fractal-conversation-ui", features = ["ratatui"] }
+fractal-mission-ui = { path = "../fractal-mission-ui", features = ["ratatui"] }
 fractal-ui-model = { path = "../fractal-ui-model" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 uuid = { version = "1", features = ["v7"] }

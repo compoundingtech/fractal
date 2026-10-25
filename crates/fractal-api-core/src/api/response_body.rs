@@ -817,7 +817,7 @@ mod tests {
                 &server_socket,
                 None,
                 app,
-                false,
+                None,
                 |_| None,
                 || {
                     let _ = ready.send(());

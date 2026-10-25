@@ -581,6 +581,7 @@ impl Daemon {
     async fn serve(&mut self) {
         let socket = self.socket();
         let state = self.state.clone();
+        let (listening, ready) = tokio::sync::oneshot::channel();
         self.server = Some(tokio::spawn(async move {
             // Provider lifecycle is simulated here; discovery must use the same fixture.
             let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
@@ -593,20 +594,26 @@ impl Daemon {
                     next.run(request).await
                 },
             ));
-            fractal_daemon::api::serve_unix(&socket, router).await
+            fractal_daemon::api::serve_unix_with_ready(&socket, router, move || {
+                let _ = listening.send(());
+            })
+            .await
         }));
-        let mut last_error = None;
-        for _ in 0..200 {
-            // bind creates the socket path before listen can accept a request. Probe the
-            // public protocol rather than treating the path's existence as readiness.
-            match self.client(PERSON).capabilities().await {
-                Ok(_) => return,
-                Err(ClientError::Unreachable(error)) => last_error = Some(error),
-                Err(error) => panic!("isolated daemon readiness failed: {error}"),
+        // Building the router comes before the socket exists, and on a loaded runner it can take
+        // longer than a fixed number of probes allowed: wait for the listener itself. A server
+        // that ends before listening fails with its own error; the bound only names a hang.
+        match tokio::time::timeout(Duration::from_secs(120), ready).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                let ended = self.server.take().unwrap().await;
+                panic!("isolated daemon ended before it listened: {ended:?}");
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            Err(_) => panic!("isolated daemon did not listen within 120 s"),
         }
-        panic!("isolated daemon did not listen: {last_error:?}");
+        // Listening is not yet answering: one probe of the public protocol confirms it.
+        if let Err(error) = self.client(PERSON).capabilities().await {
+            panic!("isolated daemon readiness failed: {error}");
+        }
     }
 
     /// End the listener and its router, reopen the on-disk store, and make fresh daemon state.
@@ -756,12 +763,15 @@ impl Daemon {
     }
 
     fn cli_command(&self, actor: &str, args: &[&str]) -> tokio::process::Command {
+        self.cli_command_format(actor, args, true)
+    }
+
+    fn cli_command_format(&self, actor: &str, args: &[&str], json_output: bool) -> tokio::process::Command {
         let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
         command
             .args([
                 "--endpoint",
                 self.socket().to_str().unwrap(),
-                "--json",
                 "--daemon-wait",
                 "0",
             ]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_INCARNATION").env_remove("FRACTAL_INCARNATION")
@@ -775,6 +785,8 @@ impl Daemon {
             .env("XDG_DATA_HOME", self.root.path().join("data"))
             .env("HOME", self.root.path().join("home"))
             .env("ST3_PERSON", actor)
+            .env("NO_COLOR", "1")
+            .args(json_output.then_some("--json"))
             .args(args);
         if actor.starts_with("agent/") {
             command.env("ST_AGENT", actor);
@@ -2038,11 +2050,13 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
             evidence: vec![suspended.id.clone()], expected_subject: None, idempotency_key: Some(key),
         }).unwrap();
     }
-    cli_value(
-        daemon
-            .cli(PERSON, &["agents", "start", WORKER, "--as", PERSON])
-            .await,
-    );
+    let refused_start = daemon
+        .cli(PERSON, &["agents", "start", WORKER, "--as", PERSON])
+        .await;
+    assert!(!refused_start.status.success());
+    let error = String::from_utf8_lossy(&refused_start.stderr);
+    assert!(error.contains("start-suspended"), "{error}");
+    assert!(error.contains("st agents resume"), "{error}");
     assert_eq!(
         fractal_daemon::suspension::current(daemon.store(), WORKER)
             .unwrap()
@@ -2520,6 +2534,140 @@ async fn glasses_save_delete_and_read_survive_stale_bases_and_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_schedules_list_pages_declarations_across_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.apply(r#"version 2
+schedule "a" { host "action-coverage"; at "2100-01-01T00:00:00Z"; work { mission "example/harvest"; workspace "/tmp/harvest" } }
+schedule "b" { host "action-coverage"; at "2100-01-02T00:00:00Z"; work { mission "example/harvest"; workspace "/tmp/harvest" } }
+"#, "schedule-list-declarations");
+    let mut original = None;
+    for pass in 0..2 {
+        let first = cli_value(daemon.cli(PERSON, &[
+            "schedules", "ls", "--as", PERSON, "--limit", "1", "--unheard-after", "1m",
+        ]).await);
+        assert_eq!(first["value"]["collection"], "schedules");
+        assert_eq!(first["value"]["basis"], "local-replicated-declarations");
+        assert_eq!(first["value"]["coverage"]["unheard_after_ms"], 60_000);
+        assert_eq!(first["value"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(first["value"]["items"][0]["id"], "schedule/a");
+        assert_eq!(first["value"]["items"][0]["primary_host_id"], "host/action-coverage");
+        assert_eq!(first["value"]["page"]["has_more"], true);
+        let cursor = first["value"]["page"]["next_cursor"].as_str().unwrap();
+        let second = cli_value(daemon.cli(PERSON, &[
+            "schedules", "ls", "--as", PERSON, "--limit", "1", "--unheard-after", "1m",
+            "--cursor", cursor,
+        ]).await);
+        assert_eq!(second["value"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(second["value"]["items"][0]["id"], "schedule/b");
+        assert_eq!(second["value"]["page"]["has_more"], false);
+        let declarations = [
+            first["value"]["items"][0]["declaration"].clone(),
+            second["value"]["items"][0]["declaration"].clone(),
+        ];
+        if let Some(expected) = &original {
+            assert_eq!(&declarations, expected);
+        } else {
+            original = Some(declarations);
+        }
+        if pass == 0 {
+            daemon.restart().await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_list_rendering_is_unchanged_by_quarantined_deploy_claims() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    let daemon = Daemon::new_member("host-b").await;
+    let mut registry = fractal_schema::registry().clone();
+    for kind in fractal_schema::deploy::KINDS {
+        assert!(registry.claims.remove(kind).is_some());
+    }
+    daemon.store().set_claim_registry(registry);
+    daemon.store().bind_fleet(FLEET).unwrap();
+    daemon.apply(
+        &format!("version 2\nagent \"example-reader\" {{ host \"host-b\"; workspace {:?}; harness \"claude\" {{}} }}\nmission \"example/inspect\" state=\"ready\" {{ goal \"Inspect the graph.\"; step \"work\" {{ assigned-to \"agent/example-reader\" }} }}\n", daemon.root.path().display().to_string()),
+        "deploy-reader-baseline",
+    );
+    let commands: &[&[&str]] = &[
+        &["agents", "ls"], &["missions", "ls"], &["work", "ls"],
+        &["alerts", "ls", "--as", PERSON], &["terminals", "ls"],
+        &["launch", "ls"], &["lanes", "ls"], &["sets", "ls"],
+        &["documents", "ls"],
+    ];
+    // Generic list envelopes carry a fresh request ID and snapshot creation time
+    // even when the graph is unchanged. Compare every other rendered line,
+    // including snapshot identity/store cut and all collection/page contents.
+    let stable_output = |bytes: &[u8]| {
+        std::str::from_utf8(bytes).unwrap().lines()
+            .filter(|line| !line.starts_with("REQUEST ID ") && !line.starts_with("  CREATED AT "))
+            .map(str::to_owned).collect::<Vec<_>>()
+    };
+    let mut baseline = Vec::new();
+    for arguments in commands {
+        let output = daemon.cli_command_format(PERSON, arguments, false).output().await.unwrap();
+        assert!(output.status.success(), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(!output.stdout.is_empty(), "{arguments:?}");
+        baseline.push((stable_output(&output.stdout), output.stderr));
+    }
+    assert!(baseline[0].0.iter().any(|line| line.contains("example-reader")));
+    assert!(baseline[1].0.iter().any(|line| line.contains("example/inspect")));
+    let source = Store::open_memory("host-a").unwrap();
+    source.bind_fleet(FLEET).unwrap();
+    let examples = [
+        json!({
+            "version": 1, "host": "host-a", "actor": "agent/example-executor",
+            "operation": "install", "trainId": "train/example",
+            "old": {"packagePath": "/nix/store/old-example", "narHash": "sha256-example-old", "commit": "a".repeat(40)},
+            "new": {"packagePath": "/nix/store/new-example", "narHash": "sha256-example-new", "commit": "b".repeat(40)},
+            "issuedAt": "2026-10-24T10:00:00Z", "expiresAt": "2026-10-24T14:00:00Z",
+            "failureRestore": false, "previewDigest": "example-preview-digest",
+            "compatSignoffId": "example-signoff"
+        }),
+        json!({"version": 1, "goId": "example-go"}),
+        json!({"version": 1, "goId": "example-go", "operation": "install", "result": "succeeded"}),
+        json!({"version": 1, "stopId": "example-stop", "scope": "installer-entry", "hosts": ["host-a", "host-b"], "liftCondition": "example release"}),
+        json!({"version": 1, "stopId": "example-stop", "releaseGoId": "example-release"}),
+        json!({"version": 1, "trainId": "train/example", "oldCommit": "a".repeat(40), "newCommit": "b".repeat(40)}),
+    ];
+    for (kind, fields) in fractal_schema::deploy::KINDS.into_iter().zip(examples) {
+        source.append_claim(&ClaimInput {
+            subject: "resource/deploy/example".into(), kind: kind.into(),
+            actor: Some("agent/example-executor".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+    let exchange = source.export_replication_exchange(
+        FLEET, &daemon.store().replication_inventory().unwrap(),
+    ).unwrap();
+    assert_eq!(exchange.envelopes.len(), 6);
+    daemon.store().receive_replication_exchange("host-a", FLEET, &exchange).unwrap();
+    let admission = daemon.store().validate_replication_backlog().unwrap();
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (0, 6, 0));
+    daemon.store().project_replication_backlog().unwrap();
+    let records = daemon.store().replica_records(true).unwrap();
+    assert_eq!(records.len(), 6);
+    for kind in fractal_schema::deploy::KINDS {
+        assert!(records.iter().any(|record| record.kind.as_deref() == Some(kind)
+            && record.state == "unknown"
+            && record.error_code.as_deref() == Some("unknown-claim-kind")));
+    }
+    for (arguments, (stdout, stderr)) in commands.iter().zip(baseline) {
+        let output = daemon.cli_command_format(PERSON, arguments, false).output().await.unwrap();
+        assert!(output.status.success(), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(stable_output(&output.stdout), stdout, "{arguments:?}: list rendering changed");
+        assert_eq!(output.stderr, stderr, "{arguments:?}: list diagnostics changed");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_reads_preserve_operational_views_after_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -2686,6 +2834,44 @@ async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
     assert_eq!(receipts[0].body["fields"]["outcome"], "seeded");
     assert_eq!(receipts[0].body["fields"]["session_id"], session);
     assert!(daemon.store().claims_for(WORKER, Some("harness.session-file")).unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_identity_renames_preserve_storage_subjects_across_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.apply(
+        &format!(
+            "version 2\nagent \"example-rename/worker\" {{ host {:?}; workspace {:?}; command \"true\" }}\nmission \"example-rename-work\" state=\"ready\" {{ goal \"Preserve identity.\"; step \"work\" {{ assigned-to \"agent/example-rename/worker\" }} }}",
+            NODE,
+            daemon.root.path().display().to_string(),
+        ),
+        "coverage-rename-declarations",
+    );
+    for (family, from, to, kind) in [
+        ("agents", "agent/example-rename/worker", "agent/example-renamed/worker", "agent.renamed"),
+        ("missions", "mission/example-rename-work", "mission/example-renamed-work", "mission.renamed"),
+    ] {
+        let key = format!("coverage-{family}-rename");
+        let arguments = [
+            family, "rename-id", from, to, "--as", "person/robin",
+            "--reason", "Clarify responsibility", "--idempotency-key", &key,
+        ];
+        let receipt = cli_value(daemon.cli("person/robin", &arguments).await);
+        assert_eq!(receipt["identity"], from);
+        assert_eq!(receipt["canonical_id"], to);
+        assert_eq!(receipt["applied"], "renamed");
+        let claims = daemon.store().claims_for(from, None).unwrap();
+        assert!(claims.iter().any(|claim| claim.kind == kind && claim.id == receipt["claim_id"]));
+        let index = daemon.store().index().unwrap();
+        daemon.restart().await;
+        let replay = cli_value(daemon.cli("person/robin", &arguments).await);
+        assert_eq!(replay["claim_id"], receipt["claim_id"]);
+        assert_eq!(replay["canonical_id"], to);
+        assert_eq!(daemon.store().index().unwrap(), index);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

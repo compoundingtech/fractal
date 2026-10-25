@@ -21,6 +21,13 @@ pub struct Config {
     /// Absent in legacy installs: preserve their bypass policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_mode: Option<fractal_drivers::access::AccessMode>,
+    /// Opt in NEW Claude wrapper generations to the stricter direct-parent ownership rule.
+    /// Absent/false is legacy admission; existing generations are never migrated by a toggle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_primary_ownership: Option<bool>,
+    /// Separate explicit opt-in for non-authorizing legacy topology observations. Off by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_primary_ownership_observe: Option<bool>,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
@@ -58,6 +65,10 @@ pub struct Config {
     /// default, so a config this build writes still loads in a build without checkpoints.
     #[serde(skip_serializing_if = "CheckpointConfig::is_default")]
     pub checkpoint: CheckpointConfig,
+    /// Whether this member trims on its own instead of by checkpoint agreement. Written only
+    /// when it differs from the default.
+    #[serde(skip_serializing_if = "TrimConfig::is_default")]
+    pub trim: TrimConfig,
     /// What this node does when an account nears its weekly limit. Off unless enabled.
     #[serde(skip_serializing_if = "LimitsConfig::is_default")]
     pub limits: LimitsConfig,
@@ -159,6 +170,23 @@ impl CheckpointConfig {
     }
 }
 
+/// `[trim]`: `local = true` makes this member trim on its own, without checkpoint agreement. It
+/// then seals, verifies and adopts no checkpoint, and finishes only a trim it had already
+/// committed. Every participant must seal a checkpoint, so the old checkpoints stop on the
+/// other members until a person excuses this one. Off by default; nothing changes unless a
+/// member opts in.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TrimConfig {
+    pub local: bool,
+}
+
+impl TrimConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// `[limits]`: when an account's selected weekly reading reaches `stop_at_weekly_percent`, this
 /// node stops the seats it hosts that use that account, except those in `keep`, once per weekly
 /// window, and notifies the operations agent in `notify`. A seat a person starts again stays up
@@ -240,12 +268,17 @@ impl LimitsConfig {
     }
 }
 
-/// `[reconcile]`: maximum background pass starts per minute, default30, and when a seat that
-/// holds claimed work and has nothing set to wake it is nudged.
+/// The reconcile pass cap when `[reconcile] max_passes_per_minute` is not set.
+pub const DEFAULT_MAX_PASSES_PER_MINUTE: u32 = 30;
+
+/// `[reconcile]`: maximum background pass starts per minute, and when a seat that holds claimed
+/// work and has nothing set to wake it is nudged.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReconcileConfig {
-    pub max_passes_per_minute: u32,
+    /// Unset: the running binary's default, [`DEFAULT_MAX_PASSES_PER_MINUTE`] for st.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_passes_per_minute: Option<u32>,
     /// How long a seat idles holding a claimed step, with nothing set to wake it, before st nudges
     /// it: a duration such as `30m`, or `off`.
     pub idle_nudge_after: String,
@@ -257,7 +290,7 @@ pub struct ReconcileConfig {
 impl Default for ReconcileConfig {
     fn default() -> Self {
         Self {
-            max_passes_per_minute: 30,
+            max_passes_per_minute: None,
             idle_nudge_after: "30m".into(),
             idle_nudge_quiet_watch: "2h".into(),
         }
@@ -266,8 +299,13 @@ impl Default for ReconcileConfig {
 
 impl ReconcileConfig {
     pub fn is_default(&self) -> bool { self == &Self::default() }
+
+    /// The configured cap, or `default` when the config sets none.
+    pub fn max_passes_per_minute_or(&self, default: u32) -> u32 {
+        self.max_passes_per_minute.unwrap_or(default)
+    }
     pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!((1..=600).contains(&self.max_passes_per_minute),
+        anyhow::ensure!(self.max_passes_per_minute.is_none_or(|cap| (1..=600).contains(&cap)),
             "reconcile.max_passes_per_minute must be between 1 and 600");
         self.idle_nudge()?;
         Ok(())
@@ -460,6 +498,8 @@ impl Default for Config {
         Self {
             node: host_name(),
             access_mode: None,
+            claude_primary_ownership: None,
+            claude_primary_ownership_observe: None,
             seat_priority: None,
             person: None,
             fleet_id: None,
@@ -477,6 +517,7 @@ impl Default for Config {
             github: GithubConfig::default(),
             changes: changes::Config::default(),
             checkpoint: CheckpointConfig::default(),
+            trim: TrimConfig::default(),
             limits: LimitsConfig::default(),
             reconcile: ReconcileConfig::default(),
             codex_work_without_asking: None,
@@ -488,6 +529,10 @@ impl Default for Config {
 impl Config {
     pub fn active_access_mode(&self) -> fractal_drivers::access::AccessMode {
         self.access_mode.unwrap_or_default()
+    }
+
+    pub fn claude_primary_ownership_enabled(&self) -> bool {
+        self.claude_primary_ownership == Some(true)
     }
 
     pub fn active_seat_priority(&self) -> fractal_runtime::SeatPriority {
@@ -1044,6 +1089,37 @@ mod tests {
     }
 
     #[test]
+    fn claude_primary_ownership_is_an_explicit_default_off_install_setting() {
+        assert!(!Config::default().claude_primary_ownership_enabled());
+        for text in ["", "claude_primary_ownership_observe=false"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert_ne!(config.claude_primary_ownership_observe, Some(true));
+        }
+        let observed: Config = toml::from_str("claude_primary_ownership_observe=true").unwrap();
+        assert_eq!(observed.claude_primary_ownership_observe, Some(true));
+        assert!(!observed.claude_primary_ownership_enabled(), "observation does not imply enforcement");
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("claude_primary_ownership_observe"));
+
+        for text in ["", "claude_primary_ownership=false"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert!(!config.claude_primary_ownership_enabled());
+        }
+        let config: Config = toml::from_str("claude_primary_ownership=true").unwrap();
+        assert!(config.claude_primary_ownership_enabled());
+        assert!(
+            toml::to_string(&config)
+                .unwrap()
+                .contains("claude_primary_ownership = true")
+        );
+        assert!(
+            !toml::to_string(&Config::default())
+                .unwrap()
+                .contains("claude_primary_ownership")
+        );
+        assert!(toml::from_str::<Config>("claude_primary_ownership=\"true\"").is_err());
+    }
+
+    #[test]
     fn install_access_mode_preserves_legacy_config_and_writes_auto_once() {
         use fractal_drivers::access::AccessMode;
         let root = tempdir().unwrap();
@@ -1068,20 +1144,25 @@ mod tests {
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "").unwrap();
         let (_, mut effective) = read_daemon_policies(Some(&path)).unwrap();
-        assert_eq!(effective.max_passes_per_minute, 30);
+        assert_eq!(effective.max_passes_per_minute, None);
+        assert_eq!(effective.max_passes_per_minute_or(DEFAULT_MAX_PASSES_PER_MINUTE), 30);
         std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=60\n").unwrap();
         effective = read_daemon_policies(Some(&path)).unwrap().1;
         for bad in ["0", "-1", "601", "4294967296", "\"bad\""] {
             std::fs::write(&path, format!("[reconcile]\nmax_passes_per_minute={bad}\n")).unwrap();
             assert!(read_daemon_policies(Some(&path)).is_err());
-            assert_eq!(effective.max_passes_per_minute, 60);
+            assert_eq!(effective.max_passes_per_minute, Some(60));
         }
         std::fs::remove_file(&path).unwrap();
         assert!(read_daemon_policies(Some(&path)).is_err());
-        assert_eq!(effective.max_passes_per_minute, 60);
+        assert_eq!(effective.max_passes_per_minute, Some(60));
         std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=15\n").unwrap();
         effective = read_daemon_policies(Some(&path)).unwrap().1;
-        assert_eq!(effective.max_passes_per_minute, 15);
+        assert_eq!(effective.max_passes_per_minute, Some(15));
+        // A cap the config names is kept, even the default value.
+        std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=30\n").unwrap();
+        effective = read_daemon_policies(Some(&path)).unwrap().1;
+        assert_eq!(effective.max_passes_per_minute_or(600), 30);
     }
     use super::*;
     use tempfile::tempdir;
@@ -1308,6 +1389,18 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(!config.checkpoint.enabled);
         assert!(toml::to_string(&config).unwrap().contains("[checkpoint]"));
         assert!(toml::from_str::<Config>("[checkpoint]\nenabled = true\nlag = 3\n").is_err());
+    }
+
+    #[test]
+    fn local_trim_is_off_unless_chosen_and_absent_from_a_written_default_config() {
+        let config = Config::default();
+        assert!(!config.trim.local);
+        // An older build refuses unknown sections, so a default config never names it.
+        assert!(!toml::to_string(&config).unwrap().contains("[trim]"));
+        let config: Config = toml::from_str("[trim]\nlocal = true\n").unwrap();
+        assert!(config.trim.local);
+        assert!(toml::to_string(&config).unwrap().contains("[trim]"));
+        assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
     }
 
     #[test]

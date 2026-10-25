@@ -17,6 +17,16 @@ const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
     AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
 
 impl Store {
+    /// A step's name within its mission, while st has the step.
+    pub fn step_path(&self, step: &str) -> Result<Option<String>> {
+        Ok(self
+            .readers
+            .get()
+            .prepare_cached("SELECT step_path FROM step_runs WHERE subject=?1")?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h7dbe458e77a9 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [step], |row| row.get(0))
+            .optional()?)
+    }
+
     /// The person-attention collection at `now`, with the first instant after `now` at which
     /// the unchanged collection changes.
     ///
@@ -681,14 +691,22 @@ impl Store {
             .into_iter()
             .filter(|desired| desired.kind == "agent")
         {
+            // Most agents have never been parked. Do not resolve their identities or
+            // declarations just to discover that there is no crash-loop decision.
+            let decisions =
+                self.claims_for(&desired.subject, Some("runtime.reconcile-decision"))?;
+            if !decisions.iter().any(|decision| {
+                let key = decision.body["fields"]["key"].as_str().unwrap_or_default();
+                key.starts_with("runtime-crash-loop:") || key.starts_with("codex-crash-loop:")
+            }) {
+                continue;
+            }
             if !person_work::declaration_live(&connection, &desired.subject)? {
                 continue;
             }
             let Some(token) = self.selected_desired_token(&desired.subject)? else {
                 continue;
             };
-            let decisions =
-                self.claims_for(&desired.subject, Some("runtime.reconcile-decision"))?;
             let decision = decisions.iter().find(|decision| {
                 let key = decision.body["fields"]["key"].as_str().unwrap_or_default();
                 key == format!("runtime-crash-loop:{token}")
@@ -755,11 +773,23 @@ impl Store {
         }
         let connection = self.readers.get();
         let mut items = Vec::new();
-        for desired in self
-            .desired_subjects()?
-            .into_iter()
-            .filter(|desired| desired.kind == "agent" && desired.member.is_some())
-        {
+        smallclaims::touched::note_read(|| "kind:intent.desired".into());
+        smallclaims::touched::note_read(|| "kind:runtime.observed".into());
+        smallclaims::touched::note_read(|| "kind:record.repaired".into());
+        // Only the absence matters: batch indexed probes instead of hydrating/sorting
+        // the latest observation and resolving identities for every running member.
+        let mut candidates = connection.prepare_cached(
+            "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
+             FROM desired WHERE kind='agent' AND member IS NOT NULL
+               AND NOT EXISTS(SELECT 1 FROM local_observations
+                   WHERE subject=desired.subject AND kind='runtime.observed')
+               AND NOT EXISTS(SELECT 1 FROM claims
+                   WHERE subject=desired.subject AND kind='runtime.observed'
+                     AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))
+             ORDER BY subject",
+        )?;
+        for desired in candidates.query_map([], desired_from_row)? {
+            let desired = desired?;
             if !person_work::declaration_live(&connection, &desired.subject)? {
                 continue;
             }
@@ -773,9 +803,6 @@ impl Store {
                 .accepted_at_unix_ms
                 .saturating_add(SEAT_NOT_STARTED_MS);
             if due > as_of
-                || self
-                    .latest_observation(&desired.subject, "runtime.observed")?
-                    .is_some()
                 || crate::suspension::current(self, &desired.subject)?.is_some()
             {
                 continue;
@@ -1183,6 +1210,22 @@ impl Store {
                 continue;
             }
             let f = &claim.body["fields"];
+            if f["condition"] == crate::restart::WHEN_IDLE {
+                let Some(request) = crate::restart::latest_request(self, source)? else {
+                    continue;
+                };
+                if request.body["fields"]["action"] != crate::restart::WHEN_IDLE
+                    || failure.subject != crate::restart::attention_episode(&request)
+                    || self
+                        .operation_claim(&crate::restart::release_key(&request))?
+                        .is_some()
+                    || self
+                        .operation_claim(&format!("agent-restart-completed:{}", request.id))?
+                        .is_some()
+                {
+                    continue;
+                }
+            }
             // Upgrades retain historical operational episodes. A current login with a concrete
             // person has one derived person item; the old agent fault must not ask again.
             if f["condition"] == "provider-auth"
@@ -1636,7 +1679,86 @@ pub struct PromptAnswer {
 /// of its kind for the seat, or leave it denied.
 const DENIAL_ANSWERS: [&str; 3] = ["approve-once", "approve-kind", "dismiss"];
 
+/// Recheck source authority and the exact denial inside the claim's writer
+/// savepoint, including generic callers. close-item cannot grant tool permission.
+pub(super) fn validate_delegated_denial(
+    connection: &Connection,
+    seat: &str,
+    fields: &BTreeMap<String, Value>,
+    evidence: &[String],
+    proof: &crate::model::DelegationProof,
+) -> std::result::Result<(), St3Error> {
+    let refused = || {
+        St3Error::new(
+            "delegation-refused",
+            "close-item only dismisses a current auto-denial for this person",
+        )
+    };
+    if fields.get("code") != Some(&json!("native-prompt-answered"))
+        || fields.get("status") != Some(&json!("dismiss"))
+        || fields.get("driver") != Some(&json!("claude"))
+        || !evidence.contains(&proof.episode)
+        || agent_person_at(connection, seat)
+            .map_err(internal)?
+            .as_deref()
+            != Some(proof.person.as_str())
+        || !person_work::declaration_live(connection, seat).map_err(internal)?
+    {
+        return Err(refused());
+    }
+    let denial = claim_by_id_tx(connection, &proof.episode)
+        .map_err(internal)?
+        .ok_or_else(refused)?;
+    if denial.subject != seat
+        || denial.kind != "harness.diagnostic"
+        || denial.body["fields"]["code"] != crate::model::PERMISSION_DENIED_CODE
+    {
+        return Err(refused());
+    }
+    let started = running_since(connection, seat).map_err(internal)?;
+    let last = last_turn_or_end(connection, seat).map_err(internal)?;
+    if started.is_none_or(|(started, _)| (denial.store_index as i64) < started)
+        || moved_on(
+            last.as_ref(),
+            denial.store_index as i64,
+            denial.accepted_at_unix_ms,
+        )
+        || native_prompt_answer(connection, &proof.episode)
+            .map_err(internal)?
+            .is_some()
+    {
+        return Err(St3Error::new(
+            "stale-fence",
+            "the denial was answered, the seat moved on, or the runtime changed",
+        ));
+    }
+    Ok(())
+}
+
 impl Store {
+    /// One source adapter for CLI/API and authenticated client actions. The
+    /// authenticated caller supplies actor; parameters cannot choose one.
+    pub fn respond_native_prompt(
+        &self,
+        seat: &str,
+        episode: &str,
+        answer: &str,
+        actor: &str,
+        delegation: Option<&crate::model::DelegationProof>,
+    ) -> std::result::Result<ClaimRecord, St3Error> {
+        if let Some(proof) = delegation {
+            if proof.episode != episode || answer != "dismiss" {
+                return Err(St3Error::new(
+                    "delegation-refused",
+                    "close-item does not authorize allowing a call, a kind or a native permission",
+                ));
+            }
+            self.dismiss_delegated_denial(seat, actor, proof)
+        } else {
+            self.answer_native_prompt(seat, episode, answer, actor)
+        }
+    }
+
     /// The calls Claude's auto mode classifier denied on `seat` since its running incarnation
     /// started, that its person has not answered: each an alert, in the seat's conversation.
     fn denial_items(
@@ -1710,6 +1832,7 @@ impl Store {
         episode: &str,
         answer: &str,
         actor: &str,
+        delegation: Option<&crate::model::DelegationProof>,
     ) -> std::result::Result<Option<ClaimRecord>, St3Error> {
         let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
         let Some(denial) = self.claim_by_id(episode).map_err(internal)? else {
@@ -1745,16 +1868,56 @@ impl Store {
             ));
         }
         let tool = fields["status"].as_str().unwrap_or("tool").to_owned();
+        let mut answer_fields = BTreeMap::from([
+            (
+                "code".into(),
+                Value::String("native-prompt-answered".into()),
+            ),
+            ("status".into(), Value::String(answer.into())),
+            ("driver".into(), Value::String("claude".into())),
+        ]);
+        let mut evidence = vec![episode.to_owned()];
+        if let Some(proof) = delegation {
+            super::delegation::add_fields(&mut answer_fields, proof);
+            super::delegation::add_evidence(&self.readers.get(), &mut evidence, proof)?;
+            // The ordinary answer readers use the typed claim operation identity.
+            // Receipt identities belong to secondary effects such as the notice.
+            let input = ClaimInput {
+                subject: seat.to_owned(),
+                kind: "harness.diagnostic".into(),
+                actor: Some(actor.to_owned()),
+                fields: answer_fields,
+                evidence,
+                expected_subject: None,
+                idempotency_key: Some(native_prompt_answer_key(episode)),
+            };
+            let (operation_id, request_digest) = smallclaims::store::claim_operation(&input)?
+                .expect("a native answer has an idempotency key");
+            let body = json!({"fields":input.fields,"evidence":input.evidence,
+                "_operation":{"id":operation_id,"request_digest":request_digest}});
+            // A delegated close and its source notification commit together.
+            // The shared append seam rechecks policy/source fences in this writer.
+            return self.connection.batched(|tx| -> std::result::Result<Option<ClaimRecord>, St3Error> {
+                let recorded = append_claim_tx(tx, &self.origin, seat, "harness.diagnostic", Some(actor),
+                    &body, &[episode.to_owned()], None).map_err(claim_append_error)?;
+                register_operation_tx(tx, &recorded).map_err(internal)?;
+                let message_key = format!("st3-denial-answer:{episode}");
+                let message_id = &hex::encode(sha2::Sha256::digest(message_key.as_bytes()))[..16];
+                append_receipt_claim_tx(tx, &self.origin, &format!("message/{message_id}"), "message.sent", Some("daemon/runtime"),
+                    &json!({"fields": {"from":"daemon/runtime", "to":seat,
+                        "content":format!("{actor}, acting for {}, left the {tool} call auto mode denied as denied. Do not run it, or work around it.", proof.person),
+                        "status":"sent", "title":format!("Your person answered the denied {tool} call"),
+                        "in_reply_to":null, "tags":[format!("st3-denial:{episode}")]}, "evidence":[recorded.id]}),
+                    std::slice::from_ref(&recorded.id), None, &message_key).map_err(claim_append_error)?;
+                Ok(Some(recorded))
+            }).map_err(|error| St3Error::new("internal", error))?;
+        }
         let recorded = self.append_claim(&ClaimInput {
             subject: seat.to_owned(),
             kind: "harness.diagnostic".into(),
             actor: Some(actor.to_owned()),
-            fields: BTreeMap::from([
-                ("code".into(), Value::String("native-prompt-answered".into())),
-                ("status".into(), Value::String(answer.into())),
-                ("driver".into(), Value::String("claude".into())),
-            ]),
-            evidence: vec![episode.to_owned()],
+            fields: answer_fields,
+            evidence,
             expected_subject: None,
             idempotency_key: Some(native_prompt_answer_key(episode)),
         })?;
@@ -2426,6 +2589,57 @@ impl Store {
         .map(Some)
     }
 
+    /// Close an auto-denial under the person's existing close-item policy. This
+    /// cannot approve a call or a kind, and never answers a live native permission.
+    pub fn dismiss_delegated_denial(
+        &self,
+        seat: &str,
+        actor: &str,
+        proof: &crate::model::DelegationProof,
+    ) -> std::result::Result<ClaimRecord, St3Error> {
+        if !actor.starts_with("agent/")
+            || self.agent_person(seat).map_err(internal)?.as_deref() != Some(proof.person.as_str())
+        {
+            return Err(St3Error::new(
+                "delegation-refused",
+                "dismissal needs an agent and the seat's current person",
+            ));
+        }
+        // An identical retry returns the actual previous result, not a second
+        // denial answer or a new grant-dependent side effect.
+        let previous = {
+            let connection = self.readers.get();
+            connection.query_row(/* sqlite-large-value: allow-for-now lv-hf9df02d62f06 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+                 FROM claims INDEXED BY claims_operation_index
+                 WHERE json_extract(body, '$._operation.id') IS NOT NULL
+                   AND json_extract(body, '$._operation.id')=?1
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                [smallclaims::store::operation_id_for_key(&native_prompt_answer_key(&proof.episode))], claim_from_row)
+                .optional().map_err(internal)?
+        };
+        if let Some(previous) = previous {
+            if previous.subject == seat
+                && previous.actor.as_deref() == Some(actor)
+                && previous.body["fields"]["status"] == "dismiss"
+                && previous.body["fields"]["delegation"] == json!(proof)
+            {
+                return Ok(previous);
+            }
+            return Err(St3Error::new(
+                "stale-fence",
+                "the denial already has another answer",
+            ));
+        }
+        self.answer_denial(seat, &proof.episode, "dismiss", actor, Some(proof))?
+            .ok_or_else(|| {
+                St3Error::new(
+                    "delegation-refused",
+                    "close-item only dismisses an auto-denial episode",
+                )
+            })
+    }
+
     /// Record `actor`'s answer to the native prompt `episode` (the observation that opened it) of
     /// `seat`. Only the seat's person answers, only the prompt still waiting, and only once.
     pub fn answer_native_prompt(
@@ -2446,7 +2660,7 @@ impl Store {
         if let Some(answered) = self.answer_screen_prompt(seat, episode, answer, actor)? {
             return Ok(answered);
         }
-        if let Some(answered) = self.answer_denial(seat, episode, answer, actor)? {
+        if let Some(answered) = self.answer_denial(seat, episode, answer, actor, None)? {
             return Ok(answered);
         }
         if !matches!(answer, "allow" | "deny" | "approve") && question_answers(answer).is_none() {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "fractal-web's evidence gate passes the run's own kit_inputs (from its change detection) to the verifier, and its skip policy orders kit_inputs: a note made without kit plays covers only a run whose own detection says the kit did not change either",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. fractal-web stays shadow (enforce false); its notes are held to one more value rule."},
+  "compatibility": {"status": "none", "detail": "evidence-gate-fractal-web now needs fractal-web-changes (about a minute, already ahead of fractal-web-execution). The gate passes --run-input only to a base verifier that takes it."},
+  "downtime": {"status": "none", "detail": "No runtime code changes."},
+  "manual": {"status": "none", "detail": "No operator step."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

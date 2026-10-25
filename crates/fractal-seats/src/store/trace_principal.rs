@@ -21,6 +21,7 @@ impl TracePrincipalStore for Store {
             let mut seen = BTreeSet::new();
             const MAX_HOPS: usize = 64;
             for _ in 0..MAX_HOPS {
+                actor = fractal_store::store::identities::resolve_reference_conn(&self.readers.get(), &actor)?;
                 if !actor.starts_with("agent/") || !seen.insert(actor.clone()) {
                     return Ok(None);
                 }

@@ -31,6 +31,7 @@ pub mod graph;
 pub mod maintenance;
 pub mod owner_indexes;
 pub mod references;
+pub mod restart;
 pub mod rollout;
 pub mod sekrets_daemon;
 pub mod store;

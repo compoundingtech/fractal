@@ -13,6 +13,8 @@ mod ci_test_paths;
 pub use fractal_peer::*;
 
 pub mod reconcile;
+#[path = "reconcile/schedule_standby.rs"]
+pub mod schedule_standby;
 pub mod delivery_presence;
 pub mod handoff;
 pub mod native_seed;

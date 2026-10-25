@@ -58,6 +58,8 @@ mod membership_query_tests;
 mod repair_operation_tests;
 #[cfg(test)]
 mod schema_install_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod contents;
 pub mod prepared_seal;
 #[cfg(test)]
 mod prepared_seal_tests;
@@ -765,6 +767,10 @@ pub const SCHEMA: &str = core_schema!("", "");
 /// Contains BEGIN IMMEDIATE and COMMIT; cannot run inside an open transaction.
 pub const FRESH_SCHEMA: &str = core_schema!("BEGIN IMMEDIATE;", "COMMIT;");
 
+/// [`FRESH_SCHEMA`] with its transaction left open, so a fresh open commits the schema
+/// version with the first tables.
+const FRESH_SCHEMA_UNCOMMITTED: &str = core_schema!("BEGIN IMMEDIATE;", "");
+
 /// The store's schema version, set once the graph's and the runtime's tables exist.
 pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
 
@@ -791,9 +797,12 @@ pub struct Store {
     /// it instead of building their own.
     pub replication_snapshot_build: Mutex<()>,
     pub replication_sync: Mutex<BTreeMap<String, PeerSyncProgress>>,
-    /// Whether a comparison that finds a difference keeps what a reproduction needs. Off unless
-    /// the daemon's divergence check is on, so exchanges cost nothing more by default.
+    /// Whether exchanges compare projections with a peer at all, keeping what a reproduction
+    /// needs when they differ. Off unless the daemon's divergence check is on: a default
+    /// install never compares, reports no divergence, and settles sync on claims alone.
     pub divergence_capture: std::sync::atomic::AtomicBool,
+    /// Whether this member trims on its own (`[trim] local`); see `trim_locally`.
+    trim_local: AtomicBool,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
     /// Fixed local schema identity, initialized lazily before the first admission pass.
@@ -890,12 +899,37 @@ impl Store {
     /// Open the store at `path`, creating it when it does not exist, with `runtime`'s tables
     /// and projections beside the graph's.
     pub fn open(path: &Path, origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
-        let origin = origin.into();
+        Self::open_with(path, origin.into(), runtime, true, |_| {})
+    }
+
+    /// [`Self::open`] with the initialization of a fresh database committed the way it was
+    /// before deferred durability (`defer_fresh_durability` false), and `prepare` run on the
+    /// writer connection before anything is read or written, so a test can observe or stop
+    /// its commits.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_for_initialization_test(
+        path: &Path,
+        origin: impl Into<String>,
+        runtime: Arc<dyn Runtime>,
+        defer_fresh_durability: bool,
+        prepare: impl FnOnce(&Connection),
+    ) -> Result<Self> {
+        Self::open_with(path, origin.into(), runtime, defer_fresh_durability, prepare)
+    }
+
+    fn open_with(
+        path: &Path,
+        origin: String,
+        runtime: Arc<dyn Runtime>,
+        defer_fresh_durability: bool,
+        prepare: impl FnOnce(&Connection),
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let mut connection = Connection::open(path)
             .with_context(|| format!("open st database {}", path.display()))?;
+        prepare(&connection);
         let path = crate::sqlite::opened_database_path(&connection, path)?;
         let has_meta: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
@@ -923,7 +957,7 @@ impl Store {
         // page cache. The default (~2 MiB per connection) churns against the
         // large durable claim store during otherwise quiet replication.
         connection.pragma_update(None, "cache_size", -(crate::sqlite::WRITE_CACHE_KIB as i64))?;
-        Self::create_schema(&connection, &*runtime)?;
+        let fresh = Self::create_schema_with(&connection, &*runtime, defer_fresh_durability)?;
         separate_staged_blobs(&mut connection)?;
         {
             let transaction = connection.transaction()?;
@@ -931,6 +965,12 @@ impl Store {
             transaction.commit()?;
         }
         runtime.finish_open_projections(&mut connection)?;
+        if fresh && defer_fresh_durability {
+            // Back to the member's setting before `from_connection` commits its first meta rows,
+            // which a fresh store always writes: that commit fsyncs the WAL, and with it every
+            // frame the initialization wrote, before open returns.
+            connection.pragma_update(None, "synchronous", "FULL")?;
+        }
         let readers = ReadPool::new(&path, false)?;
         Self::from_connection(
             connection,
@@ -974,6 +1014,20 @@ impl Store {
     /// Check and migrate the schema, then create the graph's tables, the runtime's, and the
     /// triggers that keep digests current.
     fn create_schema(connection: &Connection, runtime: &dyn Runtime) -> Result<()> {
+        Self::create_schema_with(connection, runtime, false).map(|_| ())
+    }
+
+    /// [`Self::create_schema`], returning whether the database began empty. With
+    /// `defer_fresh_durability`, a fresh database's initialization commits at
+    /// synchronous=NORMAL after the core schema: in WAL mode that is corruption-safe and
+    /// skips the fsync on each of its many small commits. The caller sets FULL again
+    /// before its next commit, and that commit's WAL fsync makes the initialization
+    /// durable. An existing database is opened exactly as before.
+    fn create_schema_with(
+        connection: &Connection,
+        runtime: &dyn Runtime,
+        defer_fresh_durability: bool,
+    ) -> Result<bool> {
         // Only an empty database can batch DDL without changing upgrade progress or locking
         // ordinary reopens. Determine this before any migration or schema hook creates objects.
         let fresh: bool = connection.query_row(
@@ -988,7 +1042,19 @@ impl Store {
         }
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f86346fb38f owner=smallclaims::store TODO=trace-statement-and-value-representation */ if fresh { FRESH_SCHEMA } else { SCHEMA })?;
+        if fresh {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8680754156af owner=smallclaims::store TODO=trace-statement-and-value-representation */ FRESH_SCHEMA_UNCOMMITTED)?;
+            // The version commits with the first tables. A first open stopped after this
+            // reopens as a current store, which the existing-store path below completes; a
+            // store with tables at version 0 is refused as an old one.
+            connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc1e68820d94d owner=smallclaims::store TODO=trace-statement-and-value-representation */ "COMMIT")?;
+        } else {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hab2af578d954 owner=smallclaims::store TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        }
+        if fresh && defer_fresh_durability {
+            connection.pragma_update(None, "synchronous", "NORMAL")?;
+        }
         repair_ledger::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
@@ -1030,7 +1096,7 @@ impl Store {
         })?;
         projection_digest::initialize(connection, runtime.digest_tables())?;
         checkpoint_capture_epoch::initialize(connection)?;
-        Ok(())
+        Ok(fresh)
     }
 
     /// Wrap an opened, initialized writer connection and its read pool.
@@ -1105,6 +1171,7 @@ impl Store {
             replication_snapshot_build: Mutex::new(()),
             replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
+            trim_local: AtomicBool::new(false),
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
@@ -1183,7 +1250,7 @@ pub struct ReplicationSnapshot {
     pub inventory_generation: i64,
     pub inventory: CompactReplicationInventory,
     pub buckets: Vec<ReplicationInventoryBucket>,
-    /// The inventory digest state before each range in `buckets`.
+    /// The inventory digest state before each range in `buckets`, then its terminal state.
     pub digest_prefixes: Vec<Sha256>,
     pub authority_digest: String,
     pub graph_generation: i64,
@@ -1269,6 +1336,8 @@ pub struct PeerSyncProgress {
     pub window_received: u64,
     pub graph_compared_at_unix_ms: Option<u128>,
     pub graph_differs_since_unix_ms: Option<u128>,
+    pub claims_compared_at_unix_ms: Option<u128>,
+    pub claims_differ_since_unix_ms: Option<u128>,
     /// The last exchange at which both nodes held the same envelopes and every projection was
     /// settled, so the two projections were comparable.
     pub aligned_comparison: Option<AlignedComparison>,
@@ -1320,6 +1389,16 @@ impl PeerSyncProgress {
             self.graph_differs_since_unix_ms = None;
         } else {
             self.graph_differs_since_unix_ms.get_or_insert(now);
+        }
+    }
+
+    /// Record one comparison of the claims this node retains with the peer's.
+    pub fn compare_claims(&mut self, equal: bool, now: u128) {
+        self.claims_compared_at_unix_ms = Some(now);
+        if equal {
+            self.claims_differ_since_unix_ms = None;
+        } else {
+            self.claims_differ_since_unix_ms.get_or_insert(now);
         }
     }
 
@@ -1460,6 +1539,8 @@ impl PeerSyncProgress {
             && now.saturating_sub(sync.measured_at_unix_ms) <= REPLICATION_SYNC_STALE_MS;
         sync.graph_compared_at_unix_ms = self.graph_compared_at_unix_ms;
         sync.graph_differs_since_unix_ms = self.graph_differs_since_unix_ms;
+        sync.claims_compared_at_unix_ms = self.claims_compared_at_unix_ms;
+        sync.claims_differ_since_unix_ms = self.claims_differ_since_unix_ms;
         sync.diverged = self
             .graph_differs_since_unix_ms
             .zip(self.graph_compared_at_unix_ms)
@@ -1561,16 +1642,20 @@ impl CompactReplicationInventory {
     }
 
     /// Set the inventory digest by resuming at range `from`; the value equals
-    /// `refresh_digest`. `prefixes[i]` holds the digest state before `buckets[i]`, which must
-    /// list the held identities range by range, and no range before `from` may have changed
-    /// since `prefixes` was built. Ranges are ordered by writer, so new envelopes re-hash only
-    /// their own later ranges and those of later writers.
+    /// `refresh_digest`. `prefixes[i]` holds the digest state before `buckets[i]`, with
+    /// one terminal state after the last bucket. The buckets must list the held identities
+    /// range by range, and no range before `from` may have changed since `prefixes` was built.
+    /// Ranges are ordered by writer, so new envelopes re-hash only their own later ranges and
+    /// those of later writers. An unchanged inventory does no hashing or prefix scan.
     pub fn resume_digest(
         &mut self,
         buckets: &[ReplicationInventoryBucket],
         prefixes: &mut Vec<Sha256>,
         from: usize,
     ) {
+        if from == buckets.len() && prefixes.len() == buckets.len() + 1 {
+            return;
+        }
         let from = from.min(prefixes.len().saturating_sub(1));
         let mut digest = match prefixes.get(from) {
             Some(state) => state.clone(),
@@ -1602,6 +1687,7 @@ impl CompactReplicationInventory {
             position = end;
         }
         debug_assert_eq!(position, self.envelopes.len());
+        prefixes.push(digest.clone());
         self.digest = hex::encode(digest.finalize());
     }
 
@@ -1712,6 +1798,7 @@ impl CompactReplicationInventory {
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         }
     }
 
@@ -2583,13 +2670,21 @@ pub fn fleet_meta(connection: &Connection, key: &str) -> Result<Option<String>> 
         .optional()?)
 }
 
-/// The highest sequence this node holds of a writer, counting envelopes a checkpoint dropped.
+/// The highest sequence this node has held of a writer, counting envelopes a trim dropped: the
+/// writer's batch head (`writer_heads`) and retired envelopes as well as tombstones, the same
+/// floor as `next_replica_sequence`. Adoption can withdraw a trimmed envelope's tombstone, and a
+/// removal's high water or a rejoin floor read only from the tombstones would then fall below a
+/// sequence peers already hold.
 pub fn writer_high_water(connection: &Connection, writer: &str) -> Result<Option<u64>> {
     Ok(connection.query_row(
         "SELECT MAX(sequence) FROM (
              SELECT MAX(sequence) AS sequence FROM replica_envelopes WHERE writer=?1
              UNION ALL
              SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1
+             UNION ALL
+             SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1
+             UNION ALL
+             SELECT sequence FROM writer_heads WHERE writer=?1
          )",
         [writer],
         |row| row.get(0),
@@ -3763,7 +3858,7 @@ fn next_batch_rowid(transaction: &Connection) -> Result<i64> {
         |row| row.get(0),
     )?;
     transaction.execute(
-        /* sqlite-large-value: allow-for-now lv-he34560861a22 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('batch_rowid_high_water',?1)",
+        /* sqlite-large-value: allow-for-now lv-h98644aa0fd08 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('batch_rowid_high_water',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [rowid.to_string()],
     )?;
     Ok(rowid)
@@ -4596,6 +4691,7 @@ impl TestReplica {
             buckets,
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         }
     }
 
@@ -4624,6 +4720,7 @@ impl TestReplica {
             buckets,
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         };
         (missing, inventory)
     }
@@ -4693,6 +4790,7 @@ pub fn compact_replication_exchange_lists_only_ranges_that_differ() {
         buckets: Vec::new(),
         accepts: None,
         checkpoint: None,
+        claim_range_query: None,
     })
     .unwrap()
     .len();
@@ -4797,6 +4895,7 @@ pub fn compact_replication_exchange_waits_for_a_complete_listing() {
         buckets: peer.summary().buckets,
         accepts: None,
         checkpoint: None,
+        claim_range_query: None,
     };
     let (missing, _) = compact_replication_difference(&inventory, &buckets, &listing, limit);
     assert_eq!(missing, test_envelope_ids("origin", 9..=10, "a"));
@@ -6124,7 +6223,7 @@ impl Store {
                 .load(Ordering::Acquire)
                 .min(missing - 1);
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-hb4d97131e1c7 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid',?1)",
+                /* sqlite-large-value: allow-for-now lv-h3cc85704f207 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('seeded_batch_rowid',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [through.to_string()],
             )?;
             transaction.commit()?;
@@ -6168,7 +6267,7 @@ impl Store {
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             if self.seal_prepared_tx(&transaction, &prepared)? {
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h8ea276cf2ab7 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid', ?1)",
+                    /* sqlite-large-value: allow-for-now lv-h0497b81f01fb owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('seeded_batch_rowid', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     [prepared.through.to_string()],
                 )?;
                 transaction.commit()?;
@@ -6387,7 +6486,23 @@ impl Store {
     }
 
     pub fn export_replication_summary(&self, fleet_id: &str) -> Result<ReplicationExchange> {
+        self.replication_summary(fleet_id, true)
+    }
+
+    /// A local scalar guard reads only `authority_digest`. Keep the full summary's fresh
+    /// snapshot, metadata and errors, but avoid cloning/serializing its unused bucket list.
+    /// This reduced inventory must not be used to construct a signed peer exchange.
+    pub fn export_replication_authority_guard(&self, fleet_id: &str) -> Result<ReplicationExchange> {
+        self.replication_summary(fleet_id, false)
+    }
+
+    fn replication_summary(
+        &self,
+        fleet_id: &str,
+        include_buckets: bool,
+    ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
+        let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
         let signature_requests = self.replication_signature_requests()?;
         Ok(ReplicationExchange {
@@ -6398,19 +6513,25 @@ impl Store {
             projection_registry_digest: Some(self.runtime.projection_registry_digest()),
             projection_versions: self.runtime.projection_versions(),
             authority_digest: snapshot.authority_digest.clone(),
-            graph_digest: snapshot.legacy_graph_digest.clone(),
-            projection_digests: snapshot.projection_digests.clone(),
+            graph_digest: digests.0.clone(),
+            projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 digest: snapshot.inventory.digest.clone(),
                 envelopes: Vec::new(),
-                buckets: snapshot.buckets.clone(),
+                buckets: if include_buckets {
+                    snapshot.buckets.clone()
+                } else {
+                    Vec::new()
+                },
                 accepts: Some(replication_accepts()),
                 checkpoint: self.trimmed_checkpoint()?,
+                claim_range_query: None,
             },
             envelopes: Vec::new(),
             signature_requests,
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+            claim_ranges: Some(self.claim_range_summary()?),
         })
     }
 
@@ -6448,6 +6569,21 @@ impl Store {
     ) -> Result<ReplicationExchange> {
         let mut exchange = self.export_replication_difference(fleet_id, remote)?;
         let _timing = time_stage(&self.replication_timers.export);
+        // Claims the peer found it lacks travel in their ordinary envelopes, after the
+        // envelopes the inventory difference already sends.
+        if let Some(query) = remote.claim_range_query.as_ref().filter(|query| !query.claims.is_empty()) {
+            let sent: BTreeSet<(String, u64, String)> = exchange
+                .envelopes
+                .iter()
+                .map(|envelope| (envelope.writer.clone(), envelope.sequence, envelope.hash.clone()))
+                .collect();
+            let wanted = self
+                .envelopes_carrying_claims(&query.claims)?
+                .into_iter()
+                .filter(|id| !sent.contains(&(id.writer.clone(), id.sequence, id.hash.clone())))
+                .collect();
+            exchange.envelopes.extend(self.replica_envelopes(wanted)?);
+        }
         exchange.signatures = self.replication_signatures_for(signature_requests)?;
         exchange.signature_requests = self.replication_signature_requests()?;
         fit_exchange_body(&mut exchange, budget)?;
@@ -6460,6 +6596,7 @@ impl Store {
         remote: &ReplicationInventory,
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
+        let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
         let same = !remote.digest.is_empty() && remote.digest == snapshot.inventory.digest;
         if !same && !remote.buckets.is_empty() {
@@ -6480,19 +6617,21 @@ impl Store {
                 projection_registry_digest: Some(self.runtime.projection_registry_digest()),
                 projection_versions: self.runtime.projection_versions(),
                 authority_digest: snapshot.authority_digest.clone(),
-                graph_digest: snapshot.legacy_graph_digest.clone(),
-                projection_digests: snapshot.projection_digests.clone(),
+                graph_digest: digests.0.clone(),
+                projection_digests: digests.1.clone(),
                 inventory: ReplicationInventory {
                     digest: snapshot.inventory.digest.clone(),
                     envelopes: listed,
                     buckets: snapshot.buckets.clone(),
                     accepts: Some(replication_accepts()),
                     checkpoint: self.trimmed_checkpoint()?,
+                    claim_range_query: None,
                 },
                 envelopes: self.replica_envelopes(missing)?,
                 signature_requests: Vec::new(),
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+                claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -6533,8 +6672,8 @@ impl Store {
             projection_registry_digest: Some(self.runtime.projection_registry_digest()),
             projection_versions: self.runtime.projection_versions(),
             authority_digest: snapshot.authority_digest.clone(),
-            graph_digest: snapshot.legacy_graph_digest.clone(),
-            projection_digests: snapshot.projection_digests.clone(),
+            graph_digest: digests.0.clone(),
+            projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 accepts: Some(replication_accepts()),
                 checkpoint: self.trimmed_checkpoint()?,
@@ -6554,6 +6693,7 @@ impl Store {
             signature_requests: Vec::new(),
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+            claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
         })
     }
 
@@ -6773,22 +6913,22 @@ impl Store {
                     )
                     .map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h0d87f9048268 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h53cc4b4e8c5e owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_digests:{relay}"),
                         serde_json::to_string(&input.projection_digests).map_err(internal)?],
                 ).map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hccba8721529c owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h7b01d2bde73b owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_versions:{relay}"),
                         serde_json::to_string(&input.projection_versions).map_err(internal)?],
                 ).map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h4d225ce0999e owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h7821b58b8774 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_registry:{relay}"),
                         input.projection_registry_digest.as_ref().unwrap_or(&input.schema_digest)],
                 ).map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hd6af5bf00958 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h5e1e6fd8e43d owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_inventory:{relay}"), input.inventory.digest],
                 ).map_err(internal)?;
                 // A response to our own dial proves the outbound grants now permit it.
@@ -6822,12 +6962,17 @@ impl Store {
             &snapshot.buckets,
             &input.inventory,
         );
-        // Each graph projects the envelopes its node holds, so the digests are comparable only
-        // while both nodes hold the same ones, and only once this node has projected them all:
-        // nothing new arrived that still waits for admission, and no projection is deferred.
+        // Comparing projections with a peer is only the optional divergence diagnostic: off
+        // unless the daemon's divergence check is on, so a default install never compares, and
+        // nothing about sync waits on it.
+        let compare = self
+            .divergence_capture
+            .load(std::sync::atomic::Ordering::Relaxed);
         let incompatible_versions = projection_digest::incompatible_versions(
             &self.runtime.projection_versions(), &input.projection_versions);
-        let (local_graph, remote_graph) = if input.projection_digests.is_empty() {
+        let (local_graph, remote_graph) = if !compare {
+            (String::new(), String::new())
+        } else if input.projection_digests.is_empty() {
             (
                 snapshot.legacy_graph_digest.clone(),
                 input.graph_digest.clone(),
@@ -6853,14 +6998,20 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(internal)?;
-        let graph_equal = (same_registry
+        // Both nodes hold the same envelopes and this node has admitted and projected them all:
+        // nothing new arrived that still waits for admission, and no projection is deferred.
+        let settled = same_registry
             && !waiting
             && !input.inventory.digest.is_empty()
             && input.inventory.digest == snapshot.inventory.digest
-            && (!input.projection_digests.is_empty() || !input.graph_digest.is_empty())
             && received == 0
             && signatures == 0
-            && !self.replication_projection_deferred())
+            && !self.replication_projection_deferred();
+        // Each graph projects the envelopes its node holds, so the digests are comparable only
+        // once settled, and only when the peer sent them.
+        let graph_equal = (compare
+            && settled
+            && (!input.projection_digests.is_empty() || !input.graph_digest.is_empty()))
         .then(|| remote_graph == local_graph);
         if !same_registry
             && input.inventory.digest == snapshot.inventory.digest
@@ -6891,16 +7042,25 @@ impl Store {
         }
         // A first sync ends at the first exchange where both nodes hold the same envelopes and
         // this node has admitted and projected them all; it settles on claims alone.
-        if graph_equal.is_some() {
+        if settled {
             self.observe_first_sync(relay, snapshot.inventory.envelopes.len() as u64)
                 .map_err(internal)?;
         }
+        // Claims are compared only with a peer that speaks the same claim-range protocol, and
+        // only while both range indexes cover every retained claim.
+        let claim_ranges = match input.claim_ranges.as_ref() {
+            Some(remote) => self.compare_claim_ranges(remote).map_err(internal)?,
+            None => None,
+        };
         let now = now_ms();
         let mut sync = self
             .replication_sync
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
+        if let Some(comparison) = &claim_ranges {
+            progress.compare_claims(comparison.same, now);
+        }
         let basis = InventoryBasis {
             peer_checkpoint: input.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
             local_inventory_generation: snapshot.inventory_generation,
@@ -6910,8 +7070,9 @@ impl Store {
         if difference.is_some() {
             progress.measured_inventory_envelopes = snapshot.inventory.envelopes.len() as u64;
         }
-        if !same_registry || waiting {
-            // Retire a comparison from before a rolling upgrade or a newly waiting claim.
+        if !compare || !same_registry || waiting {
+            // Retire a comparison from before the check was turned off, a rolling upgrade or a
+            // newly waiting claim.
             progress.graph_compared_at_unix_ms = None;
             progress.graph_differs_since_unix_ms = None;
             progress.aligned_comparison = None;
@@ -6994,7 +7155,9 @@ impl Store {
                 buckets: Vec::new(),
                 accepts: None,
                 checkpoint: None,
+                claim_range_query: None,
             },
+            claim_ranges,
         })
     }
 
@@ -7318,6 +7481,29 @@ impl Store {
     /// Whether admitted replicated claims wait for a deferred projection.
     pub fn replication_projection_deferred(&self) -> bool {
         self.replication_projection_state.load(Ordering::Acquire) & 1 != 0
+    }
+
+    /// The graph and projection digests an exchange carries. While this node's projection is
+    /// not settled (a deferred catch-up, committed batches not yet sealed into envelopes, or
+    /// replicated claims waiting for a build that knows their kinds), its tables can differ
+    /// from a settled peer's at the same inventory with no divergence at all. It then sends
+    /// neither, which a peer reads as nothing to compare this time.
+    fn exported_digests(
+        &self,
+        snapshot: &ReplicationSnapshot,
+    ) -> Result<(String, BTreeMap<String, String>)> {
+        let waiting: bool = self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records WHERE state='unknown')",
+            [],
+            |row| row.get(0),
+        )?;
+        if self.replication_projection_deferred() || snapshot.unsealed || waiting {
+            return Ok((String::new(), BTreeMap::new()));
+        }
+        Ok((
+            snapshot.legacy_graph_digest.clone(),
+            snapshot.projection_digests.clone(),
+        ))
     }
 
     pub fn projection_contention_generation(&self) -> u64 {
@@ -7703,8 +7889,12 @@ impl Store {
                     // Readers may have cached the preceding prefix at the same admitted store
                     // index. Its projection changed even when no additional claim arrived.
                     chunked |= through < target;
-                    if replayed || chunked {
+                    if replayed {
                         self.runtime.forget_views();
+                    } else if chunked {
+                        // Only more of the admitted claims projected: published lists keep
+                        // serving what readers had until they refold once the backlog is in.
+                        self.runtime.projection_advanced(through >= target);
                     }
                     if through < target {
                         between();
@@ -8251,10 +8441,24 @@ impl Store {
             .any(|progress| progress.view(now).is_some_and(|sync| sync.catching_up))
     }
 
-    /// Keep what a reproduction needs when a comparison finds a difference. Off by default.
+    /// Compare projections with peers, keeping what a reproduction needs when they differ: the
+    /// optional divergence diagnostic. Off by default.
     pub fn capture_divergences(&self, on: bool) {
         self.divergence_capture
             .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Trim on this member's own, without checkpoint agreement: the member's `[trim] local`
+    /// choice, off by default. It then seals, verifies and applies no new checkpoint and adopts
+    /// no peer's manifest, so a manifest never replaces its tombstones; a trim it had already
+    /// committed still finishes. Checkpoints need every participant, so the old checkpoints stop
+    /// on the other members until a person excuses this one.
+    pub fn trim_locally(&self, on: bool) {
+        self.trim_local.store(on, Ordering::Relaxed);
+    }
+
+    pub fn trims_locally(&self) -> bool {
+        self.trim_local.load(Ordering::Relaxed)
     }
 
     /// Every projection that a peer with the same envelopes projects differently, by peer.
@@ -8482,6 +8686,9 @@ impl Store {
         let snapshot = self.sealed_replication_snapshot()?;
         let connection = self.readers.get();
         let registry_digest = self.runtime.projection_registry_digest();
+        let compare = self
+            .divergence_capture
+            .load(std::sync::atomic::Ordering::Relaxed);
         // Projection caches include committed local batches before their envelopes are sealed.
         // Equal sealed inventories cannot diagnose those pending writes as peer divergence.
         let unsealed_local: bool = connection.query_row(
@@ -8658,7 +8865,7 @@ impl Store {
                     && !unsealed_local
                     && same_registry
                     && waiting_claims == 0;
-                if inventory_aligned && live_settled {
+                if compare && inventory_aligned && live_settled {
                     status.differing_tables = projection_digest::differing(
                         &projection_digest::comparable(&snapshot.projection_digests, &incompatible),
                         &projection_digest::comparable(&status.projection_digests, &incompatible),
@@ -8681,7 +8888,10 @@ impl Store {
             let held = aligned_before
                 .clone()
                 .filter(|held| held.differing_tables.is_empty());
-            let reason = if waiting_claims != 0 {
+            // Without the divergence check nothing is compared, so nothing waits to be.
+            let reason = if !compare {
+                None
+            } else if waiting_claims != 0 {
                 Some(format!(
                     "{waiting_claims} replicated claims wait for a build that knows their kinds"
                 ))
@@ -8728,7 +8938,7 @@ impl Store {
                 None
             };
             status.projection_comparison_waiting = reason.is_some();
-            if !status.projection_digests.is_empty() && reason.is_none() {
+            if compare && !status.projection_digests.is_empty() && reason.is_none() {
                 let compared = if inventory_aligned {
                     Some((status.differing_tables.is_empty(), now))
                 } else {
@@ -9743,6 +9953,7 @@ mod aligned_comparison_tests {
     fn a_pair_without_a_recent_aligned_exchange_names_why_it_waits() {
         let source = node("alder");
         let target = node("birch");
+        target.capture_divergences(true);
         let mut summary = source.export_replication_summary(FLEET).unwrap();
         let aligned_inventory = summary.inventory.digest.clone();
         summary.inventory.digest = "older inventory".into();

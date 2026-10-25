@@ -510,6 +510,53 @@ test('preserves versioned cursor gap errors', async () => {
     });
 });
 
+test('non-JSON HTTP rejections expose status through ClientError', async () => {
+    for (const [body, status, statusText, contentType] of [
+        ['length limit exceeded', 413, 'Payload Too Large', 'text/plain'],
+        ['<html>Bad Gateway</html>', 502, 'Bad Gateway', 'text/html'],
+        ['', 403, '', 'text/plain'],
+        ['{invalid', 500, 'Internal Server Error', 'application/json'],
+    ]) {
+        const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () =>
+            new Response(body, { status, statusText, headers: { 'Content-Type': contentType, 'Retry-After': '2' } }),
+        });
+        await assert.rejects(client.uploadBlob(new Uint8Array([1]), 'image/png'), error => {
+            assert.ok(error instanceof ClientError);
+            assert.equal(error.status, status);
+            assert.equal(error.response.code, 'http-error');
+            assert.equal(error.message, `HTTP ${status}${statusText ? ` ${statusText}` : ''}`);
+            assert.equal(error.response.retryable, false);
+            assert.equal(error.retryAfterMs, 2000);
+            return true;
+        });
+    }
+});
+
+test('structured HTTP errors keep their complete server envelope', async () => {
+    const wire = { ...cursorGapFixture, code: 'blob-too-large', message: 'Image exceeds 10 MiB', details: { max_bytes: 10485760 } };
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () =>
+        new Response(JSON.stringify(wire), { status: 413, headers: { 'Content-Type': 'text/plain', 'Retry-After': '3' } }),
+    });
+    await assert.rejects(client.uploadBlob(new Uint8Array([1]), 'image/png'), error => {
+        assert.ok(error instanceof ClientError);
+        assert.deepEqual(error.response, wire);
+        assert.equal(error.status, 413);
+        assert.equal(error.retryAfterMs, 3000);
+        return true;
+    });
+});
+
+test('successful malformed JSON and failed body reads are not HTTP rejections', async () => {
+    const malformed = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => new Response('not JSON') });
+    await assert.rejects(malformed.uploadBlob(new Uint8Array([1]), 'image/png'), SyntaxError);
+
+    const failure = new TypeError('response body interrupted');
+    const interrupted = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () =>
+        new Response(new ReadableStream({ start(controller) { controller.error(failure); } }), { status: 413 }),
+    });
+    await assert.rejects(interrupted.uploadBlob(new Uint8Array([1]), 'image/png'), error => error === failure);
+});
+
 test('completes pairing with either canonical or bare pairing ID', async () => {
     const calls = [];
     const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
@@ -973,4 +1020,34 @@ test('phone observation command retries identical tagged intervals and accepts w
     assert.equal(calls[0].init.headers.Authorization,'Bearer paired');
     assert.equal(calls[0].init.body,calls[1].init.body);
     assert.deepEqual(JSON.parse(calls[0].init.body),report);
+});
+
+
+test('schedules list preserves unknown rows and explicitly encodes one page; old server is unsupported', async () => {
+    const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../docs/st3/client-v0/fixtures/schedules-page.json'), 'utf8'));
+    const requests = [];
+    let old = false;
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async input => {
+        const url = String(input);
+        requests.push(url);
+        if (new URL(url).pathname === '/v1/client/capabilities') return response(capabilityFixture);
+        assert.equal(new URL(url).pathname, '/v1/client/schedules', 'no fallback route');
+        return old ? new Response(null, {status:404}) : Response.json(fixture);
+    }});
+    const page = await client.schedulesList({ cursor:'next&cursor', limit:1, unheard_after_ms:300000 });
+    assert.deepEqual(page, fixture);
+    assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/capabilities'), [
+        'https://example.test/v1/client/capabilities',
+    ]);
+    assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/schedules'), [
+        'https://example.test/v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000',
+    ]);
+    assert.equal(requests.length, 2, 'one capability discovery and exactly one schedules page');
+    old = true;
+    await assert.rejects(client.schedulesList(), error => error instanceof ClientError && error.response.code === 'unsupported-capability');
+    assert.deepEqual(requests, [
+        'https://example.test/v1/client/capabilities',
+        'https://example.test/v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000',
+        'https://example.test/v1/client/schedules',
+    ], 'cached capabilities, no unsupported fallback or automatic page traversal');
 });

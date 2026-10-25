@@ -12,7 +12,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/8cb2135bd4a852b99ca3f677c0815d0268766ff5";
+      "github:overengineeringstudio/effect-utils/1e294f81aeec43c2e1f25ba25bb731c1c8336beb";
   };
 
   outputs =
@@ -311,6 +311,8 @@
           "--exclude"
           "fractal-schema"
           "--exclude"
+          "fractal-tiles-registry"
+          "--exclude"
           "fractal-tui"
         ];
 
@@ -456,6 +458,11 @@
           e: "(package(=${e.package}) & binary(=${e.binary}) & test(=${e.test}))"
         ) st3Exclusions;
 
+        fractalWeb = import ./nix/fractal-web.nix {
+          inherit effect-utils system version buildStamp;
+          source = self;
+        };
+
         st3Check = pkgs.rustPlatform.buildRustPackage {
           pname = "st3";
           inherit version;
@@ -550,6 +557,8 @@
             "-p"
             "fractal-schema"
             "-p"
+            "fractal-tiles-registry"
+            "-p"
             "fractal-tui"
             "-p"
             "fractal-chatgpt"
@@ -643,6 +652,8 @@
             pkgs.lsof
           ];
           postInstall = ''
+            mkdir -p "$out/share"
+            cp -r ${fractalWeb}/share/fractal-web "$out/share/fractal-web"
             # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
             ln -s st3 $out/bin/st
             # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
@@ -726,7 +737,7 @@
           ${st3}/bin/st3 --help > st3.help
           ${st3}/bin/st --help > st.help
           cmp st3.help st.help
-          grep -F "Usage: st [" st.help
+          grep -F "Usage: fractal [" st.help
           test -s ${st3}/share/bash-completion/completions/st.bash
           test -s ${st3}/share/zsh/site-functions/_st
           test -s ${st3}/share/fish/vendor_completions.d/st.fish
@@ -824,10 +835,51 @@
         # One cargo invocation builds all four guest crates: they share the same wasm32 dependency
         # graph, so a derivation per component compiled it four times. Install paths are unchanged
         # and every component package attr points at this single output.
+        # The workspace manifest with only the four guest crates as members: the root's workspace-wide tables (workspace settings,
+        # profiles, patches), so the same build, without the root package or the other members, which cargo would otherwise load.
+        providerComponentDirs = map (name: "components/${name}") [ "github-issue" "github-pr" "pty-stats" "vista" ];
+        providerWorkspaceManifest =
+          let
+            root = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+          in
+          (pkgs.formats.toml { }).generate "Cargo.toml" (
+            pkgs.lib.filterAttrs (name: _: builtins.elem name [ "profile" "patch" "replace" ]) root
+            // {
+              workspace = builtins.removeAttrs root.workspace [ "default-members" ] // {
+                members = providerComponentDirs;
+              };
+            }
+          );
+
         st2ProviderComponents = providerRustPlatform.buildRustPackage {
           pname = "st2-provider-components";
           inherit version;
-          src = self;
+          # Only what the guest crates build from (their manifests' and the root's settings, the lock, the cargo config, the crates and
+          # their WIT worlds). With `self` every commit was a new input, so a warm local run (scripts/ci-local) rebuilt them each time; a
+          # change elsewhere now reuses the store path. Any change to these inputs, the root manifest included, still rebuilds.
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions (
+              [
+                ./Cargo.toml
+                ./Cargo.lock
+                ./.cargo
+                ./components
+                ./wit
+                # wit/*/provider-api.wit link here: a link whose target is missing fails the build, it never builds something else.
+                ./crates/fractal-resource-wasip2/wit
+              ]
+              # Every [patch] the root declares stays (cargo loads each one), so its source must be there too.
+              ++ map (path: ./. + "/${path}") (
+                pkgs.lib.concatMap (registry: map (patch: patch.path) (builtins.filter (patch: patch ? path) (builtins.attrValues registry)))
+                  (builtins.attrValues ((builtins.fromTOML (builtins.readFile ./Cargo.toml)).patch or { }))
+              )
+            );
+          };
+          postPatch = ''
+            cp ${providerWorkspaceManifest} Cargo.toml
+            chmod u+w Cargo.toml
+          '';
           inherit cargoDeps;
           buildPhase = ''
             runHook preBuild
@@ -1009,6 +1061,7 @@
         # The release target still links through the pinned Zig/glibc-baseline wrapper.
         packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
+        packages.fractal-web = fractalWeb;
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
         packages.st-fabric-adapter = stFabricAdapter;
@@ -1034,19 +1087,23 @@
         # wants them.
         checks.st2 = st2;
         checks.st3 = st3Check;
-        checks.st3-runtime-inputs =
+        # Keep derivation-path assertions lazy until the check's builder is evaluated:
+        # flake discovery must not force package inputs (including the installation hash guard).
+        checks.st3-runtime-inputs = pkgs.runCommand "st3-runtime-inputs" { } (
           assert import ./nix/st3-runtime-input-tests.nix {
             inherit self system;
             baseline = messagingCompat;
             inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
           };
-          pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
+          ''touch $out''
+        );
         checks.st3-help = st3Help;
-        checks.st3-check-input-isolation =
+        checks.st3-check-input-isolation = pkgs.runCommand "st3-check-input-isolation" { } (
           assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
           # Native check inputs must not contribute to the installed package identity.
           assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
-          pkgs.runCommand "st3-check-input-isolation" { } ''touch $out'';
+          ''touch $out''
+        );
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
@@ -1074,6 +1131,19 @@
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/smalltalk-test.sock" args;
           assert pkgs.lib.hasInfix "--pty-binary" args;
+          assert rendered.services.smalltalk.webListen == "127.0.0.1:7410";
+          assert pkgs.lib.hasInfix "127.0.0.1:7410" args;
+          assert pkgs.lib.hasInfix "--web-dist" args;
+          assert pkgs.lib.hasInfix "${package}/share/fractal-web" args;
+          assert (
+            let
+              disabled = (mkHmModuleEval { webListen = null; }).config;
+              disabledArgs = if pkgs.stdenv.hostPlatform.isLinux then
+                disabled.systemd.user.services.smalltalk.Service.ExecStart
+              else
+                builtins.concatStringsSep " " disabled.launchd.agents.smalltalk.config.ProgramArguments;
+            in pkgs.lib.hasInfix (if pkgs.stdenv.hostPlatform.isLinux then ''"--web-listen" "off"'' else "--web-listen off") disabledArgs
+          );
           # service.rs passes the shared runtime gateway explicitly, even with --state-dir.
           # Assert the rendered command: %%t would be a literal path, not a systemd specifier.
           assert (if pkgs.stdenv.hostPlatform.isLinux then

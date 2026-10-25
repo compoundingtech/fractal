@@ -143,7 +143,8 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix_bound(&server_socket, &server_socket, fractal_daemon::api::router(state))
+        let store = state.store.clone();
+        fractal_daemon::api::serve_unix_bound(&server_socket, &server_socket, fractal_daemon::api::router(state), store)
             .await
             .unwrap();
     });

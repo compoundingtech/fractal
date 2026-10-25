@@ -14,6 +14,9 @@ pub const VERSION: u32 = 1;
 /// The version of an archive that also carries message bodies. An archive without any keeps
 /// [`VERSION`], so a build that predates bodies restores it; one with bodies it refuses cleanly.
 pub const VERSION_WITH_BODIES: u32 = 2;
+/// The version of an archive that also carries the permanent ledgers (`super::backup_ledgers`).
+/// An archive with no ledger rows keeps an earlier version, as one without bodies does.
+pub const VERSION_WITH_LEDGERS: u32 = 3;
 pub const PAGE: usize = 512;
 // One envelope can contain document bytes; reject unbounded lines before allocating them.
 pub const MAX_RECORD_BYTES: u64 = 128 * 1024 * 1024;
@@ -36,11 +39,18 @@ pub struct Header {
     pub graph_digest: String,
     pub log_digest: String,
     pub tables: BTreeMap<String, TableDigest>,
+    /// Each nonempty permanent ledger's row count and digest. Empty, and absent from the JSON,
+    /// below [`VERSION_WITH_LEDGERS`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ledgers: BTreeMap<String, TableDigest>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "record", content = "data", rename_all = "kebab-case")]
 pub enum Record {
+    /// An export failed before producing its archive. This is never a valid
+    /// backup: readers report the cause and refuse publication or restore.
+    Failure { code: String, message: String },
     Header(Header),
     Envelope(ReplicaEnvelope),
     Checkpoint(CheckpointManifestPage),
@@ -48,6 +58,8 @@ pub enum Record {
     /// A long message body the exporting member holds as its owner, with the hash it is kept by.
     /// Restore writes it back beside the database. See [`crate::message_body`].
     MessageBody(MessageBodyRecord),
+    /// One page of one permanent ledger, restored by union. See [`super::backup_ledgers`].
+    Ledger(super::backup_ledgers::LedgerPage),
     End { envelopes: u64, sha256: String },
 }
 

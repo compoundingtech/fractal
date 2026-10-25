@@ -1015,7 +1015,8 @@ async fn detail_router_sql_work_stays_fixed_when_declarations_and_history_grow()
                 }
             );
             assert_eq!(cost.fullscan_steps, 0, "{kind}/{count}: {cost:?}");
-            assert_eq!(cost.sorts, 0, "{kind}/{count}: {cost:?}");
+            // One sort: the canonical order of the newest millisecond's state claims.
+            assert_eq!(cost.sorts, 1, "{kind}/{count}: {cost:?}");
             eprintln!(
                 "selected-detail {kind} declarations={count} one_item bytes={} SQL={cost:?}",
                 serde_json::to_vec(&value["value"]).unwrap().len()
@@ -1025,9 +1026,13 @@ async fn detail_router_sql_work_stays_fixed_when_declarations_and_history_grow()
             } else {
                 let prior = before[if kind == "observer" { 0 } else { 1 }];
                 assert_eq!(cost.statements, prior.statements);
+                // Older history costs nothing beyond one row: the canonical order computes the key
+                // of each state claim in the newest millisecond and of the one older row that ends
+                // it, about 60 steps each. The 32-declaration fixture has no older state claim.
+                let ties = newest_millisecond_ties(&state, subject);
                 assert!(
-                    cost.vm_steps <= prior.vm_steps + 32,
-                    "{prior:?} -> {cost:?}"
+                    cost.vm_steps <= prior.vm_steps + 32 + 64 * ties,
+                    "{prior:?} -> {cost:?}, {ties} ties"
                 );
             }
             state
@@ -1067,15 +1072,21 @@ async fn detail_seek_plans_and_metadata_bytecodes_use_indexed_headers() {
         DECLARATION_KIND_METADATA_SQL, DECLARATION_METADATA_SQL, SNAPSHOT_METADATA_SQL,
         STATE_METADATA_SQL,
     };
-    let state_index_root: i64 = connection.query_row(
-        "SELECT rootpage FROM sqlite_master WHERE type='index' AND name='claims_subject_kind_index'",
+    let claims_root: i64 = connection.query_row(
+        "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='claims'",
         [],
         |row| row.get(0),
     ).unwrap();
+    let body_column: i64 = connection.query_row(
+        "SELECT cid FROM pragma_table_info('claims') WHERE name='body'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    let state_sql: &str = &STATE_METADATA_SQL;
     for (sql, table) in [
         (DECLARATION_KIND_METADATA_SQL, "desired"),
         (DECLARATION_METADATA_SQL, "desired"),
-        (STATE_METADATA_SQL, "claims"),
+        (state_sql, "claims"),
         (SNAPSHOT_METADATA_SQL, "claims"),
     ] {
         let mut query = connection
@@ -1091,17 +1102,24 @@ async fn detail_seek_plans_and_metadata_bytecodes_use_indexed_headers() {
                 .any(|row| row.contains(&format!("SEARCH {table}"))),
             "{plan:?}"
         );
-        assert!(
-            !plan.iter().any(|row| row.contains("SCAN")
-                || row.contains("TEMP B-TREE")
-                || row.contains("CORRELATED")),
-            "{plan:?}"
-        );
-        if sql == STATE_METADATA_SQL {
+        assert!(!plan.iter().any(|row| row.contains("SCAN")), "{plan:?}");
+        if sql == state_sql {
+            // Canonical order: the accepted-time index supplies the leading terms and SQLite
+            // sorts only one millisecond's ties, through point lookups of their batch and
+            // position. No other temporary structure is allowed.
             assert!(
                 plan.iter()
-                    .any(|row| row.contains("claims_subject_kind_index")
-                        && row.contains("store_index<?")),
+                    .any(|row| row.contains("claims_subject_kind_accepted_index")),
+                "{plan:?}"
+            );
+            assert!(
+                plan.iter().filter(|row| row.contains("TEMP B-TREE")).all(|row| row.contains("FOR LAST")),
+                "{plan:?}"
+            );
+        } else {
+            assert!(
+                !plan.iter().any(|row| row.contains("TEMP B-TREE")
+                    || row.contains("CORRELATED")),
                 "{plan:?}"
             );
         }
@@ -1121,11 +1139,12 @@ async fn detail_seek_plans_and_metadata_bytecodes_use_indexed_headers() {
             }
             if opcode == "Column" {
                 let flag = row.get::<_, u8>(6).unwrap();
-                let integer_index_position = sql == STATE_METADATA_SQL
-                    && cursor_roots.get(&cursor) == Some(&state_index_root)
-                    && column == 2;
+                // The state read orders by the canonical key: accepted time, batch, position and
+                // claim ID, which admission bounds. Only its body must stay behind the flags.
+                let canonical_key = sql == state_sql
+                    && !(cursor_roots.get(&cursor) == Some(&claims_root) && column == body_column);
                 assert!(
-                    matches!(flag & 0xc0, 0x80 | 0xc0) || integer_index_position,
+                    matches!(flag & 0xc0, 0x80 | 0xc0) || canonical_key,
                     "unguarded source OP_Column cursor={cursor} column={column} p5={flag} in {sql}"
                 );
                 flags.push((cursor, column, flag));
@@ -1161,9 +1180,97 @@ async fn detail_seek_plans_and_metadata_bytecodes_use_indexed_headers() {
             assert_eq!(selected(&state, "observer", OBSERVER, &snapshot), expected);
             let cost = scope.finish();
             assert_eq!(cost.fullscan_steps, 0, "old-cut range seek: {cost:?}");
-            assert_eq!(cost.sorts, 0);
-            assert!(cost.vm_steps < 400, "old-cut range seek: {cost:?}");
+            assert_eq!(cost.sorts, 1, "old-cut range seek: {cost:?}");
+            // Newer states precede the cut in the accepted-time index and are skipped there by
+            // their store index alone: a few steps each, and none for a read at the live cut.
+            assert!(cost.vm_steps < 400 + 8 * 256, "old-cut range seek: {cost:?}");
             Ok(())
         })
         .unwrap();
+}
+
+/// How many state claims of `subject` share its newest accepted millisecond.
+fn newest_millisecond_ties(state: &AppState, subject: &str) -> u64 {
+    state
+        .store
+        .readers
+        .get()
+        .query_row(
+            "SELECT COUNT(*) FROM claims WHERE subject=?1 AND kind LIKE '%.state'
+               AND accepted_at_unix_ms=(SELECT accepted_at_unix_ms FROM claims
+                 WHERE subject=?1 AND kind LIKE '%.state'
+                 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1)",
+            [subject],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn replicate(from: &AppState, to: &AppState) {
+    let exchange = from
+        .store
+        .export_replication_exchange("detail-fleet", &to.store.replication_inventory().unwrap())
+        .unwrap();
+    to.store
+        .receive_replication_exchange(from.store.origin(), "detail-fleet", &exchange)
+        .unwrap();
+    to.store.validate_replication_backlog().unwrap();
+    to.store.apply_replication_repairs().unwrap();
+    assert!(to.store.project_replication_backlog().unwrap());
+}
+
+fn list_state(state: &AppState, kind: &str, subject: &str) -> Value {
+    state
+        .store
+        .read_snapshot(|index| {
+            let snapshot = client_snapshot_at(state, index);
+            let values = observer_subscription_resources(state, kind, false, &snapshot).unwrap();
+            let item = values.into_iter().find(|value| value["id"] == subject).unwrap();
+            let detail = selected(state, kind, subject, &snapshot).unwrap();
+            assert_eq!(item["state"], detail["state"], "list and detail choose one claim");
+            Ok(item["state"].clone())
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn members_that_admitted_states_in_either_order_report_the_same_newest() {
+    let _serial = SERIAL.acquire().await.unwrap();
+    let (left_root, right_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let left = tests::test_state_named(left_root.path(), "detail-left");
+    let right = tests::test_state_named(right_root.path(), "detail-right");
+    declare(&left, 0);
+    replicate(&left, &right);
+    // Each member holds its own state first, so arrival order disagrees between them while
+    // canonical order (accepted time first) does not: the right member's later state wins.
+    for (subject, older, newer) in [
+        (OBSERVER, "healthy", "degraded"),
+        (SUBSCRIPTION, "active", "pending"),
+    ] {
+        append_state(&left, subject, older);
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        append_state(&right, subject, newer);
+    }
+    replicate(&left, &right);
+    replicate(&right, &left);
+    for (kind, subject, newer) in [
+        ("observer", OBSERVER, "degraded"),
+        ("subscription", SUBSCRIPTION, "pending"),
+    ] {
+        assert_eq!(list_state(&left, kind, subject), newer, "{kind} on the left");
+        assert_eq!(list_state(&right, kind, subject), newer, "{kind} on the right");
+        // Negative control: the arrival-order choice the readers used before differs here.
+        let claim_kind = format!("{kind}.state");
+        let by_arrival = |state: &AppState| {
+            state
+                .store
+                .claims_for_subject_kind_at(subject, &claim_kind, None, true, 1)
+                .unwrap()
+                .claims
+                .remove(0)
+                .body["fields"]["state"]
+                .clone()
+        };
+        assert_ne!(by_arrival(&left), by_arrival(&right), "{kind}: the fixture orders arrival differently");
+    }
 }

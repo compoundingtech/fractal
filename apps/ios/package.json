@@ -1,7 +1,8 @@
 {
-  "name": "smalltalk-ios-starter",
+  "name": "fractal-ios-starter",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",

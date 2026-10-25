@@ -13,7 +13,7 @@ use super::direct;
 use super::glass::GlassWrite;
 use super::view::{Load, MissionPreview};
 use super::{AgentControl, Effect, Guard, Ui};
-use crate::feed::{self, Command, Inventories, Inventory, TerminalUpdate, Window};
+use crate::feed::{self, Command, Inventories, Inventory, Window};
 use crate::model::{self, Collection, Model};
 use anyhow::Result;
 use crossterm::{
@@ -29,9 +29,15 @@ use fractal_client::{
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     io,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex, mpsc,
+        atomic::Ordering,
+    },
     time::{Duration, Instant},
 };
+
+#[path = "live_attach.rs"]
+mod attach;
 
 /// A message sent from here that st has not reported back yet.
 struct Pending {
@@ -53,6 +59,8 @@ struct Pending {
     /// When it was last sent (or sent again): one st has not answered for a while is said to be
     /// unconfirmed, so it can be sent again or cleared rather than wait forever.
     since: Instant,
+    /// How many times it was sent again without the person asking, once st had not confirmed it.
+    resent: usize,
 }
 
 /// How often st is asked how long a message it takes, and how soon again after it did not answer.
@@ -174,14 +182,15 @@ pub struct Context {
     pub person: String,
     pub cache_path: Option<std::path::PathBuf>,
     pub cached: Option<Model>,
-    /// `st ui --glasses` / `--glass NAME`: open glasses instead of the sidebar layout, at the
-    /// named glass or the last one used on this device.
-    pub glass: Option<Option<String>>,
+    /// `st ui --space NAME`: the space to open; otherwise the last one used on this device.
+    pub space: Option<String>,
     pub(crate) open_timing: Option<super::open_timing::Trace>,
     pub(crate) process_started: Instant,
     pub initial_subject: Option<String>,
     /// Where seats on this machine leave requests to show something; none for a paired device.
     pub requests: Option<std::path::PathBuf>,
+    /// The demo `st demo play` runs in this interface: its advance key and typing.
+    pub playback: Option<super::playback::Playback>,
 }
 
 // Setup's initial destination waits for a live inventory, rather than cached agent data.
@@ -392,6 +401,8 @@ enum Fetched {
         took: Duration,
     },
     Preview(String, Load<MissionPreview>),
+    /// A document's text, by the reference its pane names, or why it could not be read.
+    Document(String, Result<String, String>),
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
@@ -401,6 +412,10 @@ enum Fetched {
     /// The Fleet tab's machines and paired devices.
     Observations { generation: u64, outcome: Result<(Vec<fractal_client::ResourceObservation>, bool), String> },
     Inventory { generation: u64, result: InventoryRead },
+    /// The objectives and budgets the Usage view shows, or why st could not say.
+    Slo { generation: u64, outcome: Result<Vec<fractal_client::SloRow>, String> },
+    /// What was left of one objective or budget across the chart period.
+    SloHistory { generation: u64, id: String, outcome: Result<fractal_client::SloHistory, String> },
     /// st's conversation search for the palette's query, or why st could not say.
     Said(String, Result<fractal_client::ConversationSearch, String>),
     /// A send finished: the pending token and st's message id, or why it failed and whether st's
@@ -416,6 +431,7 @@ enum Fetched {
     /// A direct stream to an agent's (or a shell's) PTY session.
     Native {
         agent: String,
+        generation: u64,
         direct: Direct,
     },
     /// Attaching again after the stream dropped: the new stream, or why not.
@@ -424,10 +440,11 @@ enum Fetched {
         outcome: Result<Direct, String>,
     },
     /// A shell's attach was refused for a reason that passes; it is being tried again.
-    AttachWaiting { agent: String, reason: String },
+    AttachWaiting { agent: String, generation: u64, reason: String },
     /// st gave no direct stream; follow its view of the terminal instead.
     NativeFailed {
         agent: String,
+        generation: u64,
         runtime_ids: Vec<String>,
         reason: String,
     },
@@ -496,11 +513,12 @@ pub fn run(context: Context) -> Result<()> {
         person,
         cache_path,
         cached,
-        glass,
+        space,
         mut open_timing,
         process_started,
         mut initial_subject,
         requests,
+        playback,
     } = context;
     let (fetched_tx, fetched) = mpsc::channel::<Fetched>();
     // What seats ask this terminal to show (`st ui open`); a paired device has no seats here.
@@ -521,7 +539,6 @@ pub fn run(context: Context) -> Result<()> {
     // The agent or session whose conversation the feed holds.
     let mut conversing: Vec<String> = Vec::new();
     let mut opens: BTreeMap<String, Instant> = BTreeMap::new();
-    let mut terminal_opens: BTreeMap<String, Instant> = BTreeMap::new();
     let mut answers: BTreeMap<String, AnswerTiming> = BTreeMap::new();
     let mut landed_answers: Vec<Instant> = Vec::new();
     // The session each conversation was last subscribed again for, so it is asked once.
@@ -534,6 +551,11 @@ pub fn run(context: Context) -> Result<()> {
     let mut pending: Vec<Pending> = Vec::new();
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
     ui.load_prefs();
+    // A demo's agents are scripted stand-ins whose terminals stay empty: they open on their
+    // conversation, without changing this device's choice.
+    if playback.is_some() {
+        ui.conversation_first = Some(true);
+    }
     ui.drafts_path = super::drafts_store::path();
     let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
     ui.load_drafts();
@@ -541,22 +563,14 @@ pub fn run(context: Context) -> Result<()> {
     if earlier.is_some() {
         super::slo::METRICS.add("drafts_restored_unclean", ui.drafts_saved.len() as u64);
     }
-    if glass.is_some() {
-        ui.resource_sidebar.load(&person);
-    }
+    ui.resource_sidebar.load(&person);
     ui.resource_sidebar.observe(&ui.world);
     ui.build = true;
     ui.live = true;
-    ui.glasses = glass.map(|name| {
-        super::glass::Glasses::open(name, super::glass_store::path(&person))
-    });
-    // A glass opens where this device left it.
+    ui.glasses = super::glass::Glasses::open(space, super::glass_store::path(&person));
+    // A space opens where this device left it.
     ui.show_focused();
-    if ui.glasses.is_none() {
-        ui.flash(
-            "The classic layout is going away: plain st opens spaces, with Ctrl+S for this list",
-        );
-    } else if std::env::args().any(|arg| arg == "--old") {
+    if std::env::args().any(|arg| arg == "--old") {
         ui.flash("The old screens are gone: this is spaces, and ? shows its keys");
     }
 
@@ -565,7 +579,7 @@ pub fn run(context: Context) -> Result<()> {
         // Long enough to read: the usual flash ends after four seconds.
         ui.flash = Some((note, Instant::now() + Duration::from_secs(26)));
     }
-    let _guard = Guard::enter(ui.glasses.is_some())?;
+    let _guard = Guard::enter(true)?;
     // The release smoke test's probe: the terminal is restored after a panic too.
     #[cfg(debug_assertions)]
     if std::env::var_os("STUI_TEST_PANIC_AFTER_ENTER").is_some() {
@@ -603,10 +617,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut terminal_runtimes_by_agent: BTreeMap<String, Vec<String>> = BTreeMap::new();
     // The fleet host that owns each opened terminal, so a dropped stream attaches again directly.
     let mut terminal_owners: BTreeMap<String, String> = BTreeMap::new();
-    // When a terminal was asked for, while it connects: the wait is shown, and a long one named.
-    let mut attach_started: Option<Instant> = None;
-    // Why the attach in progress is waiting, when st refused it for a reason that passes.
-    let mut attach_note: Option<String> = None;
+    let mut attach = attach::State::default();
     // The cursor shape last set, so it changes only when the attached terminal asks.
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
@@ -627,6 +638,13 @@ pub fn run(context: Context) -> Result<()> {
     let mut inventory_grace = InventoryGrace::default();
     let mut inventory_sent: Option<Inventories> = None;
     let mut usage_wanted_hours = None;
+    // Objectives and budgets are read when the Usage view shows and again when an account's
+    // limits are measured anew, never on a timer; a chart is read once per selection and period.
+    let mut slo_shown = false;
+    let mut slo_signature: Option<u64> = None;
+    let mut slo_stale = false;
+    let mut slo_reading = false;
+    let mut slo_history_asked = BTreeSet::<(String, u64)>::new();
     let mut legacy_requested = BTreeSet::new();
     // When each polled inventory first failed on this run of failures: a read that fails for a
     // moment (a daemon catching up) is not said; one that keeps failing is.
@@ -662,21 +680,9 @@ pub fn run(context: Context) -> Result<()> {
         {
             ui.flash = None;
         }
-        // A terminal still connecting says how long it has waited, so a slow st does not look
-        // like a stuck screen (Nathan, 2026-10-05: attaching took a long time).
-        if let (Some(started), Some(view)) = (attach_started, ui.terminal.as_mut())
-            && view.native.is_none()
-            && view.ended.is_none()
-            && view
-                .stale
-                .as_deref()
-                .is_some_and(|stale| stale.starts_with("connecting"))
-        {
-            view.stale = Some(match &attach_note {
-                Some(reason) => format!("{} · {reason}, trying again", connecting_text(started.elapsed())),
-                None => connecting_text(started.elapsed()),
-            });
-        }
+        let (_, selected) = ui.focus();
+        attach.select(&mut ui, selected.as_deref());
+        attach.tick(&mut ui);
         if extras.live && Instant::now() >= limit_next {
             limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
             let client = client.clone();
@@ -699,7 +705,7 @@ pub fn run(context: Context) -> Result<()> {
             match update {
                 feed::Update::GlassesVersion(version) => {
                     super::set_glasses_version(version);
-                    glasses_ready = ui.glasses.is_none();
+                    glasses_ready = false;
                 }
                 feed::Update::Connected(member) => {
                     limit_next = Instant::now();
@@ -720,6 +726,7 @@ pub fn run(context: Context) -> Result<()> {
                     extras.inventory_supported = None;
                     extras.inventory_partial.clear();
                     inventory_sent = None; legacy_requested.clear(); legacy_pending.clear();
+                    slo_stale = true; slo_reading = false; slo_history_asked.clear();
                     extras.live = false;
                     attached = None;
                     shown_tab = usize::MAX;
@@ -740,9 +747,8 @@ pub fn run(context: Context) -> Result<()> {
                         _ => None,
                     }).collect();
                     if ui.resource_sidebar.arrangements.iter().any(|a| a.body.folders.values().any(|folder| folder.tombstone.is_none()))
-                        && let Some(glasses) = ui.glasses.as_mut()
-                        && !glasses.sidebar.configured {
-                        glasses.sidebar.shown = true;
+                        && !ui.glasses.sidebar.configured {
+                        ui.glasses.sidebar.shown = true;
                     }
                     changed = true;
                 }
@@ -784,10 +790,11 @@ pub fn run(context: Context) -> Result<()> {
                                 timing.seen = card.state != "resolved";
                             }
                         }
-                        answers.retain(|_, timing| {
-                            if !timing.seen { timing.gone = true; }
+                        answers.retain(|id, timing| {
+                            timing.gone = !timing.seen;
                             if let Some(at) = timing.landed() {
                                 landed_answers.push(at);
+                                ui.finish_answer(id, true);
                                 false
                             } else {
                                 true
@@ -976,60 +983,7 @@ pub fn run(context: Context) -> Result<()> {
                     save_cache(cache_path.as_deref(), &person, &model);
                     changed = true;
                 }
-                feed::Update::Terminal(update) => match update {
-                    TerminalUpdate::Attached {
-                        terminal_id,
-                        attachment_id,
-                        incarnation,
-                    } => {
-                        attached = Some(Following {
-                            terminal_id,
-                            attachment_id,
-                            incarnation,
-                        });
-                    }
-                    TerminalUpdate::Screen(screen) => {
-                        if let Some(view) = ui.terminal.as_mut() {
-                            view.lines = screen_lines(&screen);
-                            view.cursor = screen
-                                .cursor
-                                .visible
-                                .then_some((screen.cursor.row, screen.cursor.column));
-                            view.stale = None;
-                            if !screen.title.is_empty() {
-                                view.title = format!("{} · {}", view.name, screen.title);
-                            }
-                        }
-                    }
-                    TerminalUpdate::Reconnecting(reason) => {
-                        if let Some(view) = ui.terminal.as_mut() {
-                            view.stale = Some(reason);
-                        }
-                    }
-                    TerminalUpdate::Ended { restarted, reason } => {
-                        if ui
-                            .terminal
-                            .as_ref()
-                            .is_some_and(|view| view.ended.is_none())
-                        {
-                            super::slo::METRICS.add("dead_terminal_tabs", 1);
-                        }
-                        attached = None;
-                        match ui.terminal.as_mut() {
-                            Some(view) => {
-                                view.ended = Some(if restarted {
-                                    "Terminal restarted; open it again to follow the new one".into()
-                                } else {
-                                    reason
-                                })
-                            }
-                            None if !restarted => {
-                                ui.flash(format!("Could not open the terminal: {reason}"))
-                            }
-                            None => {}
-                        }
-                    }
-                },
+                feed::Update::Terminal { generation, update } => attach.apply_terminal_update(&mut ui, generation, update, &mut attached),
             }
         }
         while let Ok(result) = fetched.try_recv() {
@@ -1041,6 +995,15 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Protocol(key, width, height, protocol) => {
                     encoding.remove(&(key.clone(), width, height));
                     ui.content.install_protocol(key, width, height, protocol);
+                }
+                Fetched::Document(reference, result) => {
+                    ui.documents.insert(
+                        reference,
+                        match result {
+                            Ok(text) => Load::Ready(text),
+                            Err(why) => Load::Failed(why),
+                        },
+                    );
                 }
                 Fetched::Read(id, result) => {
                     read_receipts.completed(id, result, Instant::now());
@@ -1138,11 +1101,13 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Notice(notice) => ui.flash(notice),
                 Fetched::AlertOutcome(id, accepted) => {
                     if !accepted {
+                        ui.finish_answer(&id, false);
                         answers.remove(&id);
                     } else if let Some(timing) = answers.get_mut(&id) {
                         timing.accepted = true;
                         if let Some(at) = timing.landed() {
                             landed_answers.push(at);
+                            ui.finish_answer(&id, true);
                             answers.remove(&id);
                         }
                     }
@@ -1245,37 +1210,31 @@ pub fn run(context: Context) -> Result<()> {
                         InventoryRead::Usage(_, _) => {},
                     }
                 }
+                Fetched::Slo { generation, outcome } => {
+                    slo_reading = false;
+                    if generation != resources_generation { continue; }
+                    match outcome {
+                        Ok(rows) => {
+                            extras.slo = Load::Ready(rows);
+                            // A chart open now is read again beside the fresh rows.
+                            slo_history_asked.clear();
+                        }
+                        Err(why) if matches!(extras.slo, Load::Ready(_)) => ui.flash(format!("Could not read objectives and budgets again: {why}")),
+                        Err(why) => extras.slo = Load::Failed(why),
+                    }
+                }
+                Fetched::SloHistory { generation, id, outcome } => {
+                    if generation != resources_generation { continue; }
+                    match outcome {
+                        Ok(history) => { extras.slo_history.insert(id, Load::Ready(history)); }
+                        Err(why) if matches!(extras.slo_history.get(&id), Some(Load::Ready(_))) => ui.flash(format!("Could not read the chart again: {why}")),
+                        Err(why) => { extras.slo_history.insert(id, Load::Failed(why)); }
+                    }
+                }
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
-                Fetched::Native { agent, direct } => {
-                    attach_note = None;
-                    let waited = attach_started.take().map(|at| at.elapsed());
-                    if let Some(waited) = waited.filter(|waited| *waited >= Duration::from_secs(3))
-                    {
-                        ui.flash(format!(
-                            "Attached after {}s: st was slow to answer",
-                            waited.as_secs()
-                        ));
-                    }
-                    let (rows, columns) = ui.terminal_size.get();
-                    let route = direct.route.clone();
-                    if let Some(view) = ui
-                        .terminal_view_mut(&agent)
-                        .filter(|view| view.native.is_none())
-                    {
-                        // The route stays in the header, so the person can always see it.
-                        view.name = format!("{} · {route}", view.name);
-                        view.title = view.name.clone();
-                        view.native = Some(super::pty::NativeTerminal::spawn(
-                            direct.stream,
-                            &direct.name,
-                            direct.incarnation,
-                            rows,
-                            columns,
-                        ));
-                        view.stale = None;
-                    }
-                    ui.flash(format!("Attached · {route}"));
+                msg @ (Fetched::Native { .. } | Fetched::NativeFailed { .. } | Fetched::AttachWaiting { .. }) => {
+                    attach.apply_fetched(&mut ui, msg, &commands);
                 }
                 Fetched::Reattached { agent, outcome } => {
                     if let Some(native) = ui
@@ -1290,33 +1249,6 @@ pub fn run(context: Context) -> Result<()> {
                         }
                     }
                 }
-                Fetched::AttachWaiting { agent, reason } => {
-                    if ui.terminal.as_ref().is_some_and(|view| view.agent == agent) {
-                        attach_note = Some(reason);
-                    }
-                }
-                Fetched::NativeFailed {
-                    agent,
-                    runtime_ids,
-                    reason,
-                } => {
-                    attach_note = None;
-                    if terminal_opens.remove(&agent).is_some() {
-                        super::slo::METRICS.add("terminal_open_errors", 1);
-                    }
-                    attach_started = None;
-                    if agent.starts_with("terminal/") {
-                        // A shell has no other view to fall back to.
-                        if let Some(view) = ui.terminal_view_mut(&agent) {
-                            view.ended = Some(format!("could not attach: {reason}"));
-                        }
-                    } else if ui.terminal_view(&agent).is_some() {
-                        ui.flash(format!(
-                            "No direct terminal ({reason}); showing st's view of it"
-                        ));
-                        let _ = commands.send(Command::Follow { runtime_ids });
-                    }
-                }
             }
             changed = true;
         }
@@ -1325,11 +1257,11 @@ pub fn run(context: Context) -> Result<()> {
         let (tab, selected) = ui.focus();
         // What a tab needs when it opens: harness sessions st did not start (Agents), and the
         // machines and devices (Fleet). They are read then, never on a timer.
-        let showing_resources = ui.glasses.as_ref().is_some_and(|g| g.sidebar.shown);
+        let showing_resources = ui.glasses.sidebar.shown;
         let focused_resource = match ui.focused_pane() { Some(super::pane::Pane::Resource(id)) => Some(id), _ => None };
         if tab != shown_tab || showing_resources && !resources_shown || focused_resource.is_some() && focused_resource != resource_pane { resources_stale = true; }
         resource_pane = focused_resource.clone();
-        if ui.glasses.is_some() && extras.live && resources_stale && !resources_reading {
+        if extras.live && resources_stale && !resources_reading {
             resources_stale = false; resources_reading = true;
             let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
             runtime.spawn(async move {
@@ -1338,6 +1270,22 @@ pub fn run(context: Context) -> Result<()> {
             });
         }
         resources_shown = showing_resources;
+        // A document is read once, when its pane is first shown.
+        if let Some(super::pane::Pane::Document(reference)) = ui.focused_pane()
+            && !ui.documents.contains_key(&reference)
+        {
+            ui.documents.insert(reference.clone(), Load::Loading);
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            runtime.spawn(async move {
+                let outcome = reader
+                    .document_get(&reference)
+                    .await
+                    .map(|document| String::from_utf8_lossy(&document.value.bytes).into_owned())
+                    .map_err(|error| error.plain());
+                let _ = tx.send(Fetched::Document(reference, outcome));
+            });
+        }
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
             // pauses it, and coming back shows the current screen first.
@@ -1347,12 +1295,9 @@ pub fn run(context: Context) -> Result<()> {
                 if shown_tab == 1 {
                     let _ = commands.send(Command::Unfollow);
                     attached = None;
-                    view.stale = Some("paused while hidden".into());
+                    if !attach::retryable(view) { view.stale = Some("paused while hidden".into()); }
                 } else if tab == 1 {
-                    let _ = commands.send(Command::Follow {
-                        runtime_ids: runtime_ids.clone(),
-                    });
-                    view.stale = Some("reconnecting".into());
+                    attach.resume_fallback(view, runtime_ids, &commands);
                 }
             }
             shown_tab = tab;
@@ -1360,6 +1305,40 @@ pub fn run(context: Context) -> Result<()> {
         let visible = ui.inventories_wanted();
         if let Some(hours) = visible.usage_hours && usage_wanted_hours != Some(hours) {
             usage_wanted_hours = Some(hours); model.usage = None; changed = true;
+        }
+        let usage_shown = visible.usage_hours.is_some();
+        let signature = match &model.usage {
+            Some(Ok(period)) => period.limits.iter().map(|limit| limit.measured_at_unix_ms).max(),
+            _ => None,
+        };
+        if usage_shown && (!slo_shown || signature != slo_signature) { slo_stale = true; }
+        slo_shown = usage_shown;
+        slo_signature = signature;
+        if usage_shown && extras.live && slo_stale && !slo_reading {
+            slo_stale = false; slo_reading = true;
+            let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+            runtime.spawn(async move {
+                let outcome = reader.slo_list().await.map(|reply| reply.value.rows).map_err(|error| super::objectives::error(&error));
+                let _ = tx.send(Fetched::Slo { generation, outcome });
+            });
+        }
+        // The chart of the objective or budget selected, or open in the focused pane.
+        let charted = selected.iter().cloned()
+            .chain(match ui.focused_pane() { Some(super::pane::Pane::Usage(Some(id))) => Some(id), _ => None })
+            .filter_map(|id| super::objectives::slo_id(&id).map(str::to_owned))
+            .collect::<BTreeSet<_>>();
+        if usage_shown && extras.live && !slo_reading {
+            let hours = ui.usage_hours.min(super::objectives::CHART_HOURS);
+            for id in charted {
+                if !slo_history_asked.insert((id.clone(), hours)) { continue; }
+                let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+                runtime.spawn(async move {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                    let outcome = reader.slo_history(&id, Some(now.saturating_sub(hours * 3_600_000)), None, Some(super::objectives::CHART_STEPS)).await
+                        .map(|reply| reply.value).map_err(|error| super::objectives::error(&error));
+                    let _ = tx.send(Fetched::SloHistory { generation, id, outcome });
+                });
+            }
         }
         if extras.inventory_supported == Some(true) {
             let held = inventory_grace.followed(visible, Instant::now());
@@ -1569,14 +1548,14 @@ pub fn run(context: Context) -> Result<()> {
                 });
                 continue;
             }
+            ui.note_acted(&effect);
             if let Effect::Attention { id, .. } = &effect {
-                if answers.len() < 256 || answers.contains_key(id) {
+                if answers.len() < 256 || answers.contains_key(id) || ui.pending_answers.contains_key(id) {
                     answers.insert(id.clone(), AnswerTiming::new(Instant::now()));
                 } else {
                     super::slo::METRICS.add("measurement_overflow", 1);
                 }
             }
-            ui.note_acted(&effect);
             match effect {
                 Effect::LoadContent(key) => {
                     content_reads.enqueue(key);
@@ -1591,7 +1570,7 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 Effect::OpenTerminal { agent } => {
-                    terminal_opens.insert(agent.clone(), Instant::now());
+                    let (generation, wanted, serial) = attach.begin(&mut ui, &agent);
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
                     // it; st's screen view (the feed follows it on its socket) only when st cannot
                     // give a direct stream.
@@ -1627,51 +1606,64 @@ pub fn run(context: Context) -> Result<()> {
                         Some(owner) => terminal_owners.insert(agent.clone(), owner.clone()),
                         None => terminal_owners.remove(&agent),
                     };
-                    attach_started = Some(Instant::now());
-                    attach_note = None;
                     let _ = commands.send(Command::Unfollow);
                     {
                         let client = client.clone();
                         let tx = fetched_tx.clone();
+                        let task_agent = agent.clone();
                         let agent = agent.clone();
                         let fallback = ui.terminal_fallback;
-                        runtime.spawn(async move {
+                        let task = runtime.spawn(async move {
                             // A shell has no other view to fall back to, and one started a moment ago
                             // can be refused while st settles which host runs it: wait, say why, retry.
                             let delays: &[Duration] = if agent.starts_with("terminal/") {
-                                &ATTACH_RETRY_DELAYS
+                                &attach::RETRY_DELAYS
                             } else {
                                 &[]
                             };
-                            let attached = retry_attach(
-                                delays,
-                                |reason| {
-                                    let _ = tx.send(Fetched::AttachWaiting {
-                                        agent: agent.clone(),
-                                        reason: reason.to_owned(),
-                                    });
-                                },
-                                || {
-                                    attach_known_then_direct(
-                                        &client,
-                                        &agent,
-                                        known.clone(),
-                                        &runtime_ids,
-                                        owner.as_deref(),
-                                        fallback,
-                                    )
-                                },
-                            )
-                            .await;
-                            let _ = tx.send(match attached {
-                                Ok(direct) => Fetched::Native { agent, direct },
+                            let attached = attach::phase("attach setup", attach::DEADLINE, async {
+                                let _permit = serial.acquire_owned().await
+                                    .map_err(|_| "attach setup cancelled".to_owned())?;
+                                retry_attach(
+                                    delays,
+                                    || wanted.load(Ordering::Relaxed),
+                                    |reason| {
+                                        let _ = tx.send(Fetched::AttachWaiting {
+                                            agent: agent.clone(),
+                                            generation,
+                                            reason: reason.to_owned(),
+                                        });
+                                    },
+                                    || {
+                                        attach_known_then_direct(
+                                            &client,
+                                            &agent,
+                                            known.clone(),
+                                            &runtime_ids,
+                                            owner.as_deref(),
+                                            fallback,
+                                        )
+                                    },
+                                ).await
+                            }).await;
+                            // Its tab closed while it waited: nobody is left to hear the outcome.
+                            if !wanted.load(Ordering::Relaxed) {
+                                if let Ok(direct) = attached { attach::close(direct); }
+                                return;
+                            }
+                            if let Err(error) = tx.send(match attached {
+                                Ok(direct) => Fetched::Native { agent, generation, direct },
                                 Err(reason) => Fetched::NativeFailed {
                                     agent,
+                                    generation,
                                     runtime_ids,
                                     reason,
                                 },
-                            });
+                            }) && let Fetched::Native { direct, .. } = error.0 {
+                                attach::close(direct);
+                            }
                         });
+                        attach.tasks.insert(task_agent, task);
                     }
                     {
                         ui.park_for(&agent);
@@ -1693,6 +1685,7 @@ pub fn run(context: Context) -> Result<()> {
                     let _ = commands.send(Command::Unfollow);
                     attached = None;
                     terminal_runtimes = None;
+                    if let Some(view) = &ui.terminal { attach.cancel(&view.agent); }
                     ui.terminal = None;
                 }
                 Effect::TerminalKey(key) => {
@@ -1789,6 +1782,13 @@ pub fn run(context: Context) -> Result<()> {
                 });
             });
         }
+        // A send st did not confirm goes again by itself, as the same request, while the link is
+        // live; what it cannot settle that way waits for the person.
+        if matches!(ui.world.link, super::view::Link::Live) {
+            effects.extend(due_for_resend(&mut pending).into_iter().map(|token| Effect::Resend {
+                entry: format!("pending:{token}"),
+            }));
+        }
         for effect in effects {
             let (effect, token, sent) = match effect {
                 Effect::Resend { entry } => {
@@ -1853,6 +1853,7 @@ pub fn run(context: Context) -> Result<()> {
                         sent: sent.clone(),
                         echoed: false,
                         since: Instant::now(),
+                        resent: 0,
                     });
                     changed = true;
                     (effect, Some(token), Some(sent))
@@ -1863,6 +1864,7 @@ pub fn run(context: Context) -> Result<()> {
                 Effect::Attention { id, .. } => Some(id.clone()),
                 _ => None,
             };
+            let optimistic_answer = alert.as_ref().is_some_and(|id| ui.pending_answers.contains_key(id));
             let shell = matches!(effect, Effect::CreateTerminal { .. });
             let client = client.clone();
             let tx = fetched_tx.clone();
@@ -1899,7 +1901,12 @@ pub fn run(context: Context) -> Result<()> {
                     // handled (`Fetched::Sent`).
                     Err(_) if sends_message => {}
                     Err(error) => {
-                        let _ = tx.send(Fetched::Notice(format!("Not done: {}", plain(&error))));
+                        let notice = if optimistic_answer {
+                            format!("Could not confirm answer: {} · request restored; check before sending again", plain(&error))
+                        } else {
+                            format!("Not done: {}", plain(&error))
+                        };
+                        let _ = tx.send(Fetched::Notice(notice));
                     }
                 }
             });
@@ -1966,11 +1973,19 @@ pub fn run(context: Context) -> Result<()> {
             let _ = commands.send(Command::Missions { follow: wanted });
         }
         answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready);
+        for typed in playback.iter().flat_map(super::playback::Playback::typed) {
+            match typed {
+                super::playback::Typed::Text(text) => ui.paste(text),
+                super::playback::Typed::Send => {
+                    ui.input_event(Event::Key(crossterm::event::KeyCode::Enter.into()));
+                }
+            }
+        }
         ui.step_voice();
         ui.step_terminal_hold();
         ui.step_default_view();
         ui.step_terminal_tabs();
-        terminal_opens.retain(|target, _| ui.terminal_view(target).is_some());
+        attach.opens.retain(|target, _| ui.terminal_view(target).is_some());
         ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
@@ -2058,7 +2073,7 @@ pub fn run(context: Context) -> Result<()> {
                 true
             }
         });
-        terminal_opens.retain(|target, at| {
+        attach.opens.retain(|target, at| {
             if ui.terminal_ready_visible(target) {
                 super::slo::METRICS.observe("terminal_open_ms", at.elapsed());
                 false
@@ -2143,6 +2158,11 @@ pub fn run(context: Context) -> Result<()> {
             |input| {
                 cancel_initial_subject(&mut initial_subject, &input);
                 match input {
+                    Event::Key(key)
+                        if playback.as_ref().is_some_and(|playback| playback.take(&key)) =>
+                    {
+                        false
+                    }
                     Event::Key(key) if reconnect_key(&key, extras.live) => {
                         let _ = commands.send(Command::Reconnect);
                         true
@@ -2224,9 +2244,11 @@ fn fill_notice(model: &mut Model, sync: Option<&fractal_client::SyncNotice>) {
     }
 }
 
+/// Saves once st has sent Now, the window every layout follows; missions arrive only while a
+/// mission list or card is on screen, so they cannot be what makes a reading worth keeping.
 fn save_cache(path: Option<&std::path::Path>, person: &str, model: &Model) {
     if let Some(path) = path
-        && model.missions.snapshot.is_some()
+        && model.now.snapshot.is_some()
     {
         let _ = crate::cache::save(path, person, model);
     }
@@ -2463,6 +2485,33 @@ async fn older_page(
         cursor = page.cursor;
     }
     Err("this session is too long to read further back here; st conversations timeline reads it all".into())
+}
+
+/// How long a message st did not confirm waits before it is sent again by itself, for each time.
+/// A repeat is the exact first request, so st answers it with the first result and never takes
+/// the message twice (Nathan, 2026-10-16: "I hate when it thinks it failed but it didn't"); after
+/// the last one the person decides.
+const AUTO_RESEND_AFTER: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(45),
+];
+
+/// The unconfirmed messages whose turn to be sent again has come. Only one st took no answer for;
+/// a message st refused is never sent again here.
+fn due_for_resend(pending: &mut [Pending]) -> Vec<String> {
+    let mut due = Vec::new();
+    for entry in pending {
+        if entry.unconfirmed
+            && entry.message_id.is_none()
+            && let Some(wait) = AUTO_RESEND_AFTER.get(entry.resent)
+            && entry.since.elapsed() >= *wait
+        {
+            entry.resent += 1;
+            due.push(entry.token.clone());
+        }
+    }
+    due
 }
 
 /// Say of each message st has not answered for a while that it is unconfirmed, so the person
@@ -2964,7 +3013,7 @@ async fn perform(
                 )
                 .await?;
             Ok((
-                "Launch created; the planner's proposal will appear in Now".into(),
+                "Launch created; the planner's proposal will appear in Inbox".into(),
                 None,
             ))
         }
@@ -3212,6 +3261,7 @@ mod tests {
                 .unwrap()
                 .block_on(retry_attach(
                     &vec![Duration::ZERO; delays],
+                    || true,
                     |reason| said.push(reason.to_owned()),
                     || {
                         let next = refusals.next();
@@ -3235,17 +3285,57 @@ mod tests {
             assert_eq!(outcome, Err(reason.to_owned()));
             assert!(said.is_empty(), "{reason} must not be retried");
         }
-        // The retried reasons are the words st's own messages use.
+        // The retried reasons are the words st's own messages use, for every code behind them:
+        // rewording one in fractal-client must not quietly stop the retries.
+        for code in [
+            fractal_client::ErrorCode::RuntimeAuthorityIndeterminate,
+            fractal_client::ErrorCode::RemoteUnavailable,
+            fractal_client::ErrorCode::RateLimited,
+            fractal_client::ErrorCode::StaleFence,
+        ] {
+            assert!(
+                super::worth_retrying(&fractal_client::plain_message(Some(&code), "")),
+                "{code:?} is not retried"
+            );
+        }
         assert!(super::worth_retrying(&fractal_client::plain_message(
-            Some(&fractal_client::ErrorCode::RuntimeAuthorityIndeterminate),
-            ""
+            Some(&fractal_client::ErrorCode::RemoteUnavailable),
+            "host/example is away"
         )));
         assert!(!super::worth_retrying(&fractal_client::plain_message(
             Some(&fractal_client::ErrorCode::NotFound),
             "terminal/x"
         )));
-        // A refusal that passes waits about a minute and a half before the tab gives up.
-        assert!(super::ATTACH_RETRY_DELAYS.iter().sum::<Duration>() >= Duration::from_secs(90));
+        // Transient shell discovery may retry briefly, but a phase timeout is never retried.
+        assert_eq!(super::attach::RETRY_DELAYS.iter().sum::<Duration>(), Duration::from_secs(3));
+        assert!(!super::worth_retrying("raw terminal stream timed out"));
+    }
+
+    #[test]
+    fn a_shells_attach_stops_retrying_once_its_tab_is_closed() {
+        let unsure = "st cannot tell yet which host runs this";
+        let wanted = std::cell::Cell::new(true);
+        let attempts = std::cell::Cell::new(0);
+        let mut said = 0;
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(retry_attach(
+                &[Duration::ZERO; 20],
+                || wanted.get(),
+                |_| {
+                    said += 1;
+                    // The tab is closed while the first wait is under way.
+                    wanted.set(false);
+                },
+                || {
+                    attempts.set(attempts.get() + 1);
+                    async move { Err::<(), _>(unsure.to_owned()) }
+                },
+            ));
+        assert_eq!(outcome, Err(unsure.to_owned()));
+        assert_eq!((attempts.get(), said), (1, 1), "no attempt after the tab is gone");
     }
 
     #[test]
@@ -3633,6 +3723,32 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn attach_deadline_retry_key_reopens_the_same_terminal() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ui = Ui::new(crate::ui::demo::world());
+        ui.live = true;
+        let agent = "terminal/attach-deadline-test";
+        ui.open_in_glass(
+            crate::ui::Pane::Terminal(agent.into()),
+            crate::ui::glass::Open::Here,
+        );
+        ui.terminal = Some(crate::ui::TerminalView {
+            agent: agent.into(),
+            name: "shell".into(),
+            title: "shell".into(),
+            lines: Vec::new(),
+            cursor: None,
+            stale: Some("failed: raw terminal stream timed out · Ctrl+R to retry".into()),
+            ended: None,
+            native: None,
+        });
+        ui.effects.clear();
+        ui.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(matches!(ui.effects.as_slice(), [Effect::OpenTerminal { agent: opened }] if opened == agent));
+    }
+
     use super::*;
 
     fn peer(host: &str, missing: u64, diverged: bool) -> fractal_client::SyncPeer {
@@ -3739,7 +3855,7 @@ mod tests {
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
         let mut ui = Ui::new(world);
-        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.glasses = super::super::glass::Glasses::open(None, None);
         ui.show_focused();
         let mut inbox = Inbox::new(Some(dir.clone()));
         let early = requests::enqueue(&dir, &known, Place::Right, false, None).unwrap();
@@ -3773,24 +3889,15 @@ mod tests {
     }
 
     #[test]
-    fn a_request_the_layout_cannot_show_without_moving_focus_is_not_called_opened() {
+    fn a_name_another_process_wrote_cannot_put_control_characters_in_the_flash() {
         use super::super::pane::Pane;
-        use super::super::requests::{Answer, Place};
+        use super::super::requests::Place;
         let mut world = super::super::demo::world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
         let mut ui = Ui::new(world);
-        ui.glasses = None;
-        let pane = || Pane::Agent(Some(known.clone()));
-        // The classic layout has no tabs or splits: only the list can show it, which moves focus.
-        let kept = ui.open_requested(pane(), Place::Tab, true, None);
-        assert_eq!(kept, Answer::NotShown);
-        let moved = ui.open_requested(pane(), Place::Tab, false, None);
-        assert_eq!(moved, Answer::Opened { focused: true });
-        // A name another process wrote cannot put control characters in the flash.
-        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
         ui.show_focused();
-        ui.open_requested(pane(), Place::Right, false, Some("agent/x/bad\x1b[2Jname\n"));
+        ui.open_requested(Pane::Agent(Some(known)), Place::Right, false, Some("agent/x/bad\x1b[2Jname\n"));
         let (shown, _) = ui.flash.clone().unwrap();
         assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
         assert!(shown.contains("bad[2Jname"), "{shown:?}");
@@ -3810,47 +3917,42 @@ mod tests {
 
     #[test]
     fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
-        for spaces in [false, true] {
-            let mut world = super::super::demo::world();
-            let mut assistant = world.agents.items()[0].clone();
-            assistant.id = "agent/st/assistant".into();
-            assistant.name = "Fractal Assistant".into();
-            let other = world.agents.items()[0].id.clone();
-            let mut ui = Ui::new(world.clone());
-            if spaces {
-                ui.glasses = Some(super::super::glass::Glasses::open(None, None));
-                ui.show_focused();
-                ui.open_home();
-            }
-            let before = ui.focus();
-            let mut requested = Some(assistant.id.clone());
-            focus_initial_subject(&mut ui, &mut requested, false, true);
-            assert_eq!(
-                ui.focus(), before,
-                "waiting inventory must not open another agent"
-            );
-            assert!(requested.is_some());
-            world.agents = Load::Ready(vec![world.agents.items()[0].clone(), assistant.clone()]);
-            ui.set_world(world.clone());
-            let before = ui.focus();
-            focus_initial_subject(&mut ui, &mut requested, false, true);
-            assert_eq!(
-                ui.focus(), before,
-                "cached inventory must not consume the request"
-            );
-            focus_initial_subject(&mut ui, &mut requested, true, true);
-            assert_eq!(ui.focus(), (1, Some(assistant.id.clone())));
-            assert_eq!(ui.live_conversations()[0], assistant.id);
-            assert!(!ui.home_open());
-            assert!(requested.is_none());
-            ui.open(&other);
-            ui.set_world(world);
-            focus_initial_subject(&mut ui, &mut requested, true, true);
-            assert_eq!(
-                ui.focus(), (1, Some(other)),
-                "later updates preserve navigation"
-            );
-        }
+        let mut world = super::super::demo::world();
+        let mut assistant = world.agents.items()[0].clone();
+        assistant.id = "agent/st/assistant".into();
+        assistant.name = "Fractal Assistant".into();
+        let other = world.agents.items()[0].id.clone();
+        let mut ui = Ui::new(world.clone());
+        ui.show_focused();
+        ui.open_home();
+        let before = ui.focus();
+        let mut requested = Some(assistant.id.clone());
+        focus_initial_subject(&mut ui, &mut requested, false, true);
+        assert_eq!(
+            ui.focus(), before,
+            "waiting inventory must not open another agent"
+        );
+        assert!(requested.is_some());
+        world.agents = Load::Ready(vec![world.agents.items()[0].clone(), assistant.clone()]);
+        ui.set_world(world.clone());
+        let before = ui.focus();
+        focus_initial_subject(&mut ui, &mut requested, false, true);
+        assert_eq!(
+            ui.focus(), before,
+            "cached inventory must not consume the request"
+        );
+        focus_initial_subject(&mut ui, &mut requested, true, true);
+        assert_eq!(ui.focus(), (1, Some(assistant.id.clone())));
+        assert_eq!(ui.live_conversations()[0], assistant.id);
+        assert!(!ui.home_open());
+        assert!(requested.is_none());
+        ui.open(&other);
+        ui.set_world(world);
+        focus_initial_subject(&mut ui, &mut requested, true, true);
+        assert_eq!(
+            ui.focus(), (1, Some(other)),
+            "later updates preserve navigation"
+        );
     }
 
     #[test]
@@ -3882,15 +3984,16 @@ mod tests {
 
     #[test]
     fn no_initial_subject_preserves_the_restored_space() {
+        use super::super::pane::Pane;
         let mut ui = Ui::new(super::super::demo::world());
-        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
         ui.open_home();
         let before = ui.focus();
         focus_initial_subject(&mut ui, &mut None, true, true);
         assert_eq!(ui.focus(), before);
-        assert!(ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert!(!ui.home_open(), "Inbox is a restored tab, not a modal");
     }
 
     fn refusal(code: fractal_client::ErrorCode, retryable: bool) -> anyhow::Error {
@@ -4563,7 +4666,8 @@ mod tests {
             ]),
         );
         let mut ui = Ui::new(world);
-        ui.switch_tab(1);
+        let agent = ui.world.agents.items()[0].id.clone();
+        ui.open(&agent);
         assert!(
             ui.visible_messages().is_empty(),
             "cached conversations are not evidence"
@@ -4672,29 +4776,18 @@ mod tests {
 
     #[test]
     fn failed_conversation_hint_and_key_resubscribe_without_resending_messages() {
-        use super::super::{demo, glass, Hit};
+        use super::super::{demo, Hit};
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        for (spaces, child) in [(false, false), (true, false), (true, true)] {
+        for child in [false, true] {
             let mut ui = Ui::new(demo::world());
             ui.live = true;
-            ui.tab = 1;
-            let selected = ui.selected_id().unwrap();
-            if spaces {
-                ui.glasses = Some(glass::Glasses::open(None, None));
-            }
             let target = if child {
-                ui.click(Hit::Pane(fractal_conversation_ui::PaneIntent::Open(
-                    "session/tester-child".into(),
-                )));
                 "session/tester-child".to_owned()
             } else {
-                let target = selected;
-                if spaces {
-                    ui.click(Hit::Pane(fractal_conversation_ui::PaneIntent::Open(target.clone())));
-                }
-                target
+                ui.listing_for(1, 40).ids[0].clone()
             };
+            ui.click(Hit::Pane(fractal_conversation_ui::PaneIntent::Open(target.clone())));
             let mut failed = BTreeMap::from([(target.clone(), "access refused".into())]);
             let mut requested = HashSet::from([target.clone()]);
             ui.world.conversations = conversations(
@@ -4878,6 +4971,7 @@ mod tests {
             sent: Arc::new(Mutex::new(None)),
             echoed: false,
             since,
+            resent: 0,
         };
         let mut fresh = [pending(Instant::now())];
         assert!(!mark_unanswered(&mut fresh));
@@ -4887,6 +4981,45 @@ mod tests {
         assert!(waiting[0].unconfirmed && waiting[0].failed.is_some());
         // Said once.
         assert!(!mark_unanswered(&mut waiting));
+    }
+
+    #[test]
+    fn a_send_st_did_not_confirm_goes_again_by_itself_a_few_times_and_then_waits_for_the_person() {
+        let pending = |unconfirmed: bool, message_id: Option<&str>| Pending {
+            token: "t".into(),
+            agent: "agent/example/cos".into(),
+            text: "hello".into(),
+            at: "10:17".into(),
+            message_id: message_id.map(str::to_owned),
+            failed: unconfirmed.then(|| "st did not answer".into()),
+            unconfirmed,
+            effect: Effect::Send {
+                in_reply_to: None,
+                agent: "agent/example/cos".into(),
+                text: "hello".into(),
+                tags: Vec::new(),
+                images: Vec::new(),
+            },
+            sent: Arc::new(Mutex::new(None)),
+            echoed: false,
+            since: Instant::now() - Duration::from_secs(600),
+            resent: 0,
+        };
+        // Due three times in a row (each resend restarts the clock in the loop), then never.
+        let mut waiting = [pending(true, None)];
+        for turn in 1..=3 {
+            assert_eq!(due_for_resend(&mut waiting), ["t"], "turn {turn}");
+            assert_eq!(waiting[0].resent, turn);
+            waiting[0].since = Instant::now() - Duration::from_secs(600);
+        }
+        assert!(due_for_resend(&mut waiting).is_empty(), "then the person decides");
+        // Not yet: the first wait is five seconds.
+        let mut fresh = [pending(true, None)];
+        fresh[0].since = Instant::now();
+        assert!(due_for_resend(&mut fresh).is_empty());
+        // A send st refused or answered, or one still waiting for its answer, is left alone.
+        let mut refused = [pending(false, None), pending(true, Some("message/one"))];
+        assert!(due_for_resend(&mut refused).is_empty());
     }
 
     fn fixture_screen() -> fractal_client::TerminalScreen {
@@ -4927,6 +5060,7 @@ struct Direct {
     route: String,
 }
 
+
 /// A direct stream to `subject`'s PTY session: st's raw terminal stream, fenced to the
 /// terminal's incarnation and routed to the host that owns it. `subject` is an agent (its
 /// terminal is the first of `runtime_ids` that has one) or a shell's terminal. With `expected`,
@@ -4944,30 +5078,6 @@ fn connecting_text(waited: Duration) -> String {
     }
 }
 
-/// How long a shell's attach keeps trying after st refuses it for a reason that passes: about a
-/// minute and a half in all.
-const ATTACH_RETRY_DELAYS: [Duration; 20] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
-    Duration::from_secs(3),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-    Duration::from_secs(5),
-];
 
 /// Whether an attach refused with `reason` may work a moment later: st cannot tell yet which host
 /// runs the terminal, that host is briefly out of reach, or st asked for a pause. A terminal that
@@ -4984,9 +5094,11 @@ fn worth_retrying(reason: &str) -> bool {
 }
 
 /// Try `attempt` again after each delay while it fails for a reason that passes, telling `waiting`
-/// the reason before each wait; the last refusal comes back once the delays are used up.
+/// the reason before each wait; the last refusal comes back once the delays are used up, or as soon
+/// as `wanted` says nobody is waiting any more (the tab was closed).
 async fn retry_attach<T, Fut>(
     delays: &[Duration],
+    wanted: impl Fn() -> bool,
     mut waiting: impl FnMut(&str),
     mut attempt: impl FnMut() -> Fut,
 ) -> Result<T, String>
@@ -4997,10 +5109,14 @@ where
     loop {
         match attempt().await {
             Err(reason) if worth_retrying(&reason) => match delays.next() {
-                Some(delay) => {
+                Some(delay) if wanted() => {
                     waiting(&reason);
                     tokio::time::sleep(*delay).await;
+                    if !wanted() {
+                        return Err(reason);
+                    }
                 }
+                Some(_) => return Err(reason),
                 None => return Err(reason),
             },
             done => return done,
@@ -5036,46 +5152,49 @@ async fn attach_direct(
     owner: Option<&str>,
     fallback: bool,
 ) -> Result<Direct, String> {
-    let mut found = Vec::new();
-    if subject.starts_with("terminal/") {
-        // A shell just started may take a moment before its screen exists.
-        let mut tries = 0;
-        let screen = loop {
-            match client.terminal_screen(subject).await {
-                Ok(screen) => break screen,
-                Err(_) if tries < 10 => {
-                    tries += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let found = attach::phase("terminal discovery", attach::DISCOVERY, async {
+        let mut found = Vec::new();
+        if subject.starts_with("terminal/") {
+            // A shell just started may take a moment before its screen exists.
+            let mut tries = 0;
+            let screen = loop {
+                match client.terminal_screen(subject).await {
+                    Ok(screen) => break screen,
+                    Err(_) if tries < 10 => {
+                        tries += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    Err(error) => return Err(error.plain()),
                 }
-                Err(error) => return Err(error.plain()),
-            }
-        };
-        found.push((
-            subject.trim_start_matches("terminal/").replace('/', "."),
-            subject.to_owned(),
-            screen.value.runtime_incarnation,
-            owner.map(str::to_owned),
-        ));
-    } else {
-        for id in runtime_ids {
-            let Ok(envelope) = client.runtimes_get(id).await else {
-                continue;
             };
-            let Resource::Runtime(runtime) = envelope.value else {
-                continue;
-            };
-            if let (Some(terminal), Some(incarnation)) =
-                (runtime.terminal_id, runtime.incarnation_id)
-            {
-                found.push((
-                    runtime.runtime_id,
-                    terminal,
-                    incarnation,
-                    Some(runtime.owner_host_id).filter(|host| !host.is_empty()),
-                ));
+            found.push((
+                subject.trim_start_matches("terminal/").replace('/', "."),
+                subject.to_owned(),
+                screen.value.runtime_incarnation,
+                owner.map(str::to_owned),
+            ));
+        } else {
+            for id in runtime_ids {
+                let Ok(envelope) = client.runtimes_get(id).await else {
+                    continue;
+                };
+                let Resource::Runtime(runtime) = envelope.value else {
+                    continue;
+                };
+                if let (Some(terminal), Some(incarnation)) =
+                    (runtime.terminal_id, runtime.incarnation_id)
+                {
+                    found.push((
+                        runtime.runtime_id,
+                        terminal,
+                        incarnation,
+                        Some(runtime.owner_host_id).filter(|host| !host.is_empty()),
+                    ));
+                }
             }
         }
-    }
+        Ok(found)
+    }).await?;
     let mut reason = "the agent has no terminal right now".to_owned();
     for (name, terminal, incarnation, runtime_owner) in found {
         if expected.is_some_and(|expected| expected != incarnation) {
@@ -5095,6 +5214,7 @@ async fn attach_direct(
         .await
         {
             Ok(direct) => return Ok(direct),
+            Err(error) if error.ends_with("timed out") => return Err(error),
             Err(error) => reason = error,
         }
     }
@@ -5114,7 +5234,7 @@ async fn attach_terminal(
     fallback: bool,
 ) -> Result<Direct, String> {
     let (name, incarnation) = identity;
-    let opened = direct::open(
+    let opened = attach::phase("direct open", attach::DIRECT, direct::open(
         client,
         &direct::Terminal {
             subject,
@@ -5124,7 +5244,7 @@ async fn attach_terminal(
             expected,
             fallback,
         },
-    )
+    ))
     .await?;
     let route = match opened {
         direct::Opened::Stream {
@@ -5142,14 +5262,16 @@ async fn attach_terminal(
         }
         direct::Opened::UseGateway { route } => route,
     };
-    let attachment = client
-        .raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
-        .await
-        .map_err(|error| format!("{route}: {}", error.plain()))?;
-    let stream = client
-        .raw_terminal_stream(&attachment)
-        .await
-        .map_err(|error| format!("{route}: {}", error.plain()))?;
+    let attachment = attach::phase("raw terminal attachment", attach::GATEWAY, async {
+        client.raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
+            .await.map_err(|error| format!("{route}: {}", error.plain()))
+    }).await?;
+    // An unused capability opens no PTY and expires on the server after 60 seconds.
+    // Once upgraded, dropping the stream cancels its bridge, including on task abort.
+    let stream = attach::phase("raw terminal stream", attach::GATEWAY, async {
+        client.raw_terminal_stream(&attachment).await
+            .map_err(|error| format!("{route}: {}", error.plain()))
+    }).await?;
     stream
         .into_std()
         .map(|stream| Direct {

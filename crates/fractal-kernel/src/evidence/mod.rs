@@ -23,10 +23,7 @@ pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 pub const FRACTAL_PREDICATE_TYPE: &str = "https://compounding.tech/fractal/evidence/gate/v1";
 // Permanent signed-history decoder exception: evidence predicate URI, #3032.
 const LEGACY_PREDICATE_TYPE: &str = "https://smalltalk.dev/evidence/gate/v1";
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-evidence-predicate-uri — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
-// Keep observers writing the old URI until the accepting verifier release is on main.
-pub const PREDICATE_TYPE: &str = LEGACY_PREDICATE_TYPE;
-// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-evidence-predicate-uri
+pub const PREDICATE_TYPE: &str = FRACTAL_PREDICATE_TYPE;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

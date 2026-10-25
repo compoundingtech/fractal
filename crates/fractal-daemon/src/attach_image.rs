@@ -30,7 +30,7 @@ To mark up a screenshot, write an SVG beside it that draws the screenshot and th
     <text x="40" y="200" font-family="sans-serif" font-size="28" fill="red">Save overlaps the field</text>
   </svg>
 
-  st conversations send agent/example/reviewer --from "$ST_AGENT" --body "Save overlaps the email field at 1280 px" --attach marked.svg
+  fractal conversations send agent/example/reviewer --from "$ST_AGENT" --body "Save overlaps the email field at 1280 px" --attach marked.svg
 
 A screenshot can come from a headless browser (`chromium --headless --screenshot=shot.png --window-size=1280,800 URL`, or Playwright's `page.screenshot`) or the system's screenshot tool, and a chart from the project's plotting library or an SVG written by hand. The file is uploaded to this member and fetched by the machine that reads or delivers the message."#;
 

@@ -54,7 +54,8 @@ const fullScaleShard = (shard: 1 | 2) => ({
     description: 'Run nextest at full scale',
     setup: testArchiveConsumerSetup,
     cacheSaveSetup: [],
-    env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: `hash:${shard}/2`, CI_TEST_THREADS: '8', ST_TEST_SCALE: 'full' },
+    // CI_TEST_LANE=daily also selects the groups that left the pull-request shards (.config/daily-only.filterset).
+    env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: `hash:${shard}/2`, CI_TEST_THREADS: '8', ST_TEST_SCALE: 'full', CI_TEST_LANE: 'daily' },
     extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
   }),
   ...consumer,

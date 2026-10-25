@@ -3,7 +3,9 @@
 # copy: the script and the verifier it loads are read from origin/main in a bare repository this host keeps, so a branch cannot
 # change what deletes. With a lock config (~/.config/evidence-gc/lock.json, see scripts/evidence-gc-lock.example.json) the tag
 # protection is off only around the tag deletions. Each run's summary is kept under the state directory and stored as a new
-# version of one st document, so the graph holds the log.
+# version of one st document, so the graph holds the log. When this host runs the evidence log (evidence-log-timer installed and
+# ~/.config/evidence-log/signer.json present), GC's lines go into it before anything is deleted, and the new head is published:
+# a pull then neither reports what GC deleted as missing nor restores it, and if that step fails nothing is deleted.
 #
 #   evidence-gc-timer                 one run (the unit's ExecStart)
 #   evidence-gc-timer --relock-only   turn the protection back on and check it (the unit's ExecStopPost)
@@ -12,6 +14,8 @@ state=${EVIDENCE_GC_STATE:-$HOME/.local/state/evidence-gc}
 remote=${EVIDENCE_GC_REMOTE:-https://github.com/compoundingtech/smalltalk.git}
 lock=${EVIDENCE_GC_LOCK:-$HOME/.config/evidence-gc/lock.json}
 document=${EVIDENCE_GC_DOCUMENT:-doc/fleet/factory/evidence-gc/runs}
+log_timer=${EVIDENCE_GC_LOG_TIMER:-$HOME/.local/bin/evidence-log-timer}
+log_config=${EVIDENCE_LOG_CONFIG:-$HOME/.config/evidence-log}
 repo=$state/repo.git
 mkdir -p "$state/runs"
 if [ ! -d "$repo" ]; then
@@ -31,9 +35,13 @@ if [ "${1:-}" = --relock-only ]; then
   [ -f "$lock" ] || exit 0
   exec python3 -I "$tools/evidence-gc" --relock-only "${lock_args[@]}"
 fi
+before_args=()
+if [ -f "$log_timer" ] && [ -f "$log_config/signer.json" ]; then
+  before_args=(--before-delete "$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1:]))' bash "$log_timer" gc --publish --plan)")
+fi
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 status=0
-python3 -I "$tools/evidence-gc" --repo "$repo" --remote origin --main origin/main --fetch --apply "${lock_args[@]}" \
+python3 -I "$tools/evidence-gc" --repo "$repo" --remote origin --main origin/main --fetch --apply "${lock_args[@]}" "${before_args[@]}" \
   --plan-out "$state/runs/$stamp.plan.json" > "$state/runs/$stamp.json" 2> "$state/runs/$stamp.log" || status=$?
 cat "$state/runs/$stamp.log" >&2
 if [ -s "$state/runs/$stamp.json" ]; then

@@ -343,6 +343,11 @@ public actor FractalClient {
         applyTraceContext(to: &request)
         let (data, response) = try await session.data(for: request); let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if let readAuthorization, data.count > readAuthorization.budget { throw AssistantReadRejected(reason: "assistant response exceeded max_response_bytes") }
+        if status == 404 && path == "v1/client/schedules" {
+            throw ErrorEnvelope(apiVersion: "st3.client.v0", errorVersion: "st3.client.error.v0", requestID: "",
+                code: .unsupportedCapability, message: "This server does not support schedules.list; upgrade the server",
+                retryable: false, retryAfterMS: nil, details: [:])
+        }
         if !(200..<300).contains(status) { throw try JSONDecoder().decode(ErrorEnvelope.self, from: data) }
         return try JSONDecoder().decode(T.self, from: data)
     }

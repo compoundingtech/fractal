@@ -48,8 +48,10 @@ pub struct ReplayStage {
 /// Installs each domain's tables and triggers when the store opens its projections.
 pub const OPEN: &[Hook] = &[
     Hook { name: "publication-facts", run: publication_facts::initialize },
+    Hook { name: "identities", run: identities::open },
     Hook { name: "custom", run: custom::open },
     Hook { name: "resources", run: resources::open },
+    Hook { name: "completion-health", run: completion_state::open },
     Hook { name: "glass-heads", run: glass_heads::open },
     Hook { name: "directive-notes", run: directive_notes::flush },
     Hook { name: "agent-messages", run: agent_messages::open },
@@ -60,6 +62,11 @@ pub const OPEN: &[Hook] = &[
 /// Projects a locally appended claim, in this order, for the kinds each entry takes.
 pub const APPEND: &[AppendProjector] = &[
     AppendProjector {
+        name: "identities",
+        takes: Takes::Kinds(&["agent.renamed", "mission.renamed", "intent.desired", "mission.published", "agent.retired", "record.repaired"]),
+        project: |transaction, _| identities::flush(transaction),
+    },
+    AppendProjector {
         name: "custom",
         takes: Takes::Every,
         project: |transaction, _| custom::flush(transaction),
@@ -68,6 +75,11 @@ pub const APPEND: &[AppendProjector] = &[
         name: "resources",
         takes: Takes::Kinds(&["resource.observed"]),
         project: |transaction, claim| resources::refresh(transaction, &claim.subject),
+    },
+    AppendProjector {
+        name: "resource-preparation",
+        takes: Takes::Every,
+        project: |transaction, _| resources::flush_preparation(transaction),
     },
     AppendProjector {
         name: "glass-heads",
@@ -114,7 +126,9 @@ pub const REPLICATED: &[AppendProjector] = &[AppendProjector {
 /// Catches each domain up with the claims a projection pass admitted.
 pub const FLUSH: &[Hook] = &[
     Hook { name: "custom", run: custom::flush },
+    Hook { name: "identities", run: identities::flush },
     Hook { name: "resources", run: resources::flush },
+    Hook { name: "completion-health", run: |transaction| completion_state::flush(transaction) },
     Hook { name: "glass-heads", run: glass_heads::flush },
     Hook { name: "directive-notes", run: directive_notes::flush },
     Hook { name: "agent-messages", run: agent_messages::flush },
@@ -127,7 +141,10 @@ pub const FLUSH: &[Hook] = &[
 /// here; only the full graph replay rebuilds them.
 pub const REBUILD: &[Hook] = &[
     Hook { name: "planning", run: rebuild_planning_tx },
+    Hook { name: "identities", run: identities::rebuild },
     Hook { name: "resources", run: resources::rebuild },
+    Hook { name: "completion-health", run: completion_state::rebuild },
+    Hook { name: "slo-breaches", run: slo_breaches::rebuild },
     Hook { name: "glass-heads", run: glass_heads::rebuild },
     Hook { name: "directive-notes", run: directive_notes::rebuild },
     Hook { name: "arrangements", run: arrangements::rebuild },
@@ -136,7 +153,9 @@ pub const REBUILD: &[Hook] = &[
 /// The domain stages of the full graph replay, after the mission runs are replayed.
 pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/planning", run: rebuild_planning_tx },
+    ReplayStage { phase: "full-replay/identities", run: identities::flush },
     ReplayStage { phase: "full-replay/resources", run: resources::rebuild },
+    ReplayStage { phase: "full-replay/completion-health", run: completion_state::rebuild },
     ReplayStage { phase: "full-replay/glass-heads", run: glass_heads::rebuild },
     ReplayStage { phase: "full-replay/directive-notes", run: directive_notes::rebuild },
     ReplayStage { phase: "full-replay/custom", run: custom::rebuild },

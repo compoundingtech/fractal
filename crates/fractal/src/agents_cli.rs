@@ -227,6 +227,9 @@ pub(super) async fn run_agents(
             ).await?;
             print_value(&response, json_output)
         }
+        AgentsCommand::RenameId(args) => {
+            run_identity_rename(endpoint, args, true, json_output).await
+        }
         AgentsCommand::Queue(args) => {
             run_agent_queue(endpoint, configured_person, args, json_output).await
         }
@@ -296,7 +299,7 @@ pub(super) async fn run_agents(
         AgentsCommand::Start(args) => {
             let client = cli_client(endpoint);
             let (subject, tokens, existing, mission) =
-                agent_start_declaration(&client, &args).await?;
+                agent_start_declaration(endpoint, &client, &args).await?;
             anyhow::ensure!(!args.source_offline || existing.is_some(),
                 "--source-offline needs an existing seat with a pending placement handoff");
             let response = if let Some(mission) = mission {
@@ -415,6 +418,7 @@ pub(super) async fn run_agents(
                     fractal_client::AgentRetireParameters {
                         agent: subject.clone(),
                         reason: args.reason,
+                        successor: args.successor.map(|value| if value.starts_with("agent/") { value } else { format!("agent/{value}") }),
                     },
                 )
                 .await?;
@@ -516,6 +520,14 @@ pub(super) async fn run_agents(
                     }),
                 )
                 .await?;
+            if request.body["fields"]["action"] == "restart-when-idle" {
+                return if json_output {
+                    print_value(&request, true)
+                } else {
+                    println!("Restart pending for {subject}: waiting for the turn to end and the harness to be idle and quiescent");
+                    Ok(())
+                };
+            }
             let previous = request.body["fields"]["incarnation_id"]
                 .as_str()
                 .unwrap_or("");
@@ -690,6 +702,7 @@ async fn agent_start_status(
 }
 
 async fn agent_start_declaration(
+    endpoint: &Endpoint,
     client: &Client,
     args: &AgentStartArgs,
 ) -> Result<(
@@ -733,6 +746,19 @@ async fn agent_start_declaration(
     loop {
         let desired: fractal_daemon::model::DesiredSubject = serde_json::from_value(claim.body)?;
         if desired.kind == "agent" {
+            // A prior declaration reconstructed through a stop is not a currently held seat.
+            if current.kind.as_deref() == Some("agent") && claim.id == *token && !args.print_kdl
+                && let ClientResource::Agent(agent) = generated_client(endpoint, None)?.agents_get(&subject).await?.value
+                && let Some(suspension) = agent.suspension
+                && matches!(suspension.phase.as_str(),
+                    "quiescing" | "snapshotting" | "suspended" | "fencing-source" | "transferring" | "restoring" | "verifying")
+            {
+                return Err(fractal_daemon::St3Error::new(
+                    "start-suspended",
+                    format!("`{subject}` is {}; use `st agents resume {subject}` to resume its recorded native session",
+                        suspension.phase),
+                ).into());
+            }
             // A mission seat starts on its run's own declaration, never as a new root seat.
             let mission = desired.owner_run.clone().map(|run| {
                 if claim.id == *token {
@@ -1165,6 +1191,7 @@ async fn run_agent_inspection(
         | AgentsCommand::Suspend(_)
         | AgentsCommand::Resume(_)
         | AgentsCommand::Rename(_)
+        | AgentsCommand::RenameId(_)
         | AgentsCommand::Queue(_)
         | AgentsCommand::Hold(_) => {
             unreachable!("agent mutation and queue commands return before inspection")

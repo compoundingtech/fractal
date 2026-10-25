@@ -1,10 +1,10 @@
 import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
 import { drawnParents, insertAt, isLive, liveAncestor, positionKey, project, wouldCycle, type FolderDoc, type Insertion, type Projection, type ProjectedFolder } from './core.mts'
 import { refusalText, sidebarOperations, type ArrangementEditorState, type RestageVerdict, type SidebarOperation } from './edit.ts'
-import type { SidebarCreateFolder, SidebarDropVerdict, SidebarMove, SidebarNode, SidebarRowStatus } from './sidebarContract.ts'
+import type { SidebarAgent, SidebarCreateFolder, SidebarDropVerdict, SidebarMove, SidebarNode, SidebarRowStatus } from './sidebarContract.ts'
 
 /** A seat's row key is not its shared membership subject. Lifecycle does not filter this roster. */
-export interface SidebarSeat { readonly id: string; readonly subject: string; readonly host: string; readonly label: string }
+export interface SidebarSeat { readonly id: string; readonly subject: string; readonly host: string; readonly label: string; readonly project?: string; readonly children?: readonly SidebarAgent[] }
 export type SidebarDocument = FolderDoc & { readonly roster: readonly SidebarSeat[] }
 export type SidebarCollapse = ReadonlyMap<string, boolean>
 const compare = (left: string, right: string): number => {
@@ -15,10 +15,14 @@ const compare = (left: string, right: string): number => {
 }
 
 export const sidebarTree = (projection: Projection, roster: readonly SidebarSeat[], collapse: SidebarCollapse): SidebarNode[] => {
+  const agent = (seat: SidebarSeat): SidebarNode => ({
+    _tag: 'Agent', id: seat.id, subject: seat.subject, label: seat.label,
+    children: seat.children, collapsed: collapse.get(seat.id) ?? true,
+  })
   const seats = new Map<string, SidebarNode[]>()
   for (const seat of roster) {
     const rows = seats.get(seat.subject) ?? []
-    rows.push({ _tag: 'Agent', id: seat.id, subject: seat.subject, label: seat.label })
+    rows.push(agent(seat))
     seats.set(seat.subject, rows)
   }
   const folder = (item: ProjectedFolder): SidebarNode => ({
@@ -27,10 +31,20 @@ export const sidebarTree = (projection: Projection, roster: readonly SidebarSeat
   })
   const unfiled = new Set(projection.unfiled)
   const rows = roster.filter(seat => unfiled.has(seat.subject)).toSorted((a, b) => compare(a.host, b.host) || compare(a.id, b.id))
-  return [...projection.folders.map(folder), ...(rows.length === 0 ? [] : [{
-    _tag: 'Group' as const, id: 'wf/unfiled', label: 'Unfiled', collapsed: collapse.get('wf/unfiled') ?? false,
-    children: rows.map((seat): SidebarNode => ({ _tag: 'Agent', id: seat.id, subject: seat.subject, label: seat.label })),
-  }])]
+  const projects = new Map<string, typeof rows>()
+  for (const row of rows) {
+    const project = row.project ?? ''
+    const members = projects.get(project) ?? []
+    members.push(row)
+    projects.set(project, members)
+  }
+  return [...projection.folders.map(folder), ...[...projects].map(([project, members]): SidebarNode => {
+    const id = project === '' ? 'wf/unfiled' : `wf/project/${encodeURIComponent(project)}`
+    return {
+      _tag: 'Group', id, label: project === '' ? 'Unfiled' : project, collapsed: collapse.get(id) ?? false,
+      children: members.map(agent),
+    }
+  })]
 }
 
 /** Filtering is a view operation; all move plans continue to use the complete document. */
@@ -38,7 +52,11 @@ export const filterSidebarTree = (tree: readonly SidebarNode[], query: string): 
   const needle = query.trim().toLocaleLowerCase()
   if (needle === '') return [...tree]
   return tree.flatMap((node): SidebarNode[] => {
-    if (node._tag === 'Agent') return node.label.toLocaleLowerCase().includes(needle) ? [node] : []
+    if (node._tag === 'Agent') {
+      const children = node.children === undefined ? undefined : filterSidebarTree(node.children, query) as readonly SidebarAgent[]
+      if (node.label.toLocaleLowerCase().includes(needle)) return [{ ...node, collapsed: false }]
+      return children?.length ? [{ ...node, collapsed: false, children }] : []
+    }
     const children = filterSidebarTree(node.children, query)
     return children.length === 0 ? [] : [{ ...node, collapsed: false, children }]
   })

@@ -4,9 +4,11 @@ import * as OtlpTracer from 'effect/observability/OtlpTracer'
 import { afterEach, beforeEach, expect, vi } from 'vitest'
 
 import { makeTelemetry, type Telemetry } from './browser.ts'
+import * as InputPaint from './inputPaint.ts'
 
 // Preserve the real scoped exporter while observing its factory through Vitest's ESM-safe spy.
 vi.mock('effect/observability/OtlpTracer', { spy: true })
+vi.mock('./inputPaint.ts', { spy: true })
 
 vi.mock('virtual:build-identity', () => ({
   buildIdentity: { machineVersion: 'test', sourceKind: 'git', dirty: false }, deploymentId: undefined,
@@ -75,12 +77,18 @@ const firstFrame = (tracer: Tracer.Tracer, parent: Tracer.Span) => {
 
 beforeEach(() => {
   vi.mocked(OtlpTracer.make).mockClear()
+  vi.mocked(InputPaint.installInputPaint).mockClear()
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   frames.clear()
   painted.length = 0
   payloads.length = 0
   fetch.mockClear()
   vi.stubGlobal('fetch', fetch)
+  vi.stubGlobal('MutationObserver', class {
+    observe() {}
+    disconnect() {}
+    takeRecords() { return [] }
+  })
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     const id = ++nextFrame
     frames.set(id, callback)
@@ -528,5 +536,72 @@ it.live('starts once if shell paint predates layer construction, and ignores lat
   yield* settle
   expect(createTracer).toHaveBeenCalledOnce()
   telemetry.ux.dispose()
+  yield* Scope.close(scope, Exit.void)
+}))
+
+it.live('exports the shared input span contract under the distinct web resource', () => Effect.gen(function* () {
+  const telemetry = make()
+  const { scope, tracer } = yield* open(telemetry)
+  const start = BigInt(Math.round(performance.timeOrigin * 1e6))
+  const span = tracer.span({ name: 'fractal.input.next_frame', parent: Option.none(), annotations: Context.empty(), links: [], startTime: start, kind: 'internal', root: true, sampled: true })
+  for (const [key, value] of Object.entries({
+    'span.label': 'input.next_frame', 'input.kind': 'mouse', 'input.action': 'click',
+    surface: 'agents', outcome: 'painted', read_to_frame_ms: 16, accepted_to_frame_ms: 15,
+    private: 'never-export-this',
+  })) span.attribute(key, value)
+  span.end(start + 16_000_000n, Exit.void)
+  telemetry.ux.shellCommitted()
+  beforePaint(); afterPaint()
+  yield* settle
+  yield* Effect.promise(() => vi.advanceTimersByTimeAsync(1000))
+  const exported = spans().filter((item) => item.name === 'fractal.input.next_frame')
+  expect(exported).toHaveLength(1)
+  expect(exported[0]?.attributes.map((attribute) => attribute.key).toSorted()).toEqual([
+    'accepted_to_frame_ms', 'input.action', 'input.kind', 'outcome', 'read_to_frame_ms', 'span.label', 'surface',
+  ])
+  expect(JSON.stringify(payloads)).toContain('fractal-web')
+  expect(JSON.stringify(payloads)).not.toContain('never-export-this')
+  yield* Scope.close(scope, Exit.void)
+}))
+
+it.live('does not construct input observation or task windows in ring-only mode', () => Effect.gen(function* () {
+  vi.stubGlobal('window', new EventTarget())
+  vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }))
+  vi.stubGlobal('PerformanceObserver', class { static readonly supportedEntryTypes: string[] = [] })
+  const observer = vi.fn()
+  vi.stubGlobal('MutationObserver', observer)
+  const telemetry = makeTelemetry({ otlpTracesUrl: undefined, resourceAttributes: {}, production: true })
+  const { scope } = yield* open(telemetry)
+  const uninstall = telemetry.install()
+  expect(observer).not.toHaveBeenCalled()
+  expect(OtlpTracer.make).not.toHaveBeenCalled()
+  uninstall()
+  yield* Scope.close(scope, Exit.void)
+}))
+
+it.live('reference-counts shared portal containers with idempotent unregistration', () => Effect.gen(function* () {
+  vi.stubGlobal('window', new EventTarget())
+  vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }))
+  vi.stubGlobal('PerformanceObserver', class { static readonly supportedEntryTypes: string[] = [] })
+  const telemetry = make()
+  const { scope } = yield* open(telemetry)
+  const root = new EventTarget() as Element
+  const first = telemetry.registerPortalHost(root)
+  const second = telemetry.registerPortalHost(root)
+  const uninstall = telemetry.install()
+  const roots = vi.mocked(InputPaint.installInputPaint).mock.calls.at(-1)![0].reactRoots!
+  const hosts = vi.mocked(InputPaint.installInputPaint).mock.calls.at(-1)![0].overlayHosts!
+  const pageRoot = new EventTarget() as Element
+  const unregisterPageRoot = telemetry.registerReactRoot(pageRoot)
+  expect([...hosts]).toEqual([root])
+  unregisterPageRoot()
+  expect([...roots]).toEqual([root])
+  first(); first()
+  expect([...roots]).toEqual([root])
+  expect([...hosts]).toEqual([root])
+  second()
+  expect([...roots]).toEqual([])
+  expect([...hosts]).toEqual([])
+  uninstall()
   yield* Scope.close(scope, Exit.void)
 }))

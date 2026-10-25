@@ -208,7 +208,10 @@ impl Fixture {
 #[test]
 fn legacy_and_fractal_predicate_uris_verify_but_an_unknown_uri_is_rejected() {
     let f = Fixture::new();
-    assert_eq!(PREDICATE_TYPE, "https://smalltalk.dev/evidence/gate/v1");
+    assert_eq!(
+        PREDICATE_TYPE,
+        "https://compounding.tech/fractal/evidence/gate/v1"
+    );
     for uri in [
         "https://smalltalk.dev/evidence/gate/v1",
         "https://compounding.tech/fractal/evidence/gate/v1",

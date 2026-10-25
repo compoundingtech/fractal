@@ -100,6 +100,8 @@ pub fn world() -> World {
         usage: Load::Ready(usage()),
         usage_limits: usage_limits(),
         agent_messages: None,
+        slo: Load::Ready(slo()),
+        slo_history: slo_history(),
         clients: Load::Ready(vec![
             Connected {
                 client: s("stui 0.1.0+1ecae71"),
@@ -163,8 +165,128 @@ pub fn loading() -> World {
         usage: Load::Loading,
         usage_limits: Vec::new(),
         agent_messages: None,
+        slo: Load::Loading,
+        slo_history: BTreeMap::new(),
         clients: Load::Loading,
     }
+}
+
+/// The demo's objectives and budgets: one met, one missed, one budget nearly spent.
+fn slo() -> Vec<fractal_client::SloRow> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    let objective = |id: &str, about: &str, target: &str, current: &str, window: &str, left: Option<f64>, status: &str, explain: &str| fractal_client::SloRow {
+        id: s(id),
+        kind: s("objective"),
+        account: None,
+        about: s(about),
+        target: s(target),
+        current: s(current),
+        window: s(window),
+        remaining_percent: left,
+        status: s(status),
+        resets_at_unix_ms: None,
+        measured_at_unix_ms: None,
+        explain: s(explain),
+    };
+    let budget = |id: &str, account: &str, about: &str, current: &str, window: &str, left: f64, resets: u64| fractal_client::SloRow {
+        id: s(id),
+        kind: s("budget"),
+        account: Some(s(account)),
+        about: s(about),
+        target: s("100% allowance"),
+        current: s(current),
+        window: s(window),
+        remaining_percent: Some(left),
+        status: s(if left > 0.0 { "met" } else { "missed" }),
+        resets_at_unix_ms: Some(now + resets),
+        measured_at_unix_ms: Some(now - 180_000),
+        explain: format!("{about}. It resets on its own; when it is spent, seats on this account wait."),
+    };
+    vec![
+        objective(
+            "request-latency",
+            "Client reads answer quickly",
+            "p99 under 250ms, 99% of samples",
+            "p99 410ms, 3.1% over",
+            "1h",
+            Some(0.0),
+            "missed",
+            "Ninety-nine in a hundred client reads should finish in 250ms. More than that have been slower this hour, so the error budget for the window is gone.",
+        ),
+        objective(
+            "cpu",
+            "The daemon leaves the machine room to work",
+            "under 60% of one core",
+            "21%",
+            "1h",
+            Some(78.0),
+            "met",
+            "The daemon's own CPU should stay under 60% of a core. It has, with most of the window's allowance still unspent.",
+        ),
+        budget(
+            "anthropic-weekly",
+            "anthropic",
+            "The account's weekly limit",
+            "94% used",
+            "7d",
+            6.0,
+            3 * 86_400_000,
+        ),
+        budget(
+            "anthropic-5-hour",
+            "anthropic",
+            "The account's 5-hour limit",
+            "41% used",
+            "5h",
+            59.0,
+            2 * 3_600_000,
+        ),
+        budget(
+            "openai-weekly",
+            "openai",
+            "The account's weekly limit",
+            "6% used",
+            "7d",
+            94.0,
+            6 * 86_400_000,
+        ),
+    ]
+}
+
+/// The demo's charts: the request objective recovering, the weekly budget spent a little more
+/// each hour.
+fn slo_history() -> BTreeMap<String, Load<fractal_client::SloHistory>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    let history = |id: &str, steps: Vec<Option<f64>>| {
+        (
+            s(id),
+            Load::Ready(fractal_client::SloHistory {
+                id: s(id),
+                since_ms: now - 24 * 3_600_000,
+                until_ms: now,
+                samples: steps.iter().flatten().count() as u64 * 20,
+                steps,
+            }),
+        )
+    };
+    BTreeMap::from([
+        history(
+            "request-latency",
+            (0..72)
+                .map(|at| Some(if at < 40 { 100.0 - at as f64 * 2.5 } else { 0.0 }))
+                .collect(),
+        ),
+        history(
+            "anthropic-weekly",
+            (0..72)
+                .map(|at| if at < 6 { None } else { Some(60.0 - (at - 6) as f64 * 0.82) })
+                .collect(),
+        ),
+    ])
 }
 
 /// The demo accounts' limits, as their harnesses last reported them.
@@ -670,6 +792,7 @@ fn agents() -> Vec<Agent> {
     });
     let detail =
         |goal: &str, claimed: &str, next: Option<&str>, queue: &[&str], state: &str| AgentDetails {
+            mail_custody: None,
             goal: Some(s(goal)),
             claimed: Some(s(claimed)),
             next: next.map(s),
@@ -700,6 +823,7 @@ fn agents() -> Vec<Agent> {
         "idle, waiting for feedback",
     );
     list[2].details = AgentDetails {
+        mail_custody: None,
         goal: Some(s("Tag this week's release.")),
         claimed: Some(s("1h ago")),
         next: Some(s("Weekly release › publish")),
@@ -886,6 +1010,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: Some(s(ATLAS_KDL)),
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -921,6 +1046,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -964,6 +1090,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -999,6 +1126,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -1044,6 +1172,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -1071,6 +1200,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
         Mission {
@@ -1106,6 +1236,7 @@ fn all_missions() -> Vec<Mission> {
             kdl: None,
             outcome: None,
             updated_at: String::new(),
+            state: String::new(),
             step_metadata: Default::default(),
         },
     ]

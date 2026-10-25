@@ -3,7 +3,7 @@
 // Run through gate-slot with CI=1. Managed environments may set PLAYWRIGHT_MODULE and
 // CHROMIUM_PATH. SPLIT_PROOF_DIR optionally records screenshots and the JSON receipt.
 import assert from 'node:assert/strict'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { createServer, loadConfigFromFile } from 'vite'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
@@ -38,9 +38,17 @@ try {
     page.on('pageerror', error => errors.push(String(error)))
     await page.goto(`http://127.0.0.1:${port}/split-header-geometry.browser.html${failed ? '?sync-failed' : ''}`)
     await page.getByRole('button', { name: 'Toggle right panel', exact: true }).click()
+    const inspector = page.getByRole('complementary', { name: 'Agent inspector', exact: true })
+    await inspector.waitFor()
+    await inspector.getByRole('tab', { name: 'Details', exact: true }).waitFor()
+    if (out && !failed && width === 1440 && preferred === 440) {
+      await page.evaluate(() => document.fonts.ready)
+      await page.screenshot({ path: `${out}/app-${scheme}-1440-details.png` })
+    }
+    await inspector.getByRole('tab', { name: 'Changes', exact: true }).click()
     await page.getByTestId('diff-code').waitFor()
     await page.waitForFunction(failed => document.querySelector('[data-testid="transcript-header-status"] [data-testid="sync-line"]')?.getAttribute('data-sync-visible') === String(failed), failed)
-    const dock = page.getByRole('separator', { name: 'Resize changes' })
+    const dock = page.getByRole('separator', { name: 'Resize Changes' })
     if (width === 900) {
       await dock.focus(); await page.keyboard.press('End')
       assert.equal(Number(await dock.getAttribute('aria-valuenow')), Number(await dock.getAttribute('aria-valuemax')))
@@ -111,31 +119,32 @@ try {
     rows.push({ scheme, failed, viewport: width, dock: Number(await dock.getAttribute('aria-valuenow')), ...facts, rest })
     if (out) {
       const suffix = failed ? width === 900 ? '900-sync-failed' : `1440-${preferred}-sync-failed` : width === 900 ? '900-main-lane' : preferred === 720 ? '1440-max-dock' : '1440'
-      const image = await page.screenshot({ path: `${out}/app-${scheme}-${suffix}.png` })
+      await page.screenshot({ path: `${out}/app-${scheme}-${suffix}.png` })
       if (!failed && width === 1440 && preferred === 440) {
         await page.getByRole('button', { name: 'Captured changes information' }).click()
         await page.getByTestId('diff-panel-info').waitFor({ state: 'visible' })
         await page.screenshot({ path: `${out}/app-${scheme}-1440-provenance.png` })
-        await page.getByRole('button', { name: 'Close changes', exact: true }).click()
+        await page.getByRole('button', { name: 'Close agent inspector', exact: true }).click()
         await page.setViewportSize({ width: 390, height: 844 })
         await page.getByRole('button', { name: 'Agent details', exact: true }).waitFor()
         await page.getByRole('tab', { name: 'Changes', exact: true }).waitFor()
         await page.screenshot({ path: `${out}/app-${scheme}-390-phone.png` })
         await page.getByRole('button', { name: 'Agent details', exact: true }).click()
+        await page.getByRole('complementary', { name: 'Agent inspector', exact: true }).waitFor()
+        await page.screenshot({ path: `${out}/app-${scheme}-390-details.png` })
+        const detailsSheet = page.getByRole('dialog', { name: 'Agent details', exact: true })
+        await detailsSheet.getByRole('button', { name: 'Close agent details', exact: true }).click()
+        await detailsSheet.waitFor({ state: 'hidden' })
         await page.getByRole('button', { name: 'Conversation menu', exact: true }).click()
         for (const label of ['Resources', 'View KDL', 'Show all system events']) {
           const item = page.getByRole(label === 'Show all system events' ? 'menuitemcheckbox' : 'menuitem', { name: label === 'Resources' ? /^Resources/ : label, exact: label !== 'Resources' })
           assert.ok((await item.boundingBox()).height >= 44, `Phone menu touch target: ${label}`)
         }
         await page.keyboard.press('Escape')
-        const reference = await readFile(`${out}/rm1-slice-${scheme}-1440.png`)
-        await page.setViewportSize({ width: 2880, height: 940 })
-        await page.setContent(`<html><body style="margin:0;background:${scheme === 'dark' ? '#111' : '#fff'};font:14px system-ui;color:${scheme === 'dark' ? '#fff' : '#111'}"><div style="display:flex"><figure style="margin:0"><figcaption style="height:40px;padding:10px;box-sizing:border-box">Live app · synthetic integration fixtures · ${scheme}</figcaption><img width="1440" src="data:image/png;base64,${image.toString('base64')}"></figure><figure style="margin:0"><figcaption style="height:40px;padding:10px;box-sizing:border-box">Accepted RM1 Slice reference · ${scheme}</figcaption><img width="1440" src="data:image/png;base64,${reference.toString('base64')}"></figure></div></body></html>`)
-        await page.screenshot({ path: `${out}/${scheme}-1440-comparison.png` })
       }
     }
     if (out && failed && width === 1440 && preferred === 440) {
-      await page.getByRole('button', { name: 'Close changes', exact: true }).click()
+      await page.getByRole('button', { name: 'Close agent inspector', exact: true }).click()
       await page.setViewportSize({ width: 390, height: 844 })
       await page.getByRole('button', { name: 'Agent details', exact: true }).waitFor()
       for (const label of ['Retry loading conversation', 'Sync details for conversation']) {

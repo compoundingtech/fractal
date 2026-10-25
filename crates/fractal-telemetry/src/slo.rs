@@ -22,6 +22,8 @@ pub struct Targets {
     pub cpu: Cpu,
     pub divergence: Divergence,
     pub database: Database,
+    pub duration: Vec<DurationTarget>,
+    pub count: Vec<CountTarget>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +87,48 @@ pub struct Database {
     pub max_growth_mb_per_day: f64,
 }
 
+/// One percentile of a duration observed outside the daemon, such as a CI run: the objective
+/// `NAME/pPERCENTILE`. A name may declare several percentiles, each its own objective.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurationTarget {
+    pub name: String,
+    pub about: String,
+    /// Between 1 and 99: that many of every 100 samples finish within `target_ms`.
+    pub percentile: u64,
+    pub target_ms: u64,
+    /// The series that feeds it, `ci/NAME`.
+    pub path: String,
+}
+
+impl DurationTarget {
+    /// The objective's id: its name and percentile, `merge-latency/p95`.
+    pub fn id(&self) -> String {
+        format!("{}/p{}", self.name, self.percentile)
+    }
+}
+
+/// Events observed outside the daemon, such as flaky CI results, counted per hour: the
+/// objective `NAME`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CountTarget {
+    pub name: String,
+    pub about: String,
+    pub max_per_hour: u64,
+    /// The series that feeds it, `ci/NAME`.
+    pub path: String,
+}
+
+/// Whether `path` names a series observed in CI: `ci/` and lowercase words joined by `-` or `/`.
+fn is_ci_path(path: &str) -> bool {
+    path.strip_prefix("ci/").is_some_and(|rest| {
+        rest.split('/').all(|part| {
+            !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+    })
+}
+
 impl Latency {
     /// The target a sample served here (`remote` false) or from another machine misses past.
     pub fn target(&self, remote: bool) -> Duration {
@@ -105,7 +149,7 @@ pub fn parse(text: &str) -> Result<Targets> {
     let mut paths = std::collections::BTreeSet::new();
     for latency in &targets.latency {
         ensure!(
-            names.insert(latency.name.as_str()),
+            names.insert(latency.name.clone()),
             "target {} is named twice",
             latency.name
         );
@@ -139,7 +183,7 @@ pub fn parse(text: &str) -> Result<Targets> {
         }
     }
     for share in &targets.share {
-        ensure!(names.insert(share.name.as_str()), "duplicate share target");
+        ensure!(names.insert(share.name.clone()), "duplicate share target");
         ensure!(share.min_percent > 0 && share.min_percent <= 100, "invalid share target");
         ensure!(share.path.starts_with("client/ios/") && paths.insert(&share.path), "invalid share path");
     }
@@ -158,6 +202,32 @@ pub fn parse(text: &str) -> Result<Targets> {
             .all(|value| value.is_finite() && *value > 0.0),
         "the database targets are not positive sizes"
     );
+    // A CI series feeds one name's targets: a duration's percentiles share it, nothing else does.
+    let mut series = std::collections::BTreeMap::new();
+    for duration in &targets.duration {
+        let id = duration.id();
+        ensure!(
+            (1..=99).contains(&duration.percentile),
+            "target {id}'s percentile is not between 1 and 99"
+        );
+        ensure!(duration.target_ms > 0, "target {id} has no duration");
+        ensure!(names.insert(id.clone()), "target {id} is named twice");
+        ensure!(is_ci_path(&duration.path), "path {:?} is not a CI series", duration.path);
+        ensure!(
+            *series.entry(duration.path.as_str()).or_insert(duration.name.as_str()) == duration.name,
+            "path {:?} has two targets",
+            duration.path
+        );
+    }
+    for count in &targets.count {
+        ensure!(names.insert(count.name.clone()), "target {} is named twice", count.name);
+        ensure!(is_ci_path(&count.path), "path {:?} is not a CI series", count.path);
+        ensure!(
+            series.insert(count.path.as_str(), count.name.as_str()).is_none(),
+            "path {:?} has two targets",
+            count.path
+        );
+    }
     Ok(targets)
 }
 
@@ -652,6 +722,23 @@ mod tests {
         assert_eq!(targets.cpu.max_cores, 2.0);
         assert_eq!((targets.database.max_live_gb, targets.database.max_growth_mb_per_day), (8.0, 300.0));
         assert!(targets.for_path("GET /v1/health").is_none());
+        let durations = targets
+            .duration
+            .iter()
+            .map(|d| (d.id(), d.target_ms, d.path.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            durations,
+            [
+                ("merge-latency/p50".to_owned(), 600_000, "ci/merge-queue"),
+                ("merge-latency/p95".to_owned(), 600_000, "ci/merge-queue"),
+                ("ci-critical-path/p95".to_owned(), 780_000, "ci/workspace-critical-path"),
+            ]
+        );
+        let flakes = &targets.count[0];
+        assert_eq!((flakes.name.as_str(), flakes.max_per_hour, flakes.path.as_str()), ("flakes", 0, "ci/flakes"));
+        // A CI series is not a daemon path: no request counts toward it.
+        assert!(targets.for_path("ci/merge-queue").is_none());
     }
 
     #[test]
@@ -763,6 +850,35 @@ mod tests {
             "{SOURCE}\n[[latency]]\nname = \"again\"\nabout = \"\"\np99_ms = 1\npaths = [\"GET /v1/client/now\"]\n"
         );
         assert!(parse(&twice).unwrap_err().to_string().contains("two targets"));
+    }
+
+    #[test]
+    fn ci_durations_and_counts_are_checked() {
+        let error = |text: &str| parse(text).unwrap_err().to_string();
+        let p95 = "percentile = 95\ntarget_ms = 600000\npath = \"ci/merge-queue\"";
+        assert!(parse(SOURCE.split("[[count]]").next().unwrap()).is_err(), "the count kind is required");
+        for percentile in ["0", "100", "250"] {
+            let text = SOURCE.replacen("percentile = 95", &format!("percentile = {percentile}"), 1);
+            assert!(error(&text).contains("between 1 and 99"), "{percentile}");
+        }
+        assert!(parse(&SOURCE.replacen("percentile = 95", "percentile = -5", 1)).is_err());
+        assert!(error(&SOURCE.replacen("target_ms = 780000", "target_ms = 0", 1)).contains("no duration"));
+        assert!(parse(&SOURCE.replace("max_per_hour = 0", "max_per_hour = -1")).is_err());
+        assert!(parse(&SOURCE.replace("max_per_hour = 0", "max_per_hour = 0.5")).is_err());
+        assert!(parse(&SOURCE.replace("max_per_hour = 0", "max_per_hour = 0\nmin_per_hour = 0")).is_err());
+        assert!(error(&SOURCE.replace("\"ci/flakes\"", "\"GET /v1/flakes\"")).contains("not a CI series"));
+        assert!(error(&SOURCE.replace("\"ci/flakes\"", "\"ci/Flakes\"")).contains("not a CI series"));
+        assert!(error(&SOURCE.replace("\"ci/flakes\"", "\"ci/\"")).contains("not a CI series"));
+        // The same percentile twice is one objective named twice.
+        let again = format!("{SOURCE}\n[[duration]]\nname = \"merge-latency\"\nabout = \"\"\n{p95}\n");
+        assert!(error(&again).contains("named twice"));
+        // Another name may not take a series that feeds one already.
+        let other = format!("{SOURCE}\n[[duration]]\nname = \"other\"\nabout = \"\"\n{p95}\n");
+        assert!(error(&other).contains("two targets"));
+        let count = format!("{SOURCE}\n[[count]]\nname = \"other\"\nabout = \"\"\nmax_per_hour = 1\npath = \"ci/merge-queue\"\n");
+        assert!(error(&count).contains("two targets"));
+        let named = SOURCE.replace("name = \"flakes\"", "name = \"write-ack\"");
+        assert!(error(&named).contains("named twice"));
     }
 
     #[test]

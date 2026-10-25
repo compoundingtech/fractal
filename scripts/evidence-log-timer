@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# One pull of the evidence log, as main has it (scripts/evidence-log.service, every 2 minutes from scripts/evidence-log.timer).
+# The script and the verifier it loads are read from origin/main in the bare repository this host keeps, never a checkout's copy.
+# The signer (~/.config/evidence-log/signer.json, a JSON argv that signs stdin; `st sekrets` once the log key has a profile) and
+# the log key list (~/.config/evidence-log/log-keys, until main pins .st/evidence-log-key) are this host's configuration.
+# EVIDENCE_LOG_FLAGS adds --publish and, once GC writes its lines first, --restore.
+set -euo pipefail
+state=${EVIDENCE_LOG_STATE:-$HOME/.local/state/evidence-log}
+remote=${EVIDENCE_LOG_REMOTE:-https://github.com/compoundingtech/smalltalk.git}
+config=${EVIDENCE_LOG_CONFIG:-$HOME/.config/evidence-log}
+repo=$state/repo.git
+mkdir -p "$state"
+if [ ! -d "$repo" ]; then
+  git init -q --bare "$repo"
+  git -C "$repo" config gc.auto 0
+  git -C "$repo" remote add origin "$remote"
+fi
+git -C "$repo" -c core.hooksPath=/dev/null fetch -q --no-tags origin +refs/heads/main:refs/remotes/origin/main
+tools=$(mktemp -d)
+trap 'rm -rf "$tools"' EXIT
+for tool in evidence-log evidence-verify; do
+  git -C "$repo" show "origin/main:scripts/$tool" > "$tools/$tool"
+done
+keys=$config/log-keys
+if git -C "$repo" cat-file -e origin/main:.st/evidence-log-key 2>/dev/null; then
+  git -C "$repo" show origin/main:.st/evidence-log-key > "$tools/log-keys"
+  keys=$tools/log-keys
+fi
+# shellcheck disable=SC2086
+exec python3 -I "$tools/evidence-log" "${1:-pull}" --repo "$repo" --remote origin --main origin/main \
+  --signer "$(cat "$config/signer.json")" --log-keys "$keys" ${EVIDENCE_LOG_FLAGS:-} "${@:2}"

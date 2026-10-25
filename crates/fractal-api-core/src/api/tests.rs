@@ -364,6 +364,7 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
     let (status, body) = ask("/v1/agents/suspend", "quiet").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["body"]["fields"]["action"], "suspend");
+    let suspend_claim_id = body["id"].clone();
     let suspension = crate::suspension::current(&state.store, subject)
         .unwrap()
         .unwrap();
@@ -373,6 +374,27 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
     assert_eq!(body["code"], "already-suspended");
     let (_, body) = ask("/v1/agents/restart", "restart").await;
     assert_eq!(body["code"], "restart-suspended");
+    let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
+        "from":subject,"to":"agent/example-renamed-seat","actor":"person/robin",
+        "reason":"Clarify seat","idempotency_key":"suspended-rename"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    for requested in [subject, "agent/example-renamed-seat"] {
+        let (status, replay) = json_request(app.clone(), "/v1/agents/suspend", json!({
+            "subject":requested,"actor":"person/test","idempotency_key":"quiet"
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["id"], suspend_claim_id);
+        let (_, resume) = json_request(app.clone(), "/v1/agents/resume", json!({
+            "subject":requested,"actor":"person/test","idempotency_key":"not-yet-suspended"
+        })).await;
+        assert_eq!(resume["code"], "not-suspended", "{resume}");
+        let (_, snapshot) = json_request(app.clone(), "/v1/internal/seat-snapshot", json!({
+            "subject":requested,"actor":"person/test","suspend_operation":"stale",
+            "resume_operation":"stale","offset":0
+        })).await;
+        assert_eq!(snapshot["code"], "stale-fence", "{snapshot}");
+    }
 }
 
 #[test]
@@ -487,8 +509,11 @@ fn descriptor_exhaustion_bounds_accept_retries_and_log_reports() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_unix_peer_is_bound_to_its_harness_environment() {
+    // A test run from an agent seat inherits that seat's FRACTAL_AGENT, which would conflict
+    // with this fixture's identity and bind nothing.
     let mut child = std::process::Command::new("sleep")
         .arg("10")
+        .env_remove("FRACTAL_AGENT")
         .env("ST_AGENT", "agent/fixture/worker")
         .spawn()
         .unwrap();
@@ -2271,9 +2296,11 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let server_socket = socket.clone();
-    let app = router(state(root.path()));
+    let state = state(root.path());
+    let store = state.store.clone();
+    let app = router(state);
     let server = tokio::spawn(async move {
-        serve_unix_with_ancestor(&server_socket, None, app, true, slow_ancestor).await
+        serve_unix_with_ancestor(&server_socket, None, app, Some(store), slow_ancestor).await
     });
     while !socket.exists() {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2298,6 +2325,106 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
         started.elapsed()
     );
     server.abort();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn direct_router_bound_unix_accepts_renamed_actor_and_header_but_refuses_foreign_identity() {
+    use http_body_util::{BodyExt as _, Full};
+
+    fn ancestor(_pid: u32) -> Option<String> {
+        Some("agent/example-bound-original/worker".into())
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example-bound-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example-bound-other/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    state.store.apply(&intent, &expected, "bound-declare").unwrap();
+    let app = router(state.clone());
+    for (from, to) in [
+        ("agent/example-bound-original/worker", "agent/example-bound-current/worker"),
+        ("agent/example-bound-other/worker", "agent/example-bound-foreign/worker"),
+    ] {
+        let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
+            "from":from,"to":to,"actor":"person/robin",
+            "reason":"Clarify seat","idempotency_key":format!("rename-{from}")
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{renamed}");
+    }
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handler_calls = calls.clone();
+    let app = Router::new().route(
+        "/v1/agents/native-session",
+        post(move |Json(body): Json<Value>| async move {
+            handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Json(body)
+        }),
+    );
+    let store = state.store.clone();
+    let socket = root.path().join("bound.sock");
+    let served_socket = socket.clone();
+    let (ready, serving) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        serve_unix_with_ancestor_ready(
+            &served_socket, None, app, Some(store), ancestor,
+            || { let _ = ready.send(()); },
+        ).await.unwrap();
+    });
+    tokio::time::timeout(Duration::from_secs(5), serving).await.unwrap().unwrap();
+    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await.unwrap();
+    let connection = tokio::spawn(async move { connection.await.unwrap() });
+    let old = "agent/example-bound-original/worker";
+    let current = "agent/example-bound-current/worker";
+    for actor in [old, current] {
+        for header in [old, current] {
+            let response = sender.send_request(Request::builder()
+                .method("POST").uri("/v1/agents/native-session")
+                .header("host", "local").header("content-type", "application/json")
+                .header(client_v0::LOCAL_PERSON_HEADER, header)
+                .body(Full::new(axum::body::Bytes::from(json!({
+                    "subject":current,"actor":actor,"incarnation_id":"bound-incarnation",
+                    "harness":"claude","session_id":"bound-alias-session"
+                }).to_string()))).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::OK, "{actor}, {header}: {body}");
+            assert_eq!(body["actor"], actor);
+            assert_eq!(body["subject"], current);
+        }
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    for foreign in ["agent/example-bound-other/worker", "agent/example-bound-foreign/worker", "person/other"] {
+        for field in ["actor", "requester", "header"] {
+            let before = state.store.index().unwrap();
+            let mut body = json!({
+                "subject":current,"actor":current,"incarnation_id":"bound-incarnation",
+                "harness":"claude","session_id":"must-not-be-written"
+            });
+            if field != "header" { body[field] = json!(foreign); }
+            let response = sender.send_request(Request::builder()
+                .method("POST").uri("/v1/agents/native-session")
+                .header("host", "local").header("content-type", "application/json")
+                .header(client_v0::LOCAL_PERSON_HEADER, if field == "header" { foreign } else { current })
+                .body(Full::new(axum::body::Bytes::from(body.to_string()))).unwrap())
+                .await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{foreign}, {field}: {refusal}");
+            assert_eq!(refusal["code"], "foreign-agent-actor");
+            assert_eq!(state.store.index().unwrap(), before);
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        }
+    }
+    server.abort();
+    connection.abort();
 }
 
 #[test]
@@ -3061,7 +3188,8 @@ async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     let state = state(root.path());
     let declarations = crate::graph::parse_internal_intent(PERFORMANCE_DECLARATIONS, &state.node).unwrap();
     state.store.apply_internal(&declarations, "workflow-registration-fixture").unwrap();
-    let app = router(state.clone());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
     let request = apply_request(&state, PERFORMANCE_REGISTRATION, "agent/foreign", "forged-workflow-register");
     let response = app.oneshot(Request::builder().method("POST").uri("/v1/intent/apply")
         .header("content-type", "application/json").extension(BoundAgent("agent/own".into()))
@@ -4592,6 +4720,7 @@ fn doctor_names_shared_tables_that_differ_at_equal_inventory() {
     state.fleet_id = Some("fleet/audit".into());
     state.configured_peers = vec!["alder".into()];
     state.store.bind_fleet("fleet/audit").unwrap();
+    state.store.capture_divergences(true);
     let source = Store::open_memory("alder").unwrap();
     source.bind_fleet("fleet/audit").unwrap();
     let original = source.export_replication_summary("fleet/audit").unwrap();
@@ -6548,6 +6677,87 @@ async fn message_lifecycle_requires_the_exact_recipient_actor() {
         .await
         .unwrap();
     assert_eq!(legacy.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn retired_mailbox_successor_lists_reads_and_closes_as_itself() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = parse_intent(source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "custody-api-fixture").unwrap();
+    let sent = state.store.append_claim(&ClaimInput {
+        subject: "message/custody-api".into(), kind: "message.sent".into(),
+        actor: Some("person/avery".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("person/avery")),
+            ("to".into(), json!("agent/example/old")),
+            ("content".into(), json!("A note kept for the new custodian.")),
+            ("status".into(), json!("sent")),
+        ]), evidence: vec![], expected_subject: None,
+        idempotency_key: Some("custody-api-send".into()),
+    }).unwrap();
+    let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    let retirement = state.store.retire_agent_with_successor(
+        "agent/example/old", "person/avery", "Rollover", &token, None,
+        "custody-api-retire", &[], Some("agent/example/new"),
+    ).unwrap().0;
+    let app = router(state.clone());
+    let (status, detail) = get_request(app.clone(), "/v1/client/agents/example/old").await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["mail_custody"], json!({"successor":"agent/example/new","state":"pending"}));
+    let (status, _) = get_request(app.clone(), "/v1/messages/page?acting_as=agent/example/new").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, denied) = get_request(app.clone(),
+        "/v1/messages/page?to=agent/example/old&acting_as=agent/example/wrong&limit=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, denied) = get_request(app.clone(),
+        "/v1/messages/page?to=agent/example/old&acting_as=agent/example/old&limit=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, page) = get_request(app.clone(),
+        "/v1/messages/page?to=agent/example/old&acting_as=agent/example/new&limit=1").await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["subject"], sent.subject);
+    let path = "/v1/messages/custody-api/claims";
+    let (status, denied) = json_request(app.clone(), path,
+        json!({"lifecycle":"read","actor":"agent/example/old","idempotency_key":"old-custody-read"})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, read) = json_request(app.clone(), path,
+        json!({"lifecycle":"read","actor":"agent/example/new","idempotency_key":"new-custody-read"})).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["actor"], "agent/example/new");
+    assert_eq!(read["body"]["fields"]["acting_for"], "agent/example/old");
+    assert!(read["body"]["evidence"].as_array().unwrap().iter().any(|id| id == &retirement.id));
+    let (status, closed) = json_request(app, path,
+        json!({"lifecycle":"closed","actor":"agent/example/new","idempotency_key":"new-custody-close"})).await;
+    assert_eq!(status, StatusCode::OK, "{closed}");
+    assert_eq!(closed["body"]["fields"]["acting_for"], "agent/example/old");
+}
+
+#[test]
+fn retired_agent_cached_card_refolds_custody_once_at_new_cut() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = parse_intent(source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "custody-card-fixture").unwrap();
+    let index = state.store.index().unwrap();
+    let before = client_agent_resources_cached(&state.store, false, index).unwrap();
+    let old = before.iter().find(|card| card["id"] == "agent/example/old").unwrap();
+    assert!(old.get("mail_custody").is_none());
+    let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    state.store.retire_agent_with_successor(
+        "agent/example/old", "person/avery", "Rollover", &token, None,
+        "custody-card-retire", &[], Some("agent/example/new"),
+    ).unwrap();
+    let after_index = state.store.index().unwrap();
+    let after = client_agent_resources_cached(&state.store, false, after_index).unwrap();
+    let old = after.iter().find(|card| card["id"] == "agent/example/old").unwrap();
+    assert_eq!(old["mail_custody"], json!({"successor":"agent/example/new","state":"pending"}));
+    let refolds = state.store.agent_resources_refolded_cards_for_test();
+    let warm = client_agent_resources_cached(&state.store, false, after_index).unwrap();
+    assert_eq!(warm, after);
+    assert_eq!(state.store.agent_resources_refolded_cards_for_test(), refolds);
 }
 
 #[tokio::test]
@@ -9088,6 +9298,198 @@ fn agent_cards_advance_locally_and_keep_historical_snapshots() {
 }
 
 #[test]
+fn declaration_restart_marker_preserves_suspension_and_placement() {
+    for moving in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = state.store.clone();
+        let source = r#"version 2
+agent "example/overlay" { workspace "/tmp"; harness "codex" {} }
+"#;
+        store.apply_internal(&parse_intent(source, "node").unwrap(), "overlay-source").unwrap();
+        let subject = "agent/example/overlay";
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"status":"running", "host":"node",
+                "runtime_id":"example.overlay", "incarnation_id":"old", "restarting_from":"old"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "harness.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"state":"idle", "driver":"codex", "incarnation_id":"old"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert_eq!(checked_agent_cache(&store, false, store.index().unwrap())[0]["state"], "restarting");
+        if moving {
+            let moved = source.replace("workspace", "host \"remote\"; workspace");
+            store.apply_internal(&parse_intent(&moved, "node").unwrap(), "overlay-move").unwrap();
+            let cards = checked_agent_cache(&store, false, store.index().unwrap());
+            assert_eq!(cards[0]["state"], "waiting");
+            assert_ne!(cards[0]["handoff"]["phase"], "running");
+        } else {
+            let token = store.selected_desired_token(subject).unwrap().unwrap();
+            let request = store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "runtime.action.requested".into(), actor: Some("person/test".into()),
+                fields: serde_json::from_value(json!({"action":"suspend", "incarnation_id":"old"})).unwrap(),
+                evidence: vec![token], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "runtime.action.succeeded".into(), actor: Some("person/test".into()),
+                fields: serde_json::from_value(json!({"action":"suspend", "operation_status":"suspended"})).unwrap(),
+                evidence: vec![request.id.clone()], expected_subject: None,
+                idempotency_key: Some(crate::suspension::suspend_completed_key(&request.id)),
+            }).unwrap();
+            let cards = checked_agent_cache(&store, false, store.index().unwrap());
+            assert_eq!(cards[0]["state"], "suspended");
+        }
+    }
+}
+
+#[test]
+fn declaration_relaunch_is_restarting_until_replacement_harness_is_ready() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let intent = parse_intent(
+        r#"version 2
+agent "example/relaunch" { workspace "/tmp"; harness "codex" {} }
+"#,
+        "node",
+    )
+    .unwrap();
+    store
+        .apply_internal(&intent, "relaunch-declaration")
+        .unwrap();
+    let subject = "agent/example/relaunch";
+    let append = |kind: &str, fields: Value| {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: None,
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    };
+    let state_at = |index| checked_agent_cache(&store, false, index)[0]["state"].clone();
+    append(
+        "runtime.observed",
+        json!({"status":"running","incarnation_id":"old","runtime_id":"example.relaunch"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "starting",
+        "first launch has no replacement"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"idle","driver":"codex","incarnation_id":"old"}),
+    );
+    let ready_cut = store.index().unwrap();
+    assert_eq!(state_at(ready_cut), "running");
+    append(
+        "runtime.observed",
+        json!({"status":"running","incarnation_id":"old","runtime_id":"example.relaunch","restarting_from":"old"}),
+    );
+    let restart_cut = store.index().unwrap();
+    assert_eq!(state_at(restart_cut), "restarting");
+    let raw = client_agent_resources_uncached(&store, false, restart_cut).unwrap();
+    let deadline = raw[0]["_restart_until_unix_ms"].as_u64().unwrap() as u128;
+    assert_eq!(store.agent_roster_valid_until(restart_cut, None), Some(deadline),
+        "the existing agents window must wake at presentation expiry without a new claim");
+    let mut before = raw[0].clone();
+    overlay_declaration_restart(&mut before, deadline - 1);
+    assert_eq!(before["state"], "restarting");
+    let mut stuck = raw[0].clone();
+    overlay_declaration_restart(&mut stuck, deadline);
+    assert_eq!(stuck["state"], "running", "a stale marker cannot conceal the underlying state");
+    assert!(stuck.get("_restart_until_unix_ms").is_none());
+    assert_eq!(
+        state_at(ready_cut),
+        "running",
+        "snapshot before cutover stays unchanged"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"blocked","blocked_on":"human","ask":"permission","driver":"codex","incarnation_id":"old"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "waiting",
+        "the retiring harness's current human block remains visible"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"ended","blocked_on":null,"ask":null,"driver":"codex","incarnation_id":"old"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "failed",
+        "the retiring harness's failure is not hidden by its restart marker"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"idle","blocked_on":null,"ask":null,"driver":"codex","incarnation_id":"old"}),
+    );
+    assert_eq!(state_at(store.index().unwrap()), "restarting");
+    append(
+        "runtime.observed",
+        json!({"status":"exited","incarnation_id":"old","runtime_id":"example.relaunch","restarting_from":"old"}),
+    );
+    assert_eq!(state_at(store.index().unwrap()), "stopped", "a deferred replacement is not active progress");
+    append(
+        "runtime.observed",
+        json!({"status":"starting","runtime_id":"example.relaunch","restarting_from":"old"}),
+    );
+    assert_eq!(state_at(store.index().unwrap()), "restarting");
+    append(
+        "runtime.observed",
+        json!({"status":"running","incarnation_id":"new","runtime_id":"example.relaunch","restarting_from":"old"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "restarting",
+        "a new wrapper is not ready"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"blocked","blocked_on":"human","ask":"permission","driver":"codex","incarnation_id":"new"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "waiting",
+        "human blocks remain visible"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"idle","blocked_on":null,"ask":null,"driver":"codex","incarnation_id":"new"}),
+    );
+    assert_eq!(state_at(store.index().unwrap()), "running");
+    assert_eq!(
+        state_at(restart_cut),
+        "restarting",
+        "replacement readiness cannot rewrite history"
+    );
+    append(
+        "runtime.observed",
+        json!({"status":"stopped","incarnation_id":"new","runtime_id":"example.relaunch"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "stopped",
+        "explicit stop has no restart marker"
+    );
+    append(
+        "runtime.observed",
+        json!({"status":"failed","runtime_id":"example.relaunch"}),
+    );
+    assert_eq!(state_at(store.index().unwrap()), "failed");
+}
+
+#[test]
 fn agent_state_requires_current_harness_evidence_for_native_drivers() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
@@ -11375,4 +11777,259 @@ async fn harness_event_endpoint_requires_this_native_seats_local_peer_and_runtim
     stale["runtime_incarnation"] = json!("retired-runtime");
     let (status, body) = json_request(app, "/v1/harness-events", stale).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+}
+
+#[test]
+fn identity_rename_refusals_keep_typed_http_statuses() {
+    for code in ["identity-cycle", "identity-occupied", "identity-retired-source", "lifecycle-unavailable"] {
+        let error = ApiError::bad(St3Error::new(code, "rename refused"));
+        assert_eq!(error.status, StatusCode::CONFLICT, "{code}");
+        assert_eq!(error.code, code);
+    }
+    assert_eq!(ApiError::bad(St3Error::new("identity-cross-kind", "wrong kind")).status,
+        StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(ApiError::bad(St3Error::new("identity-unknown", "missing")).status,
+        StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn native_rename_request_accepts_optional_compare_and_swap() {
+    let value = json!({
+        "from": "agent/example-old", "to": "agent/example-new",
+        "actor": "person/robin", "reason": "Clarify responsibility",
+        "idempotency_key": "example-rename"
+    });
+    let request: crate::store::identities::RenameRequest =
+        serde_json::from_value(value).unwrap();
+    assert_eq!(request.expected_declaration, None);
+    assert_eq!(request.expected_naming_revision, None);
+    assert_eq!(request.from, "agent/example-old");
+}
+
+#[tokio::test]
+async fn native_rename_routes_show_and_send_keep_storage_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    state.store.apply(&intent, &expected, "example-declare").unwrap();
+    let app = router(state.clone());
+    let rename = json!({
+        "from": "agent/example-original/worker", "to": "agent/example-renamed/worker",
+        "actor": "person/robin", "reason": "Clarify responsibility",
+        "idempotency_key": "example-rename"
+    });
+    let (status, receipt) = json_request(app.clone(), "/v1/agents/rename-id", rename.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["identity"], "agent/example-original/worker");
+    assert_eq!(receipt["canonical_id"], "agent/example-renamed/worker");
+    assert_eq!(receipt["replication"]["state"], "local-durable");
+    let (_, replay) = json_request(app.clone(), "/v1/agents/rename-id", rename).await;
+    assert_eq!(replay["applied"], "already-applied");
+    assert_eq!(replay["claim_id"], receipt["claim_id"]);
+    for requested in ["agent/example-original/worker", "agent/example-renamed/worker"] {
+        let (status, client_detail) = get_request(
+            app.clone(), &format!("/v1/client/agents/{requested}"),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{client_detail}");
+        assert_eq!(client_detail["id"], "agent/example-original/worker");
+        for field in ["requested_id", "identity", "renamed_to", "naming_revision"] {
+            assert!(client_detail.get(field).is_none(), "native field leaked into client-v0: {field}");
+        }
+    }
+    let (status, sent) = json_request(app, "/v1/messages", json!({
+        "from": "person/robin", "to": "agent/example-original/worker", "content": "Continue.",
+        "idempotency_key": "example-send"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    assert_eq!(sent["requested_recipient"], "agent/example-original/worker");
+    assert_eq!(sent["recipient"], "agent/example-renamed/worker");
+    assert_eq!(sent["recipient_identity"], "agent/example-original/worker");
+}
+
+#[tokio::test]
+async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subject = "agent/example-rollout-original/worker";
+    let source = format!(
+        "version 2\nagent \"example-rollout-original/worker\" {{ rollout \"manual\"; host {:?}; workspace \"/tmp\"; harness \"claude\" {{ model \"fixture\"; }} }}\n",
+        state.node,
+    );
+    let intent = crate::graph::parse_owned_set_intent(&source, state.store.origin()).unwrap();
+    let mut options = crate::store::owned_sets::Options {
+        set: "example-rollout".into(),
+        source: crate::store::owned_sets::Source {
+            repository: "fixture/rollout".into(), r#ref: "refs/heads/main".into(),
+            sha: format!("{:040x}", 1), sequence: 1,
+        },
+        expected_set: "absent".into(), rollout: None, adopt: Default::default(),
+        allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+    };
+    let preview = state.store.owned_set_preview(&intent, &options).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    options.confirm_retire = Some(preview.digest);
+    options.expected_subjects = preview.expected_subjects;
+    state.store.apply_owned_set(&intent, &options, "rollout-declare", "person/robin").unwrap();
+    let token = state.store.selected_desired_token(subject).unwrap().unwrap();
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running","runtime_id":subject,
+            "host":state.node,"incarnation_id":"rollout-incarnation"})),
+        ("runtime.action.succeeded", json!({"action":"start","desired_token":token,
+            "incarnation_id":"rollout-incarnation"})),
+    ] {
+        roster_fixture_append(&state.store, subject, kind, fields);
+    }
+    let (_, launched) = crate::rollout::launched_member(
+        &state.store, subject, "rollout-incarnation",
+    ).unwrap().unwrap();
+    let app = router(state.clone());
+    let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
+        "from":subject,"to":"agent/example-rollout-renamed/worker","actor":"person/robin",
+        "reason":"Clarify seat","idempotency_key":"rollout-rename"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    let mut claim_id = Value::Null;
+    // New name first catches literal launch-receipt lookup; old name must replay it.
+    for requested in ["example-rollout-renamed/worker", "agent/example-rollout-original/worker", "agent/example-rollout-renamed/worker"] {
+        let (status, claim) = json_request(app.clone(), "/v1/agents/rollout", json!({
+            "subject":requested,"actor":"person/robin","expected_desired":token,
+            "expected_incarnation":"rollout-incarnation",
+            "policy":crate::rollout::Policy::when_idle(1_800_000, false),
+            "idempotency_key":"rollout-alias-retry"
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{claim}");
+        assert_eq!(claim["subject"], subject);
+        assert_eq!(claim["body"]["fields"]["rollout"]["old_member"]["runtime_id"], launched.runtime_id);
+        if claim_id.is_null() { claim_id = claim["id"].clone(); }
+        assert_eq!(claim["id"], claim_id);
+    }
+}
+
+#[tokio::test]
+async fn renamed_agent_restart_and_native_report_resolve_aliases_before_lookup() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example-restart-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    state.store.apply(&intent, &expected, "restart-declare").unwrap();
+    let app = router(state.clone());
+    let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
+        "from":"agent/example-restart-original/worker","to":"agent/example-restart-renamed/worker","actor":"person/robin",
+        "reason":"Clarify seat","idempotency_key":"restart-rename"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    let mut claim_id = Value::Null;
+    for requested in ["agent/example-restart-renamed/worker", "agent/example-restart-original/worker"] {
+        let (status, claim) = json_request(app.clone(), "/v1/agents/restart", json!({
+            "subject":requested,"actor":"person/robin","idempotency_key":"restart-alias-retry"
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{claim}");
+        assert_eq!(claim["subject"], "agent/example-restart-original/worker");
+        if claim_id.is_null() { claim_id = claim["id"].clone(); }
+        assert_eq!(claim["id"], claim_id);
+    }
+    let mut report_id = Value::Null;
+    for (subject, actor) in [
+        ("agent/example-restart-renamed/worker", "agent/example-restart-original/worker"),
+        ("agent/example-restart-original/worker", "agent/example-restart-renamed/worker"),
+    ] {
+        let (status, report) = json_request(app.clone(), "/v1/agents/native-session", json!({
+            "subject":subject,"actor":actor,"incarnation_id":"native-incarnation",
+            "harness":"claude","session_id":"native-alias-session"
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{report}");
+        assert_eq!(report["subject"], "agent/example-restart-original/worker");
+        assert_eq!(report["actor"], "agent/example-restart-original/worker");
+        assert_eq!(report["body"]["fields"]["agent"], "agent/example-restart-original/worker");
+        if report_id.is_null() { report_id = report["id"].clone(); }
+        assert_eq!(report["id"], report_id);
+    }
+}
+
+#[tokio::test]
+async fn renamed_mission_overview_and_launch_use_storage_identity_and_public_label() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let (_, status, applied) = preview_and_apply(app.clone(), r#"version 2
+mission "overview-original" state="ready" {
+  goal "Review the candidate."
+  step "review" { assigned-to "person/robin" }
+}"#).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    let (status, renamed) = json_request(app.clone(), "/v1/missions/rename-id", json!({
+        "from":"mission/overview-original","to":"mission/overview-renamed","actor":"person/robin",
+        "reason":"Clarify mission","idempotency_key":"overview-rename"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    for requested in ["overview-original", "overview-renamed", "mission/overview-renamed"] {
+        let (status, overview) = get_request(
+            app.clone(), &format!("/v1/mission-overview?mission={requested}"),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{overview}");
+        assert_eq!(overview["mission"], "mission/overview-renamed");
+        assert_eq!(overview["total_runs"], 0);
+    }
+    for requested in ["overview-original", "overview-renamed"] {
+        let (status, session) = json_request(app.clone(), "/v1/launches",
+            serde_json::to_value(PlanningSessionStartRequest {
+                mission: requested.into(), run: None,
+                request: b"Review the candidate.".to_vec(),
+                workspace: workspace.display().to_string(),
+                requester: Some("person/robin".into()),
+                provider: None, model: None, effort: None,
+                idempotency_key: format!("launch-{requested}"),
+            }).unwrap(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        assert_eq!(session["mission"], "overview-renamed");
+        let stored = state.store.planning_session(session["id"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(stored.mission, "overview-original");
+        let candidate = br#"version 2
+mission "overview-renamed" state="ready" {
+  goal "Review the canonical-name candidate."
+  step "review" { assigned-to "person/robin" }
+}"#;
+        let original_candidate = std::str::from_utf8(candidate).unwrap()
+            .replace("overview-renamed", "overview-original");
+        let expected = parse_intent(&original_candidate, &state.node).unwrap();
+        let expected_revision = &expected.missions["overview-original"].revision;
+        let session_id = session["id"].as_str().unwrap();
+        let (status, submitted) = json_request(
+            app.clone(), &format!("/v1/launches/{session_id}/submit"),
+            serde_json::to_value(PlanningCandidateSubmitRequest {
+                actor: session["planner"].as_str().unwrap().into(),
+                markdown: b"# Canonical-name candidate\n".to_vec(),
+                kdl: candidate.to_vec(),
+                idempotency_key: format!("candidate-{requested}"),
+            }).unwrap(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{submitted}");
+        assert_eq!(submitted["mission"], "overview-renamed");
+        let (status, previewed) = json_request(
+            app.clone(), &format!("/v1/launches/{session_id}/preview"), json!({}),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{previewed}");
+        assert_eq!(previewed["preview"]["hash"], submitted["preview"]["hash"]);
+        let stored = state.store.planning_session(session_id).unwrap().unwrap();
+        assert_eq!(stored.mission, "overview-original");
+        let variant = stored.variants.iter().find(|variant| variant.name == "default").unwrap();
+        assert_eq!(&variant.candidate.mission_revision, expected_revision);
+        let preview = variant.preview.as_ref().unwrap();
+        assert_eq!(&preview.mission.mission_revisions["mission/overview-original"], expected_revision);
+        assert!(!preview.mission.mission_revisions.contains_key("mission/overview-renamed"));
+        assert_eq!(
+            serde_json::to_value(&preview.mission.mission_provenance).unwrap(),
+            serde_json::to_value(&expected.mission_provenance).unwrap(),
+        );
+    }
 }

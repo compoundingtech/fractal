@@ -5,6 +5,8 @@ import { ActionSheetIOS, Linking, Pressable, StyleSheet, Text, TextInput, View, 
 import { fonts, systemColors, theme } from './theme';
 import type { Run } from './markdown';
 import { markdown } from './markdown';
+import { StackActions } from '@react-navigation/native';
+import { navigationRef } from './navigation';
 
 // Shared renderers retain the legacy stui presentation by default. SystemScreen scopes
 // system text, semantic appearance and grouped rows to the migrated native surfaces.
@@ -127,26 +129,32 @@ function showPath(path: string) {
     index => { if (index === 0) void Clipboard.setStringAsync(path); },
   );
 }
-function Runs({ runs, base }: { runs: Run[]; base: TextStyle }) {
+// A document link in a message, a mission or a step opens the document on the tab it was tapped
+// in, so back returns there. The document screen follows its own links along its trail instead.
+export function openDocumentLink(reference: string) {
+  if (navigationRef.isReady()) navigationRef.dispatch(StackActions.push('Document', { reference, trail: [reference] }));
+}
+type DocumentOpener = (reference: string) => void;
+function Runs({ runs, base, onDocument = openDocumentLink }: { runs: Run[]; base: TextStyle; onDocument?: DocumentOpener }) {
   const appearance = useTextAppearance();
-  return <>{runs.map((run, index) => <Text key={index} style={appearance.system ? [base, run.style === 'bold' && { fontWeight: '600' }, run.style === 'code' && { fontFamily: fonts.regular }, run.style === 'link' && { color: appearance.colors.action, textDecorationLine: 'underline' }] : runStyle(run, base)} onPress={run.url ? () => void Linking.openURL(run.url!) : run.path ? () => showPath(run.path!) : undefined}>{run.text}</Text>)}</>;
+  return <>{runs.map((run, index) => <Text key={index} style={appearance.system ? [base, run.style === 'bold' && { fontWeight: '600' }, run.style === 'code' && { fontFamily: fonts.regular }, run.style === 'link' && { color: appearance.colors.action, textDecorationLine: 'underline' }] : runStyle(run, base)} onPress={run.document ? () => onDocument(run.document!) : run.url ? () => void Linking.openURL(run.url!) : run.path ? () => showPath(run.path!) : undefined}>{run.text}</Text>)}</>;
 }
 
 /** Markdown as stui renders a reply: peach headings, lavender bullets, code in a gutter. */
-export function Markdown({ text, color = theme.text, selectable = true }: { text: string; color?: string; selectable?: boolean }) {
+export function Markdown({ text, color = theme.text, selectable = true, onDocument }: { text: string; color?: string; selectable?: boolean; onDocument?: DocumentOpener }) {
   const appearance = useTextAppearance();
   const base: TextStyle = appearance.system ? { fontFamily: 'System', fontSize: 17, color: appearance.color(color) } : { ...styles.text, color };
   return <View>{markdown(text).map((block, index) => {
     switch (block.kind) {
       case 'blank': return <View key={index} style={{ height: LINE / 2 }} />;
-      case 'heading': return <Text key={index} style={[base, appearance.system ? { fontWeight: '600', color: appearance.color(theme.peach) } : [styles.bold, { color: theme.peach }, block.level === 1 && { textDecorationLine: 'underline' }]]}><Runs runs={block.runs} base={appearance.system ? { ...base, fontWeight: '600' } : { ...base, ...styles.bold, color: theme.peach }} /></Text>;
+      case 'heading': return <Text key={index} style={[base, appearance.system ? { fontWeight: '600', color: appearance.color(theme.peach) } : [styles.bold, { color: theme.peach }, block.level === 1 && { textDecorationLine: 'underline' }]]}><Runs onDocument={onDocument} runs={block.runs} base={appearance.system ? { ...base, fontWeight: '600' } : { ...base, ...styles.bold, color: theme.peach }} /></Text>;
       case 'rule': return <View key={index} style={[styles.mdRule, { backgroundColor: theme.surface2 }]} />;
-      case 'quote': return <View style={styles.quote}><Text style={[base, appearance.system ? { color: appearance.colors.secondary, fontStyle: 'italic' } : { color: theme.subtext0, fontFamily: fonts.italic }]}><Runs runs={block.runs} base={appearance.system ? base : { ...base, color: theme.subtext0, fontFamily: fonts.italic }} /></Text></View>;
-      case 'item': return <View style={[styles.item, { paddingLeft: block.indent * 7 }]}><Text style={[base, { color: appearance.color(theme.lavender) }]}>{block.marker}</Text><Text style={[base, styles.itemText]}><Runs runs={block.runs} base={base} /></Text></View>;
+      case 'quote': return <View style={styles.quote}><Text style={[base, appearance.system ? { color: appearance.colors.secondary, fontStyle: 'italic' } : { color: theme.subtext0, fontFamily: fonts.italic }]}><Runs onDocument={onDocument} runs={block.runs} base={appearance.system ? base : { ...base, color: theme.subtext0, fontFamily: fonts.italic }} /></Text></View>;
+      case 'item': return <View style={[styles.item, { paddingLeft: block.indent * 7 }]}><Text style={[base, { color: appearance.color(theme.lavender) }]}>{block.marker}</Text><Text style={[base, styles.itemText]}><Runs onDocument={onDocument} runs={block.runs} base={base} /></Text></View>;
       case 'fence': return <Text key={index} style={[base, { color: theme.overlay0 }]}>{block.text}</Text>;
       case 'code': return <Text key={index} selectable={selectable} style={[base, { fontFamily: fonts.regular, color: appearance.color(theme.subtext1), paddingLeft: 14 }]}>{block.text || ' '}</Text>;
       case 'table': return <Text key={index} style={[base, !appearance.system && { color: theme.subtext0 }]}>{block.text}</Text>;
-      case 'text': return <Text key={index} selectable={selectable} style={base}><Runs runs={block.runs} base={base} /></Text>;
+      case 'text': return <Text key={index} selectable={selectable} style={base}><Runs onDocument={onDocument} runs={block.runs} base={base} /></Text>;
     }
   })}</View>;
 }

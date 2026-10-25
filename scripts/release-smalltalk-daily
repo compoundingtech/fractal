@@ -19,10 +19,14 @@ import subprocess
 import sys
 import tempfile
 
-from release_notes import ImpactError, render
+from release_notes import FIELDS, ImpactError, render
 
 WORKFLOW = 'release-smalltalk.yml'
 SEMVER = re.compile(r'v(\d+)\.(\d+)\.(\d+)')
+# Stay below GitHub's 125000-character release-body limit.
+RELEASE_BODY_LIMIT = 120000
+FULL_NOTES_POINTER = ('The complete notes and upgrade guide are attached as the `RELEASE-NOTES.md` asset; '
+                      'complete classifications are attached as `UPGRADE-IMPACT.json`.')
 
 
 DIAGNOSTIC_LIMIT = 2000
@@ -81,6 +85,66 @@ def next_tag():
     return f'v{major}.{minor}.{patch + 1}'
 
 
+def release_body(rendered, impact):
+    """Summarize oversized intervals from classifications, never from sliced Markdown."""
+    if len(rendered) <= RELEASE_BODY_LIMIT:
+        return rendered
+    headline, marker, _ = rendered.partition('\n## Upgrade impact\n')
+    if not marker:
+        raise ImpactError('cannot build bounded release body: missing release headline')
+    fragments = impact['fragments']
+    lines = [headline.rstrip(), '', '## Upgrade impact', '',
+             'Summary only: review the attached complete notes before upgrading.', '']
+    for field, label in FIELDS.items():
+        counts = {status: sum(f[field]['status'] == status for f in fragments)
+                  for status in ('changed', 'unknown', 'none')}
+        lines.append(f'- **{label}:** {counts["changed"]} changed, {counts["unknown"]} unknown, '
+                     f'{counts["none"]} none.')
+    lines.extend(['', '## Priority upgrade items', '',
+                  'Action-required and breaking changes first; details and the full upgrade guide are attached.', ''])
+
+    def priority(fragment):
+        if fragment['manual']['status'] != 'none':
+            return 0
+        if (any(fragment[field].get('transitions') for field in ('schema', 'rules'))
+                or any(re.search(r'\bbreaking\b', fragment[field]['detail'], re.I) for field in FIELDS)):
+            return 1
+        return 2
+
+    def plain(text, limit):
+        text = ' '.join(text.split())
+        if len(text) > limit:
+            text = text[:limit].rstrip() + '…'
+        return re.sub(r'([\\`*_{}\[\]()<>])', r'\\\1', text)
+
+    items = []
+    for fragment in sorted(fragments, key=priority):
+        active = [field for field in FIELDS if fragment[field]['status'] != 'none']
+        if not active:
+            continue
+        active.sort(key=lambda field: field != 'manual')
+        classification = '; '.join(f'{FIELDS[field]}: {fragment[field]["status"]}' for field in active)
+        detail = fragment[active[0]]['detail']
+        link = impact['change_links'][fragment['path']]
+        items.append(f'- **{classification}.** {plain(fragment["summary"], 240)} — '
+                     f'{plain(detail, 360)} ([PR/source]({link}))\n')
+    body = '\n'.join(lines)
+    # Reserve the largest possible omission count before accepting any complete entry.
+    reserve = f'\n{len(items)} more upgrade items; see the attached complete notes.\n\n{FULL_NOTES_POINTER}\n'
+    if len(body) + len(reserve) > RELEASE_BODY_LIMIT:
+        raise ImpactError('cannot build bounded release body: headline and classification counts exceed limit')
+    included = 0
+    for item in items:
+        if len(body) + len(item) + len(reserve) > RELEASE_BODY_LIMIT:
+            break
+        body += item
+        included += 1
+    omitted = len(items) - included
+    if omitted:
+        body += f'\n{omitted} more upgrade items; see the attached complete notes.\n'
+    return body + '\n' + FULL_NOTES_POINTER + '\n'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--dry-run', action='store_true', help='verify and print the notes; publish nothing')
@@ -112,6 +176,7 @@ def main():
         return 1
     try:
         rendered, impact = render(repo, previous, sha, tag, os.environ.get('GH_REPO', 'compoundingtech/smalltalk'), since)
+        body = release_body(rendered, impact)
     except ImpactError as error:
         say(str(error))
         return 1
@@ -125,18 +190,23 @@ def main():
 
     notes = dist / 'RELEASE-NOTES.md'
     notes.write_text(rendered)
+    body_notes = dist / 'RELEASE-BODY.md'
+    body_notes.write_text(body)
     (dist / 'UPGRADE-IMPACT.json').write_text(json.dumps(impact, indent=2) + '\n')
     assets = sorted(str(p) for pattern in ('*.tar.gz', '*.sha256') for p in dist.glob(pattern))
-    assets += [str(dist / 'SHA256SUMS'), str(dist / 'RELEASE.json'), str(dist / 'UPGRADE-IMPACT.json')]
+    assets += [str(dist / 'SHA256SUMS'), str(dist / 'RELEASE.json'), str(dist / 'UPGRADE-IMPACT.json'), str(notes)]
     if args.dry_run:
-        print(notes.read_text())
-        say(f'dry run: would publish {tag} at {sha} with {len(assets)} assets')
+        print(body)
+        shortened = 'shortened' if body != rendered else 'unchanged'
+        say(f'dry run: release body {shortened}: {len(body)} characters '
+            f'(full notes: {len(rendered)}; limit: {RELEASE_BODY_LIMIT})')
+        say(f'dry run: would publish {tag} at {sha} with {len(assets)} assets, including RELEASE-NOTES.md')
         return 0
 
     # A draft has no tag yet. Publishing it creates the tag at exactly this commit, so a partial
     # draft can be inspected and deleted without leaving a tag behind.
     run('gh', 'release', 'create', tag, '--target', sha, '--draft', '--title', f'Fractal {tag}',
-        '--notes-file', str(notes), *assets)
+        '--notes-file', str(body_notes), *assets)
     run('gh', 'release', 'edit', tag, '--draft=false')
     tagged = run('git', 'ls-remote', 'origin', f'refs/tags/{tag}^{{}}', f'refs/tags/{tag}', cwd=repo).split()
     if sha not in tagged:

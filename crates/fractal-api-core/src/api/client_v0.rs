@@ -327,6 +327,15 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "pairing.revoke",
 ];
 
+/// Server-established browser admission, never deserialized from a request header.
+/// This grants client API capabilities only; it is not an administrative bearer.
+#[derive(Clone, Debug)]
+pub struct LocalWebSession {
+    pub person: String,
+    pub id: String,
+    pub expires_at: u128,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClientSession {
     /// The credential/session identity used for audit and idempotency isolation.
@@ -588,6 +597,16 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "messages-paging.v2")
         });
+    if let Some(web) = request.extensions().get::<LocalWebSession>() {
+        let mut session = ClientSession::local(Some(&web.person))?;
+        session.actor = format!("client/local-web/{}", web.id);
+        session.transport = "local-web";
+        session.custom_forms = custom_forms;
+        session.grant_expires_at = Some(web.expires_at);
+        session.conversation_blocks = conversation_blocks;
+        session.messages_paging = messages_paging;
+        return Ok(session);
+    }
     let Some(value) = request.headers().get(AUTHORIZATION) else {
         if transport == "unix" {
             let person = request
@@ -672,10 +691,11 @@ pub fn paired_client_session(
     transport: &'static str,
     custom_forms: bool,
 ) -> Result<ClientSession, ApiError> {
-    let revoked = state.store.claims_for_subject_kind_at(
+    // Revoked wins: any revocation of the grant ends it, whatever order a member admitted the
+    // pairing and the revocation in. Completing refuses a used grant, so nothing re-grants it.
+    let revoked = !state.store.claims_for_subject_kind_at(
         &paired.subject, "custom.client.pairing-revoked", None, true, 1,
-    ).map_err(ApiError::internal)?.claims.first()
-        .is_some_and(|claim| claim.store_index > paired.store_index);
+    ).map_err(ApiError::internal)?.claims.is_empty();
     let expires_at = paired.body.pointer("/fields/expires_at_unix_ms")
         .and_then(Value::as_u64).map(u128::from).unwrap_or_default();
     if revoked || expires_at <= client_now_ms() {
@@ -715,22 +735,35 @@ pub fn paired_client_session(
 /// Held collection sockets carry no bearer secret. Re-resolve their session grant at each
 /// arrangement read, using the same expiration/revocation checks as HTTP authentication.
 pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<ClientSession, ApiError> {
+    if session.transport == "local-web" {
+        // Only the server-established browser extension mints this transport.
+        // Collection workers must retain its original expiry, never turn it into a pairing.
+        if !acting_party(session)
+            || state.owning_person.as_deref() != Some(session.authority_actor.as_str())
+            || !session.actor.strip_prefix("client/local-web/")
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            || !session.grant_expires_at.is_some_and(|expiry| expiry > client_now_ms())
+            || session.pairing_grant.is_some()
+        {
+            return Err(forbidden("the local web session authority changed or expired"));
+        }
+        return Ok(session.clone());
+    }
     if session.transport == "unix" && acting_party(session) {
         return Ok(session.clone());
     }
-    let pairings = match session.pairing_grant.as_deref() {
-        Some(subject) => state.store.claims_for_subject_kind_at(
-            subject, "custom.client.pairing-completed", None, true, 1,
-        ),
-        None => state.store.claims_for_kind_at(
-            "custom.client.pairing-completed", None, true, 10_000,
-        ),
-    }.map_err(ApiError::internal)?;
-    let paired = pairings.claims.iter().find(|claim| match session.pairing_grant.as_deref() {
-        Some(subject) => claim.subject.as_str() == subject,
-        None => claim.body.pointer("/fields/session_actor").and_then(Value::as_str) == Some(session.actor.as_str()),
-    }).ok_or_else(|| forbidden("the client session grant is absent"))?;
-    let mut current = paired_client_session(state, paired, session.transport, session.custom_forms)?;
+    // With a grant, the canonical newest completion, so every member checks the same one.
+    let paired = match session.pairing_grant.as_deref() {
+        Some(subject) => state.store
+            .newest_claim_for_subject_kind(subject, "custom.client.pairing-completed")
+            .map_err(ApiError::internal)?,
+        None => state.store
+            .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
+            .map_err(ApiError::internal)?
+            .claims.into_iter()
+            .find(|claim| claim.body.pointer("/fields/session_actor").and_then(Value::as_str) == Some(session.actor.as_str())),
+    }.ok_or_else(|| forbidden("the client session grant is absent"))?;
+    let mut current = paired_client_session(state, &paired, session.transport, session.custom_forms)?;
     current.conversation_blocks = session.conversation_blocks;
     current.messages_paging = session.messages_paging;
     if current.authority_actor != session.authority_actor {
@@ -1526,6 +1559,9 @@ pub async fn now(
     let mut effective_query = query.clone();
     effective_query.person.clone_from(&person);
     let (history, actor, owner_run) = (query.history, query.actor.clone(), query.owner_run.clone());
+    if history && actor.is_none() && owner_run.is_none() {
+        return super::attention_history::page(state, snapshot, effective_query, "now").await;
+    }
     client_snapshot_page(
         &state,
         snapshot,
@@ -2326,6 +2362,7 @@ pub fn native_slice_page_at_generation(
         "page": ClientPageInfo {
             limit, has_more, next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
     });
     if let Some(header) = header {

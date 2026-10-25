@@ -46,6 +46,99 @@ fn sync(from: &Store, from_name: &str, to: &Store) -> usize {
 }
 
 #[test]
+fn receive_preserves_peer_projection_meta_rowids_and_updates_changed_values() {
+    let source = node("person/robin");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.sqlite3");
+    let recipient = Store::open(&path, "person/recipient", Arc::new(Plain)).unwrap();
+    recipient.bind_fleet(FLEET).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    // Rowids catch REPLACE; the trigger also catches unconditional in-place UPDATE.
+    connection
+        .execute_batch(
+            "CREATE TABLE peer_meta_updates (key TEXT NOT NULL);
+             CREATE TRIGGER record_peer_meta_update AFTER UPDATE ON meta
+             WHEN NEW.key LIKE 'peer_projection_%:person/robin'
+             BEGIN INSERT INTO peer_meta_updates(key) VALUES(NEW.key); END;",
+        )
+        .unwrap();
+    let update_count = || {
+        connection
+            .query_row("SELECT COUNT(*) FROM peer_meta_updates", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    let metadata = || {
+        connection
+            .prepare(
+                "SELECT key, rowid, value FROM meta
+                 WHERE key LIKE 'peer_projection_%:person/robin' ORDER BY key",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let mut exchange = source
+        .export_replication_exchange(FLEET, &recipient.replication_inventory().unwrap())
+        .unwrap();
+    exchange.projection_registry_digest = None;
+    recipient
+        .receive_replication_exchange("person/robin", FLEET, &exchange)
+        .unwrap();
+    let first = metadata();
+    assert_eq!(first.len(), 4);
+    recipient
+        .receive_replication_exchange("person/robin", FLEET, &exchange)
+        .unwrap();
+    assert_eq!(metadata(), first);
+    assert_eq!(update_count(), 0, "identical metadata must not be rewritten");
+
+    exchange
+        .projection_digests
+        .insert("example".into(), "changed".into());
+    exchange.projection_versions.insert("example".into(), 2);
+    exchange.projection_registry_digest = Some("changed-registry".into());
+    exchange.inventory.digest = "changed-inventory".into();
+    recipient
+        .receive_replication_exchange("person/robin", FLEET, &exchange)
+        .unwrap();
+    let expected = BTreeMap::from([
+        (
+            "peer_projection_digests:person/robin",
+            serde_json::to_string(&exchange.projection_digests).unwrap(),
+        ),
+        (
+            "peer_projection_versions:person/robin",
+            serde_json::to_string(&exchange.projection_versions).unwrap(),
+        ),
+        (
+            "peer_projection_registry:person/robin",
+            "changed-registry".into(),
+        ),
+        (
+            "peer_projection_inventory:person/robin",
+            "changed-inventory".into(),
+        ),
+    ]);
+    assert_eq!(update_count(), 4);
+    for ((key, rowid, value), (old_key, old_rowid, old_value)) in metadata().into_iter().zip(first) {
+        assert_eq!(key, old_key);
+        assert_eq!(rowid, old_rowid, "{key} must update in place");
+        assert_ne!(value, old_value, "{key} must accept the changed value");
+        assert_eq!(value, expected[key.as_str()]);
+    }
+}
+
+#[test]
 fn claims_replicate_between_members_and_their_logs_agree() {
     let ada = node("ada-laptop");
     let grace = node("grace-desktop");

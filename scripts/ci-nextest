@@ -58,6 +58,13 @@ if [[ -n "${CI_TEST_EXTRACTED:-}" ]]; then
 else
   selection=$(python3 scripts/ci-nextest-targets)
 fi
+# Groups that left the pull-request shards for the daily run. Only the daily shards
+# (CI_TEST_LANE=daily) select them; everything else, local runs included, leaves them out.
+daily_only=$(awk 'NF && !/^[[:space:]]*#/ { printf "%s(%s)", (n++ ? " or " : ""), $0 }' \
+  "$(dirname "$0")/../.config/daily-only.filterset")
+if [[ "${CI_TEST_LANE:-}" != daily && -n "$daily_only" ]]; then
+  selection="($selection) and not ($daily_only)"
+fi
 arguments=()
 filters=()
 while [[ $# -gt 0 ]]; do

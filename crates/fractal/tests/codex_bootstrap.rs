@@ -222,6 +222,7 @@ async fn delivery_recovery_control(
     let bootstrap_custody = Arc::new(std::sync::Mutex::new(None));
     let capture = bootstrap_custody.clone();
     let capture_root = root_path.clone();
+    let bound_store = state.store.clone();
     let app = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let delay = delay.clone();
@@ -257,7 +258,7 @@ async fn delivery_recovery_control(
     ));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix_bound(&server_socket, &state_socket, app)
+        fractal_daemon::api::serve_unix_bound(&server_socket, &state_socket, app, bound_store)
             .await
             .unwrap();
     });
@@ -887,6 +888,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     };
     let pending_count = pending.clone();
     let bound_count = bound.clone();
+    let bound_store = state.store.clone();
     let app = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let pending = pending_count.clone();
@@ -920,7 +922,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     let server_socket = socket.clone();
     let server_state_socket = state_socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix_bound(&server_socket, &server_state_socket, app)
+        fractal_daemon::api::serve_unix_bound(&server_socket, &server_state_socket, app, bound_store)
             .await
             .unwrap();
     });
