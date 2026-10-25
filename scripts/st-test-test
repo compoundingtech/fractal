@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """scripts/st-test against real repositories: the tree it signs (the head), the lag, failures, refusals."""
+import atexit
 import contextlib
 import fcntl
 import hashlib
@@ -18,6 +19,12 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+
+# The agent git guard needs a private enclosing TMPDIR for pushes to local bare fixtures.
+PRIVATE_TMPDIR = tempfile.mkdtemp()
+os.environ['TMPDIR'] = PRIVATE_TMPDIR
+tempfile.tempdir = None
+atexit.register(shutil.rmtree, PRIVATE_TMPDIR, ignore_errors=True)
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
