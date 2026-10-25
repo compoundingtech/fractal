@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
-  scripts/st-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
-  scripts/st-test --seed [REF] [--base origin/main] [--push REMOTE]
+  scripts/st-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE | --out DIR] [--attempt N] [--time-limit SECONDS]
+  scripts/st-test --seed [REF] [--base origin/main] [--push REMOTE | --out DIR]
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
 
@@ -34,6 +34,12 @@ On a host that runs the evidence log (scripts/evidence-log.service installed as 
 asks it to pull at once, without waiting: a pass counts only once the log lists it, so this saves up to one pull interval.
 ST_EVIDENCE_LOG_NUDGE (a JSON argv) replaces that command; asking never changes the result.
 
+With --out DIR every selected, relevant check is measured again, including already-covered crates, and evidence-wrap writes
+DIR/<record>.pack and DIR/<record>.json instead of importing notes or pushing. DIR is resolved from the caller's working directory
+before entering a clean worktree. --out and --push are incompatible; --seed --out exports without its usual implicit push.
+Success means the checks passed and their packs were exported, not that the verifier counts them as covered: publication and
+verification of the exported records are the publisher's responsibility. Lane-edit refusals and irrelevant checks still do not sign.
+
 It runs `nix develop` and `pnpm install` from the tree under test, on this machine, as this user, with the host's
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
@@ -43,8 +49,8 @@ summary row and, when scripts/ci-local printed its stage table, linux-gate's sta
 or to the path in ST_TEST_RUNS (`off` records nothing); scripts/st-test-report reads it against the per-PR suite's time objective
 (docs/st3/gate-evidence.md). Recording never changes the result: a file that cannot be written is one line on stderr.
 
-Exit 0 when every selected check passed and was signed; 1 when a check failed, timed out or could not be signed; 2 when it
-could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered; 4 when nothing failed but a check
+Exit 0 when every selected check passed and was signed (with --out, exported but not verified); 1 when a check failed, timed out or
+could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered; 4 when nothing failed but a check
 was not signed because the tree edits that check's lane (evidence-wrap would refuse it; CI runs it).
 """
 import argparse
@@ -937,10 +943,14 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         keys, error = only_crates(keys, args.crate)
     if error:
         return [('rust-tests', 'NOT RUN', 0, f'cannot compute the per-crate keys: {error}')], True
-    fetch_crate_notes(args.push or 'origin', keys)
-    keyed = time.monotonic()
-    missing, have = uncovered_crates(tools['evidence-verify'], directory, tree, args.base, repository if judged_by_policy(args.base) else None,
-                                     lane_base, keys)
+    if args.out:
+        missing, have = list(keys.items()), 0  # Export the whole selection, even when local notes already cover it.
+        keyed = time.monotonic()
+    else:
+        fetch_crate_notes(args.push or 'origin', keys)
+        keyed = time.monotonic()
+        missing, have = uncovered_crates(tools['evidence-verify'], directory, tree, args.base, repository if judged_by_policy(args.base) else None,
+                                         lane_base, keys)
     verified_at = time.monotonic()
     if not missing:
         return [('rust-tests', 'covered', round(verified_at - begun),
@@ -992,6 +1002,8 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
             wrap += ['--lanes-from', lane_base]
         if toolchain:
             wrap += ['--toolchain-sha256', toolchain]
+        if args.out:
+            wrap += ['--out', args.out]
         started = time.monotonic()
         signed = subprocess.run(wrap + ['--'] + RUST_TESTS_COMMAND, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -1000,11 +1012,17 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
             return (f'rust-tests:{crate}', f'FAILED ({signed.returncode})', round(time.monotonic() - started), detail), None
         try:
             record = json.loads(signed.stderr[signed.stderr.index('{'):])
-            if not record.get('verified'):
-                raise ValueError('the record did not verify locally')
-            key = keys[crate]
-            refs = [record['tag'], record['ref'], f'refs/tags/evidence/input/rust-tests/{key}/{record["record"]}',
-                    f'refs/notes/evidence-input/rust-tests/{key}/{record["record"]}']
+            if args.out:
+                # Export summaries have no refs or verification verdict: the pack has not been imported.
+                if record['check'] != RUST_TESTS or record['tree'] != tree or record['exit_code'] != 0:
+                    raise ValueError('the export summary does not match the successful run')
+                refs = []
+            else:
+                if not record.get('verified'):
+                    raise ValueError('the record did not verify locally')
+                key = keys[crate]
+                refs = [record['tag'], record['ref'], f'refs/tags/evidence/input/rust-tests/{key}/{record["record"]}',
+                        f'refs/notes/evidence-input/rust-tests/{key}/{record["record"]}']
         except (ValueError, KeyError) as error:
             return (f'rust-tests:{crate}', 'FAILED (record)', round(time.monotonic() - started), f'cannot read the signed record: {error}'[:160]), None
         return None, (refs, facts)
@@ -1035,6 +1053,8 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     detail = (f'{signed_count} of {len(selected)} crates signed from linux-gate\'s own nextest run ({have} of {len(keys)} already had a passing note)'
               if junit == report else
               f'{signed_count} of {len(selected)} crates run and signed ({have} of {len(keys)} already had a passing note); one nextest run on the workspace build')
+    if args.out:
+        detail += '; packs exported, not imported or verified'
     empty = [crate for crate in empty if crate not in listed_no_tests(args.base)]
     if empty:
         # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).
@@ -1167,7 +1187,9 @@ def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--check', action='append', default=[], metavar='NAME', help='only this check (repeatable)')
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
-    parser.add_argument('--push', metavar='REMOTE', help='push the signed notes here after they verify')
+    publication = parser.add_mutually_exclusive_group()
+    publication.add_argument('--push', metavar='REMOTE', help='push the signed notes here after they verify')
+    publication.add_argument('--out', metavar='DIR', help='rerun the selection and export packs here without importing or pushing; verification follows publication')
     parser.add_argument('--repository', metavar='OWNER/NAME', help='default: from the remote\'s GitHub URL; without it the policy is not applied')
     parser.add_argument('--rerun', action='store_true', help='run a check even when this tree already has a passing signature for it')
     parser.add_argument('--crate', action='append', default=[], metavar='NAME', help='with --check rust-tests: only these crates (repeatable)')
@@ -1175,13 +1197,16 @@ def main(argv):
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
     parser.add_argument('--seed', nargs='?', const='', metavar='REF', help='sign the per-crate rust-tests notes of REF (default: the base) instead of HEAD, '
-                        'for the crates that lack one, and push them (to origin unless --push says otherwise): what a merge-queue signer runs after a merge that moved '
-                        'a crate key or the lane, from any checkout, whatever HEAD is')
+                        'for the crates that lack one, and push them (to origin unless --push says otherwise); with --out, export every selected crate instead: '
+                        'what a merge-queue signer runs after a merge that moved a crate key or the lane, from any checkout, whatever HEAD is')
     parser.add_argument('--all', action='store_true', help='accepted, and the same as no flag: every check runs')
     parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree (a lane edit, '
                         'and with no --check a policy check that has no local command, count as covered: CI runs them); exit 0 if all are, 3 if not')
     parser.add_argument('--toolchain-sha256', help='passed to evidence-wrap: skip the nix evaluation, record this digest')
     args = parser.parse_args(argv)
+    if args.out is not None:
+        args.out = str(Path(args.out).resolve())
+        args.rerun = True
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._/-]*', args.base):
         raise Failure(f'--base {args.base!r} must be a branch or ref name (it may not start with "-")')
     unknown = [name for name in args.check if name not in LOCAL]
@@ -1196,7 +1221,8 @@ def main(argv):
             raise Failure(f'--seed {(args.seed or args.base)!r} is not a commit (fetch it first)')
         TARGET.append(text(resolved))
         args.check = [RUST_TESTS]
-        args.push = args.push or 'origin'
+        if not args.out:
+            args.push = args.push or 'origin'
     checks = args.check or [name for name in LOCAL if name not in OPT_IN]
     if args.list:
         for name in checks:
@@ -1335,6 +1361,8 @@ def main(argv):
                     wrap += ['--toolchain-sha256', args.toolchain_sha256]
                 if args.push:
                     wrap += ['--push', args.push]
+                if args.out:
+                    wrap += ['--out', args.out]
                 environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
                 environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                 if target and name in BUILDS:
@@ -1367,7 +1395,10 @@ def main(argv):
                         code = 124
                 seconds = round(time.monotonic() - started)
                 ok = code == 0
-                is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                if args.out:
+                    why = 'packs exported, not imported or verified' if ok else 'export failed'
+                else:
+                    is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
                 return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why), not ok, False
 
             # The light checks run alongside the ones that build, one after another in a lane of their own, as CI runs them on runners of
