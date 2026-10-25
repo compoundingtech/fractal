@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 import tempfile
 import unittest
 
@@ -272,6 +273,33 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(table, ['setup', 'tests', 'clippy', 'fleet-compat'])
         run, = logs.glob('run-*')
         self.assertEqual(sorted(path.name for path in run.glob('*.log')), ['clippy.log', 'fleet-compat.log', 'tests.log'])
+
+    def test_a_stopped_run_stops_the_stage_its_lane_is_running(self):
+        # clippy (in the lane) records its pid and keeps running; the tests stage ends at once, so the run waits for its lane.
+        said = ('#!/usr/bin/env bash\n'
+                'if [ "$1" = clippy ]; then echo $$ > "$CI_LOCAL_TEST_LOG.clippy"; sleep 60; fi\n'
+                'if [ "$1" = tests ]; then for i in $(seq 100); do [ -s "$CI_LOCAL_TEST_LOG.clippy" ] && break; sleep 0.05; done; fi\n')
+        (self.work / 'scripts/ci-linux').write_text(said)
+        env = {'PATH': f'{self.bin}:{self.devshell}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
+               'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
+        run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(lambda: run.poll() is None and run.kill())
+        marker = Path(f'{self.log}.clippy')
+        for _ in range(200):
+            if marker.exists() and marker.read_text().strip():
+                break
+            time.sleep(0.05)
+        clippy = int(marker.read_text())
+        time.sleep(0.5)  # the tests stage is done; the run is waiting for its lane
+        run.terminate()
+        run.wait(timeout=20)
+        for _ in range(100):
+            if not Path(f'/proc/{clippy}').exists():
+                break
+            time.sleep(0.05)
+        self.assertFalse(Path(f'/proc/{clippy}').exists(), 'the lane\'s running stage outlived the run')
+        self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
         self.stage_exits = [0, 3, 5]
