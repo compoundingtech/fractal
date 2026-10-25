@@ -137,8 +137,52 @@ POOL_WAIT_SECONDS = 5
 # compat baselines cost minutes to materialize, install and download again. They are not tracked files, so the tree stays exact.
 POOL_KEEP = ('/repos/', 'node_modules/', '/target/compat-baselines/')
 POOL_SETTINGS = {}  # the ST_TEST_* settings (pool, pool cap, signing jobs, member limit, runs file) as the caller set them: read before the seat scrub drops every ST_* name
-SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_POOL_MAX_GB', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT', 'ST_TEST_RUNS')
+SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_POOL_MAX_GB', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT', 'ST_TEST_RUNS',
+                 'ST_TEST_MAX_LOAD', 'ST_TEST_LOAD_WAIT_MINUTES')
 POOL_MAX_GB = 60.0  # all repositories' pools together under the pool directory; ST_TEST_POOL_MAX_GB (0 or off: no cap) replaces it
+
+
+# A host-local load limit (set by whoever runs the host, never in the repo): the 1-minute load average above which a run does not start its
+# heavy work. The limit is a number in ~/.config/st-test/max-load (or ST_TEST_MAX_LOAD); no file and no variable means no limit. While the load is
+# above it the run WAITS and says why every minute, up to ST_TEST_LOAD_WAIT_MINUTES (default 30), then fails with that reason: never silently.
+LOAD_WAIT_MINUTES = 30
+LOAD_ANNOUNCE_SECONDS = 60
+
+
+def load_limit():
+    value = POOL_SETTINGS.get('ST_TEST_MAX_LOAD')
+    if value is None:
+        try:
+            value = (Path.home() / '.config/st-test/max-load').read_text().split()[0]
+        except (OSError, IndexError):
+            return None
+    try:
+        limit = float(value)
+    except ValueError:
+        raise Failure(f'the host load limit {value!r} must be a number (a load average)')
+    return limit if limit > 0 else None
+
+
+def wait_for_load(limit, read_load=lambda: os.getloadavg()[0], sleep=time.sleep, clock=time.monotonic, deadline_minutes=None):
+    """Return once the 1-minute load average is at or below `limit`; say why we wait every minute; fail after the deadline."""
+    if deadline_minutes is None:
+        value = POOL_SETTINGS.get('ST_TEST_LOAD_WAIT_MINUTES')
+        try:
+            deadline_minutes = float(value) if value is not None else LOAD_WAIT_MINUTES
+        except ValueError:
+            raise Failure(f'ST_TEST_LOAD_WAIT_MINUTES={value!r} must be a number of minutes')
+    started, announced = clock(), None
+    while True:
+        load = read_load()
+        if load <= limit:
+            return
+        now = clock()
+        if now - started >= deadline_minutes * 60:
+            raise Failure(f'the host stayed above its load limit: load1 {load:.0f} > {limit:g} (host limit) for {deadline_minutes:g} min; nothing was started')
+        if announced is None or now - announced >= LOAD_ANNOUNCE_SECONDS:
+            print(f'st-test: waiting: load1 {load:.0f} > {limit:g} (host limit)', file=sys.stderr, flush=True)
+            announced = now
+        sleep(min(10, LOAD_ANNOUNCE_SECONDS))
 
 
 class Failure(Exception):
@@ -1301,6 +1345,9 @@ def main(argv):
     status = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
     if status:
         raise Failure('the checkout has uncommitted changes to tracked files; commit them first, the note is for the committed tree')
+    limit = load_limit()
+    if limit:
+        wait_for_load(limit)
     reap_stale()
     with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
         os.chmod(scratch, 0o700)
