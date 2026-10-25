@@ -32,6 +32,7 @@ fn response(digest: String) -> ReplicationExportResponse {
         exchange: ReplicationExchange {
             peer: "local".into(),
             fleet_id: FLEET.into(),
+            shard_id: None,
             schema_digest: String::new(),
             authority_digest: digest.clone(),
             graph_digest: String::new(),

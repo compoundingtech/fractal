@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check every generated PR job refuses drafts, including failure collectors."""
+"""Check PR CI jobs refuse drafts and Storybook deployment runs only on main pushes."""
 import ast
 from pathlib import Path
 import re
@@ -10,6 +10,15 @@ count = 0
 for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
     workflow = path.read_text()
     triggers = workflow.split('\njobs:', 1)[0]
+    if path.name == 'storybook-deploy.yml':
+        assert triggers.split('\non:\n', 1)[1].split('\npermissions:', 1)[0] == '  push:\n    branches: [main]\n', 'Storybook must only trigger on pushes to main'
+        assert 'pull_request' not in workflow and 'ready_for_review' not in workflow
+        assert 'destroy' not in workflow and 'pr-' not in workflow
+        assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow
+        assert 'ref: ${{ github.sha }}' in workflow and 'STAGE: main' in workflow
+        assert '  cancel-in-progress: false\n' in workflow
+        print('passed: Storybook deploy has only the main push trigger and no PR lifecycle or credentials path')
+        continue
     if not re.search(r'^  pull_request:', triggers, re.M):
         continue
     for event in ('ready_for_review', 'converted_to_draft'):
@@ -35,6 +44,6 @@ for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
         if path.name == 'fleet.yml' and name == 'linux-gate':
             assert '(always())' in expression, 'dependency failures must still reach the gate on ready PRs'
         count += 1
-    print('passed:', path.name, len(blocks), 'draft jobs suppressed; ready and converted-to-draft events included')
+    print('passed:', path.name, len(blocks), 'PR jobs checked; ready and converted-to-draft events included')
 assert count >= 20, count
 print('passed:', count, 'generated PR job conditions; absent draft identity fails closed')

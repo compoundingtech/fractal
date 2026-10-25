@@ -2,7 +2,7 @@
 
 This local Expo module is the phone's opt-in fabric carrier: an app-owned iroh endpoint and a temporary loopback HTTP listener. Each accepted TCP connection opens a fresh direct service-ALPN fabric session. The ordinary TypeScript client then uses that listener without a transport change. Normal gateway entry still rejects loopback, and a listener, a pairing credential or gateway configuration is never saved.
 
-It is opt-in at build time and at run time. Normal pod installation compiles `StFabricDisabled.swift` and needs neither Rust nor an XCFramework; `ST3_FABRIC=1` (older name `ST3_FABRIC_PROOF=1`) links the bridge. A linked bridge does nothing until the person turns Fabric on in the app (see [the app README](../../README.md#fabric-an-opt-in-carrier)); it makes no identity and starts no network monitor before then. The path monitor runs only while a bridge is open. The Debug entry `com.compoundingtech.smalltalk.starter://fabric-proof` stays development-only and is separate from ordinary pairing.
+It is opt-in at build time and at run time. Normal pod installation compiles `StFabricDisabled.swift` and needs neither Rust nor an XCFramework; `ST3_FABRIC=1` (older name `ST3_FABRIC_PROOF=1`) links the bridge. A linked bridge does nothing until the person turns Fabric on in the app (see [the app README](../../README.md#fabric-an-opt-in-carrier)); it makes no identity and starts no network monitor before then. The path monitor runs only while a bridge is open. The Debug entry `com.compoundingtech.fractal.starter://fabric-proof` stays development-only and is separate from ordinary pairing.
 
 ## Build
 
@@ -83,4 +83,4 @@ ST3_FABRIC=1 pnpm run pods
 # Use Debug, FORCE_BUNDLING=1, and leave SKIP_BUNDLING unset.
 ```
 
-This local preparation uses `com.compoundingtech.smalltalk.fabricproof` and its own URL scheme, so installation does not replace the ordinary app. Its proof link starts `com.compoundingtech.smalltalk.fabricproof://fabric-proof`. The generated local override forces Debug bundling and selects `ST3_FABRIC_OFFLINE_DEBUG=1`; Metro then omits only Expo's devtools message socket, which rejects embedded Debug bundles. Native and JavaScript Debug guards stay enabled; Release still rejects the carrier. Signing and provisioning remain local.
+This local preparation uses `com.compoundingtech.fractal.fabricproof` and its own URL scheme, so installation does not replace the ordinary app. Its proof link starts `com.compoundingtech.fractal.fabricproof://fabric-proof`. The generated local override forces Debug bundling and selects `ST3_FABRIC_OFFLINE_DEBUG=1`; Metro then omits only Expo's devtools message socket, which rejects embedded Debug bundles. Native and JavaScript Debug guards stay enabled; Release still rejects the carrier. Signing and provisioning remain local.

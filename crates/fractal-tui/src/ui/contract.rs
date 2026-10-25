@@ -1,6 +1,6 @@
-//! The shared client contract in `fixtures/clients`: what every Small Talk client shows.
+//! The shared client contract in `fixtures/clients`: what every Fractal client shows.
 //!
-//! stui writes these files and the iOS app tests against them, so both apps clean the same
+//! Fractal TUI writes these files and the iOS app tests against them, so both apps clean the same
 //! transcripts the same way, use the same words and colours, draw a conversation's entries
 //! by the same rules, and share one demo world.
 //! Run `STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract` after an intended change.
@@ -12,6 +12,10 @@ use super::view::*;
 use ratatui::style::Color;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+
+/// The lists every client offers, by name. Worktrees stays hidden until the graph models
+/// worktrees: its screens only have invented data to show (Nathan, 2026-09-28).
+const LISTS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
 
 fn root() -> PathBuf {
     PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../../fixtures/clients")
@@ -121,7 +125,7 @@ pub fn words() -> Value {
         .iter()
         .map(|tier| json!({ "id": serde_json::to_value(tier).unwrap(), "title": tier.title() }))
         .collect::<Vec<_>>();
-    json!({ "mission": mission, "agent": agent, "tier": tier, "tabs": super::screens::TABS })
+    json!({ "mission": mission, "agent": agent, "tier": tier, "tabs": LISTS })
 }
 
 /// The cleaned conversation. `at` is a local display time, so it is left out: it depends on
@@ -208,7 +212,7 @@ fn the_shared_client_contract_matches_stui() {
             .unwrap_or_else(|_| panic!("{name} is missing; run with STUI_UPDATE_CONTRACT=1"));
         assert!(
             current == text,
-            "{name} no longer matches stui; if the change is intended, run STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract and update the iOS app"
+            "{name} no longer matches Fractal TUI; if the change is intended, run STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract and update the iOS app"
         );
     }
 }

@@ -16,7 +16,7 @@ verifiers accept both predicate types:
 `https://compounding.tech/fractal/evidence/gate/v1` and
 `https://smalltalk.dev/evidence/gate/v1`. Acceptance of the old URI is the
 permanent signed-history decoder exception named in
-[#3032](https://github.com/compoundingtech/smalltalk/issues/3032); existing signed
+[#3032](https://github.com/compoundingtech/fractal/issues/3032); existing signed
 attestations are never rewritten. All other predicate URIs are rejected.
 The Rust observers and `scripts/evidence-sign` write
 `https://compounding.tech/fractal/evidence/gate/v1`. The dual-URI verifiers
@@ -600,10 +600,9 @@ environment fingerprint, so a check's note can carry more over time; the reposit
 which inputs a check must carry.
 
 The `linux-gate` aggregate records only the members of `linux-gate`: it leaves out the evidence gate jobs, the
-`fractal-web` lane and the two separate checks `genie-freshness` and `typescript-client`, which have their own notes
+`fractal-web` lane and the three separate checks `genie-freshness`, `ci-script-tests` and `typescript-client`, which have their own notes
 (the note job still waits for them, to publish those notes). It refuses, making no note, when the gate of a member
-said skip (`evidence-gate-linux-gate`, `evidence-gate-mail-redelivery-canaries`, `evidence-gate-isolation-vm`; a gate
-added later counts too unless it belongs to a separate check) or when a member reports `skipped` (only the merge-queue
+said skip (`evidence-gate-linux-gate`; a gate added later counts too unless it belongs to a separate check) or when a member reports `skipped` (only the merge-queue
 shards may, outside a merge group), so a member that did not run never reads as success. A skip taken by the
 `genie-freshness` or `typescript-client` gate does not stop it.
 
@@ -630,7 +629,7 @@ lower-case names with nonempty string values (a shard number, a test set). It ca
 one, and anything malformed makes no note. The aggregate note ignores the jobs of the separate `fractal-web` lane
 (`fractal-web` and `fractal-web-*`) and its gate's decision: that lane is skipped whenever no web path changed, which must not
 stop the `linux-gate` verdict, and it has its own whole-check note (below).
-It ignores `genie-freshness` and `typescript-client` the same way, and their gates' decisions.
+It ignores `genie-freshness`, `ci-script-tests` and `typescript-client` the same way, and their gates' decisions.
 
 The `fractal-web` lane runs only when web paths changed, in one shard on pull requests and two on the merge queue (when kit
 inputs changed). Each `fractal-web-execution` shard signs its own result (check `fractal-web`, command `["bash",
@@ -861,12 +860,12 @@ check for the typed `nix` observation is a later slice, agreed with the Nix prod
 
 ## Evidence gate and the skip policy
 
-Six non-required jobs, `evidence-gate-<check>` for each required check (`linux-gate`,
-`typescript-client`, `isolation-vm`, `genie-freshness`, `mail-redelivery-canaries`) and for the `fractal-web` lane, decide whether
+Four non-required jobs, `evidence-gate-<check>` for each required check (`linux-gate`,
+`typescript-client`, `genie-freshness`) and for the `fractal-web` lane, decide whether
 a trusted note already covers the run's tree. They hold `contents: read` only, write nothing and dispatch
 nothing, and every problem becomes `decision=run`. **Every required check now consumes its gate's decision**: `genie-freshness` and `typescript-client`
 (by skipping their steps), and the Linux group (below); the `fractal-web` execution shards consume theirs the same way
-(its entry is shadow, so it never says skip).
+(enforced for pull requests since 2026-10-23, like the others).
 
 ### What a skip does
 
@@ -893,15 +892,15 @@ writes the record id to the job summary. The wiring is deliberately conservative
   note job `needs` every `evidence-gate-*` job, so it sees them all: the `linux-gate` note refuses when any gate but
   `fractal-web`'s says skip, and the `fractal-web` note when that one does. Each
   gate a job reads is one of that job's own `needs`, which a test checks.
-- A skip of `genie-freshness` skips the tests of this machinery too (`ci-evidence-gate-test`,
-  `evidence-verify-test`, `genie --check`) for that tree. That is accepted because the note is for the same tree and
+- A skip of `genie-freshness` or `ci-script-tests` skips the tests of this machinery too (`evidence-verify-test`, `genie --check` and the
+  rest of `genie-freshness`; `ci-evidence-gate-test` and the other script tests in `ci-script-tests`) for that tree. That is accepted because the note is for the same tree and
   a change to those files is a protected path that always runs in full; a reader must not assume they ran.
 - What is protected and what is bound otherwise. The protected paths are the gate, the verifier, both of their
   tests, the policy, the evidence keys, the workflow source (`fleet.yml.genie.ts`), the helper module it imports
   (`workspace-ci.ts`) and the generated `fleet.yml`. The signing and publishing wrapper scripts are not on that list:
   they are bound by the note itself, which carries their `wrapper_sha256`, so a changed wrapper cannot produce a note
   the policy accepts.
-- A required check that is a job, `isolation-vm` and `mail-redelivery-canaries`, never reports `skipped`; under an
+- A required check that is a job (`genie-freshness`, `typescript-client`) never reports `skipped`; under an
   enforced skip it reports success with its steps skipped, so once a check is enforced the name means "covered by
   a trusted note", not "ran". Whoever reads a result (including the observer) must treat such a run as covered, not
   freshly run; the job's summary says so (`evidence covered by a trusted note`).
@@ -920,20 +919,16 @@ writes the record id to the job summary. The wiring is deliberately conservative
 
 `linux-gate` is an aggregate of jobs that are not themselves required checks, so those jobs skip at the **job**
 level, which allocates no runner at all: `linux-tests` and its three shards, `linux-clippy` and
-`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. `linux-test-build` feeds the test shards,
-`mail-redelivery-canaries` and `isolation-vm`, so it skips only when **every one of them** is covered; that
-condition is derived from theirs in the generator, never written twice. The two jobs that are required checks in
-their own right keep running and end in success with their steps skipped, so a required check never reports
-`skipped`: `mail-redelivery-canaries` is covered by its own note or by `linux-gate`'s (the aggregate note proves
-its canaries passed), `isolation-vm` by its own note; both gate their first step, the pre-check that the shared
-build succeeded.
+`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. `linux-test-build` feeds the test shards, so
+it skips only when **every one of them** is covered; that condition is derived from theirs in the generator, never
+written twice. The VM tests (`isolation-vm`) and the mail redelivery canaries were members too, and required checks of
+their own, until 2026-10-23: they now run once a day (`daily-long.yml`), and a red daily run comments on its one open issue.
 
 `linux-gate` itself still runs always and still fails on anything but success, with one addition: it reads its gate's
 decision, and a member that reports `skipped` is accepted only when that decision was exactly `true`, only
 in the **positions** of the stages that are skipped at job level (the build, the test shards, clippy and fleet
 compatibility, derived in the generator from the very list that skips them), never for a failure or a
-cancellation, and the stage counts are still enforced. `upgrade-impact` and `mail-redelivery-canaries` are never
-accepted as skipped, so a condition that skipped them for any other reason cannot be waved through just because a
+cancellation, and the stage counts are still enforced. `upgrade-impact` is never accepted as skipped, so a condition that skipped them for any other reason cannot be waved through just because a
 note exists. A skipped job reports `skipped` to
 the aggregate evidence-note producers, which refuse to sign for a skipped member, so a skipped run writes no
 fresh `linux-gate` note.
@@ -979,7 +974,7 @@ key stops the skip by itself. Paths are literal and relative; an under-declared 
 keeps running the real job for one run in N even when a note matches, chosen by a hash of the check, the key and
 the head, so a retry behaves the same; the gate prints `decision=run` with a reason starting `sampled`.
 
-`linux-gate` declares its inputs too (shadow only: `enforce` stays false, `sample_one_in` 5). The list is the Rust test stage's
+`linux-gate` declares its inputs too (enforced for pull requests since 2026-10-23, `sample_one_in` 5). The list is the Rust test stage's
 (`doc/fleet/factory/nix-evidence/rust-test-declared-inputs`, a textual scan of what the Rust sources name) plus what the other
 members of the aggregate read: the whole of `.github` (workflows, the clippy and fleet-compat baselines) and `scripts` (the stage
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
@@ -993,7 +988,7 @@ artifact name, and `upgrade-impact`, which reads the fragments, always runs. The
 the first runs are shadow: a miss shows up as a satisfied note beside a failing real job, and `scripts` and `.github` are declared
 whole until a per-file list is reviewed against a trace of what each stage opens.
 
-`fractal-web` declares its inputs too (shadow only, `sample_one_in` 5). The list is every path the lane's detector
+`fractal-web` declares its inputs too (enforced for pull requests since 2026-10-23, `sample_one_in` 5). The list is every path the lane's detector
 (`scripts/ci-fractal-web-changes`, embedded in `fractal-web-changes`) matches, written as the directories and files that exist. That
 includes four paths the lane reads although no web source names them, which the detector now matches too: `apps/ios/package.json`
 (a workspace member, so the frozen install reads it), `docs/st3/client-v0/fixtures` (an SDK unit test opens `timeline-conformance.json`),
@@ -1014,16 +1009,21 @@ those scripts. The aggregate `linux-gate` note signs its input key like a stage 
 before the partitions (`needs.evidence-gate-linux-gate.outputs.skip` on the shards, clippy and fleet-compat), so the four shards
 share one key.
 
-`isolation-vm` and `mail-redelivery-canaries` declare the same list (shadow only too: `enforce` stays false, `sample_one_in` 5),
-so the three lanes share one input key. Both are members of the `linux-gate` aggregate, whose list already covers what its members
-read, and neither reads anything outside it. The canaries are `scripts/ci-linux mail-redelivery-canaries`, which runs
-`scripts/ci-mail-redelivery-canaries`: a fixed set of the Rust tests from `linux-test-build`'s archive, with the `ci` profile of
-`.config/nextest.toml`. `isolation-vm` builds the two VM drivers from `flake.nix`, `flake.lock`, `nix/transport-isolation-vm.nix` and
-`nix/sekrets-vm.nix` (the `pty` package is a flake input), the provider components from the workspace's Rust sources, and runs the
-same archive and the `sekrets-st3` binary of the same build, with only `Cargo.toml` copied into the VM; its other steps are
-`scripts` and the baselines under `.github`. Each job signs its key itself (`STEP_CHECK` and `STAGE_JOB` are the policy's check
-names, and both steps set `PROJECT_BASE_SHA`), and the aggregate job's publish step indexes every accepted record with a key, so
-nothing in the workflow changes.
+**`ci-script-tests`: the CI scripts' self-tests, keyed on what they read.** `genie-freshness` used to run every self-test of the CI machinery with the
+whole tree as its key, so every pull request paid for them (about 7 minutes). Measured with `strace` (2026-10-23), 44 of the 47 tests read only
+`scripts/`, `.github/`, `.st/`, `nix/` and about fifteen root and config files; they are most of the test time (`ci-evidence-gate-test` alone is
+two minutes). They now are the check `ci-script-tests` (`scripts/ci-script-tests`), whose skip-policy entry declares exactly those paths as `inputs`:
+a pull request that touches none of them reuses an earlier signature. The check runs the tests in a **sparse copy of the tree holding only the declared
+inputs** (`scripts/ci-sparse-tree`, a one-commit git repository; the megarepo members under `repos/` are linked in, pinned by `megarepo.lock`), so a
+test that reads anything else fails instead of passing on a stale signature: the list cannot drift from what the tests read, and adding a read outside it
+is a reviewed change to the list (policy, `.st/required-lanes.json`, and the list in `scripts/evidence-verify-test`). The four tests that read
+`crates/`, `apps/` or the whole tree (`evidence-verify-test`, `check-ci-test-paths`, `ci-fractal-web-test`, `rust-test-keys-test`) stay in `genie-freshness` with the lints, the
+licenses and `genie --check`; its key is still the whole tree and its run is about a minute. Both scripts run their tests in parallel
+(`scripts/ci-parallel-tests`, `GENIE_FRESHNESS_JOBS`, default 6). The new check has a gate job, a workflow job, a lane, a `scripts/st-test` entry and the
+same levels as `genie-freshness`; it is **not a required context of its own** (a head from before the check existed has no run of it, and a required context would block every such head): the `linux-gate` job, which every head reports and which always waits for the long stages, needs it and fails the gate when it failed or was cancelled (`skipped` counts only when its own gate decided to skip), so new heads enforce it and old heads are unaffected.
+
+`isolation-vm` and `mail-redelivery-canaries` had entries of their own with the same list until 2026-10-23, when they moved to the daily
+run; they have no policy entry now, so nothing on a pull request or in the queue waits on them.
 
 The projection reads names as bytes and passes them NUL-terminated both ways (`ls-tree -z`, `update-index -z`),
 so a newline in a name cannot split one file into two entries; symlinks and gitlinks keep their modes. When none
@@ -1051,9 +1051,7 @@ checked. `observed` (the central observer's record of a finished job) and `wrapp
 as `fleet/ci`) are listed for **every** required check, each with the exact command that producer records:
 - `linux-gate`: `["linux-gate", "aggregate", <the aggregate's needed jobs, sorted>]`, without the gate jobs, `fractal-web-*`,
   `genie-freshness` and `typescript-client`;
-- `mail-redelivery-canaries`: the stage command `["bash", "scripts/ci-linux", "mail-redelivery-canaries"]`;
-- `genie-freshness`: `["bash", "scripts/ci-genie-freshness"]`; `typescript-client`: `["bash", "scripts/ci-typescript-client"]`;
-  `isolation-vm`: `["isolation-vm", "nixos-test-driver", "transport-isolation-vm", "sekrets-vm"]`;
+- `genie-freshness`: `["bash", "scripts/ci-genie-freshness"]`; `ci-script-tests`: `["bash", "scripts/ci-script-tests"]`; `typescript-client`: `["bash", "scripts/ci-typescript-client"]`;
 - `fractal-web` (shadow, `wrapper` only): `["fractal-web", "aggregate", "fractal-web", "fractal-web-changes", "fractal-web-execution"]`,
   the whole-check note the aggregate note job signs from the lane's jobs, which must also carry `kit_shard_count`, `shard_results`,
   `kit_inputs`, `kit_play_set` and `app_test_set`. A shard's own note (`["bash", "scripts/ci-fractal-web"]`) does not match it.
@@ -1074,16 +1072,25 @@ A kind's rule may also name `by_level`: for one signer level (the first part of 
 host-signed local note (its command is the `nix develop ...` line `scripts/st-test` runs) can satisfy a check whose CI step wrapper records a
 different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
-`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only.
+`host` level is admitted for the `wrapper` kind of `genie-freshness`, `ci-script-tests` and `typescript-client`, for pull requests only.
 A level's rule may also say `"lane": true` (default false): that level's notes are then held to the lane of the check in
 `.st/required-lanes.json` at the same accepted base as the policy, exactly as `--lanes-from` holds any note: the tree must not change
 the lane's definition paths (`definition_changed`) and the note must carry that base's `lane_definition_sha256` (`wrong_definition`); a base
-without a lane for the check refuses such a note (`no_lane`). Other levels are unaffected. The `agent` level (below) uses it.
+without a lane for the check refuses such a note (`no_lane`). With `--lane-base COMMIT` the definition is the one at that commit instead
+(the lane file must be the same at both; see "Which lane definition a pull request is held to"). Other levels are unaffected. The `agent`
+level (below) uses it.
 
 A check may also name `events` itself (optional; the same two values). It limits the runs ANY note for that check may skip, whoever signed it,
 and a signer level's own `events` can only narrow it further (the verifier reports the intersection, which may be empty: then nothing skips).
 Absent means every event the gate allows. This is how a check is enforced for pull requests while the merge queue keeps testing the combined
 tree: `"enforce": true, "events": ["pull_request"]`.
+
+The `queue` level is for a merge-queue signer: a key held in an account of its own, away from every agent seat, that fetches main and the
+pull request heads itself and signs the merged tree the queue will test. Every check the `host` level signs admits it for the `wrapper`
+kind with the host's command and inputs, `"events": ["merge_group"]` and `"lane": true`, so a queue note never covers a pull request and a
+tree that edits its own lane never skips on one. It is inert until a check's own `events` gains `merge_group`: today every check lists
+`pull_request` only, so the intersection is empty and a queue note skips nothing. That flip is made per check, on its own measured trigger,
+and `.st/evidence-keys` names the key (a `queue/NAME` line) only once it exists; deleting that line revokes it.
 
 #### Input values (`input_order`, `shard_inputs`)
 
@@ -1123,14 +1130,26 @@ note covers.
 | Check | `enforce` | `events` | `sample_one_in` | Since |
 | --- | --- | --- | --- | --- |
 | `typescript-client` | true | `pull_request` | 5 | this change |
-| `genie-freshness`, `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |
-| `fractal-web` (whole-check note; one shard's note never counts) | false | - | 5 | - |
+| `fractal-web` (whole-check note; one shard's note never counts) | true | `pull_request` | 5 | 2026-10-23 |
+| `linux-gate` | true | `pull_request` | 5 | 2026-10-23 |
+| `genie-freshness` | true | `pull_request` | 5 | 2026-10-23 |
+| `ci-script-tests` | true | `pull_request` | 5 | 2026-10-23 |
 
 `typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
 trusted note, 254 of which would have skipped (the rest were sampled or touched a protected file), and not one satisfied note sat beside a failing
 real job; the published notes' shadow verification (`evidence-shadow v1`) was `ok` for every lane in every merge-group run since it landed. The
 sampled one in five keeps comparing the note with a real run. Each further check is its own reviewed change to this table, the policy and the
 `enforced` lists in `ci-evidence-gate-test` and `evidence-verify-test`.
+
+### Which checks our pull requests skipped (`scripts/evidence-skip-report`)
+
+`scripts/evidence-skip-report [--hours 24] [--actor LOGIN]... [--receipts FILE]... [--markdown]` counts, for the pull request runs in the
+window (started by the given accounts), each check as `skipped` or as run, and why it ran: `lane_edit` (the pull request changes a file
+of the check's lane, so a local run could not sign it), `merge_tree` (the gate asked about the merge tree, `tree_of=merge`, because a
+protected file changed since the branch point, an author is not listed or the branch is too far behind, and no note covered it), `not_signed` (no note covered the tree although the lane is untouched: pushed
+unsigned), `failed` (the note recorded a failure), `protected` (a file that decides skipping changed), `sampled` (the one-in-five canary),
+`shadow` (the skip is not turned on) or `other`. It lists the not-signed pull requests with their branch and, from pre-push receipts
+(JSON lines with `branch` and `agent`), the seat that pushed them. Read only; it reuses `scripts/evidence-flip-ready`'s GitHub reads.
 
 ### When a check is ready to flip (`scripts/evidence-flip-ready`)
 
@@ -1149,7 +1168,10 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
   job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red is hidden only when a member that a skip skips
   (the jobs whose `if` reads `needs.evidence-gate-linux-gate.outputs.skip`: `linux-test-build`, `linux-tests` and its shards,
   `linux-clippy`, `linux-fleet-compat`) failed or was cancelled; a red from a member that always runs (`upgrade-impact`) would show
-  under enforce too, and is reported as `visible_red`, which does not block.
+  under enforce too, and is reported as `visible_red`, which does not block. A check with no job of its own (the per-crate
+  `rust-tests`) is judged by the jobs its skip skips, those whose `if` reads `needs.evidence-gate-rust-tests.outputs.skip`
+  (`linux-test-build`, `linux-tests` and its shards; not the `linux-gate` verdict, which reads it in a step only): its real result
+  is `failure` when one of them failed or was cancelled, and that red is hidden. While no job skips on it, it is not ready.
 
 A check can also carry preconditions on its own policy entry at origin/main, whatever its decision lines say. `linux-gate` has one:
 its clippy stage ratchets against a base, so it is not ready until the policy requires `clippy_base_sha` of both its `host` and `agent`
@@ -1176,7 +1198,7 @@ accepted base like everything else here. Nothing calls it yet and no check sets 
 asserts that every committed check is `off`. Making any check `reject` is a separate reviewed change, and making it a required status
 check is a repository ruleset change that is not made here. A pass for a tree is never evidence for the combined tree the merge queue tests.
 
-### Lane definitions (`.st/required-lanes.json`, nothing reads it yet)
+### Lane definitions (`.st/required-lanes.json`)
 
 A note says a check passed; what the check RAN is decided by scripts that live in the tree under test, so an agent could change them and still hold a
 valid note. `.st/required-lanes.json` (read from the accepted base, strictly validated) names, per lane, the exact `argv`, the `definition_paths`
@@ -1185,10 +1207,12 @@ valid note. `.st/required-lanes.json` (read from the accepted base, strictly val
 IDENTICAL in the verified tree and at BASE, otherwise `definition_changed` (the change edits its own checker, so the signed path is refused and CI
 runs); and the note must carry `lane_definition_sha256`, the digest of those blobs at BASE plus the argv, otherwise `wrong_definition`. A check with
 no lane entry is `no_lane`; a broken lane file or a definition path missing at the base is an error (exit 2 under `--require-all`), never a reject.
-The committed file lists the two lanes `scripts/st-test` can run today, with the same argv (a test pins that) and deliberately wide definition paths
-(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for genie-freshness): a change to any script then always runs in CI. They are to be tightened
-only with a read trace of the lane (a later change). No producer writes the digest yet, nothing passes `--lanes-from`, and no gate reads the file, so
-this changes no behaviour; when a gate does read it, `.st/required-lanes.json` must join that gate's protected paths.
+The committed file lists every lane `scripts/st-test` can run, with the same argv (a test pins that) and deliberately wide definition paths
+(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for most lanes): a change to any script then always runs in CI. They are to be tightened
+only with a read trace of the lane (a later change). The file is in use: `scripts/st-test` and `scripts/evidence-wrap` write the digest, the
+verifier holds every lane-bound signer level (`"lane": true`) to it, and the gate reads it from the base, so `.st/required-lanes.json` is one of
+the gate's protected paths. A pull request's head is held to the definition at its branch point (see "Which lane definition a pull request is held
+to").
 
 Producer half: `scripts/evidence-wrap --lanes-from BASE` (and `scripts/st-test`, which passes its base for every check the base's lane file defines)
 refuses any command that is not the lane's argv, refuses a tree whose lane definition differs from BASE (nothing is signed; CI runs the check, and the
@@ -1296,6 +1320,27 @@ percentile 11 and the 99th 22, so the bound refuses only outliers. The merge que
 limits how much a green pull request can differ from what lands, not what lands. The number lives in the gate (read from the accepted base,
 a protected path), so changing it is a reviewed change like any other.
 
+### Which lane definition a pull request is held to
+
+A lane's definition paths are wide (all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` and the nextest and clippy settings for the Rust
+lanes), and main changes one of them in more than a third of its merges (197 of 502 in the week to 2026-10-23). Compared with main's tip, a
+branch that is merely behind such a merge reads as editing its lane, so its lane-bound note never counted, and a note signed against the tip
+stopped counting as soon as main moved again. A lane edit is therefore judged by the pull request's OWN change (Nathan, 2026-10-23):
+when the gate uses the head tree, it passes the branch point (`git merge-base BASE HEAD`) to the verifier as
+`--lane-base`, and the head is held to the lane's definition at that commit. The definition paths must be byte-identical in the head and at
+the branch point (`definition_changed` otherwise: the pull request edits its lane, CI runs it) and the note must carry the branch point's
+`lane_definition_sha256` (`wrong_definition` otherwise). The verifier refuses a lane base that is not an ancestor of the base, and one whose
+`.st/required-lanes.json` differs from the base's (`definition_changed`), so the argv and paths are the base's either way; the gate never
+uses a head tree whose branch point has another lane file anyway (it is a protected path). What this admits, stated plainly: a note made
+with an older lane definition that main had accepted, for a pull request that changed none of it; the merge queue still tests the
+integrated tree with today's definition, `pull_request` only, sampling unchanged. A merge-tree run (a fallback, or a branch that holds the
+base) is held to the base as before. To keep the head tree the gate does not fetch the base again at depth 1 in head mode (that would cut the
+history the ancestry check reads).
+
+`scripts/st-test` signs and reports the same way: it takes the branch point of the commit it signs (the base itself when the branch holds the
+base's tip, or when the lane file changed on main since the branch left it), judges a lane edit against it, passes it to `evidence-wrap
+--lanes-from` (so the note carries its digest) and asks the verifier with `--lane-base`, in a run and under `--status`.
+
 ### Host keys
 
 Our own machines are trusted to sign what they run. `scripts/evidence-keygen` makes a host's key, a scratch
@@ -1324,9 +1369,10 @@ Agents push signatures (Nathan, 2026-10-19). An agent signing account has its ow
 `scripts/evidence-keygen --level agent --name ALIAS` under that account (the alias is invented, never a seat or host name; keep the
 alias-to-account mapping private). Its line goes into `.st/evidence-keys` with a pull request, like a host key, and is read from the
 accepted base, so a change can never vouch for its own key. The skip policy admits `agent` exactly where it admits `host` (the `wrapper`
-kind of `genie-freshness` and `typescript-client`, the `scripts/st-test` command, `pull_request` only, never `observed` and never the merge
-queue) with one addition, `"lane": true`: an agent note must be signed against the lane definition of the accepted base, so a tree that
-edits the lane's own scripts never skips on an agent's note. The trust is still cooperative (the key's account runs the code it signs
+kind of `genie-freshness`, `ci-script-tests` and `typescript-client`, the `scripts/st-test` command, `pull_request` only, never `observed` and never the merge
+queue) with one addition, `"lane": true`: an agent note must be signed against the lane definition of the accepted base (of the pull
+request's branch point, for a head tree: see "Which lane definition a pull request is held to"), so a tree that edits the lane's own scripts
+never skips on an agent's note. The trust is still cooperative (the key's account runs the code it signs
 for); what the separate level adds is the lane binding and revocation per account: deleting one `agent/...` line from `.st/evidence-keys`
 on main stops every note that key signed from counting, for the next run after that change merges, without touching any other agent or
 host. Revocation needs no ref deletion: the notes stay, they simply no longer verify.
@@ -1340,13 +1386,22 @@ the record it used.
 
 ### Running the checks locally (`scripts/st-test`)
 
-`scripts/st-test` runs each required check that has a local command (today `typescript-client`, `genie-freshness`,
-`mail-redelivery-canaries` and `linux-gate`, in that order; `--list --all` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
-records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
+`scripts/st-test` runs the whole per-PR suite: each required check that has a local command (today `typescript-client`, `genie-freshness`, `ci-script-tests`
+and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and means the same) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
+records the exit code and output digest. The checks that do not build (`typescript-client`, `genie-freshness`, `ci-script-tests`) run alongside
+`linux-gate`, one after another in a lane of their own, as CI runs them on runners of their own: their output is kept and printed after
+linux-gate's, never interleaved, and the summary lists every check as before (`ST_EVIDENCE_SERIAL=1` runs them one after another). The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
-the integrated tree, and a pass of the merge tree is not made here. The command always runs in a fresh
-throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. When that tree has a
+the integrated tree, and a pass of the merge tree is not made here. The command always runs in a clean
+worktree of that commit, so untracked or ignored files in your checkout cannot change the result. The worktree is one of a small pool
+of persistent ones per repository (`~/.cache/st-test/<hash of the git common dir>/tree-N`), each held by an flock while a run uses it
+(a run waits for a free one and never shares one with a concurrent run); before each run the tree is reset to the commit and stripped of
+untracked and ignored files except the inputs that cost minutes to fetch again (the megarepo members under `repos/`, every `node_modules/`
+and `target/compat-baselines/`), and its tracked files must equal the commit (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
+fingerprints and sccache's absolute-path keys stay valid and a second run is warm. `ST_TEST_TREES` sets the pool size (default: the
+host's heavy slots from `~/.config/cargo-heavy-slots`, plus one; `off` runs in a fresh throwaway worktree as before) and `ST_TEST_POOL`
+its directory. When that tree has a
 `megarepo.lock`, its members are materialized under `repos/` first with the command CI's `megarepoApplyStep` runs (`mr apply`
 from the flake's effect-utils pin; a test pins the two together): `genie-freshness` imports `repos/effect-utils`, and the dev
 shells only warn when it is missing. If that fails, no check runs and nothing is signed. A failing run is
@@ -1359,7 +1414,80 @@ run with `--push` then starts that unit without waiting (`systemctl --user start
 `ST_EVIDENCE_LOG_NUDGE`): a pass counts only once the log lists it, so the agent's record is logged in seconds instead of at the next
 2-minute pull. The pull itself is the unit's, with the log key's grant; st-test never signs the log. Asking is best effort and never
 changes the result.
+A check the tree already has a passing signature for (the verifier's answer, the same one `st-test` asks after a run) is not run again:
+it prints `already signed` and, with `--push`, pushes that note as it is, so re-running on an unchanged tree is near instant. A failed
+record is not a signature. `--rerun` runs the check anyway. The megarepo members are fetched only once a check has to run.
+Every check runs with one fixed `PATH` (`~/.local/bin`, `~/.cargo/bin`, `/run/current-system/sw/bin`, `/nix/var/nix/profiles/default/bin`, `/usr/bin`,
+`/bin` and the directory of `nix`, those that exist) instead of the caller's (`~/.cargo/bin` stays because the clippy ratchet's baseline holds
+the `clippy 0.1.97` that `cargo clippy -V` prints with it, not the longer one it prints without): cargo's build scripts record `PATH`, so two seats whose
+PATHs differ would otherwise rebuild nearly the whole workspace in the same pool tree. `ST_EVIDENCE_PATH=keep` leaves the caller's `PATH`.
+All the repositories' pools together are kept under `ST_TEST_POOL_MAX_GB` (default 60; `0` or `off` for no cap): before a run starts, with its own
+tree already held, `st-test` removes the least recently used trees and their targets whose lock is free, oldest first, until the pool directory
+(`~/.cache/st-test`) fits, never one in use, and says on stderr what it removed. The per-target guard (below) stays. A run can exceed the cap by its own growth (one run's tests, clippy and fleet-compat builds end near 60 GB with incremental
+compilation, which the checks now turn off as CI does), so size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus about 60. Where cargo's
+`build-dir` points elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`), the intermediates live there, not in the pool, and the cap does not count them.
+`scripts/ci-local` (what the Linux gate stages run through) measures and prints every time: the setup before the stages, each stage's start,
+end and seconds, and the time it spent waiting in the build admission queue (the shim's `cargo: waiting in order` / `got build slot` lines
+get a UTC stamp, and the waits are counted and added up per stage), in a table at the end. Each stage's output is also kept in
+`~/.cache/ci-local-logs/run-TIME-PID/STAGE.log` (`CI_LOCAL_LOG_DIR` names another place; the latest 10 runs stay), because the scratch home
+of the stages is removed afterwards.
+**The tree it signs is the tree the CI gate will judge.** Usually that is the pushed head. But when protected files moved on main since the branch
+point (or the branch is more than `HEAD_TREE_MAX_BEHIND` commits behind), the gate falls back to the MERGE tree (`head_tree=fallback:...` in its
+output), which a signature on the head does not cover. `st-test` asks the base's own `scripts/ci-evidence-gate` (`branch_point_verdict`, the function
+`choose_tree` calls: one rule, not a copy). When it says fallback, `st-test` makes the merge of the head with the base as a commit (`git merge-tree`,
+nothing is checked out in your clone), signs and tests THAT tree in its pool tree, and says so; if the branch does not merge cleanly it refuses and tells
+you to merge the base into the branch first. `st-test --status`, which the pre-push hook asks, judges the same tree, so a push is refused when the tree CI
+will judge is not covered even if the head tree is.
+`scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
+counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); unless `--check` names checks, every check of the skip
+policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
+
+**An agent's push is refused unless its tree is covered.** Our agents run the tests deliberately, as part of their work, with
+`scripts/st-test --push origin`, which signs what it ran. When `ST_AGENT` is set and this machine's signer is listed in `.st/evidence-keys` on
+main, the pre-push hook only asks `st-test --status` about HEAD's tree. Covered, and the push goes silently (receipt `covered`). Not covered,
+or the status cannot be read, and the push is refused (receipt `refused`, with the uncovered checks): the hook prints the status and the command to
+run, and never signs anything itself. That command is long (it builds and tests the Rust workspace, and the machine's build cap queues
+it): it is run as a normal long or background shell command, and the agent waits for it. `ST_SKIP_EVIDENCE=1` and `ST_EVIDENCE_LOCAL=off` do not
+apply to such a push. Only in an emergency, `ST_EVIDENCE_OVERRIDE='reason'` lets it go: one line is printed and the receipt records outcome
+`override` with the reason; `git push --no-verify` stays git's own escape. A machine without a signer, or with one not listed on main, and a person's
+push (no `ST_AGENT`) keep the behaviour below: nobody is refused for lacking a key. The installed stub blocks a push only on the hook's own refusal
+(its exit 3); any other outcome, a crash included, lets the push go. A stub written before this change discards every exit code: it is replaced on
+the next `nix develop` from a tree that has the new `scripts/install-git-hooks`, and by running that script from main.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not).
+The check that builds the Rust workspace (`linux-gate`) builds in one cargo target per pool tree kept between runs,
+`~/.cache/st-test/<hash>/target-N` (outside the tree, so the cleaning keeps it; `ST_EVIDENCE_TARGET=PATH` names one shared target for all
+trees instead, which one run at a time builds and tests in: its lock is exclusive for the whole run, because two runs on different
+trees sharing it once tested each other's binaries; `off` builds in the tree itself; a `CARGO_TARGET_DIR` you set is left alone), so a run does not start cold: a tree's path
+is the same every run, so the dependencies, build scripts and unchanged workspace crates are reused.
+Operations' terms: it is removed before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it), it is never
+pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
+no longer used by default and can be deleted.
+**The host's build cap governs the checks that build.** Each runs inside a `builds.slice` scope (`systemd-run --user --scope
+--slice=builds.slice`), so everything it starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own
+cargo, the dev shell's sccache client), and each cargo command inside takes the host's build slots through the cargo admission shim like any
+build. It holds no heavy-slot ticket for the whole check (`cargo --stage-slot`): the tests run under the test guardian
+(`scripts/st3_test_process.py`), which detaches from its parents, and the shim lets a cargo command skip the queue under a held stage only
+when the stage is its ancestor, so the guardian's cargo commands queued for the one heavy slot their own stage held until the stage limit
+killed it (2026-10-23, on a build host: a canaries stage killed at 2400 s having built nothing). Only what starts `evidence-wrap` changes; the command it
+records and signs does not. A host without a user systemd bus runs the check as before and says so on stderr; `ST_EVIDENCE_GOVERN=off` does the
+same.
+
+**How long a run takes, and the objective.** A full warm run of the per-PR suite (`scripts/st-test` with no `--check` and no `--crate`,
+every default check including the per-crate `rust-tests` signing, on a pool tree whose kept target already holds a build) takes 12 minutes
+(720 s) or less on a dev box. It is in breach when the p90 of those runs is over 12 minutes, or when any one of them takes over 15 minutes
+(900 s). So that this is measured rather than remembered, every run that reaches its summary appends one JSON line to
+`~/.local/state/st-test/runs.jsonl` (under `$XDG_STATE_HOME` when that is set; `ST_TEST_RUNS=PATH` names another file, `ST_TEST_RUNS=off`
+records nothing; it is read before the seat scrub, like the other `ST_TEST_*` settings, so the checks never see it). One write with
+`O_APPEND`, so concurrent runs never interleave; a file that cannot be written is one line on stderr and never changes the exit code. A
+record (`"v": 1`) has `started` and `ended` (UTC, from before the base fetch to the summary), `total_s` (monotonic seconds), `host`, `tree`,
+`commit`, `base`, `behind`, `full` (no `--check` and no `--crate`), `checks`, `pool_tree`, `warm` (the build target was not empty before the
+run; `null` when no check builds), `parallel` (the light checks ran alongside the build lane), `rows` (every summary row's name, result and
+seconds), `exit`, and `stages`: `linux-gate`'s stages (name, start, end, seconds, exit, queue waits and queue seconds) from the table
+`scripts/ci-local` prints at its end, read from its output, which st-test copies to the terminal as it comes and keeps (`[]` when there is
+no table). `scripts/st-test-report [FILE...] [--hours 24 | --since ISO] [--slo-s 720] [--max-s 900] [--markdown]` reads those files and
+prints, over the full warm runs in the window that ran and signed every check (exit 0), the count,
+the nearest-rank p50 and p90, the maximum, the share within the objective, whether it is breached and why, the same per host, and the five
+slowest stages or checks; the runs left out are counted by reason (`not_full`, `cold`, `partial`: exit 4, a tree that edits a lane runs nothing for that check, and `failed`). It writes nothing.
 
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
 one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing
@@ -1367,20 +1495,20 @@ a hook it did not write and leaving a configured `core.hooksPath` alone. **The h
 `scripts/evidence-prepush` and `scripts/st-test` from `<remote>/main` into a temporary directory and runs those copies (when the base has none it
 does nothing). The checks they run are the tree's code (`nix develop`, `pnpm install`, the tests), on this machine as you with the host's signing key
 within reach: that is cooperative trust (known defect 22), not something the base-pinned hook protects against. When you push the branch
-you have checked out, the hook asks `st-test --status`; if every check is covered the push goes, silently. Otherwise it runs `st-test --push REMOTE`
+you have checked out, the hook (for a push that the paragraph above does not refuse or let through) asks `st-test --status`; if every check is covered the push goes,
+silently. Otherwise it runs `st-test --push REMOTE`
 (an interactive push waits for it up to `ST_EVIDENCE_TIME_LIMIT`, default 1200 seconds, then stops it with TERM and KILL of its whole process
-group) and the push goes. A push from an agent (`ST_AGENT` set, or no terminal on stderr) runs inside a tool call with a short timeout, so there the hook
-waits at most `ST_EVIDENCE_AGENT_LIMIT` seconds (default 300: the light checks' 90th percentile on the signing host was about 250 s, a typical run
-about 60 s, and an agent's tool call allows 600 s), prints that signing continues in the background with its log path, and lets the push go; the notes
+group) and the push goes. A push without a terminal on stderr (a script, or an agent whose signer is not listed) runs inside a tool call with a short timeout, so there the hook
+waits at most `ST_EVIDENCE_AGENT_LIMIT` seconds (default 300; an agent's tool call allows 600 s), prints that signing continues in the background with its log path, and lets the push go; the notes
 are pushed when the run finishes. `typescript-client` runs first because it is signed for nearly every tree, and each note is pushed as soon as its
 check is signed, so a note signed within the wait is on the remote before git sends the branch (the hook finishes before git updates any ref) and the
 first CI run sees it. A tree that edits a lane's definition is not signed for that lane: st-test says "not signed" for it without running it and exits
 4 when nothing else failed, and the hook says CI runs that check, not that a check failed. One signing run per tree: a push of a tree that another
 push on the machine is still signing (in the background, say) says so and goes, and that run's notes follow. Each push of the checked-out head appends
 one line to `~/.local/state/st3/evidence-prepush/receipts.jsonl` (`time`, `tree`, `branch`, `agent`, `outcome`: `covered`, `signed`,
-`signed_lane_edit`, `background`, `failed`, `skip_flag`, `local_off` or `not_signing:REASON`), append only, so the pre-sign rate can be read per push.
+`signed_lane_edit`, `background`, `failed`, `skip_flag`, `local_off`, `not_signing:REASON`, and for an agent `refused` or `override`), append only, so the pre-sign rate can be read per push.
 **The hook's environment is scrubbed (st2#3014).** git exports `GIT_DIR` (and `GIT_PREFIX`, `GIT_EXEC_PATH`, ...) to a hook, and `GIT_DIR` is set whenever the push is made from a linked worktree, which every agent seat uses. A script run with it that makes its own repository or says `git -C elsewhere ...` still acts on the CALLER's repository, because `GIT_DIR` wins over `-C` and over the working directory. The repository's own fixture tests do exactly that; run from the hook they committed on the caller's branches, rewrote the shared repository's identity and pushed. The stub, `evidence-prepush`, `st-test` and `ci-genie-freshness` (through `scripts/git-env-clean`) now drop the variables that select a repository or an identity (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`, `GIT_PREFIX`, `GIT_QUARANTINE_PATH`, `GIT_AUTHOR_*`, `GIT_COMMITTER_*`, `GIT_PUSH_OPTION*`, ...) before they start anything; transport and credential variables (`GIT_SSH_COMMAND`, `GIT_ASKPASS`, `GIT_TERMINAL_PROMPT`, `GIT_HTTP_*`, `GIT_CONFIG_*`) stay, because the notes push needs them. The shell scrub uses only `export -p` (the non-interactive bash of a nix shell has no `compgen`, which made its first version a silent no-op there) and checks its own result: a scrub that did not work stops the caller, and makes the stub skip the hook with a message. The stub is a copy in each repository's hooks directory but runs `evidence-prepush` and `st-test` as they are on `origin/main`, so a stub installed before this change is covered as soon as it is on main; `install-git-hooks` replaces an older stub carrying its marker on the next shell entry. Tests push from a linked worktree through the real hook, also with `compgen` disabled, and require the caller's config, HEAD, status, branches and tags to be byte-identical.
-It never blocks a push: a failing check is recorded and printed, a timeout is printed, and so is every other failure (an exception, a missing `python3`,
+Apart from an agent's refusal, it never blocks a push: a failing check is recorded and printed, a timeout is printed, and so is every other failure (an exception, a missing `python3`,
 a slow fetch, a signer that `.st/evidence-keys` on main does not list, a missing signing key). `ST_SKIP_EVIDENCE=1` does not wait: the push
 goes at once, the same signing runs in the background, and the hook says that a CI run that starts before a note is there runs that check in full.
 `ST_EVIDENCE_LOCAL=off` does no local signing work at all, not even the status question, and says so in one line (for a seat or unit where
@@ -1401,12 +1529,43 @@ keep the caller's environment. Tests set these variables in the caller and requi
 refuse when it is started with `LD_PRELOAD`.
 
 
-**Heavy checks and Linux gate stages (`scripts/ci-local`).** A check that builds and tests the Rust workspace
-(`mail-redelivery-canaries` and `linux-gate`) is heavy: minutes to tens of minutes of a shared build host. st-test runs it only when
-it is named (`--check NAME`) or with `--all`, never by default, so the pre-push hook keeps signing the light checks within its
-wait. Their local command is
-`nix develop -c bash scripts/ci-local STAGE...`; `linux-gate`'s runs the four stages a `linux-gate` skip covers, `tests clippy
-fleet-compat mail-redelivery-canaries` (the test build with them, after preparing what CI's test-build job does for the tests: the
+**The VM tests (`scripts/ci-local isolation-vm`).** `isolation-vm` runs daily, not per pull request (2026-10-23), so st-test does not
+run it and no policy accepts a local note for it; `nix develop -c bash scripts/ci-local isolation-vm` still runs it by hand, which runs `scripts/ci-local-isolation-vm` in the stages' own home: it probes `/dev/kvm` (read-write, and a VM can be
+created), builds in place what CI's isolation-vm job downloads from linux-test-build (the workspace test archive, `cargo nextest
+archive` with CI's own filter, and the standalone production gateway, refused when it carries `test-support` or a test profile), then
+builds and runs the transport isolation VM driver with that archive and the sekrets VM driver with that gateway, with `TMPDIR` in the
+run's scratch. Its lane (`.st/required-lanes.json`) declares `.config/nextest.toml`, `.st`, `flake.lock`, `flake.nix`,
+`nix/sekrets-vm.nix`, `nix/transport-isolation-vm.nix` and `scripts`. A machine without a usable `/dev/kvm` fails it.
+
+**The web lane (`scripts/ci-local-web`).** `fractal-web`'s local command is `nix develop .#web -c bash scripts/ci-local-web`, which runs
+what CI's fractal-web-execution job runs (`scripts/ci-web-shell-test`, then `scripts/ci-fractal-web`) as ONE shard that covers every kit
+play and app test (`KIT_INPUTS=true`, `KIT_SHARD_COUNT=1`, `KIT_PLAY_SET=all`, a11y on, no per-play cap, `APP_TEST_SET=all`): more than a
+pull request's own run, and with no base to compare with. It runs in a home of its own on the account's disk, with a CI runner's umask,
+no seat or credential variables and none of the account's tool wrappers on `PATH`; the pnpm store is kept, and Buck's file watcher is the
+host's Watchman service, named by its socket. The note records `kit_shard_count=1`, `shard_results=0=success`, `kit_inputs=true`,
+`kit_play_set=all`, `app_test_set=all` and `event_name=pull_request`, so the wrapper kind's shard-count and input-order rules apply to it
+as to CI's aggregate note; its host and agent levels admit it for `pull_request` (`by_level`, `lane: true`). st-test asks the base's own
+`scripts/ci-fractal-web-changes` whether any web input changed since HEAD's merge base with the base: when none did, CI does not run the
+lane, so `--status` reads `not relevant` (covered) and a run skips it, neither a failure nor a note.
+
+**Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
+is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory,
+`/dev/shm/cl.XXXXXX` when `/dev/shm` has 20 GiB free and `/var/tmp/cl.XXXXXX` on disk otherwise (`CI_LOCAL_TMP_ROOT` names another root;
+tests put Unix sockets several levels below it, and a socket path is limited to 108 bytes, which the daemons' sockets in the delivery-probe
+and seat tests exceeded under the scratch; in RAM the tests' SQLite commits do not wait for a disk sync: on a build host the linux-gate tests
+took 849 s there against 1518 s on disk, and 519 s with 12 threads, at about 3.3 GB of `/dev/shm`), because a dev shell's `TMPDIR` is
+under `/tmp`, which on some build hosts is a small tmpfs (tests that need tens of GB of scratch are refused there) or holds a stray
+`/tmp/.git` (tests that look for the enclosing repository find it); a host's preloaded allocator (`LD_PRELOAD`) is dropped, as no
+CI runner has one (the `malloc_trim` tests fail under it); the stages compile without sccache (`RUSTC_WRAPPER` is unset, as CI compiles
+when its cache is unavailable), because a cache server started inside the run keeps the run's `HOME` and `TMPDIR`, removed at exit, and the
+account's builds share that one server, so every compile through it failed afterwards (the kept build directory is the local cache);
+each test process gets a `TMPDIR` of its own under the run's (`scripts/ci-test-tmpdir`, set as the cargo target runner, which nextest
+honours for every test and every listing), because one test that left an empty `.git` at the top of a shared `TMPDIR` made every later
+test there see a repository that is not one (a CI runner is fresh for every job); and the
+stages run with a CI runner's umask, 022, in a scratch no one else can
+write to (the secrets gateway's tests refuse a group-writable directory, and some hosts' umask is 002). st-test runs every check by
+default, `linux-gate` with the others: there is no subset for signing. `linux-gate`'s local command is
+`nix develop -c bash scripts/ci-local tests clippy fleet-compat`, the three stages a `linux-gate` skip covers (the test build with them, after preparing what CI's test-build job does for the tests: the
 provider components the resource-provider tests load and the previous release the messaging compatibility tests run against; `upgrade-impact` is not skipped and runs in CI), with clippy's
 ratchet compared with the base (as CI compares with the event's base): st-test gives the stage the base commit it has just
 fetched (`CLIPPY_BASE_SHA`) and records it in the note as the input `clippy_base_sha`, which a host or agent `linux-gate` note must
@@ -1417,9 +1576,13 @@ and cache directories are a scratch directory that is removed afterwards, and no
 since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST2_OTELITE_BIN`, `ST3_OTELITE_BIN` and
 `FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's st state, harness
 configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
-rustup homes (the dependency cache) and `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues: the
+rustup homes (the dependency cache), `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues, and the
+host's admission itself: the shims and the `build-admission` program look for their program, limits, priorities and queue state
+under the account's home, which the stages' `HOME` would hide (every build then took the shims' fallback cap under a lock of its own),
+so `scripts/ci-local` names them from the account's home (`BUILD_ADMISSION_BIN`, `BUILD_ADMISSION_CONFIG`, `BUILD_ADMISSION_STATE`,
+`BUILD_ADMISSION_FALLBACK_LOCK`, `CARGO_PRIORITY_FILE`, `CARGO_HEAVY_SLOTS`; a value the caller set is kept). The
 stage takes an ordinary heavy admission slot, with no priority of its own. Test binaries run outside that gate, so on a
-shared host the stages' tests run 6 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
+shared host the stages' tests run 12 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
 `ionice -c 3` and `nice -n 10`: an unbounded run (one test per core) held the dev host's IO pressure above its alarm line. The shim is handed the dev shell's own cargo as
 `CARGO_REAL` (`CI_LOCAL_CARGO`, or the first cargo on PATH outside the account's home that is not the shim): a build host's
 default real cargo may source a saved dev shell environment from another day, and on 2026-10-22 one such file put an older
@@ -1433,7 +1596,7 @@ stages 1592 s wall with a warm target and the tests' scratch on `/dev/shm` (test
 120 s), at 6 test threads, peak IO pressure 12.6%. A cold target adds about 10 minutes and roughly 19 GB of writes.
 
 **The pre-sign worker (`scripts/evidence-presign-worker`).** Signing at push time depends on the push: a push with `ST_SKIP_EVIDENCE=1`
-does not wait, a push made where no hook runs signs nothing, and no push signs the heavy checks. The worker closes that gap on the signing
+does not wait, and a push made where no hook runs signs nothing. The worker closes that gap on the signing
 host, from the tools' side. Two systemd user timers (`scripts/evidence-presign-light.timer` every 2 minutes, `scripts/evidence-presign-heavy.timer`
 every 5) each run one tick of one class through `scripts/evidence-presign-timer`, which reads the worker from `origin/main` of a clone the
 worker owns (one per class, so a light tick never moves the checkout under a heavy run). A tick lists the open pull requests and keeps the
@@ -1442,7 +1605,8 @@ ready ones (not drafts) that target `main`, come from the repository itself (no 
 or with no login in it, the worker refuses to run, and an outside author's code is never run (it would run with the host's key within
 reach). Newest first, it takes the first head with a check of its class that `st-test --status` does not call covered and that it has not
 run for that tree before, runs `st-test --check NAME... --push origin` on it, records the result and stops: one head per tick, serially per
-class (a lock; a tick still running skips the next). The light class is st-test's default checks; the heavy class is what `--all` adds. A
+class (a lock; a tick still running skips the next). The light class is what `st-test --list` prints, now every check (st-test has no
+subset for signing since 2026-10-23); the heavy class is what `--all` adds to that, which is nothing. Both timers are off on the signing host. A
 failure or a lane-edit refusal is a result, recorded and not retried for that tree (CI runs the check); a run stopped for load is not, and
 that head waits 30 minutes before it is tried again. Load, for the heavy class: it starts only after IO pressure (some avg60) stayed under
 8% for 10 minutes with no admitted heavy build active and at least 140 GiB free (it clears nothing to make room), runs with `TMPDIR` on
@@ -1461,6 +1625,39 @@ checkout), and it is one reason the authors file must stay that short. A check's
 signed: the tree edits every lane), `failed` or `deferred`), and `evidence-presign-worker summary` prints, per class, the ready heads seen in the
 window, how many had every check covered, the median and worst wait from first seen ready to covered, the runs and their outcomes, and
 how many ticks did not start (for disk or load) and how many runs were stopped, by reason.
+
+**The shadow merge-queue signer (`scripts/evidence-queue-signer`).** It measures whether a signer could keep the merge queue from
+rebuilding what is already built, without changing anything: a host note never covers a `merge_group` run, so it skips, waits for and
+blocks nothing (`seed`, below, is the exception: its notes are the per-crate ones pull requests reuse). Three systemd user timers run it through `scripts/evidence-queue-timer`, which reads it (and the pre-sign worker, whose host
+rules it uses) from `origin/main` of a clone per command. `observe` (every minute, seconds) reads the merge queue, fetches each group
+commit while its `gh-readonly-queue` branch exists (so a dropped entry is measured too), and records the group tree, whether `git
+merge-tree` of the pull request head onto the entry's base gives the same tree, and, depth 1, the tree predicted for the next pull
+request to be queued (from the host's optional `~/.config/evidence-queue-signer/next-command`, which prints `<number> <head sha>` lines
+in queue order) merged onto the queue's tail. When an entry has left the queue and the queue's own jobs on its group commit finished, it
+appends one line to `~/.local/state/evidence-queue-signer/entries.jsonl`: the pull request, whether it landed, the trees and whether they
+are equal, per check when the queue's gate looked (the `evidence-gate-NAME` job's start) and its result (the `NAME` job), and the
+signer's run for that tree, with whether each note was there before the gate looked and by how many minutes, and whether the results
+agree. `sign` (every minute, one run at a time) takes the prediction first, since only a tree signed before enqueue can be ready in
+time, then the queue's entries in position order, never a tree twice, and runs `st-test` with every local check on it (the group commit
+as fetched, or the prediction's merge of the same two parents, which has the same tree), signing as the host. Only our own authors'
+code runs: a tree runs when its pull request and every entry ahead of it are by a login in `~/.config/evidence-presign/authors`;
+`~/.config/evidence-queue-signer/every-author` (the operator's decision) runs every entry. Its runs go through the host's build slot
+like any `st-test`, and the worker's stop limits apply. It starts on operations' terms for the host: IO pressure under 12% (three
+points under the stop), at least 165 GiB free and 20 GiB of available memory, without the worker's wait for ten calm minutes
+(`~/.config/evidence-queue-signer/start.json` overrides them, agreed with operations). Each
+run appends a line to `attempts.jsonl` (wait from first seen to start, seconds per check, and each note's time, read back from the
+pushed notes' `observed_at`, or estimated from the start and the per-check seconds when none can be read, as `signed_at_source`
+says). A tree is run once whatever the outcome, so a tree stopped for load is not retried. `seed` (every minute, one run at a time)
+runs `st-test --seed COMMIT` on each new tip of main, which signs and pushes the per-crate `rust-tests` notes of that tree for the crates
+whose key has none yet, so a pull request branched from main reuses them; most merges move a handful of crates, one that moves the lane
+all of them. Main's code is merged code, the code every run on the host already builds under a pull request, so no author rule applies.
+It starts on the same terms as `sign`, and not while another `st-test --seed` runs on the host (that tick is skipped; the next tries
+again); its nextest takes the build slots through the admission shim like any `st-test` build. A tip is seeded once whatever the outcome
+(the next merge's seed covers what one left missing), except that a seed load stopped before its tests started (waiting for a build
+slot, or building; nextest's `Starting N tests` line is the boundary) tries the same tip again on the next tick, up to six tries, until
+a newer merge replaces it. Each try appends a line to `seeds.jsonl` (wait from the merge to the start, seconds, the try number, whether
+the tests had started, the pool cap `ST_TEST_POOL_MAX_GB` it ran with, and the crates that did not sign). `evidence-queue-signer report` sums a window, and `~/.config/evidence-queue-signer/off` stops
+all three.
 
 ### When the gate says skip
 
@@ -1498,7 +1695,7 @@ Limits, stated plainly:
 - For a pull request the tree is the merge-ref tree, so a note matches only a branch that is current
   with main.
 - With no age limit (`max_age_s` null), an old success on the identical tree can skip checks that depend
-  on the hosted image or on timing (`typescript-client`, `isolation-vm`). That is a choice, recorded in
+  on the hosted image or on timing (`typescript-client`). That is a choice, recorded in
   the known defects; `age_s` in the decision line is there to audit it.
 
 ### Skips are not recorded as fresh runs
@@ -1553,7 +1750,7 @@ With a check listed, it writes one notice annotation and the job summary:
 > `scripts/st-test --push origin` before marking the pull request ready, and CI can skip them. How: (#3621). This never fails a
 > check or blocks a merge.
 
-`--all` is added when `mail-redelivery-canaries` is listed. Every run also prints one counting line,
+The command is the same whatever is listed: st-test runs the whole suite. Every run also prints one counting line,
 `evidence-presign-notice v1 pr=… listed=…|- passed_over=check:reason,…|-`. If the lanes file or the file list cannot be read,
 the affected checks are passed over, never listed.
 

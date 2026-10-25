@@ -78,7 +78,7 @@ fn a_chunked_catch_up_refreshes_cut_keyed_reductions_and_keeps_readers_served() 
         runtimes.generation(),
     );
     assert_eq!(runtimes_at(&store, admitted), RUNTIMES);
-    assert!(!store.smalltalk.subject_cache.lock().unwrap().statuses.is_empty());
+    assert!(!store.fractal.subject_cache.lock().unwrap().statuses.is_empty());
     // As the refresher's next fold would, take up the forget from receiving the backlog.
     let _ = runtimes.base();
     let mut chunks = 0;
@@ -88,14 +88,14 @@ fn a_chunked_catch_up_refreshes_cut_keyed_reductions_and_keeps_readers_served() 
             // The cut has not moved, but the projection has: what was reduced at this cut from the
             // prefix before is gone, so nothing answers from it.
             assert_eq!(store.index().unwrap(), admitted);
-            assert!(store.smalltalk.subject_cache.lock().unwrap().statuses.is_empty(),
+            assert!(store.fractal.subject_cache.lock().unwrap().statuses.is_empty(),
                 "chunk {chunks} left reductions of the prefix before it");
             assert_eq!(runtimes_at(&store, admitted), RUNTIMES);
             // Readers keep the roster and the runtimes list they had, under their own cut, while
             // neither is a base the next fold starts from.
             let (cut, cards, _) = store.published_agent_roster(admitted, false).expect("the roster stays served");
             assert_eq!((cut, cards[0]["name"].as_str()), (admitted, Some("before the catch-up")));
-            assert!(store.smalltalk.agent_resources_cache.lock().unwrap().is_empty(), "never a fold base");
+            assert!(store.fractal.agent_resources_cache.lock().unwrap().is_empty(), "never a fold base");
             assert!(matches!(runtimes.current(), ListRead::Served(..)), "the runtimes list stays served");
             // A fold from nothing after every chunk kept a busy node folding for the whole
             // backlog: the runtimes list refolds once, when the last chunk is in.
@@ -103,7 +103,7 @@ fn a_chunked_catch_up_refreshes_cut_keyed_reductions_and_keeps_readers_served() 
         })
         .unwrap());
     assert!(chunks >= 2, "the backlog projected in {chunks} chunk(s)");
-    assert!(store.smalltalk.subject_cache.lock().unwrap().statuses.is_empty(), "the last chunk too");
+    assert!(store.fractal.subject_cache.lock().unwrap().statuses.is_empty(), "the last chunk too");
     // The last chunk asks it once: the runtimes list folds from nothing next, at the same cut.
     assert!(runtimes.base().0.is_none());
     // A refold replaces what readers kept.

@@ -1,4 +1,4 @@
-//! The part of `store::missions` that moved up from st3-store.
+//! The part of `store::missions` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_delivery::store::missions::*;
@@ -2003,7 +2003,7 @@ fn set_step_state_guarded(
 impl MissionsStore for Store {
 
     fn agent_roster_refresher_running(&self) -> bool {
-        self.smalltalk.agent_roster_refresh.get().is_some()
+        self.fractal.agent_roster_refresh.get().is_some()
     }
 
     fn rebuild_planning_projection(&self) -> Result<()> {

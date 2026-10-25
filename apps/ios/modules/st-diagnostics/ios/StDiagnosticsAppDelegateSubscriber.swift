@@ -4,7 +4,7 @@ import OSLog
 import UIKit
 
 public final class StDiagnosticsAppDelegateSubscriber: ExpoAppDelegateSubscriber {
-  private static let logger = Logger(subsystem: "smalltalk.diagnostics", category: "native-storage")
+  private static let logger = Logger(subsystem: "fractal.diagnostics", category: "native-storage")
   private var subscribed = false
   private let metrics = DiagnosticMetricKitSubscriber()
 

@@ -41,7 +41,7 @@ impl Ui {
             Hit::Answer(_) => "choose answer; Enter sends".into(),
             Hit::Alert(_, AlertTap::Answer(_)) => "answer this alert".into(),
             Hit::Alert(_, AlertTap::Choose(..)) => "choose this answer".into(),
-            Hit::Alert(_, AlertTap::Open) => "open this alert in Now".into(),
+            Hit::Alert(_, AlertTap::Open) => "open this alert in Inbox".into(),
             Hit::Alert(_, AlertTap::Toggle) => "show or hide the alerts".into(),
             Hit::Voice => "start voice input".into(),
             Hit::NewTerminal => "new terminal".into(),
@@ -52,15 +52,12 @@ impl Ui {
             Hit::ResourceFolderMenu(_) => "rename or delete folder".into(),
             Hit::ResourceFolderDrag(_) => "drag to reorder folder".into(),
             Hit::SidebarRow(_) => "open item in tab".into(),
-            Hit::SidebarSection(_) | Hit::Tab(_) => format!("show {label}"),
+            Hit::SidebarSection(_) => format!("show {label}"),
             Hit::Usage => "show/hide Usage".into(),
             Hit::Connection => "connection details".into(),
             Hit::Row(_) => "select row".into(),
             Hit::Message | Hit::Subject | Hit::InlineImage(_) => String::new(),
             Hit::Resize => "drag resize; double-click equalize".into(),
-            Hit::Key('s') if self.glasses.is_none() && self.popover.is_none() => {
-                "show/hide list [s]".into()
-            }
             Hit::Key(_) | Hit::Enter | Hit::Escape | Hit::Menu(_) => label,
             Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
             Hit::Pane(PaneIntent::Open(_)) | Hit::Open(_) => "open subject".into(),
@@ -86,7 +83,7 @@ impl Ui {
             Hit::PaletteSection(2) => "missions [Ctrl+3]".into(),
             Hit::PaletteSection(3) => "fleet [Ctrl+4]".into(),
             Hit::PaletteSection(_) => format!("open {label}"),
-            Hit::Home => "show/hide Now [Ctrl+H]".into(),
+            Hit::Home => "open Inbox [Ctrl+H]".into(),
             Hit::Link(_) => "copy link".into(),
             Hit::Split(true) => "split right [Ctrl+V]".into(),
             Hit::Split(false) => "split below [Ctrl+X]".into(),
@@ -210,92 +207,61 @@ mod tests {
 
     #[test]
     fn pointer_footer_names_both_operations_and_keeps_status_and_keyboard_hints() {
-        for spaces in [false, true] {
-            let mut ui = Ui::new(demo::world());
-            ui.build = true;
-            if spaces {
-                ui.glasses = Some(glass::Glasses::open(None, None));
-            }
-            let before = draw(&ui);
-            assert!(line(&before, 47).contains("Keys:"));
-            let rect = target(&ui, |hit| matches!(hit, Hit::Connection));
-            let focus = ui.focus();
-            pointer(&mut ui, MouseEventKind::Moved, rect.x, rect.y);
-            let buf = draw(&ui);
-            let footer = line(&buf, 47);
-            assert!(
-                footer.contains("Click: connection details · Right: actions menu"),
-                "{footer}"
-            );
-            assert!(
-                !footer.contains("ctrl+w") && !footer.contains("↑↓"),
-                "{footer}"
-            );
-            assert!(footer.contains(crate::version::short(crate::version::now()).as_str()));
-            assert_eq!(ui.focus(), focus);
-            assert!(ui.effects.is_empty());
-            assert_eq!(
-                buf[(rect.x, rect.y)].bg,
-                theme::hover_background(before[(rect.x, rect.y)].bg)
-            );
-            ui.flash("A useful status");
-            assert!(line(&draw(&ui), 47).contains("A useful status"));
-            ui.flash = None;
-            ui.world.link = Link::Offline("Connection interrupted".into());
-            assert!(line(&draw(&ui), 47).contains("Connection interrupted"));
-            ui.world.link = Link::Live;
-            ui.confirm = Some('x');
-            assert!(!line(&draw(&ui), 47).contains("Click:"));
-            ui.confirm = None;
-            ui.input_event(Event::FocusLost);
-            assert!(line(&draw(&ui), 47).contains("Keys:"));
-            if spaces {
-                let agent = ui.world.agents.items()[0].id.clone();
-                ui.open(&agent);
-                draw(&ui);
-                let tab = target(&ui, |hit| matches!(hit, Hit::GlassTab(0, 0)));
-                pointer(&mut ui, MouseEventKind::Moved, tab.x, tab.y);
-                assert!(line(&draw(&ui), 47).contains("Right: tab/split menu"));
-                pointer(
-                    &mut ui,
-                    MouseEventKind::Down(MouseButton::Right),
-                    tab.x,
-                    tab.y,
-                );
-                assert!(matches!(&ui.context.as_ref().unwrap().items[0].1,
-                    glass::MenuAction::Activate { hit, .. } if **hit == Hit::GlassTab(0, 0)));
-            } else {
-                let agent = ui.world.agents.items()[0].id.clone();
-                if let Load::Ready(agents) = &mut ui.world.agents {
-                    agents[0].state = AgentState::Stopped;
-                }
-                ui.popover = Some(format!("actions:{agent}"));
-                draw(&ui);
-                let start = target(&ui, |hit| matches!(hit, Hit::Key('s')));
-                pointer(&mut ui, MouseEventKind::Moved, start.x, start.y);
-                let footer = line(&draw(&ui), 47);
-                assert!(
-                    footer.contains("Start") && !footer.contains("show/hide list"),
-                    "{footer}"
-                );
-                let sidebar = ui.sidebar;
-                pointer(
-                    &mut ui,
-                    MouseEventKind::Down(MouseButton::Left),
-                    start.x,
-                    start.y,
-                );
-                assert_eq!(ui.sidebar, sidebar);
-                assert!(ui.flash.as_ref().unwrap().0.contains("Start"));
-            }
-        }
+        let mut ui = Ui::new(demo::world());
+        ui.build = true;
+        let before = draw(&ui);
+        assert!(line(&before, 47).contains("Keys:"));
+        let rect = target(&ui, |hit| matches!(hit, Hit::Connection));
+        let focus = ui.focus();
+        pointer(&mut ui, MouseEventKind::Moved, rect.x, rect.y);
+        let buf = draw(&ui);
+        let footer = line(&buf, 47);
+        assert!(
+            footer.contains("Click: connection details · Right: actions menu"),
+            "{footer}"
+        );
+        assert!(
+            !footer.contains("ctrl+w") && !footer.contains("↑↓"),
+            "{footer}"
+        );
+        assert!(footer.contains(crate::version::short(crate::version::now()).as_str()));
+        assert_eq!(ui.focus(), focus);
+        assert!(ui.effects.is_empty());
+        assert_eq!(
+            buf[(rect.x, rect.y)].bg,
+            theme::hover_background(before[(rect.x, rect.y)].bg)
+        );
+        ui.flash("A useful status");
+        assert!(line(&draw(&ui), 47).contains("A useful status"));
+        ui.flash = None;
+        ui.world.link = Link::Offline("Connection interrupted".into());
+        assert!(line(&draw(&ui), 47).contains("Connection interrupted"));
+        ui.world.link = Link::Live;
+        ui.confirm = Some('x');
+        assert!(!line(&draw(&ui), 47).contains("Click:"));
+        ui.confirm = None;
+        ui.input_event(Event::FocusLost);
+        assert!(line(&draw(&ui), 47).contains("Keys:"));
+        let agent = ui.world.agents.items()[0].id.clone();
+        ui.open(&agent);
+        draw(&ui);
+        let tab = target(&ui, |hit| matches!(hit, Hit::GlassTab(0, 0)));
+        pointer(&mut ui, MouseEventKind::Moved, tab.x, tab.y);
+        assert!(line(&draw(&ui), 47).contains("Right: tab/split menu"));
+        pointer(
+            &mut ui,
+            MouseEventKind::Down(MouseButton::Right),
+            tab.x,
+            tab.y,
+        );
+        assert!(matches!(&ui.context.as_ref().unwrap().items[0].1,
+            glass::MenuAction::Activate { hit, .. } if **hit == Hit::GlassTab(0, 0)));
     }
 
     #[test]
     fn unattached_terminal_button_hovers_and_runs_the_keyboard_attach_action() {
         for shell in [false, true] {
             let mut ui = Ui::new(demo::world());
-            ui.glasses = Some(glass::Glasses::open(None, None));
             let id = if shell {
                 "terminal/example-shell".to_owned()
             } else {
@@ -326,7 +292,6 @@ mod tests {
     #[test]
     fn middle_click_closes_only_on_release_over_the_pressed_tab() {
         let mut ui = Ui::new(demo::world());
-        ui.glasses = Some(glass::Glasses::open(None, None));
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
         let other = ui.world.agents.items()[1].id.clone();
@@ -412,7 +377,6 @@ mod tests {
     #[test]
     fn popover_links_take_clicks_without_focusing_or_resizing_an_underlying_split() {
         let mut ui = Ui::new(demo::world());
-        ui.glasses = Some(glass::Glasses::open(None, None));
         let agent = ui.world.agents.items()[0].id.clone();
         if let Load::Ready(agents) = &mut ui.world.agents {
             agents[0].details.progress = Some("https://example.com/notes".into());
@@ -461,7 +425,6 @@ mod tests {
     #[test]
     fn subject_text_and_dividers_show_their_gestures_and_unfocused_buttons_name_focus() {
         let mut ui = Ui::new(demo::world());
-        ui.glasses = Some(glass::Glasses::open(None, None));
         let mission = ui.world.missions.items()[0].id.clone();
         ui.open_in_glass(Pane::Mission(Some(mission)), glass::Open::Right);
         draw(&ui);
@@ -498,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn classic_host_and_person_are_status_and_inert_references_are_plain() {
+    fn host_and_person_are_status_and_inert_references_are_plain() {
         let mut ui = Ui::new(demo::world());
         let buf = draw(&ui);
         let word = target(&ui, |hit| matches!(hit, Hit::Connection));
@@ -515,7 +478,7 @@ mod tests {
         );
         assert!(!ui.help);
         assert!(
-            ui.tab == 3 || ui.flash.is_some(),
+            ui.tab() == 3 || ui.flash.is_some(),
             "connection shows the machine or connection status"
         );
         assert!(line(&buf, 0).contains("live"));
@@ -555,7 +518,6 @@ mod tests {
         // Nathan, 2026-10-07: hovering messages seemed to crash stui.
         for (width, height) in [(60, 20), (100, 30), (160, 48)] {
             let mut ui = Ui::new(demo::world());
-            ui.glasses = Some(super::glass::Glasses::open(None, None));
             ui.live = true;
             ui.open_in_glass(
                 Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
