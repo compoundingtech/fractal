@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Integrate open Fractal PRs and publish an immutable production build.
 
-Version 7: preserve main's derived changelog registry after every merge; retain PR entry files.
+Version 10: isolate host publication and reject executable candidate artifact types.
 """
-import datetime, fcntl, hashlib, json, os, pathlib, re, shutil, subprocess, time
+import datetime, fcntl, hashlib, json, math, os, pathlib, re, shutil, subprocess, time
+import sys
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+import candidate_sandbox
 def required_input(name):
     value = os.environ.get(name)
     if not value:
@@ -45,8 +49,32 @@ try:
         TRUSTED_AUTHORS = frozenset(author.lower() for author in authors)
 except (ValueError, TypeError) as error:
     raise SystemExit(f'invalid integrator trust configuration: {error}')
-PR_METADATA_FIELDS = 'number,headRefName,headRefOid,baseRefName,isDraft,author,isCrossRepository,headRepositoryOwner'
-INTEGRATOR_VERSION = 7
+PR_METADATA_FIELDS = 'number,headRefName,headRefOid,baseRefName,baseRefOid,changedFiles,isDraft,author,isCrossRepository,headRepositoryOwner'
+INTEGRATOR_VERSION = 10
+DEPENDENCY_SANDBOX_VERSION = candidate_sandbox.DEPENDENCY_POLICY
+try:
+    SELECTION_BUDGET_SECONDS = float(os.environ.get('FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS', '60'))
+    if not math.isfinite(SELECTION_BUDGET_SECONDS) or SELECTION_BUDGET_SECONDS <= 0:
+        raise ValueError('expected a finite positive number of seconds')
+except ValueError as error:
+    raise SystemExit(f'invalid FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS: {error}')
+SELECTION_DEADLINE = None
+
+class SelectionDeadline(Exception):
+    """The selection phase expired before any candidate mutation."""
+
+class IncompleteFiles(ValueError):
+    def __init__(self, expected, fetched):
+        self.expected, self.fetched = expected, fetched
+        super().__init__(f'incomplete file pagination: expected {expected}, got {fetched}')
+
+def selection_remaining():
+    if SELECTION_DEADLINE is None:
+        return None
+    remaining = SELECTION_DEADLINE - time.monotonic()
+    if remaining <= 0:
+        raise SelectionDeadline(f'selection API budget exceeded ({SELECTION_BUDGET_SECONDS:g}s)')
+    return remaining
 DRY_RUN = '--dry-run' in __import__('sys').argv
 if DRY_RUN:
     C = pathlib.Path(os.environ['FRACTAL_DRY_RUN_CLONE'])
@@ -98,6 +126,11 @@ def swap_server(cleanenv):
 def generated(path):
     return pathlib.PurePosixPath(path).name in ('pnpm-lock.yaml', 'licenses.json', 'pnpm-lock.sha256.json')
 
+def require_candidate_path(path):
+    if not path.resolve().is_relative_to(C.resolve()):
+        raise ValueError('candidate path resolves outside integration clone')
+    return path
+
 # This loop deploys only the web app, never the daemon it connects to.
 # A changed generated contract requires a coordinated deployment elsewhere.
 WIRE_CONTRACT_PATHS = frozenset((
@@ -145,9 +178,74 @@ def trusted_pr(pr, row, permission_cache):
     return True
 
 def load_pr_files(pr):
-    # Only trusted PRs reach this query; trust metadata comes from the earlier snapshot.
-    pr['files'] = json.loads(run(['gh', 'pr', 'view', str(pr['number']),
-        '--repo', CANONICAL_REPO, '--json', 'files'], capture=True, timeout=120).stdout)['files']
+    # Trust is rechecked before this function on every tick, including cache hits.
+    selection_remaining()
+    identity = {field: pr[field] for field in ('number', 'headRefOid', 'baseRefOid')}
+    if (type(identity['number']) is not int or identity['number'] <= 0
+            or any(not isinstance(identity[field], str) or not re.fullmatch(r'[0-9a-f]{40}', identity[field])
+                   for field in ('headRefOid', 'baseRefOid'))):
+        raise ValueError('invalid PR file-list identity')
+    expected = pr['changedFiles']
+    if type(expected) is not int or expected < 0:
+        raise ValueError('invalid PR changed-file count')
+    if expected > 3000:
+        # Both GitHub file connections stop at 3000, even with cursor pagination.
+        raise IncompleteFiles(expected, 0)
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    cache = L/'metadata-cache'/'pr-files'/f'{key}.json'
+    if cache.exists():
+        payload = json.loads(cache.read_text())
+        files = payload.get('files')
+        if (payload.get('identity') != identity or not isinstance(files, list)
+                or len(files) != expected or any(not isinstance(path, str) or not path for path in files)
+                or len(set(files)) != len(files)):
+            raise ValueError(f'invalid cached file list for PR #{pr["number"]}')
+    else:
+        # Small GraphQL lists avoid downloading REST patches. Compare the count
+        # before trusting completeness; large/truncated lists require every page.
+        initial = json.loads(run(['gh', 'pr', 'view', str(pr['number']),
+            '--repo', CANONICAL_REPO, '--json', 'files'], capture=True, timeout=120).stdout)
+        entries = initial.get('files')
+        if (not isinstance(entries, list) or any(not isinstance(entry, dict)
+                or not isinstance(entry.get('path'), str) or not entry['path'] for entry in entries)):
+            raise ValueError(f'invalid file list for PR #{pr["number"]}')
+        files = [entry['path'] for entry in entries]
+        if len(files) != expected:
+            # GitHub also caps REST at 3000 files. The count check below refuses
+            # that partial result rather than selecting with missing paths.
+            pages = json.loads(run(['gh', 'api', '--paginate', '--slurp',
+                f'repos/{CANONICAL_REPO}/pulls/{pr["number"]}/files?per_page=100'],
+                capture=True, timeout=120).stdout)
+            if (not isinstance(pages, list) or not pages
+                    or any(not isinstance(page, list) or len(page) > 100 for page in pages)
+                    or any(not isinstance(entry, dict) or not isinstance(entry.get('filename'), str)
+                           or not entry['filename'] for page in pages for entry in page)):
+                raise ValueError(f'invalid file pagination for PR #{pr["number"]}')
+            files = [entry['filename'] for page in pages for entry in page]
+        if len(files) != expected:
+            raise IncompleteFiles(expected, len(files))
+        if len(set(files)) != len(files):
+            raise ValueError(f'duplicate file paths for PR #{pr["number"]}')
+        fence = json.loads(run(['gh', 'pr', 'view', str(pr['number']),
+            '--repo', CANONICAL_REPO, '--json', 'headRefOid,baseRefOid,changedFiles'],
+            capture=True, timeout=120).stdout)
+        if any(fence.get(field) != pr[field] for field in ('headRefOid', 'baseRefOid', 'changedFiles')):
+            raise ValueError(f'PR #{pr["number"]} moved during file selection; retry next tick')
+        selection_remaining()
+        atomic_json(cache, {'identity': identity, 'files': files})
+    selection_remaining()
+    pr['files'] = [{'path': path} for path in files]
+
+def load_selected_pr_files(pr, row):
+    try:
+        load_pr_files(pr)
+        return True
+    except IncompleteFiles as error:
+        entry = {'pr': pr['number'], 'reason': 'files-incomplete', 'files': [],
+                 'changedFiles': error.expected, 'fetchedFiles': error.fetched}
+        row['skipped'].append(entry)
+        row['selection'].append({**entry, 'draft': pr['isDraft']})
+        return False
 
 def verified_pr_heads(ordered, row):
     verified = []
@@ -162,13 +260,6 @@ def verified_pr_heads(ordered, row):
 
 def select_pr(pr, row, manual):
     files = [f['path'] for f in pr['files']]
-    # Inspect every page, so path selection is independent of GitHub's file cap.
-    if len(files) >= 100:
-        pages = json.loads(run(['gh', 'api', '--paginate', '--slurp',
-            f'repos/{CANONICAL_REPO}/pulls/{pr["number"]}/files?per_page=100'],
-            capture=True, timeout=120).stdout)
-        files = [f['filename'] for page in pages for f in page]
-        pr['files'] = [{'path': path} for path in files]
     relevant = [path for path in files if path.startswith(('apps/fractal-web/', 'packages/fractal-ui/'))]
     reason = ('manual-drop' if pr['number'] in manual else
         'fractal-paths' if relevant else 'no-fractal-paths')
@@ -240,7 +331,7 @@ def resolve_additive():
         stages = {n: git('show', f':{n}:{path}', capture=True, check=False) for n in (1, 2, 3)}
         if any(stages[n].returncode for n in (2, 3)):
             continue  # delete/modify needs a real decision
-        target = C/path
+        target = require_candidate_path(C/path)
         if path.endswith('.md'):
             import tempfile
             with tempfile.TemporaryDirectory(dir=L) as tmp:
@@ -269,19 +360,23 @@ def resolve_additive():
 
 def prepare_dependencies():
     # Materialize the candidate's locked members before regeneration or cache reuse.
-    member_inputs=hashlib.sha256()
+    member_inputs=hashlib.sha256(str(DEPENDENCY_SANDBOX_VERSION).encode())
     for path in ('megarepo.kdl', 'megarepo.lock'):
-        member_inputs.update(path.encode()); member_inputs.update((C/path).read_bytes())
+        member_inputs.update(path.encode()); member_inputs.update(candidate_sandbox.read_regular(C/path))
     member_key=member_inputs.hexdigest()
     member_state=L/f'{C.name}-members-key.json'
-    members=json.loads((C/'megarepo.lock').read_text())['members']
+    members=json.loads(candidate_sandbox.read_regular(C/'megarepo.lock'))['members']
     if (not member_state.exists() or
             json.loads(member_state.read_text())['key'] != member_key or
-            any(not (C/'repos'/name).is_dir() for name in members)):
-        effect_rev=json.loads((C/'flake.lock').read_text())['nodes']['effect-utils']['locked']['rev']
-        run(['nice', '-n', '19', 'nix', 'run',
-             f'github:overengineeringstudio/effect-utils/{effect_rev}#megarepo', '--',
-             'apply', '--worktree-mode', 'commit', '--git-protocol', 'https'], cwd=C, timeout=1800)
+            any(not (C/'repos'/name).is_dir() or
+                not (C/'repos'/name).resolve().is_relative_to(C.resolve()/'.devenv/candidate-members')
+                for name in members)):
+        # The runner fixes MEGAREPO_STORE inside C so member links survive scratch HOME.
+        run(['apply', '--worktree-mode', 'commit', '--git-protocol', 'https'],
+            cwd=C, timeout=1800, network=True,
+            package='mr')
+        # Rematerialized members invalidate installed workspace/source-input links.
+        (L/f'{C.name}-lockhash').unlink(missing_ok=True)
         atomic_json(member_state, {'key': member_key})
     # Cache only deterministic generated metadata, never source resolutions.
     paths=[p for p in text('ls-files').splitlines()
@@ -289,7 +384,7 @@ def prepare_dependencies():
            or p.startswith(('genie/', 'scripts/ci-fractal-web-licenses', 'buck2/dependencies/'))]
     inputs=hashlib.sha256()
     for path in paths:
-        inputs.update(path.encode()); inputs.update((C/path).read_bytes())
+        inputs.update(path.encode()); inputs.update(candidate_sandbox.read_regular(C/path))
     cache=L/'metadata-cache'/inputs.hexdigest()
     if cache.exists():
         if cache.stat().st_size:
@@ -382,27 +477,52 @@ def regenerate():
     # Repo-owned generators: manifests first, pnpm lock next, then Buck archive
     # hashes and the license inventory. Once per candidate, never per PR merge.
     # prepare_dependencies materializes locked members; the genie shell no longer does.
-    run(['nice', '-n', '19', 'nix', 'develop', '.#genie', '-c', 'genie', '--defer-validation'], cwd=C, timeout=1800)
-    run(['nice', '-n', '19', 'pnpm', 'install', '--lockfile-only', '--no-frozen-lockfile'], cwd=C, timeout=900)
-    run(['nice', '-n', '19', 'nix', 'develop', '.#genie', '-c', 'genie'], cwd=C, timeout=1800)
+    run(['nice', '-n', '19', 'genie', '--defer-validation'], cwd=C,
+        timeout=1800, sandbox_shell='genie')
+    run(['nice', '-n', '19', 'pnpm', 'install', '--store-dir', candidate_sandbox.PNPM_STORE_PATH,
+         '--lockfile-only', '--no-frozen-lockfile'],
+        cwd=C, timeout=900, sandbox_shell='web', network=True)
+    run(['nice', '-n', '19', 'genie'], cwd=C, timeout=1800, sandbox_shell='genie')
     install()  # license generator requires the frozen installed manifests
-    run(['nice', '-n', '19', 'python3', 'scripts/ci-fractal-web-licenses'], cwd=C, timeout=900)
+    # Missing optional/platform manifests are fetched as lock-integrity-verified npm archives.
+    run(['nice', '-n', '19', 'python3', 'scripts/ci-fractal-web-licenses'],
+        cwd=C, timeout=900, sandbox_shell='web', network=True)
     git('add', '-u')
     if text('diff', '--cached', '--name-only'):
         git('commit', '-m', 'live-r3: regenerate merged dependency metadata')
 
-def run(args, cwd=None, capture=False, check=True, timeout=None):
+def run(args, cwd=None, capture=False, check=True, timeout=None, *,
+        sandbox_shell=None, network=False, package=None):
     started=time.monotonic()
     category = ('fetch' if 'fetch' in args else 'merge' if args[0]=='git' else
                 'install' if 'pnpm' in args else 'regenerate' if 'genie' in args or 'scripts/ci-fractal-web-licenses' in args else
                 'build' if args[0]=='bash' or 'node' in args else 'selection')
+    selection_api = args[0] == 'gh' and SELECTION_DEADLINE is not None
+    if selection_api:
+        remaining = selection_remaining()
+        timeout = min(timeout, remaining) if timeout is not None else remaining
     try:
         log_capture=not capture and ('genie' in args or ('pnpm' in args and '--frozen-lockfile' in args))
-        result=subprocess.run([str(a) for a in args], cwd=cwd, text=True,
-                              stdout=subprocess.PIPE if capture or log_capture else None,
-                              stderr=subprocess.PIPE if capture or log_capture else None,
-                              check=check and not log_capture, timeout=timeout,
-                              env={**os.environ, 'CI':'1'})
+        command=[str(a) for a in args]
+        options=dict(text=True, stdout=subprocess.PIPE if capture or log_capture else None,
+                     stderr=subprocess.PIPE if capture or log_capture else None,
+                     check=check and not log_capture, timeout=timeout)
+        if package is not None:
+            result=candidate_sandbox.run_package(package, command, worktree=cwd or C,
+                                                network=network, **options)
+        elif sandbox_shell is not None:
+            result=candidate_sandbox.run(command, worktree=cwd or C, shell=sandbox_shell,
+                                        network=network, **options)
+        else:
+            if command[0] == 'git':
+                command = ['python3', '-I', str(SCRIPT_DIR/'host-git.py'), *command[1:]]
+            result=subprocess.run(command, cwd=SCRIPT_DIR, text=True,
+                                  stdout=subprocess.PIPE if capture or log_capture else None,
+                                  stderr=subprocess.PIPE if capture or log_capture else None,
+                                  check=check and not log_capture, timeout=timeout,
+                                  env={**os.environ, 'CI':'1'})
+        if selection_api:
+            selection_remaining()
         if log_capture:
             if result.stdout: print(result.stdout, end='', flush=True)
             if result.stderr: print(result.stderr, end='', file=__import__('sys').stderr, flush=True)
@@ -411,6 +531,10 @@ def run(args, cwd=None, capture=False, check=True, timeout=None):
                 result.stderr=(result.stderr or '')[-4000:]
                 result.check_returncode()
         return result
+    except subprocess.TimeoutExpired as error:
+        if selection_api and time.monotonic() >= SELECTION_DEADLINE:
+            raise SelectionDeadline(f'selection API budget exceeded ({SELECTION_BUDGET_SECONDS:g}s)') from error
+        raise
     finally:
         if TIMINGS is not None:
             TIMINGS[category]=TIMINGS.get(category,0)+round((time.monotonic()-started)*1000)
@@ -424,14 +548,16 @@ def digest(root):
 def stamp(private_hash):
     git('commit','--allow-empty','-m','live-r3: production integration','-m',f'Public client/private server; private overlay SHA256: {private_hash}')
 def install():
-    inputs=hashlib.sha256()
+    inputs=hashlib.sha256(f'{DEPENDENCY_SANDBOX_VERSION}:{candidate_sandbox.INSTALL_POLICY}'.encode())
     for path in ('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'megarepo.kdl',
                  'megarepo.lock', 'pnpm-source-inputs.json'):
-        inputs.update(path.encode()); inputs.update((C/path).read_bytes())
+        inputs.update(path.encode()); inputs.update(candidate_sandbox.read_regular(C/path))
     lockhash=inputs.hexdigest()
     state=L/f'{C.name}-lockhash'
     if not (C/'node_modules').exists() or not state.exists() or state.read_text()!=lockhash:
-        run(['nice','-n','19','nix','develop','.#web','--option','builders','','-c','pnpm','install','--prefer-offline','--frozen-lockfile'],cwd=C,timeout=900); state.write_text(lockhash)
+        run(['nice','-n','19',*candidate_sandbox.pnpm_install_command('--prefer-offline','--frozen-lockfile')],
+            cwd=C, timeout=900, sandbox_shell='web', network=True)
+        state.write_text(lockhash)
 def build(name):
     return run(['bash',BUILD_SCRIPT,C,text('rev-parse','HEAD'),name],check=False)
 def recovery_select_build(sha):
@@ -496,7 +622,7 @@ def current_server_url(cleanenv, expected_sha=None):
     return None
 def activate(previous):
     current=os.path.realpath(P/'current')
-    sha=json.loads((P/'current/build-receipt.json').read_text())['buildIdentity']['rev']
+    sha=json.loads(candidate_sandbox.read_regular(P/'current/build-receipt.json'))['buildIdentity']['rev']
     cleanenv={k:v for k,v in os.environ.items() if k not in ('PTY_SESSION','ST_AGENT')}
     cleanenv['PWD']=str(C/'apps/fractal-web')
     if previous==current:
@@ -517,7 +643,7 @@ def activate(previous):
     except Exception:
         subprocess.run(['devnet','down',purpose],cwd=C/'apps/fractal-web',env=cleanenv,check=False)
         if previous and previous!=current:
-            rollback_sha=json.loads((pathlib.Path(previous)/'build-receipt.json').read_text())['buildIdentity']['rev']
+            rollback_sha=json.loads(candidate_sandbox.read_regular(pathlib.Path(previous)/'build-receipt.json'))['buildIdentity']['rev']
             recovery_select_build(rollback_sha)
             subprocess.run(['devnet','up',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
         raise RuntimeError('devnet activation failed; previous build rolled back if available')
@@ -593,7 +719,8 @@ def compatible_recorded_stack(stack, heads, row):
     return stack
 
 def tick():
-    global TIMINGS, REGISTRY_BASE
+    global TIMINGS, REGISTRY_BASE, SELECTION_DEADLINE
+    candidate_sandbox.validate_configuration()
     start=time.monotonic(); row={'ts':datetime.datetime.now(datetime.timezone.utc).isoformat(),'sha':None,'main':None,'included':[],'skipped':[],'selection':[],'build':'failed','ms':0}
     row['integratorVersion']=INTEGRATOR_VERSION
     TIMINGS=row['timingsMs']={}
@@ -604,14 +731,14 @@ def tick():
     try:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: row.update(build='skipped',reason='lock-held'); return
+        SELECTION_DEADLINE = time.monotonic() + SELECTION_BUDGET_SECONDS
         # Trust metadata is fetched before any PR files or executable content.
         permission_cache={}
         prs=json.loads(run(['gh','pr','list','--repo',CANONICAL_REPO,'--state','open','--limit','1000','--json',PR_METADATA_FIELDS],capture=True,timeout=120).stdout)
         manual=set(json.loads((L/'live-r3-drop.json').read_text())) if (L/'live-r3-drop.json').exists() else set()
         selected=[]
         for pr in prs:
-            if trusted_pr(pr, row, permission_cache):
-                load_pr_files(pr)
+            if trusted_pr(pr, row, permission_cache) and load_selected_pr_files(pr, row):
                 if select_pr(pr, row, manual): selected.append(pr)
         # Priority PRs first, then all open kit PRs, then newest first. A child
         # already carries its ancestors; merging old bases first defeats priority.
@@ -620,7 +747,7 @@ def tick():
             kit = any(f['path'].startswith('packages/fractal-ui/') for f in p['files'])
             return (0, rank[p['number']]) if p['number'] in rank else (1 if kit else 2, -p['number'])
         ordered=sorted(selected,key=priority)
-        rejected={entry['pr'] for entry in row['skipped'] if entry['reason'] in ('fork-head','untrusted-author')}
+        rejected={entry['pr'] for entry in row['skipped'] if entry['reason'] in ('fork-head','untrusted-author','files-incomplete')}
         missing=REQUIRED-{p['number'] for p in ordered}-rejected
         for number in sorted(missing):
             merged=json.loads(run(['gh','pr','view',str(number),'--repo',CANONICAL_REPO,'--json',PR_METADATA_FIELDS+',state'],capture=True,timeout=120).stdout)
@@ -628,12 +755,15 @@ def tick():
                 continue
             if merged['state'] != 'MERGED':
                 raise RuntimeError(f'required ui-design PR #{number} missing from selection and not merged')
-            load_pr_files(merged)
+            if not load_selected_pr_files(merged, row):
+                continue
             # GitHub retains pull/head refs after merge. Keep the required head
             # explicit even when it has left the open-PR query.
             ordered.append(merged)
             row['selection'].append({'pr':number,'reason':'required-merged','draft':False,'files':[f['path'] for f in merged['files']]})
         ordered.sort(key=priority)
+        selection_remaining()
+        SELECTION_DEADLINE = None
         if not C.exists():
             run(['git','clone','--no-hardlinks',SOURCE_CLONE,C]); git('remote','set-url','origin',f'https://github.com/{CANONICAL_REPO}.git')
         exclude=C/'.git/info/exclude'
@@ -675,22 +805,30 @@ def tick():
             old=json.loads(state.read_text())
             # Only reusable artifacts can bypass candidate reconstruction.
             if (P/'builds'/old['sha']).is_dir():
-                row.update(sha=old['sha'],included=old['included'],skipped=old['skipped'],build='skipped',reason='unchanged',selectionComplete=True)
+                incomplete = {entry['pr']: entry for entry in row['skipped'] if entry['reason'] == 'files-incomplete'}
+                skipped = [entry for entry in old['skipped'] if entry['pr'] not in incomplete] + list(incomplete.values())
+                row.update(sha=old['sha'],included=old['included'],skipped=skipped,build='skipped',reason='unchanged',selectionComplete=True)
                 previous=recovery_previous()
                 recovery_select_build(row['sha'])
                 row['url']=activate(previous)
                 return
         git('checkout','-B','live-r3',base)
         overlay=C/'apps/fractal-web/private'
-        if not (C/'apps/fractal-web/vendor/utils/src/node/cli-build-identity.js').exists():
-            shutil.copytree(VENDOR,C/'apps/fractal-web/vendor',symlinks=True,dirs_exist_ok=True)
+        require_candidate_path(overlay)
+        vendor=require_candidate_path(C/'apps/fractal-web/vendor')
+        # copytree can follow pre-existing destination symlinks at any depth.
+        for root, dirs, files in os.walk(vendor):
+            for name in dirs + files:
+                require_candidate_path(pathlib.Path(root)/name)
+        if not require_candidate_path(vendor/'utils/src/node/cli-build-identity.js').exists():
+            shutil.copytree(VENDOR,vendor,symlinks=True,dirs_exist_ok=True)
         if overlay.exists(): shutil.rmtree(overlay)
         shutil.copytree(private,overlay,symlinks=True)
-        config=overlay/'vite.config.ts'
+        config=require_candidate_path(overlay/'vite.config.ts')
         if not any('private-annotations' in f.read_text() for f in (C/'apps/fractal-web/src').rglob('DevBar.tsx')):
             config.write_text(config.read_text().replace('privateAnnotations(),','').replace(', privateAnnotations()', '').replace('privateAnnotations()', ''))
         # Main has no private extension hooks: retain its unchanged public boundary.
-        builder=overlay/'build-live.mjs'
+        builder=require_candidate_path(overlay/'build-live.mjs')
         builder.write_text(builder.read_text().replace("configFile: resolve(app, 'private/vite.config.ts')","configFile: resolve(app, 'vite.config.ts')"))
         row['buildProfile']='public-client/private-server'
         if stack:
@@ -735,12 +873,17 @@ def tick():
         row['url']=activate(previous)
         row['build']='built'
         atomic_json(state,{'signature':signature,'sha':row['sha'],'included':row['included'],'skipped':row['skipped'],'pinnedBase':row['pinnedBase']})
+    except SelectionDeadline as error:
+        row.update(build='skipped', reason='selection-deadline', selectionFailure=True,
+                   selectionComplete=False, error=str(error))
+        print('selection deadline:', error, flush=True)
     except Exception as e:
         row['error']=str(e)
         if isinstance(e,subprocess.CalledProcessError):
             row['detail']=((e.stdout or '') + '\n' + (e.stderr or '')).strip()[-4000:]
         print('tick failed:',row['error'],row.get('detail',''),flush=True)
     finally:
+        SELECTION_DEADLINE = None
         observe_served(row)
         row['ms']=round((time.monotonic()-start)*1000)
         row['timingsMs']['other']=max(0,row['ms']-sum(row['timingsMs'].values()))
