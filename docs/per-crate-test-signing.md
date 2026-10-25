@@ -174,6 +174,10 @@ stage scripts). So about half the merges re-run a handful of crates and one in s
   - asks `--members`.
   A base whose verifier lacks `--members`, or that has no `scripts/rust-test-keys`, makes the outcome `unavailable`, and the check runs.
 - The decision line adds `members` (workspace members), `missing` (how many have no satisfying note), `manifests_fetch` and `members_fetch`.
+- The evidence log's view (`log`, `log_head`, `log_age_s`, `log_missing`) covers every member at once: the log head is judged once, then
+  each member's own key file in the log. `missing` when the log lists a record under any member's key that is not here, else
+  `unlogged_pass` when some member's chosen note is not listed yet, else `ok`. Without it every line said `log=-`, and the flip trigger's
+  24 h log window could never start.
 - The test jobs are wired to it: `linux-tests` and its shards (and through them `linux-test-build`) skip when linux-gate's note OR every
   crate's per-crate note covers the tree; clippy and fleet compatibility still need linux-gate's own note. The linux-gate verdict accepts
   a skipped stage only when one of those gates decided skip and that stage's own rule says skip. Nothing changes while the rust-tests entry is
@@ -213,4 +217,22 @@ from any checkout and whatever HEAD is: it signs the per-crate `rust-tests` note
 for the crates that lack one, runs only those crates, and pushes the notes (to `origin` unless `--push` says otherwise). It takes no other check; it
 exits 0 when every crate is covered or signed, and `--crate NAME` narrows it. Measured: a full seeding of 52 crates is about 12 minutes on this host
 (prep 158 s, nextest 480 s, signing 53 s); after a merge that touched 2 crates it runs only those 2.
+
+## 12. Verification and push time (measured 2026-10-24)
+
+Two warm full runs on hetz2 took 935 s and 1116 s against the 12-minute budget, with 123 to 270 s outside every check row. Where it went, and what
+changed:
+
+- **Asking the verifier about 52 crates.** `st-test` ran `evidence-verify --crate-key` once per crate: 52 processes, each loading all of the tree's
+  52 records (2 880 `load` calls, two git runs each). The same 52 crates in one `evidence-verify --members` run, with each record read once per
+  process (`load` is cached: a record is content-addressed) and the members checked 8 at a time, give the identical answer. Measured on one input
+  (tree e9fd13c5b808, policy at main): per-crate processes 110.0 s, `--members` before the cache 105.9 s, with the cache 32.8 s, with the cache and
+  the members side by side 8.6 s. `st-test` now asks once (`--members`, falling back to the per-crate loop only when the verifier cannot answer).
+  The CI gate's `--members` call gets the same speed-up.
+- **The row's time.** The `rust-tests` row used to show only the tests (0 s when signed from linux-gate's report). It now shows all of its time, with
+  `[keys, verify, tests, sign, push]` in the detail, and a `setup` row shows the fetch, the clean tree and the megarepo members before any check.
+- **The push.** Records are pushed in chunks of 40 refs with git's porcelain output, and a ref that failed is retried (3 tries, 2 s and 4 s apart); the
+  error names the refs left and git's reason. One 76-ref push once reported only `(failed)` for a ref that pushed alone afterwards.
+- **What did not change.** Signing 52 crates still costs about 48 s: the post-sign check inside `evidence-wrap` (6.8 s per record, in its own process)
+  is the base tool's, and a change to it is its own trust review.
 

@@ -94,6 +94,23 @@ if [[ ( "$stage" == tests || "$stage" == mail-redelivery-canaries ) && -n "${CI_
   printf 'Test scratch filesystem: '
   stat -f -c %T "$TMPDIR"
 fi
+# On a CI runner the tests' TMPDIR is a disk (overlayfs), and their file-backed SQLite stores spend most of their time there waiting
+# on fsync. The runner's /dev/shm is tmpfs (8 GiB, noexec, on the 8x16 runners): remount it exec and resize it as perf.yml does, so the checkpoint tests'
+# free-space gate (about 17 GB, as in scripts/ci-local) passes, and put TMPDIR there. tmpfs holds only what the tests write: the
+# peak was 2.4 GiB per pull-request shard (2026-10-24). The tests about durability or disk cost use CI_TEST_DISK_TMPDIR, the old
+# TMPDIR (disk_tempdir in the tests' support code). The daily shards keep a disk for now.
+if [[ "$stage" == tests && -z "${CI_LOCAL_CARGO_HOME:-}" && "${GITHUB_ACTIONS:-}" == true && "${CI_TEST_LANE:-}" != daily ]] \
+  && [[ "$(stat -f -c %T /dev/shm 2>/dev/null)" == tmpfs ]]; then
+  # The runners mount it noexec; tests run programs they write into TMPDIR (installers, fake children).
+  sudo -n mount -o remount,exec,size=24G /dev/shm || echo "::warning::could not remount /dev/shm"
+  if [[ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -ge $((20 * 1024 * 1024)) ]] \
+    && ! awk '$2 == "/dev/shm" {print $4}' /proc/mounts | tr ',' '\n' | grep -qx noexec; then
+    export CI_TEST_DISK_TMPDIR="${TMPDIR:-/tmp}"
+    shm=$(mktemp -d /dev/shm/t.XXXXXX)
+    export TMPDIR="$shm" TMP="$shm" TEMP="$shm"
+  fi
+  echo "Test scratch filesystem: $(stat -f -c %T "${TMPDIR:-/tmp}") at ${TMPDIR:-/tmp}; disk for durability tests: ${CI_TEST_DISK_TMPDIR:-none}"
+fi
 case "$stage" in
   # The nextest --no-run step already compiled the test executables.
   tests) {

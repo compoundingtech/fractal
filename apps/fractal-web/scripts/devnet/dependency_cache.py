@@ -15,6 +15,8 @@ import shutil
 import stat
 import sys
 import tempfile
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from candidate_sandbox import read_regular
 
 
 INSTALL_INPUTS = ('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'megarepo.kdl',
@@ -32,7 +34,7 @@ def public_install_key(source):
     inputs = hashlib.sha256()
     for name in INSTALL_INPUTS:
         inputs.update(name.encode())
-        inputs.update((source / name).read_bytes())
+        inputs.update(read_regular(source / name))
     return inputs.hexdigest()
 
 

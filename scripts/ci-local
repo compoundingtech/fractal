@@ -110,6 +110,11 @@ export HOME="$scratch/home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" 
 export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
 export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md" TMPDIR="$tmp"
 mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP" "$TMPDIR"
+# The few tests about durability or disk cost keep a disk (disk_tempdir in the tests' support code): the scratch is on one.
+if [ "$(stat -f -c %T "$tmp" 2>/dev/null)" = tmpfs ]; then
+  export CI_TEST_DISK_TMPDIR="$scratch/disk"
+  mkdir -p "$CI_TEST_DISK_TMPDIR"
+fi
 # A host may preload an allocator into every process (jemalloc); a CI runner preloads nothing, and tests that measure the allocator
 # (malloc_trim) fail under one.
 unset LD_PRELOAD
