@@ -3321,6 +3321,11 @@ struct AgentRestartArgs {
     /// Also interrupts immediately when restarting yourself during a turn.
     #[arg(long)]
     now: bool,
+    /// Start a new native session instead of continuing the last one. The seat must have a
+    /// handoff written or marked ready (`st agents handoff ready`) since its last turn; the new
+    /// session is given it first. Without this the restart continues the last session.
+    #[arg(long)]
+    fresh_session: bool,
 }
 
 #[derive(Subcommand)]
