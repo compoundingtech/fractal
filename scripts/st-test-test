@@ -1244,7 +1244,7 @@ class PerCrate(StTest):
 
     def test_the_gate_asks_whether_every_member_has_a_note_for_its_own_key(self):
         fields = self.gate()
-        self.assertEqual((fields['outcome'], fields['reason'], fields['members'], fields['missing']), ('rejected', 'crate_uncovered', '2', '2'), fields)
+        self.assertEqual((fields['outcome'], fields['reason'], fields['members'], fields['missing']), ('no_note', 'crate_uncovered', '2', '2'), fields)
         self.assertEqual(self.run_crates('--push', 'origin')[0], 0)
         fields = self.gate()
         # Satisfied, in shadow: the committed rust-tests entry does not enforce, so the decision is still run.
@@ -1252,7 +1252,7 @@ class PerCrate(StTest):
         self.assertIn(fields['members_fetch'], ('ok', 'none'))
         self.commit('crates/top/src/lib.rs', '// changed\n')
         fields = self.gate()
-        self.assertEqual((fields['outcome'], fields['reason'], fields['missing']), ('rejected', 'crate_uncovered', '1'), fields)
+        self.assertEqual((fields['outcome'], fields['reason'], fields['missing']), ('no_note', 'crate_uncovered', '1'), fields)
 
     def test_the_verifier_is_satisfied_only_when_every_member_has_a_note_for_its_own_key(self):
         code, result = self.members()
