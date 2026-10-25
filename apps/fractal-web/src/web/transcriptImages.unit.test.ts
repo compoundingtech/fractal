@@ -42,11 +42,11 @@ describe('transcript image byte reads', () => {
     await pending
     expect(listener).toHaveBeenCalledTimes(2)
     expect(cache.snapshot()).not.toBe(snapshot)
-    unsubscribe()
     cache.dispose()
     expect(objectUrls.revokeObjectURL).toHaveBeenCalledWith('blob:viewer')
     expect(cache.state(attachment.id)).toEqual({ _tag: 'Deferred' })
     expect(listener).toHaveBeenCalledTimes(2)
+    unsubscribe()
   })
 
   it.each(['ungranted', 'failed'] as const)('keeps %s reads deferred with an explicit state and allows a user retry', async reason => {

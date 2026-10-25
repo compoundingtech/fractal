@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { Transcript, assistantDarkTheme, liveAccentTheme, compositionLightTheme, type TextItem, type TranscriptAttachmentImages, type TranscriptTurn } from '@fractal/ui/assistant-ui'
+import { EmbraceRuntimeProvider, Transcript, assistantDarkTheme, liveAccentTheme, compositionLightTheme, type TextItem, type TranscriptAttachmentImages, type TranscriptTurn } from '@fractal/ui/assistant-ui'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import type { Attachment } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-data/model.ts'
 import { surfaceVars as surface, spaceVars as space, textVars as text } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -40,7 +40,7 @@ function TranscriptImages({ scheme, width = 'desktop', fixture }: { readonly sch
     }
     return createTranscriptImages(port)
   })
-  React.useEffect(() => () => images.dispose(), [images])
+  React.useLayoutEffect(() => () => images.dispose(), [images])
   const snapshot = React.useSyncExternalStore(images.subscribe, images.snapshot)
   // A new host object per cache snapshot re-renders the transcript whenever a read changes state.
   const attachmentImages = React.useMemo((): TranscriptAttachmentImages => ({
@@ -56,7 +56,9 @@ function TranscriptImages({ scheme, width = 'desktop', fixture }: { readonly sch
   return <NarrowLayoutContext.Provider value={width === 'phone'}>
     <section aria-label={`Transcript image ${fixture}`} data-fixture={fixture} data-scheme={scheme} {...stylex.props(styles.surface, width === 'phone' ? styles.phone : styles.desktop, scheme === 'dark' && assistantDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
       <div {...stylex.props(styles.transcript)}>
+        <EmbraceRuntimeProvider options={{ messages: [prompt], onNew: async () => {} }}>
         <Transcript turns={turns} title="Image review" showHeader={false} sync={{ _tag: 'Live', since: 0 }} now={1792909271000} observedAt={1792909271000} attachmentImages={attachmentImages} />
+        </EmbraceRuntimeProvider>
       </div>
       <ol aria-label="Fixture chunk reads" {...stylex.props(styles.reads)}>{requests.map((request, index) => <li key={index} data-sha256={request.sha256} data-message={request.message} data-offset={request.offset ?? 0}>{`Read ${request.sha256.slice(0, 8)} at ${request.offset ?? 0}`}</li>)}</ol>
     </section>

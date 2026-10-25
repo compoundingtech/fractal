@@ -91,7 +91,8 @@ export function createTranscriptImages(port: Pick<AttachmentPort, 'chunk'> | und
     dispose: () => {
       const next = new Map(states)
       for (const id of next.keys()) remove(next, id)
-      publish(next)
+      // Teardown must not notify React while its subscriptions are being detached.
+      states = next
     },
   }
 }
