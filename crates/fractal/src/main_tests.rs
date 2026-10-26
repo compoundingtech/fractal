@@ -504,6 +504,15 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
 }
 
 #[test]
+fn diagnostic_prefix_preserves_gate_and_native_driver_contracts() {
+    for legacy in ["st", "st3"] {
+        assert_eq!(ClientMessage::Human.diagnostic_prefix(legacy), "fractal");
+        assert_eq!(ClientMessage::Stable.diagnostic_prefix(legacy), legacy);
+        assert_eq!(ClientMessage::for_output(true).diagnostic_prefix(legacy), legacy);
+    }
+}
+
+#[test]
 fn gate_subprocess_stderr_keeps_stable_client_errors() {
     const CHILD: &str = "ST_TEST_GATE_ERROR_CHILD";
     if std::env::var_os(CHILD).is_some() {
@@ -518,7 +527,7 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
         let error = anyhow::Error::from(fractal_client::ClientError::Api(
             api.code.clone(), api.message.clone(), Box::new(api),
         ));
-        eprintln!("{}", cli_error_message(&error, false));
+        stderr_message("st", format_args!("{}", cli_error_message(&error, false)));
         let mut stalled = None;
         // Exercise the actual Resync notice sink, including duplicate suppression.
         for _ in 0..2 {
@@ -542,9 +551,9 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
         assert!(output.status.success(), "{output:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!(stderr.trim(), if gate {
-            "st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
+            "st: st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
         } else {
-            "Fractal hit a problem: the store failed (internal)\nst: Fractal hit a problem: the stream failed · trying again"
+            "fractal: Fractal hit a problem: the store failed (internal)\nfractal: Fractal hit a problem: the stream failed · trying again"
         });
     }
 }

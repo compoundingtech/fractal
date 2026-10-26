@@ -21,10 +21,7 @@ pub(super) fn run_driver_hook() -> ExitCode {
             &mut std::io::stdin(),
             &mut |diagnostic| {
                 if let Err(error) = fractal_daemon::driver_hook::post_diagnostic(&env, &diagnostic) {
-                    eprintln!(
-                        "st: could not record the {} diagnostic: {error:#}",
-                        diagnostic.code
-                    );
+                    crate::stderr_message("st", format_args!("could not record the {} diagnostic: {error:#}", diagnostic.code));
                 }
             },
         )

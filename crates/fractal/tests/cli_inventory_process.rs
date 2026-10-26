@@ -154,7 +154,7 @@ fn mixed_inventory_requests_exit_before_an_action() {
         assert!(output.stdout.is_empty(), "{output:?}");
         assert_eq!(
             output.stderr,
-            b"st: --read-contract-inventory-json must be used alone\n"
+            b"fractal: --read-contract-inventory-json must be used alone\n"
         );
     }
     assert!(!root.path().join("absent-daemon.sock").exists());
@@ -187,7 +187,7 @@ fn literal_inventory_names_after_terminator_reach_ordinary_dispatch() {
         assert!(output.stdout.is_empty(), "{output:?}");
         assert_eq!(
             output.stderr,
-            b"st: document input cannot be a symbolic link\n"
+            b"fractal: document input cannot be a symbolic link\n"
         );
         assert_eq!(
             std::fs::read_link(root.path().join(literal)).unwrap(),
