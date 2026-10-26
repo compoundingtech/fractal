@@ -3463,27 +3463,27 @@ mod tests {
         routes(0);
         let token = GithubAuth::test("shifted-pages-token");
         let cursor = json!({"items_since": at, "comments_since": at}).to_string();
-        let poll = |cursor| {
-            let mut request = request(&["comments"], cursor, None);
+        let poll = |cursor: Option<String>| {
+            let mut request = request(&["comments"], cursor.as_deref(), None);
             // Continuation/reconciliation must revalidate despite the ordinary cache TTL.
             request.every_ms = Some(120_000);
             observe_at(request, &base, Some(&token))
         };
-        let first = poll(Some(&cursor)).await.unwrap();
+        let first = poll(Some(cursor)).await.unwrap();
         routes(1); // ID1001 moves into page10; page11 skips it and sees updated ID1.
-        let tail = poll(first.cursor.as_deref()).await.unwrap();
+        let tail = poll(first.cursor.clone()).await.unwrap();
         let cursor = RepositoryCursor::parse(tail.cursor.as_deref());
         assert_eq!(cursor.items_since.as_deref(), Some(at));
         assert_eq!(cursor.comments_since.as_deref(), Some(at));
-        let repaired = poll(tail.cursor.as_deref()).await.unwrap();
+        let repaired = poll(tail.cursor.clone()).await.unwrap();
         assert_eq!(item(&repaired.facts, "issues", 1001)["recent_comments"][0]["id"], 1001);
         routes(2); // Another shift during reconciliation must require another stable sweep.
-        let mut latest = poll(repaired.cursor.as_deref()).await.unwrap();
+        let mut latest = poll(repaired.cursor.clone()).await.unwrap();
         assert_eq!(RepositoryCursor::parse(latest.cursor.as_deref()).items_since.as_deref(), Some(at));
         let mut complete = false;
         for _ in 0..6 {
             github.take_requests();
-            latest = poll(latest.cursor.as_deref()).await.unwrap();
+            latest = poll(latest.cursor.clone()).await.unwrap();
             let requests = github.take_requests();
             for start in starts {
                 assert!(requests.iter().filter(|request| request.starts_with(&format!("GET {start}"))).count() <= 10);
