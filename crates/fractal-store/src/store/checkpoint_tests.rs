@@ -544,6 +544,7 @@ fn sealed_capture_rejects_invalid_envelope_times_at_first_use() {
 }
 
 #[test]
+
 fn sealed_capture_restarts_when_trim_commits_between_metadata_and_bodies() {
     use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
     struct Pause {

@@ -1941,6 +1941,21 @@ fn usage_provenance_survives_resume_replay_periods_and_reopen() {
     let local = Store::open(&path, "host-one").unwrap();
     let subject = "agent/example.provenance";
     let binding = |incarnation: &str, session: &str| {
+        // Bindings carrying an incarnation require its running observation first.
+        local
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("running")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
         local
             .append_claim(&ClaimInput {
                 subject: subject.into(),

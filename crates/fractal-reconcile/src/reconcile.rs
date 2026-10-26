@@ -23814,6 +23814,21 @@ agent "import/omp/repair-order" {{
         old.import_replication("author", &declaration.export_replication(0).unwrap())
             .unwrap();
         let append_binding = |store: &Store, incarnation: &str| {
+            // A driver's binding is accepted only while its incarnation is the running one.
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some(seat.into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("incarnation_id".into(), Value::String(incarnation.into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
             store
                 .append_claim(&ClaimInput {
                     subject: seat.into(),
@@ -24012,6 +24027,20 @@ agent "import/omp/repair-order" {{
         old_build
             .append_claim(&ClaimInput {
                 subject: seat.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(seat.into()),
+                fields: BTreeMap::from([
+                    ("status".into(), Value::String("running".into())),
+                    ("incarnation_id".into(), Value::String("old-build".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        old_build
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
                 kind: "harness.session-file".into(),
                 actor: Some(seat.into()),
                 fields: BTreeMap::from([
@@ -24084,6 +24113,21 @@ agent "import/omp/fixture" {{
                     "desired_token".into(),
                     Value::String(store.launch_lineage(&subject.subject).unwrap().pop().unwrap()),
                 );
+                // A driver's binding is accepted only while its incarnation is the running one.
+                store
+                    .append_claim(&ClaimInput {
+                        subject: subject.subject.clone(),
+                        kind: "runtime.observed".into(),
+                        actor: Some(subject.subject.clone()),
+                        fields: BTreeMap::from([
+                            ("status".into(), Value::String("running".into())),
+                            ("incarnation_id".into(), Value::String(incarnation.into())),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
             }
             store
                 .append_claim(&ClaimInput {
