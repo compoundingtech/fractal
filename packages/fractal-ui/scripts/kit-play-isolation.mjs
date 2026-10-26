@@ -64,16 +64,16 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
         let probe = auditPages.get(origin)
         if (!probe) {
           probe = await context.newPage()
-          // A case service worker can claim and navigate this client. Routing
-          // alone does not intercept SW responses, so bypass it on this target
-          // before any navigation. Every audit document remains script-free.
+          // Routing is not a script boundary: service workers and blob URLs can
+          // bypass it. Disable document script execution on the target itself;
+          // explicit DevTools storage probes remain available.
           const probeClient = await context.newCDPSession(probe)
-          await probeClient.send('Network.setBypassServiceWorker', { bypass: true })
+          await probeClient.send('Emulation.setScriptExecutionDisabled', { value: true })
           await probe.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }))
           await probe.goto(origin)
           auditPages.set(origin, probe)
         }
-        if (probe.isClosed() || new URL(probe.url()).origin !== origin) {
+        if (probe.isClosed() || probe.url() !== new URL(origin).href) {
           throw new Error(`Kit isolation audit page changed at ${origin}`)
         }
         residualStorage('reset', await probe.evaluate(() => ({
@@ -104,6 +104,15 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
           const failures = results.filter(result => result.status === 'rejected')
           if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Kit isolation page cleanup failed')
           pages = casePages()
+        }
+        // A case worker can claim and navigate an audit client, including to
+        // same-origin blob HTML. Scripts stay disabled there, but do not retain
+        // a substituted document across the reset boundary.
+        for (const [origin, probe] of auditPages) {
+          if (probe.isClosed() || probe.url() !== new URL(origin).href) {
+            await probe.close()
+            auditPages.delete(origin)
+          }
         }
         await context.clearCookies()
         await context.clearPermissions()
