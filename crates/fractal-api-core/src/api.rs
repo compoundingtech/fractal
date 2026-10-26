@@ -1,3 +1,4 @@
+use crate::RetirementsStore;
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
 use crate::ConversationReadsStore;
@@ -94,9 +95,15 @@ pub mod read_deadline;
 pub mod response_body;
 mod owned_sets;
 pub mod published_attention;
+pub mod attention_history;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
-pub use published_attention::{published_attention_rows, refresh_attention_list};
+pub use revision_changes::revision_card;
+#[cfg(any(test, feature = "test-support"))]
+pub use published_attention::{
+    attention_fleet, present_attention, published_attention_rows, refresh_attention_list,
+    refresh_attention_list_with,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
@@ -110,6 +117,7 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
 #[cfg(target_os = "linux")]
@@ -119,6 +127,7 @@ pub use tile_endpoint::{
 };
 pub use published_lists::{start_published_lists, wait_published_lists_at_least};
 mod changes;
+mod deploy;
 
 #[cfg(test)]
 mod legacy_handler_guard_tests;
@@ -168,7 +177,24 @@ pub fn raw_terminal_owner_splice(
     Box::pin(raw_terminal_splice(socket, transport, None, None, None, None, None))
 }
 
-pub use crate::delivery_presence::claude_channel_attached;
+pub use crate::delivery_presence::{claude_channel_attached, claude_channel_proof_pending};
+
+pub fn configure_claude_ownership_observation(root: &Path, enabled: bool) {
+    delivery_presence::configure_observation(root, enabled);
+}
+
+/// The same answer as `claude_channel_attached`, with the delivery binding that proves it and
+/// the instant the proof lapses by itself. Both come from one presence predicate, so a push
+/// stream's deadline cannot drift from what the poll answers.
+pub fn claude_channel_attachment(
+    store: &Store,
+    subject: &str,
+    incarnation: &str,
+) -> Option<(crate::mailbox::Fence, tokio::time::Instant)> {
+    delivery_presence::attachment_window(subject, incarnation)
+        .filter(|(_, until)| tokio::time::Instant::now() <= *until)
+        .filter(|(fence, _)| store.check_mailbox(fence).is_ok())
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -378,6 +404,7 @@ impl ApiError {
             | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
+            | "custody-pending"
             | "stale-subject"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -473,7 +500,7 @@ pub fn router(state: AppState) -> Router {
     router_with(state, &[])
 }
 
-/// Routes a crate above this one serves (st3-api-mailbox's mailbox stream): each family is added to
+/// Routes a crate above this one serves (fractal-api-mailbox's mailbox stream): each family is added to
 /// the route table before the envelope and leave layers wrap it, so it is served exactly as the
 /// routes listed here. `router` without them is the route table this crate alone answers.
 pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
@@ -500,6 +527,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route(
+            "/v1/deploy/verify-go",
+            post(deploy::verify_go).layer(Extension(transport)),
+        )
         .route("/v1/harnesses", get(operations::available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
         .route(
@@ -725,6 +756,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
         .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
+        .route(
+            "/v1/internal/fleet/pairing-admission",
+            post(fleet::fleet_pairing_admission),
+        )
         .route(
             "/v1/internal/fleet/admission-residue",
             get(fleet::fleet_admission_residue),
@@ -1707,6 +1742,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         "recipient-retired"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
+        | "invalid-custody-successor"
+        | "custody-pending"
         | "not-found"
         | "forbidden"
         | "attention-migrated"
@@ -1855,7 +1892,9 @@ pub fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> 
 }
 
 pub fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
-    if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
+    if cursor.starts_with(attention_history::CURSOR_PREFIX) {
+        attention_history::cursor_snapshot(cursor)
+    } else if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
         client_v0::native_page_cursor_snapshot(cursor)
     } else {
         decode_client_cursor(cursor).map(|cursor| cursor.snapshot)
@@ -2101,6 +2140,7 @@ fn client_page_read_projected(
                 has_more,
                 next_cursor,
                 cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+                omitted_items: None,
             },
             sync: client_sync_notice(state),
             replicated: None,
@@ -3171,10 +3211,20 @@ fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
     let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), local_host) else {
         return;
     };
+    // Eligibility above already required a live local native seat with an id.
+    let attachment_push = (item["driver"].as_str() == Some("claude")).then(|| {
+        delivery_presence::attachment_push(
+            item["id"].as_str().unwrap_or_default(),
+            item["incarnation_id"].as_str(),
+        )
+    });
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
     item["delivery"] = assessment.to_value();
+    if let Some(attachment_push) = attachment_push {
+        item["delivery"]["attachment_push"] = Value::String(attachment_push.into());
+    }
 }
 
 /// Share the live/local/native eligibility with scalar readers such as assistant summary
@@ -3639,6 +3689,13 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            // Fold the point read into a cached card. Presentation of a warm roster page
+            // must not repeat one retirement query for every retired row.
+            if state == "retired"
+                && let Some(custody) = store.mail_custody_status(&subject.subject).map_err(anyhow::Error::new)?
+            {
+                value["mail_custody"] = custody;
+            }
             if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));
@@ -4168,12 +4225,13 @@ pub fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
     }
 }
 
-fn client_attention_resources_with_previews(
+pub fn client_attention_resources_with_previews(
     state: &AppState,
     person: Option<&str>,
     history: bool,
 ) -> anyhow::Result<Vec<Value>> {
     let mut items = client_attention_resources(&state.store, person, history)?;
+    published_attention::published_attention_presentations(&state.store, &mut items);
     for item in &mut items {
         if item["attention_kind"] != "launch-approval" {
             continue;
@@ -5135,6 +5193,7 @@ fn client_work_published_page(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -6305,7 +6364,7 @@ fn harness_ancestor(mut pid: u32) -> Option<String> {
     let mut seen = BTreeSet::new();
     while pid > 1 && pid != std::process::id() && seen.insert(pid) {
         let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
             let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
             (key == name).then(|| value.to_owned())
@@ -6365,7 +6424,7 @@ fn native_delivery_identity(
             _ => None,
         }
     })?;
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     let agent = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
         env.iter().find_map(|entry| {
             let (key, value) = entry.split_once('=')?;
@@ -6382,7 +6441,7 @@ fn native_delivery_identity(
 }
 
 #[cfg(target_os = "linux")]
-fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
     stream
         .peer_cred()
         .ok()?
@@ -6391,7 +6450,7 @@ fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
 }
 
 #[cfg(target_os = "macos")]
-fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd as _;
     let mut pid: libc::pid_t = 0;
     let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
@@ -6409,7 +6468,7 @@ fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn local_peer_pid(_stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(_stream: &tokio::net::UnixStream) -> Option<u32> {
     None
 }
 
@@ -7332,27 +7391,9 @@ fn doctor_report_with_operation_drift(
             message: error.to_string(),
         }),
     }
-    match state.store.operational_repair_plan() {
-        Ok(plan) if plan.items.is_empty() => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "pass".into(),
-            message: "the graph has no repairable operational contradictions".into(),
-        }),
-        Ok(plan) => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "warn".into(),
-            message: format!(
-                "{} graph-authorized repairs are available; inspect `st repair dry-run` token {}",
-                plan.items.len(),
-                plan.token
-            ),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "fail".into(),
-            message: format!("could not compute the operational repair plan: {error}"),
-        }),
-    }
+    checks.push(operations::operational_repair_check(
+        operations::owner_operational_repair_plan(state),
+    )?);
     checks.push(
         terminal_exec_gates_check(&state.store).unwrap_or_else(|error| DoctorCheck {
             name: "terminal-exec-gates".into(),
@@ -7948,6 +7989,9 @@ fn doctor_report_with_operation_drift(
                 .iter()
                 .filter(|agent| {
                     agent.pointer("/delivery/state").and_then(Value::as_str) == Some("stale")
+                        || agent.pointer("/delivery/reason").and_then(Value::as_str)
+                            .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
+                                || reason.starts_with("ownership proof unavailable"))
                 })
                 .map(|agent| {
                     format!(

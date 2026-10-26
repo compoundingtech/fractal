@@ -32,7 +32,7 @@ impl Trace {
         match Self::create(started, Path::new(&path), target) {
             Ok(trace) => Some(trace),
             Err(_) => {
-                eprintln!("stui: conversation-open timing unavailable; continuing without it");
+                eprintln!("Fractal TUI: conversation-open timing unavailable; continuing without it");
                 None
             }
         }

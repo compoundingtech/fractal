@@ -44,6 +44,7 @@ pub mod resources;
 pub mod search;
 pub mod arrangements;
 pub mod conversation_blocks;
+pub mod conversation_delivery;
 pub mod collection_windows;
 pub mod inventory;
 pub mod published_missions;
@@ -327,6 +328,15 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "pairing.revoke",
 ];
 
+/// Server-established browser admission, never deserialized from a request header.
+/// This grants client API capabilities only; it is not an administrative bearer.
+#[derive(Clone, Debug)]
+pub struct LocalWebSession {
+    pub person: String,
+    pub id: String,
+    pub expires_at: u128,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClientSession {
     /// The credential/session identity used for audit and idempotency isolation.
@@ -345,6 +355,7 @@ pub struct ClientSession {
     pub local_peer: bool,
     pub custom_forms: bool,
     pub conversation_blocks: bool,
+    pub conversation_delivery_links: bool,
     /// Internal assistant projection option, never negotiated by native clients.
     pub assistant_content_handles: bool,
     pub messages_paging: bool,
@@ -365,6 +376,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms: true,
             conversation_blocks: false,
+            conversation_delivery_links: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
@@ -405,6 +417,7 @@ impl ClientSession {
                 local_peer: false,
                 custom_forms,
                 conversation_blocks: false,
+                conversation_delivery_links: false,
                 assistant_content_handles: false,
                 messages_paging: false,
                 scopes: ["read.projections", "terminal.read"]
@@ -426,6 +439,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms,
             conversation_blocks: false,
+            conversation_delivery_links: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
@@ -444,6 +458,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            conversation_delivery_links: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
@@ -506,6 +521,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         json!({ "id": action, "version": 0, "state": state })
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
+    capabilities.push(json!({"id":"conversation-delivery-links", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"push-registration", "version":1, "state":if session.pairing_issued_here && session.transport != "unix" {"granted"} else {"unavailable"}}));
     capabilities.push(json!({"id":"messages-paging", "version":2, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
@@ -579,6 +595,10 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "conversation-blocks.v1")
         });
+    let conversation_delivery_links = request.headers().get("x-st3-features")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|feature|
+            feature.trim() == "conversation-delivery-links.v1"));
     let messages_paging = request
         .headers()
         .get("x-st3-features")
@@ -588,6 +608,16 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "messages-paging.v2")
         });
+    if let Some(web) = request.extensions().get::<LocalWebSession>() {
+        let mut session = ClientSession::local(Some(&web.person))?;
+        session.actor = format!("client/local-web/{}", web.id);
+        session.transport = "local-web";
+        session.custom_forms = custom_forms;
+        session.grant_expires_at = Some(web.expires_at);
+        session.conversation_blocks = conversation_blocks;
+        session.messages_paging = messages_paging;
+        return Ok(session);
+    }
     let Some(value) = request.headers().get(AUTHORIZATION) else {
         if transport == "unix" {
             let person = request
@@ -605,6 +635,7 @@ pub fn authenticate(
             }
             session.custom_forms = custom_forms;
             session.conversation_blocks = conversation_blocks;
+            session.conversation_delivery_links = conversation_delivery_links;
             session.messages_paging = messages_paging;
             return Ok(session);
         }
@@ -643,6 +674,7 @@ pub fn authenticate(
     };
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     session.conversation_blocks = conversation_blocks;
+    session.conversation_delivery_links = conversation_delivery_links;
     session.messages_paging = messages_paging;
     if request.method() == axum::http::Method::POST
         && request.uri().path() == "/v1/client/diagnostics"
@@ -672,10 +704,11 @@ pub fn paired_client_session(
     transport: &'static str,
     custom_forms: bool,
 ) -> Result<ClientSession, ApiError> {
-    let revoked = state.store.claims_for_subject_kind_at(
+    // Revoked wins: any revocation of the grant ends it, whatever order a member admitted the
+    // pairing and the revocation in. Completing refuses a used grant, so nothing re-grants it.
+    let revoked = !state.store.claims_for_subject_kind_at(
         &paired.subject, "custom.client.pairing-revoked", None, true, 1,
-    ).map_err(ApiError::internal)?.claims.first()
-        .is_some_and(|claim| claim.store_index > paired.store_index);
+    ).map_err(ApiError::internal)?.claims.is_empty();
     let expires_at = paired.body.pointer("/fields/expires_at_unix_ms")
         .and_then(Value::as_u64).map(u128::from).unwrap_or_default();
     if revoked || expires_at <= client_now_ms() {
@@ -706,6 +739,7 @@ pub fn paired_client_session(
         local_peer: false,
         custom_forms,
         conversation_blocks: false,
+        conversation_delivery_links: false,
         assistant_content_handles: false,
         messages_paging: false,
         scopes,
@@ -715,23 +749,37 @@ pub fn paired_client_session(
 /// Held collection sockets carry no bearer secret. Re-resolve their session grant at each
 /// arrangement read, using the same expiration/revocation checks as HTTP authentication.
 pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<ClientSession, ApiError> {
+    if session.transport == "local-web" {
+        // Only the server-established browser extension mints this transport.
+        // Collection workers must retain its original expiry, never turn it into a pairing.
+        if !acting_party(session)
+            || state.owning_person.as_deref() != Some(session.authority_actor.as_str())
+            || !session.actor.strip_prefix("client/local-web/")
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            || !session.grant_expires_at.is_some_and(|expiry| expiry > client_now_ms())
+            || session.pairing_grant.is_some()
+        {
+            return Err(forbidden("the local web session authority changed or expired"));
+        }
+        return Ok(session.clone());
+    }
     if session.transport == "unix" && acting_party(session) {
         return Ok(session.clone());
     }
-    let pairings = match session.pairing_grant.as_deref() {
-        Some(subject) => state.store.claims_for_subject_kind_at(
-            subject, "custom.client.pairing-completed", None, true, 1,
-        ),
-        None => state.store.claims_for_kind_at(
-            "custom.client.pairing-completed", None, true, 10_000,
-        ),
-    }.map_err(ApiError::internal)?;
-    let paired = pairings.claims.iter().find(|claim| match session.pairing_grant.as_deref() {
-        Some(subject) => claim.subject.as_str() == subject,
-        None => claim.body.pointer("/fields/session_actor").and_then(Value::as_str) == Some(session.actor.as_str()),
-    }).ok_or_else(|| forbidden("the client session grant is absent"))?;
-    let mut current = paired_client_session(state, paired, session.transport, session.custom_forms)?;
+    // With a grant, the canonical newest completion, so every member checks the same one.
+    let paired = match session.pairing_grant.as_deref() {
+        Some(subject) => state.store
+            .newest_claim_for_subject_kind(subject, "custom.client.pairing-completed")
+            .map_err(ApiError::internal)?,
+        None => state.store
+            .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
+            .map_err(ApiError::internal)?
+            .claims.into_iter()
+            .find(|claim| claim.body.pointer("/fields/session_actor").and_then(Value::as_str) == Some(session.actor.as_str())),
+    }.ok_or_else(|| forbidden("the client session grant is absent"))?;
+    let mut current = paired_client_session(state, &paired, session.transport, session.custom_forms)?;
     current.conversation_blocks = session.conversation_blocks;
+    current.conversation_delivery_links = session.conversation_delivery_links;
     current.messages_paging = session.messages_paging;
     if current.authority_actor != session.authority_actor {
         return Err(forbidden("the client session authority changed"));
@@ -1526,6 +1574,9 @@ pub async fn now(
     let mut effective_query = query.clone();
     effective_query.person.clone_from(&person);
     let (history, actor, owner_run) = (query.history, query.actor.clone(), query.owner_run.clone());
+    if history && actor.is_none() && owner_run.is_none() {
+        return super::attention_history::page(state, snapshot, effective_query, "now").await;
+    }
     client_snapshot_page(
         &state,
         snapshot,
@@ -1731,7 +1782,7 @@ fn normalized_timeline_usage_body(
     Value::Object(body)
 }
 
-/// The Small Talk in one session's conversation: messages sent for this session, and messages
+/// The Fractal in one session's conversation: messages sent for this session, and messages
 /// to or from its agent that name no session, accepted while this incarnation was the agent's
 /// current one. st joins them into the timeline so every client shows the same conversation.
 fn session_messages(
@@ -1770,7 +1821,7 @@ fn session_message_belongs(
     }
 }
 
-/// A message's timeline body: who wrote to whom, about what, so a client can draw Small Talk
+/// A message's timeline body: who wrote to whom, about what, so a client can draw Fractal
 /// apart from the harness's own turns.
 /// Who signed a message a person wrote and whether it checks: the verdict st recorded, and the
 /// device the signing key was granted to, by the label the person gave it when it paired. A
@@ -2296,6 +2347,10 @@ pub fn native_slice_page_at_generation(
     items.truncate(limit);
     drop(overlay);
     let _page_preparation = crate::profile::span("conversation/page-preparation");
+    let receipt_source = crate::external_sessions::external_session_id(source.driver, &source.native_id);
+    conversation_delivery::annotate(state, snapshot, session, &receipt_source,
+        managed.map(|managed| managed.0.as_str()),
+        items.iter_mut().map(|(item, _)| item))?;
     // A page never outgrows what a paired reader can take from a remote owner (its reads are
     // capped at 1 MiB): a seat with very large entries gets a shorter newest page and a cursor
     // for the rest. A lone entry can exceed the target budget, but not the hard ceiling.
@@ -2326,6 +2381,7 @@ pub fn native_slice_page_at_generation(
         "page": ClientPageInfo {
             limit, has_more, next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
     });
     if let Some(header) = header {
@@ -2402,7 +2458,7 @@ fn canonical_native_slice(
 /// The most native entries one echo-omitting read examines.
 #[cfg(not(any(test, feature = "test-support")))]
 pub const NATIVE_ECHO_SCAN_ITEMS: usize = 4096;
-/// Test builds (st3-api-client-v0's tests reach this through test-support) scan a smaller budget, so a
+/// Test builds (fractal-api-client-v0's tests reach this through test-support) scan a smaller budget, so a
 /// fixture can exceed it with a few hundred echoes.
 #[cfg(any(test, feature = "test-support"))]
 pub const NATIVE_ECHO_SCAN_ITEMS: usize = 256;
@@ -2996,6 +3052,7 @@ pub fn timeline_value(
             .as_deref()
             .and_then(|cursor| offset_continuation_header(state, session, &session_id, snapshot, cursor));
         for item in &mut page.items {
+            if !session.conversation_delivery_links && let Some(item) = item.as_object_mut() { item.remove("delivers"); }
             if !session.conversation_blocks && let Some(body) = item["body"].as_object_mut() {
                 body.remove("blocks");
             }

@@ -106,6 +106,75 @@ async fn lock_fleet_admission(
     }
 }
 
+/// Pairing credentials travel over the helper's private stdin/stdout, never argv.
+async fn bootstrap_fabric_invite(
+    endpoint: &Endpoint,
+    created: &mut fractal_daemon::api::FleetInviteCreated,
+) -> Result<()> {
+    let code = fractal_daemon::fleet::code::JoinCode::decode(&created.code)?;
+    if code.migrate
+        || !code.endpoints.iter().any(|endpoint| {
+            matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Fabric { .. })
+        })
+    {
+        return Ok(());
+    }
+    let Endpoint::Unix(socket) = endpoint else {
+        anyhow::bail!("Fabric bootstrap invitations must be issued on the sponsor machine");
+    };
+    let helper = std::env::var_os("ST_FABRIC_ADAPTER")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|parent| parent.join("st-fabric-adapter")))
+                .filter(|path| path.is_file())
+        })
+        .or_else(|| fractal_daemon::fleet::transport::resolve_tool(None, "st-fabric-adapter"))
+        .context(
+            "Fabric invitations need st-fabric-adapter installed and Fabric running with \
+             --runtime-peers; use --via tailscale for a Tailscale-only invitation",
+        )?;
+    let mut child = tokio::process::Command::new(helper)
+        .arg("--st-socket")
+        .arg(socket)
+        .arg("pairing-invite")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .context("start the Fabric invitation helper")?;
+    {
+        use tokio::io::AsyncWriteExt as _;
+        let mut input = child.stdin.take().context("open pairing helper input")?;
+        input
+            .write_all(&serde_json::to_vec(&json!({ "code": created.code }))?)
+            .await?;
+        input.write_all(b"\n").await?;
+        input.shutdown().await?;
+    }
+    let output = child.wait_with_output().await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Fabric invitation bootstrap failed; the st invite remains open until revoked or expired"
+    );
+    #[derive(serde::Deserialize)]
+    struct PairedInvite {
+        code: String,
+    }
+    let paired: PairedInvite =
+        serde_json::from_slice(&output.stdout).context("decode the Fabric invitation helper")?;
+    let paired_code = fractal_daemon::fleet::code::JoinCode::decode(&paired.code)?;
+    anyhow::ensure!(
+        paired_code.fleet_id == code.fleet_id && paired_code.invite == code.invite,
+        "Fabric invitation helper returned another invitation"
+    );
+    created.expires_at_unix_ms = paired_code.expires_at.saturating_mul(1000);
+    created.code = paired.code;
+    Ok(())
+}
+
 pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool) -> Result<()> {
     let manages_services = match &command {
         FleetCommand::Create(args) => !args.no_service,
@@ -115,7 +184,8 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         FleetCommand::Migrate(args) => !args.no_service,
         FleetCommand::Transports { command } => match command {
             FleetTransportsCommand::Add { no_service, .. }
-            | FleetTransportsCommand::Remove { no_service, .. } => !*no_service,
+            | FleetTransportsCommand::Remove { no_service, .. }
+            | FleetTransportsCommand::Prefer { no_service, .. } => !*no_service,
         },
         _ => false,
     };
@@ -172,7 +242,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     "--send-fabric needs the NAME of the machine to send it to"
                 );
             }
-            let created: fractal_daemon::api::FleetInviteCreated = client
+            let mut created: fractal_daemon::api::FleetInviteCreated = client
                 .post(
                     "/v1/internal/fleet/invites",
                     &fractal_daemon::api::FleetInviteRequest {
@@ -184,6 +254,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     },
                 )
                 .await?;
+            bootstrap_fabric_invite(endpoint, &mut created).await?;
             let command = if args.migrate { "migrate" } else { "join" };
             if let Some(path) = &args.code_file {
                 fractal_daemon::fleet::join::write_private(path, created.code.as_bytes())?;
@@ -226,15 +297,11 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     "Invite {} for {target} expires in about {expires_in} minutes.",
                     created.invite
                 );
+                println!("On {target}, run:\n  st fleet {command} {}", created.code);
                 println!(
-                    "On {target}, run this and paste the code when asked:\n  st fleet {command}"
+                    "The code is a one-use credential. To avoid shell history, run \
+                     `st fleet {command}` and paste it at the hidden prompt instead."
                 );
-                println!("Code:\n  {}", created.code);
-                if let Some(name) = &args.name {
-                    println!(
-                        "Or, if {name} is a Fabric peer of this machine, send the code instead of showing it:\n  st fleet invite {name} --send-fabric\n  fabric exec {name} -- st fleet {command} --fabric-inbox"
-                    );
-                }
             }
             Ok(())
         }
@@ -459,7 +526,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 "This member is now {}; it announces the change when its replication worker starts.",
                 file.mode.as_str()
             );
-            refresh_fleet_worker(args.no_service)?;
+            refresh_fleet_services(args.no_service)?;
             Ok(())
         }
         FleetCommand::Transports { command } => {
@@ -648,15 +715,15 @@ async fn save_and_publish_fleet_settings(
             },
         )
         .await
-        .context("fleet.toml saved; endpoint publication did not complete; restart the replication worker to announce the saved settings")?;
+        .context("fleet.toml saved; endpoint publication did not complete; restart st3 daemon and st3 replication-worker to apply saved relay settings and announce the saved endpoints")?;
     Ok(())
 }
 
-fn refresh_fleet_worker(no_service: bool) -> Result<()> {
+fn refresh_fleet_services(no_service: bool) -> Result<()> {
     if !no_service && services_installed()? {
         fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
     } else {
-        println!("Restart st3 replication-worker for the change to take effect.");
+        println!("Restart st3 daemon and st3 replication-worker for the change to take effect.");
         println!(
             "The old worker no longer publishes endpoints after its settings change; restart it to resume publication."
         );
@@ -679,14 +746,37 @@ async fn run_fleet_transports(
     );
     let transport = match &command {
         FleetTransportsCommand::Add { transport, .. }
-        | FleetTransportsCommand::Remove { transport, .. } => transport,
+        | FleetTransportsCommand::Remove { transport, .. }
+        | FleetTransportsCommand::Prefer { transport, .. } => transport,
     };
     let enabled = file
         .transports
         .iter()
         .any(|configured| configured == transport);
-    // A repeated add never reconfigures an existing exposure, even with a different flag.
-    if matches!(&command, FleetTransportsCommand::Add { .. }) && enabled {
+    if matches!(&command, FleetTransportsCommand::Prefer { .. }) {
+        anyhow::ensure!(
+            enabled,
+            "{transport} is not enabled on this member; preference only reorders enabled transports"
+        );
+        if file.transports.first() == Some(transport) {
+            println!("{transport} is already preferred.");
+            return Ok(());
+        }
+    }
+    // Re-adding can change local preference, but never reconfigures the exposure.
+    if let FleetTransportsCommand::Add {
+        prefer, no_service, ..
+    } = &command
+        && enabled
+    {
+        if *prefer && file.transports.first() != Some(transport) {
+            file.transports.retain(|configured| configured != transport);
+            file.transports.insert(0, transport.clone());
+            file.save(&config.state_dir)?;
+            drop(lock);
+            println!("Fabric is now preferred; its existing protocol is unchanged.");
+            return refresh_fleet_services(*no_service);
+        }
         println!("Fabric is already enabled; remove it before changing its protocol.");
         return Ok(());
     }
@@ -705,8 +795,23 @@ async fn run_fleet_transports(
         .clone()
         .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
     let no_service = match command {
+        FleetTransportsCommand::Prefer {
+            transport,
+            no_service,
+        } => {
+            let index = file
+                .transports
+                .iter()
+                .position(|configured| configured == &transport)
+                .expect("preferred transport was checked as enabled");
+            file.transports[..=index].rotate_right(1);
+            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            println!("{transport} is now preferred; transport exposure is unchanged.");
+            no_service
+        }
         FleetTransportsCommand::Add {
             fabric_protocol,
+            prefer,
             no_service,
             ..
         } => {
@@ -738,7 +843,11 @@ async fn run_fleet_transports(
                 .expose(&protocol, &format!("127.0.0.1:{port}"))
                 .await
                 .context("Fabric exposure failed; fleet settings and endpoints are unchanged")?;
-            file.transports.push("fabric".into());
+            if prefer {
+                file.transports.insert(0, "fabric".into());
+            } else {
+                file.transports.push("fabric".into());
+            }
             file.fabric_protocol = Some(protocol.clone());
             endpoints.retain(|endpoint| endpoint["transport"] != "fabric");
             endpoints.push(json!({"transport":"fabric", "node":node, "protocol":protocol}));
@@ -790,8 +899,8 @@ async fn run_fleet_transports(
                 None => Err(anyhow::anyhow!("fabric is not installed")),
             };
             drop(lock);
-            // Refresh even when cleanup fails: no worker may keep using the removed carrier.
-            refresh_fleet_worker(no_service)?;
+            // Refresh even when cleanup fails: relay and worker must stop using the carrier.
+            refresh_fleet_services(no_service)?;
             if let Err(error) = result {
                 println!(
                     "Fabric endpoint removed; unexposure still needs cleanup: {error:#}. When Fabric is available, run fabric unexpose {protocol}"
@@ -805,7 +914,7 @@ async fn run_fleet_transports(
         }
     };
     drop(lock);
-    refresh_fleet_worker(no_service)
+    refresh_fleet_services(no_service)
 }
 
 /// Settings for a migrating node: its existing replication port unless one is given.

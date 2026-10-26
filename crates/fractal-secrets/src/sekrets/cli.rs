@@ -16,7 +16,7 @@ use super::protocol::{Attestation, CallerView, Request, RunRequest};
 #[derive(Args, Debug)]
 #[command(
     args_conflicts_with_subcommands = true,
-    after_help = "Run a command:  st sekrets [--profile P] -- gh pr create --draft\n\
+    after_help = "Run a command:  fractal sekrets [--profile P] -- gh pr create --draft\n\
                   A command runs as the sekrets user with the profile's home and environment, \
                   under its allow and deny policy; the caller never reads the credential."
 )]
@@ -24,7 +24,7 @@ pub struct SekretsArgs {
     #[command(subcommand)]
     command: Option<SekretsCommand>,
     /// The profile to run as. Without it: a person's default profile, or the one profile granted
-    /// to this seat that allows the command.
+    /// to this agent that allows the command.
     #[arg(long)]
     profile: Option<String>,
     /// The command and its arguments, after `--`.
@@ -64,7 +64,7 @@ enum SekretsCommand {
     Log(LogArgs),
     /// List policy presets.
     Presets,
-    /// Register this host's daemon key with the gateway, so seats can be told from their person.
+    /// Register this host's daemon key with the gateway, so agents can be told from their person.
     /// Run from a login session.
     Enable,
     /// Print the root commands that create the sekrets user, its store and the gateway service.
@@ -110,7 +110,7 @@ struct UnlockArgs {
 
 #[derive(Args, Debug, Clone)]
 struct PolicyArgs {
-    /// A named policy; repeat to combine. See `st sekrets presets`.
+    /// A named policy; repeat to combine. See `fractal sekrets presets`.
     #[arg(long = "preset")]
     presets: Vec<String>,
     /// Allow commands that start with these whole arguments, such as "gh pr view".
@@ -189,7 +189,7 @@ struct SetupArgs {
     /// More people on a shared host: UID=person/NAME.
     #[arg(long = "also")]
     also: Vec<String>,
-    /// The st binary root copies for the gateway; this one when omitted.
+    /// The fractal binary root copies for the gateway; this one when omitted.
     #[arg(long)]
     st: Option<PathBuf>,
     /// Directories callers' checkouts live under.

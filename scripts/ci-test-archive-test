@@ -179,8 +179,8 @@ class DownloadControls(unittest.TestCase):
                                              for name, data in self.files.items()}}).encode()
         self.manifest_hash = hashlib.sha256(self.manifest).hexdigest()
         self.zip_bytes = self.make_zip()
-        self.environment = dict(GITHUB_REPOSITORY='owner/repo', GITHUB_RUN_ID='123',
-                                GITHUB_RUN_ATTEMPT='2', GITHUB_SHA='a' * 40,
+        self.environment = dict(GITHUB_REPOSITORY='owner/old-name', GITHUB_REPOSITORY_ID='789',
+                                GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='2', GITHUB_SHA='a' * 40,
                                 CI_TEST_ARCHIVE_ARTIFACT_ID='456',
                                 CI_TEST_ARCHIVE_PRODUCER_ATTEMPT='1',
                                 CI_TEST_ARCHIVE_MANIFEST_SHA256=self.manifest_hash,
@@ -276,6 +276,24 @@ class DownloadControls(unittest.TestCase):
         for name, data in self.files.items():
             self.assertEqual((self.destination / name).read_bytes(), data)
         self.assertFalse(list(self.root.glob('ci-test-transfer-*')))
+
+    def test_repository_id_survives_rename_without_name_lookup(self):
+        self.download(self.fake_gh([self.zip_bytes]))
+        self.assertEqual(self.calls, [
+            ['gh', 'api', 'repositories/789/actions/artifacts/456'],
+            ['transport', 'repositories/789/actions/artifacts/456/zip'],
+        ])
+
+    def test_missing_repository_id_resolved_once_before_transfer_retries(self):
+        del self.environment['GITHUB_REPOSITORY_ID']
+        with patch.object(module, 'output', return_value='789') as resolve:
+            self.download(self.fake_gh([b'partial', self.zip_bytes]))
+        resolve.assert_called_once_with('gh', 'api', 'repos/owner/old-name', '--jq', '.id')
+        self.assertEqual(self.calls, [
+            ['gh', 'api', 'repositories/789/actions/artifacts/456'],
+            ['transport', 'repositories/789/actions/artifacts/456/zip'],
+            ['transport', 'repositories/789/actions/artifacts/456/zip'],
+        ])
 
     def test_truncated_transfer_recovers_before_any_consumer(self):
         self.download(self.fake_gh([self.zip_bytes[:80], self.zip_bytes]))
@@ -558,22 +576,23 @@ class StreamingControls(unittest.TestCase):
                 raise urllib.error.HTTPError(request.full_url, 302, 'redirect',
                     {'Location': 'https://storage.invalid/?signed-secret'}, None)
         with patch.dict(os.environ, self.environment, clear=True), patch.object(module.urllib.request, 'build_opener', return_value=Opener()):
-            url = module.signed_artifact_url('repos/owner/repo/actions/artifacts/456', 1)
+            url = module.signed_artifact_url('repositories/789/actions/artifacts/456', 1)
         self.assertEqual(url, 'https://storage.invalid/?signed-secret')
         self.assertEqual(captured[0].get_header('Authorization'), 'Bearer test-token-never-in-argv')
         self.assertEqual(captured[0].host, 'api.github.com')
+        self.assertEqual(captured[0].full_url, 'https://api.github.com/repositories/789/actions/artifacts/456/zip')
         handler = module.NoRedirect()
         self.assertIsNone(handler.redirect_request(None, None, 302, '', {}, url))
 
     def test_invalid_redirect_refused_and_http_error_is_redacted(self):
         import urllib.error
-        for status, location in [(302, 'http://storage.invalid/secret'), (403, 'signed-secret')]:
+        for status, location in [(302, 'http://storage.invalid/secret'), (301, 'https://api.github.com/secret'), (403, 'signed-secret')]:
             class Opener:
                 def open(inner, request, **kwargs):
                     raise urllib.error.HTTPError('https://signed-secret', status, 'secret body',
                         {'Location': location}, None)
             with patch.dict(os.environ, self.environment, clear=True), patch.object(module.urllib.request, 'build_opener', return_value=Opener()), self.assertRaises(module.TransferError) as raised:
-                module.signed_artifact_url('repos/owner/repo/actions/artifacts/456', 1)
+                module.signed_artifact_url('repositories/789/actions/artifacts/456', 1)
             self.assertNotIn('signed-secret', str(raised.exception))
 
 

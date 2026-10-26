@@ -91,8 +91,8 @@ public actor FractalClient {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/conversations/\(Self.routedSessionID(sessionID))/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         if let after { components.queryItems = [.init(name: "after", value: after)] }
-        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("st3.client.conversation.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
+        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.conversation.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
@@ -125,8 +125,8 @@ public actor FractalClient {
     public func glassesStream(subscriptionID: String = "glasses") -> AsyncThrowingStream<GlassCollectionFrame, Error> {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
-        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
+        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
@@ -150,8 +150,8 @@ public actor FractalClient {
     public func arrangementsStream(person: String, subscriptionID: String = "arrangements", limit: Int = 100, subject: String? = nil) -> AsyncThrowingStream<ArrangementCollectionFrame, Error> {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
-        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-        var request = URLRequest(url: components.url!); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
+        var request = URLRequest(url: components.url!); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
         applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
@@ -183,7 +183,7 @@ public actor FractalClient {
     public func agentsStream(subscriptionID: String = "agents", limit: Int = 100, status: String? = nil, agent: String? = nil) -> AsyncThrowingStream<AgentCollectionFrame, Error> {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
-        var request = URLRequest(url: components.url!); request.setValue("custom-subjects.v1, conversation-blocks.v1", forHTTPHeaderField: "x-st3-features"); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        var request = URLRequest(url: components.url!); request.setValue("custom-subjects.v1, conversation-blocks.v1", forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
@@ -259,6 +259,7 @@ public actor FractalClient {
     public func launchVariantsList(launchID: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/launches/\(launchID.replacingOccurrences(of: "launch/", with: ""))/variants", query: query) }
     public func launchDecisionsList(launchID: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/launches/\(launchID.replacingOccurrences(of: "launch/", with: ""))/decisions", query: query) }
     public func launchApprovalsList(launchID: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/launches/\(launchID.replacingOccurrences(of: "launch/", with: ""))/approvals", query: query) }
+    public func schedulesList(cursor: String? = nil, limit: Int? = nil, unheardAfterMS: UInt64? = nil) async throws -> Envelope<SchedulesPage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; if let unheardAfterMS { query.append(.init(name: "unheard_after_ms", value: String(unheardAfterMS))) }; return try await get("v1/client/schedules", query: query) }
     public func missionsList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("missions", cursor: cursor, limit: limit, history: history) }
     public func missionsGet(id: String) async throws -> Envelope<Resource> { try await resource("missions", id: id) }
     public func workList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("work", cursor: cursor, limit: limit, history: history) }
@@ -279,6 +280,7 @@ public actor FractalClient {
     public func lanesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("lanes", cursor: cursor, limit: limit, history: history) }
     public func lanesGet(id: String) async throws -> Envelope<Resource> { try await resource("lanes", id: id) }
     public func terminalsList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("terminals", cursor: cursor, limit: limit, history: history) }
+    public func runtimeStartsList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("runtime-starts", cursor: cursor, limit: limit, history: history) }
     public func operationsList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("operations", cursor: cursor, limit: limit, history: history) }
     public func operationsGet(id: String) async throws -> Envelope<Resource> { try await resource("operations", id: id) }
     public func historyList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("history", cursor: cursor, limit: limit, history: history) }
@@ -404,8 +406,8 @@ public actor FractalClient {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/terminals/\(id.replacingOccurrences(of: "terminal/", with: ""))/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         if let incarnation { components.queryItems = [.init(name: "incarnation", value: incarnation)] }
-        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("\(fractalClientTerminalSubprotocol), st3.cap.\(streamCapability)", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
+        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("\(fractalClientTerminalSubprotocol), fractal.cap.\(streamCapability)", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
@@ -469,6 +471,11 @@ public actor FractalClient {
         applyTraceContext(to: &request)
         let (data, response) = try await session.data(for: request); let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if let readAuthorization, data.count > readAuthorization.budget { throw AssistantReadRejected(reason: "assistant response exceeded max_response_bytes") }
+        if status == 404 && path == "v1/client/schedules" {
+            throw ErrorEnvelope(apiVersion: "st3.client.v0", errorVersion: "st3.client.error.v0", requestID: "",
+                code: .unsupportedCapability, message: "This server does not support schedules.list; upgrade the server",
+                retryable: false, retryAfterMS: nil, details: [:])
+        }
         if !(200..<300).contains(status) { throw try JSONDecoder().decode(ErrorEnvelope.self, from: data) }
         return try JSONDecoder().decode(T.self, from: data)
     }

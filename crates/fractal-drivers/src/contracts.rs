@@ -10,7 +10,7 @@ pub fn legacy_env_name(name: &str) -> Option<String> {
     .then(|| format!("ST2_{}", name.strip_prefix("ST_").unwrap()))
 }
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 /// Fractal spelling of an ST/ST3 environment variable.
 pub fn fractal_env_name(name: &str) -> Option<String> {
     name.strip_prefix("ST_")

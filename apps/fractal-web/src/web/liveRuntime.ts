@@ -30,9 +30,9 @@ export const createPageRuntime = (replay?: Replay) => {
   
   // The page owns one source for its lifetime; Storybook never imports this live root.
   const live = liveSource({
+    adoptEarlyCollections: replay === undefined,
     options: {
       baseUrl: window.location.origin, maxFollows: 8, conversationSlots: 'advertised',
-      adoptEarlyCollections: replay === undefined,
       ...(replay === undefined ? {} : { socket: replay.socket, fetch: replay.fetch }),
       parentSpan: ux.activeSpan,
       traceContext: ux.traceContext,

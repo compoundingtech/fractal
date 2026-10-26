@@ -1,11 +1,15 @@
 # Current collection subscriptions
 
 Connect once to `GET /v1/client/collections/stream` with WebSocket subprotocol
-`st3.client.collections.v0`. The same Unix or paired client credentials used by
+`fractal.client.collections.v0`. The same Unix or paired client credentials used by
 the rest of client v0 apply. One connection accepts up to sixteen subscriptions.
 The optional `collections` capability version 1 advertises this bound; older
 daemons omit it and accept eight. Clients reserve their existing conversation
 and terminal slots before adding optional windows on older daemons.
+
+Every receiving fleet host must run #3430 or later before these new-only senders
+are deployed. That release still accepts old-only `st3.client.collections.v0`
+clients; there is no dual-offer negotiation or automatic old-name retry.
 
 The server sends a WebSocket protocol ping every eight seconds and answers client
 pings with the same payload. These frames do not read collection windows. A send
@@ -297,6 +301,12 @@ Optional capability `presentation` version 1 says agent rows carry `presentation
 word, list group, why the agent needs someone, and what it holds and has queued (see
 [the UI contract](../../clients/ui-contract.md#agent)). Older daemons omit both. A row that
 lacks it shows the state st reports, marked as coming from an older st; clients derive nothing.
+
+The same capability says attention rows carry `presentation`: the Now group and card, who
+**Chat about this** reaches, who raised it, and the step it holds (see
+[the UI contract](../../clients/ui-contract.md#attention-row)). The attention refresher computes
+it; every attention route copies it from the published list, and a row the list has not
+published yet has none until it does.
 
 ## Screen inventories
 

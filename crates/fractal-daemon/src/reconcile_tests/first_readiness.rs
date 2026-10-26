@@ -1,4 +1,4 @@
-//! First-readiness tests that serve the API; they live in st3-daemon because the API does.
+//! First-readiness tests that serve the API; they live in fractal-daemon because the API does.
 
 #![allow(unused_imports, dead_code)]
 

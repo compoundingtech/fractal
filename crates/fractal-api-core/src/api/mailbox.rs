@@ -69,6 +69,7 @@ pub struct FixtureDirtyGate {
     pub allowed: std::sync::atomic::AtomicBool,
     pub notifications: std::sync::atomic::AtomicUsize,
     pub replay_proofs: std::sync::atomic::AtomicUsize,
+    pub attachment_evaluations: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]

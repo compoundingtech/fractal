@@ -2,7 +2,7 @@
 
 Status: current language and runtime specification.
 
-See [kdl-lifecycle.md](./kdl-lifecycle.md) for complete day-to-day publication workflows.
+See [Configuration and KDL](../site/reference/configuration.md) for complete day-to-day publication workflows.
 
 Every st KDL document starts with `version 2`. Declarations follow the version directly.
 
@@ -282,6 +282,10 @@ can likewise create a plain shell at `pty/agent/PATH/UUID`. Only its exact creat
 Top-level schedules are also valid authored declarations: `st apply schedules.kdl` previews
 and publishes them without creating a mission run. Each schedule names the mission it will
 request at its declared times. Other top-level execution members still require a mission run.
+
+[`st schedules ls`](schedules-list.md) lists locally replicated declarations with recorded owners,
+nominal next declared ticks and explicit per-row knowledge age/unheard-host coverage. It does not
+contact the hosts or inspect occurrence history.
 
 The origin of the `mission-run.created` claim advances the mission run. It also materializes the run declarations.
 
@@ -1108,7 +1112,7 @@ step "wait-for-build" {
 
 The step is agentless and cannot name an agent. It completes when the named run completes. It fails when that run fails or is cancelled. Other steps order after it with `depends-on`. The value is a run ID or `mission-run/` subject, and it can use inputs.
 
-To make one run wait without changing its mission, start it with `after`. See [Starting after another run](kdl-lifecycle.md#starting-after-another-run).
+To make one run wait without changing its mission, start it with `after`. See [Starting after another run](../site/reference/configuration.md#definitions-runs-and-revisions).
 
 ## Run reports
 
@@ -1253,7 +1257,7 @@ Back-off: a step gets at most one nudge per idle period. After a nudge, the next
 the seat has taken a turn and gone idle again, and a quiet nudge comes no sooner than 2 hours after
 the step's last nudge. An action nudge is not held by the 2 hours, but each action nudges a step at
 most once. Every nudge is recorded on the step as a `work.nudged` claim that names the message,
-the idle period and the waits. `st work show` prints `Nudged:` while the step is held, and stui
+the idle period and the waits. `st work show` prints `Nudged:` while the step is held, and Fractal TUI
 shows `nudged … ago` under the working step.
 
 Two daemon settings in `[reconcile]` tune this, and are read again without a restart:
@@ -1800,7 +1804,7 @@ Messages use sender-chosen `kind: silent | wake`, defaulting to wake for every s
 
 A seat's bare `handles-faults` node makes it the fleet's fault agent: it receives each fault that no step assignee or agent requester owns, such as a failed loop on a run a person requested. When several live seats carry it, the first by subject takes them. Faults never go to a person's attention.
 
-Two seat faults reach that owner so a seat that cannot start is never found by looking. A seat parked by the crash-loop guard is a fault that carries the driver's last `harness.diagnostic` (its code and reason). A seat that is declared to run but that no runtime observation has ever described for ten minutes, which `st agents ls` shows as `desired`, is a fault too ("An agent seat has not started", with the same diagnostic, or the note that the driver never ran). Both end when the seat's runtime is observed or its declaration changes. A mission's seat reaches the run's requester first, like any other fault.
+Two seat faults reach that owner so a seat that cannot start is never found by looking. A seat parked by the crash-loop guard is a fault that carries the driver's last `harness.diagnostic` (its code and reason). A seat that is declared to run but that no runtime observation has ever described for ten minutes, which `st agents ls` shows as `desired`, is a fault too ("An agent seat has not started", with the same diagnostic, or the note that the driver never ran). Both end when the seat's runtime is observed or its declaration changes. A mission's seat reaches the run's requester first, like any other fault. A seat that restarts always (the default) is not left stopped for good: its parked launch is retried after one minute, then two, four, eight, sixteen and thirty, at most six times since its last successful launch, and each retry is a `retry` reconcile decision that names the failure before it (and the owner run, when the seat has one). A retry that starts the seat ends the fault; after the sixth, one `retries-exhausted` decision says the launch stays stopped until `st agents restart` or a changed declaration. Other restart policies are not retried. `st` runs the first `pty` on the launch PATH that accepts `--env NAME`, so an older build earlier on the PATH no longer parks every restart.
 Codex compares the model ID and effort returned by a saved-thread resume with the declaration exactly. If Codex normalizes a declared model alias to a different ID, the driver fails before binding; three failed starts park the seat under the Codex crash-loop guard until its declaration changes.
 Typed harnesses always run their real interactive TUI in a PTY. Claude always loads the native st
 channel. Use `exec {}` for non-interactive provider commands.
@@ -1969,9 +1973,18 @@ schedule again never starts work from before the stop.
 
 The schedule does not assign work. The referenced mission defines its work selectors.
 
+### Optional automatic standby
+
+See [Automatic schedule standby](schedule-standby.md) for the `standby { host
+"archive"; after "5m" }` declaration and all-member adoption requirement.
+Jobs must be safe to run twice: while hosts cannot hear each other a job may run
+on both; write jobs so a second run is harmless.
+
+If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
+
 ## Mission revisions
 
-In [free mode](kdl-lifecycle.md#free-mode), any person or agent may revise any part of a run, as
+In [free mode](../site/reference/configuration.md#free-mode), any person or agent may revise any part of a run, as
 itself. Human-only revision protection still selects the reviewers who must approve the change.
 `mission-authority` blocks still parse and are ignored.
 

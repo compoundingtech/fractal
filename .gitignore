@@ -29,6 +29,7 @@ crates/fractal-drivers/hooks/typecheck/node_modules/
 clients/typescript/fractal-client/node_modules/
 clients/typescript/fractal-views/node_modules/
 clients/typescript/fractal-scenarios/node_modules/
+packages/fractal-sdk/node_modules/
 
 # Pinned megarepo members materialized by `mr apply`.
 /repos/
@@ -36,6 +37,12 @@ clients/typescript/fractal-scenarios/node_modules/
 # Buck2: the web devShell links the rules and capabilities cells; build output.
 /.buck2/
 /buck-out/
+# Written into the checkout by the web dev shell's Buck tooling (the file watcher admission) on a host that runs Watchman; not source.
+/.buckconfig.local
 
 # Derived from apps/fractal-web/.changelog/ by scripts/changelog-registry.mjs; never committed (it would conflict).
 /apps/fractal-web/.changelog/registry.generated.ts
+
+# Local Alchemy cache/state metadata; remote Cloudflare state is authoritative.
+/infra/storybook/.alchemy/
+/infra/storybook/node_modules/

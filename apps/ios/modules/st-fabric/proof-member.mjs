@@ -11,7 +11,7 @@ const kind = 'st-fabric-isolated-proof-v1';
 const expectedVersion = process.env.FABRIC_EXPECTED_VERSION ?? '0.2.41+84c3208';
 if (expectedVersion !== '0.2.41+84c3208') throw new Error('Unsupported fabric proof pin');
 // The separate offline Debug app (prepare-phone.mjs) has its own scheme; a simulator Debug build uses the starter scheme.
-const scheme = (separate) => `com.compoundingtech.smalltalk.${separate ? 'fabricproof' : 'starter'}://fabric-proof`;
+const scheme = (separate) => `com.compoundingtech.fractal.${separate ? 'fabricproof' : 'starter'}://fabric-proof`;
 const command = (binary, args) => {
   const result = spawnSync(binary, args, { env: environment, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`${binary} test command failed: ${result.stderr}`);

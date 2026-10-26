@@ -241,6 +241,7 @@ fn typed_content(
     };
     let full = fractal_client::TimelineEntry {
         id: source.id.clone(),
+        delivers: source.delivers.clone(),
         sequence: source.sequence,
         revision: source.revision,
         timestamp: source.timestamp.clone(),

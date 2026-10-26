@@ -18,6 +18,8 @@ pub struct State {
     confirmed: BTreeSet<String>,
     #[serde(default)]
     accepted: BTreeSet<String>,
+    #[serde(default)]
+    receipt_records: BTreeMap<String, Option<crate::conversation_delivery::NativeReceipt>>,
     lines: fractal_drivers::reexec::LineBuffer,
 }
 #[derive(Default, Deserialize, Serialize)]
@@ -27,6 +29,8 @@ pub struct Handoffs {
     confirmed: BTreeSet<String>,
     #[serde(default)]
     accepted: BTreeSet<String>,
+    #[serde(default)]
+    receipt_records: BTreeMap<String, Option<crate::conversation_delivery::NativeReceipt>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -39,6 +43,27 @@ pub async fn run(
     runtime_id: &str,
 ) -> Result<()> {
     let agent_dir = &paths.agent_dir;
+    let session = std::env::var(fractal_drivers::claude_session::SESSION_ENV).unwrap_or_default();
+    let sequence = std::env::var(fractal_drivers::claude_session::SESSION_SEQ_ENV)
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let ownership = fractal_drivers::claude_process::with_caller(agent_dir, &session, sequence,
+        std::process::id(), None, fractal_drivers::claude_process::Caller::Channel, Ok);
+    let legacy = match ownership {
+        Ok(fractal_drivers::claude_process::Admission::Primary) => false,
+        // The report and initialization claim below retain the ownership warning.
+        // Accepted legacy startup must not write into the person's terminal.
+        Ok(fractal_drivers::claude_process::Admission::Legacy) => true,
+        Err(error) => {
+            eprintln!("st: {}", fractal_drivers::claude_process::diagnostic(&error));
+            if fractal_drivers::claude_process::failure_kind(&error)
+                == Some(fractal_drivers::claude_process::FailureKind::Refused) {
+                return run_idle().await;
+            }
+            // Unavailable proof is not proof of secondary ownership. Report startup failure
+            // rather than silently parking a legitimate primary in the unscoped protocol.
+            return Err(error);
+        }
+    };
     let ledger_path = agent_dir.join("native-channel-handoffs.json");
     let mut state = if let Some(path) =
         fractal_drivers::reexec::resume_path(fractal_drivers::reexec::CHANNEL_RESUME_ENV)
@@ -60,6 +85,7 @@ pub async fn run(
             attempted: ledger.attempted,
             confirmed: ledger.confirmed,
             accepted: ledger.accepted,
+            receipt_records: ledger.receipt_records,
             ..State::default()
         }
     };
@@ -110,13 +136,18 @@ pub async fn run(
         "image":fractal_drivers::reexec::running_identity().map(|i| i.token()),
         "follows":fractal_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
         "channel":{"pid":std::process::id(),"image":fractal_drivers::reexec::running_identity().map(|i| i.token()),"age_ms":0},
-        "ready":state.initialized})
+        "ready":state.initialized,
+        "reason":legacy.then_some("legacy ownership: unprotected until next natural restart")})
     };
     let mut subscription = Subscription::start(client.clone(), state.fence.clone(), report());
     let mut watch = fractal_drivers::reexec::ReplacementWatch::for_current_process();
     // Retry the identical claim after a failed acknowledgement. The existing tick
     // schedules retries; polling the POST separately keeps MCP input and EOF live.
-    let initialization_input = channel_initialization_claim(&state.fence);
+    let mut initialization_input = channel_initialization_claim(&state.fence);
+    if legacy {
+        initialization_input.fields.insert("reason".into(), json!(
+            "legacy ownership: unprotected until next natural restart; MCP initialized under legacy admission"));
+    }
     let initialization = announce_initialization(client, &initialization_input);
     tokio::pin!(initialization);
     let mut initialization_recorded = false;
@@ -150,6 +181,7 @@ pub async fn run(
                 Some(Frame::Replay { nonce }) => subscription.acknowledge_replay(nonce),
                 Some(Frame::Drain { operation }) => subscription.acknowledge_drain(operation),
                 Some(Frame::Seat { .. }) => {}, // the outer driver owns the PTY title
+                Some(Frame::Attachment { .. }) => {}, // sent only to the outer driver's title stream
                 Some(Frame::Fenced { reason }) => anyhow::bail!("{reason}"),
                 None => return Ok(()),
             },
@@ -175,7 +207,8 @@ pub async fn run(
                     "image":fractal_drivers::reexec::running_identity().map(|i| i.token()),
                     "follows":fractal_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
                     "channel":{"pid":std::process::id(),"image":fractal_drivers::reexec::running_identity().map(|i| i.token()),"age_ms":0},
-                    "ready":state.initialized}));
+                    "ready":state.initialized,
+                    "reason":legacy.then_some("legacy ownership: unprotected until next natural restart")}));
                 if state.initialized && replayed {
                     // The stream grants eligibility only to live mail. Retained handoffs can
                     // still acquire missing receipts from native proof, without another offer.
@@ -274,14 +307,24 @@ pub async fn run(
                         let records = (|| {
                             let path = fractal_drivers::claude_session::channel_transcript_recovering(paths, identity, runtime_id, &wrapper)?
                                 .context("Claude has not bound this wrapper to a native transcript")?;
-                            transcript.appended(&path)
+                            let native_session = fractal_drivers::claude_session::channel_receipt_session(
+                                &paths.session_dir, identity, runtime_id, &wrapper, &path)?;
+                            Ok::<_, anyhow::Error>((transcript.appended(&path)?, native_session))
                         })();
                         match records {
-                            Ok(records) => {
+                            Ok((records, native_session)) => {
                                 retries.remove("transcript");
                                 for record in records {
                                     for (message, envelope) in &content {
                                         if native_receipt(&record, envelope) {
+                                            // Freeze the exact receipt payload before its first POST;
+                                            // a lost ACK retries identical metadata after reexec too.
+                                            if let std::collections::btree_map::Entry::Vacant(entry) = state.receipt_records.entry(message.clone()) {
+                                                let proof = native_session.as_deref().and_then(|session|
+                                                    crate::conversation_delivery::claude_record(&record, session));
+                                                entry.insert(proof);
+                                                dirty = true;
+                                            }
                                             dirty |= state.confirmed.insert(message.clone());
                                             dirty |= state.accepted.insert(message.clone());
                                             dirty |= state.attempted.insert(message.clone());
@@ -338,7 +381,8 @@ pub async fn run(
                         let result = async {
                             receipt(client, &state.fence, &message, "delivered").await?;
                             if state.confirmed.contains(&message) {
-                                receipt(client, &state.fence, &message, "read").await?;
+                                receipt_with_record(client, &state.fence, &message, "read",
+                                    state.receipt_records.get(&message).and_then(Option::as_ref)).await?;
                             }
                             Ok::<_, anyhow::Error>(())
                         }.await;
@@ -346,6 +390,7 @@ pub async fn run(
                             Ok(()) => {
                                 state.accepted.remove(&message);
                                 if state.confirmed.remove(&message) { content.remove(&message); }
+                                state.receipt_records.remove(&message);
                                 retries.remove(&key);
                                 unconfirmed_since.remove(&message);
                                 dirty = true;
@@ -612,6 +657,7 @@ fn save_handoffs(path: &Path, state: &State) -> Result<()> {
             attempted: state.attempted.clone(),
             confirmed: state.confirmed.clone(),
             accepted: state.accepted.clone(),
+            receipt_records: state.receipt_records.clone(),
         },
     )?;
     file.flush()?;
@@ -763,16 +809,23 @@ async fn receipt(
     message: &str,
     lifecycle: &str,
 ) -> Result<ClaimRecord> {
-    client
-        .post(
-            "/v1/mailbox/receipts",
-            &Receipt {
-                fence: fence.clone(),
-                message: message.into(),
-                lifecycle: lifecycle.into(),
-            },
-        )
-        .await
+    receipt_with_record(client, fence, message, lifecycle, None).await
+}
+
+async fn receipt_with_record(
+    client: &Client,
+    fence: &Fence,
+    message: &str,
+    lifecycle: &str,
+    record: Option<&crate::conversation_delivery::NativeReceipt>,
+) -> Result<ClaimRecord> {
+    let mut payload = serde_json::to_value(Receipt {
+        fence: fence.clone(), message: message.into(), lifecycle: lifecycle.into(),
+    })?;
+    if let Some(record) = record {
+        payload["native_receipt"] = serde_json::to_value(record)?;
+    }
+    client.post("/v1/mailbox/receipts", &payload).await
 }
 /// A user-scoped plugin may be loaded by ordinary Claude sessions outside a seat.
 /// Serve the protocol without paths, daemon access, mailbox fences or readiness observations.
@@ -1100,6 +1153,24 @@ mod tests {
         let unavailable = Client::unix(dir.path().join("absent-daemon.sock"));
         assert!(notifications_held(&unavailable, "agent/worker", dir.path(), "replacement").await);
         server.abort();
+    }
+
+    #[test]
+    fn claude_channel_receipt_identity_survives_ledger_and_reexec_without_payload() {
+        let mut state = State::default();
+        state.confirmed.insert("message/fixture".into());
+        state.receipt_records.insert("message/fixture".into(), Some(crate::conversation_delivery::NativeReceipt {
+            session_id: "session/external-0123456789abcdef01234567".into(), message_id: "native-user".into(),
+        }));
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("handoffs.json");
+        save_handoffs(&path, &state).unwrap();
+        let ledger: Handoffs = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(ledger.receipt_records, state.receipt_records);
+        let resumed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(resumed.receipt_records, state.receipt_records);
+        let legacy: Handoffs = serde_json::from_value(json!({"incarnation":"old", "attempted":[],"confirmed":[],"accepted":[]})).unwrap();
+        assert!(legacy.receipt_records.is_empty());
     }
 
     #[test]
