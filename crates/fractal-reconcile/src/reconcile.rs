@@ -3234,9 +3234,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             }
                             return Ok(());
                         }
-                        self.retire_obsolete_failed_restart(subject, now_ms())?;
                         // A pending publication must not orphan a suspend or block its resume.
                         if let Some(suspension) = &suspension {
+                            self.retire_obsolete_failed_restart(subject, now_ms())?;
                             return self.reconcile_suspension(
                                 subject,
                                 member,
@@ -8282,6 +8282,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         else {
             return Ok(false);
         };
+        if self.retire_obsolete_failed_restart(subject, now_ms())? {
+            return Ok(true);
+        }
         if self
             .store
             .selected_desired_token(&subject.subject)?
@@ -8289,9 +8292,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             != request.body.pointer("/evidence/0").and_then(Value::as_str)
         {
             return Ok(false);
-        }
-        if self.retire_obsolete_failed_restart(subject, now_ms())? {
-            return Ok(true);
         }
         let completion = format!("agent-restart-completed:{}", request.id);
         if let Some(result) = self.store.operation_claim(&completion)? {
@@ -23266,6 +23266,58 @@ mission "feedback-review" state="ready" {
             "found evidence must use no SQLite statements on repeated passes: {cost:?}"
         );
         assert!(runtime.stops.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_start_restart_authority_expires_without_closing_the_producer() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; }",
+            "original",
+        );
+        let subject = "agent/example/worker";
+        let desired = store.desired_subject_with_writer(subject).unwrap().unwrap().0;
+        let token = store.selected_desired_token(subject).unwrap().unwrap();
+        let mut operation = RuntimeStartOperation {
+            id: uuid::Uuid::now_v7().to_string(),
+            subject: subject.into(),
+            owner: "fixture".into(),
+            body: serde_json::json!({
+                "subject": desired, "selected_token": token, "request": null,
+                "member": desired.member, "reason": "fixture failed start",
+            }),
+            revoked_by: None,
+            finished: false,
+            result: None,
+            applied: false,
+            cleanup_verified: false,
+            dispatched: false,
+            receipted: false,
+        };
+        store.admit_runtime_start(&mut operation, 2).unwrap();
+        store.finish_runtime_start(&operation.id, &serde_json::json!({
+            "error": "producer closure unverified", "producer_closed": false,
+        })).unwrap();
+        let request = store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/avery".into()),
+            fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+            evidence: vec![token], expected_subject: None,
+            idempotency_key: Some("age-bounded-restart".into()),
+        }).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let deadline = request.accepted_at_unix_ms + 60 * 60 * 1000;
+        assert!(!reconciler.retire_obsolete_failed_restart(&desired, deadline).unwrap());
+        assert!(reconciler.retire_obsolete_failed_restart(&desired, deadline + 1).unwrap());
+        let result = store.operation_claim(&format!("agent-restart-completed:{}", request.id))
+            .unwrap().unwrap();
+        assert_eq!(result.body["fields"]["operation_status"], "retired");
+        assert_eq!(result.body["evidence"][0], request.id);
+        let pending = store.runtime_start_for(subject).unwrap().unwrap();
+        assert_eq!(pending.id, operation.id);
+        assert!(!pending.cleanup_verified);
     }
 
     #[test]
