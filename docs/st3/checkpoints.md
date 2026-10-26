@@ -93,6 +93,10 @@ at sealing until its participants use the same rules, including during rollback.
 refuses seal terms whose rules digest differs from the running build, without consuming the node's first
 verification. The normal step replaces terms only for the newest due cut; quiet retries there do not
 establish verification of an older cut.
+For the required N/N-1 rolling window, a sealing wait must not block work or
+schedules, and retained history must remain readable by admitted older members.
+The [mixed-fleet design and open implementation](compatibility.md#checkpoints-in-a-mixed-fleet)
+preserve these exact-digest checks rather than weakening verification.
 
 A status-history proof mismatch logs bounded source diagnostics from the same scratch proof reads:
 the checkpoint, seal row, cut, build and rules/drop identities, array lengths and first differing
