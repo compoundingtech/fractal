@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Holding an arrow key now keeps moving through the TUI picker when it is opened over an attached terminal, including terminals that report explicit key-repeat events.",
+  "summary": "Holding an arrow key now keeps moving through TUI sidebar lists and the picker over an attached terminal, including terminals that report explicit key-repeat events.",
   "replay": {"status": "none", "detail": "No claim or projection changes."},
   "schema": {"status": "none", "detail": "No schema changes."},
   "rules": {"status": "none", "detail": "No rule changes."},

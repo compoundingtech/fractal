@@ -7289,7 +7289,7 @@ mod tests {
     }
 
     #[test]
-    fn held_down_in_the_palette_moves_every_row_over_an_attached_terminal() {
+    fn held_down_moves_every_row_in_the_palette_and_sidebar_over_an_attached_terminal() {
         use crossterm::event::{Event, KeyEventKind};
 
         for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
@@ -7331,8 +7331,29 @@ mod tests {
             );
             ui.input_event(Event::Key(enter));
             assert!(ui.palette_open(), "held Enter must not open the selection");
-            assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell)));
+            assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell.clone())));
             assert!(ui.effects.is_empty(), "navigation must not request daemon work");
+
+            // Normal sidebar navigation must own repeats just as it owns presses.
+            ui.glasses.palette = None;
+            ui.toggle_sidebar();
+            ui.resource_sidebar.observe(&ui.world);
+            ui.resource_sidebar.filter = "agent".into();
+            let count = ui.resource_sidebar.rows().len();
+            assert!(count > 1, "the fixture has multiple ordinary list rows");
+            for n in 1..=50 {
+                let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, kind);
+                ui.input_event(Event::Key(key));
+                assert_eq!(
+                    ui.resource_sidebar.selected,
+                    n.min(count - 1),
+                    "sidebar {kind:?} event {n} must move exactly one row, clamped"
+                );
+            }
+            ui.input_event(Event::Key(release));
+            assert_eq!(ui.resource_sidebar.selected, count - 1);
+            assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell)));
+            assert!(ui.effects.is_empty(), "sidebar navigation must stay local");
         }
     }
 
