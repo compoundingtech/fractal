@@ -66,6 +66,25 @@ struct Worker {
 /// Space for one receipt in the writer that reserved it.
 pub struct ReceiptPermit(OwnedSemaphorePermit);
 
+pub(super) enum AdmissionError {
+    ReadEnded(ApiError),
+    Writer(ApiError),
+}
+
+impl AdmissionError {
+    pub(super) fn into_api(self) -> ApiError {
+        match self { Self::ReadEnded(error) | Self::Writer(error) => error }
+    }
+}
+
+impl From<ApiError> for AdmissionError {
+    fn from(error: ApiError) -> Self { Self::Writer(error) }
+}
+
+fn read_ended(error: smallclaims::error::Error) -> AdmissionError {
+    AdmissionError::ReadEnded(ApiError::bad(error))
+}
+
 enum Command {
     Receipt(Receipt),
     Flush(oneshot::Sender<Result<(), String>>),
@@ -101,9 +120,36 @@ impl ReceiptWriter {
     /// Reserve space for one receipt, waiting while the writer is full.
     ///
     /// # Errors
-    /// The writer was shut down, before or during the wait.
+    /// The writer was shut down, or the current read reached its deadline or was cancelled.
     pub async fn reserve(&self) -> Result<ReceiptPermit, ApiError> {
-        self.permits.clone().acquire_owned().await.map(ReceiptPermit).map_err(|_| closed())
+        self.reserve_for_read().await.map_err(AdmissionError::into_api)
+    }
+
+    pub(super) async fn reserve_for_read(&self) -> Result<ReceiptPermit, AdmissionError> {
+        let budget = smallclaims::read_budget::current();
+        if let Some(budget) = &budget { budget.check().map_err(read_ended)?; }
+        // Ready admission does not allocate a cancellation subscription or install a timer.
+        let space = match self.permits.clone().try_acquire_owned() {
+            Ok(space) => space,
+            Err(tokio::sync::TryAcquireError::Closed) => return Err(closed().into()),
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                let admission = self.permits.clone().acquire_owned();
+                if let Some(budget) = &budget {
+                    tokio::select! {
+                        biased;
+                        _ = budget.cancelled() => {
+                            budget.check().map_err(read_ended)?;
+                            unreachable!("a read budget wakes only after its deadline or cancellation");
+                        }
+                        space = admission => space.map_err(|_| closed())?,
+                    }
+                } else {
+                    admission.await.map_err(|_| closed())?
+                }
+            }
+        };
+        if let Some(budget) = &budget { budget.check().map_err(read_ended)?; }
+        Ok(ReceiptPermit(space))
     }
 
     /// Queue one caller-bound receipt into reserved space without waiting. It returns once the
@@ -555,5 +601,48 @@ mod tests {
         drop(held);
         shutdown.await.unwrap();
         assert_eq!(claims(&store, &subject(0), OUTCOME).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipt_admission_releases_its_blocking_worker_when_the_read_ends() {
+        use smallclaims::read_budget::{self, ReadBudget};
+        use std::time::Duration;
+        for cancelled in [false, true] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let writer = Arc::new(ReceiptWriter::with_capacity(1));
+            let held = store.connection.write();
+            enqueue(&writer, &store, 0).await;
+            let (started, waiting) = oneshot::channel();
+            let runtime = tokio::runtime::Handle::current();
+            let queue = writer.clone();
+            let target = store.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                let budget = if cancelled {
+                    ReadBudget::cancellable("/v1/client/assistant/summary")
+                } else {
+                    ReadBudget::new("/v1/client/assistant/summary", Duration::from_millis(200))
+                };
+                read_budget::with(Some(budget.clone()), || runtime.block_on(async {
+                    let mut request = std::pin::pin!(queue.enqueue(&target, subject(1), ACTOR.into(), used(), outcome()));
+                    assert!(request.as_mut().now_or_never().is_none());
+                    assert!(started.send(budget).is_ok());
+                    request.await
+                }))
+            });
+            let budget = waiting.await.unwrap();
+            if cancelled { budget.cancel(); }
+            let error = tokio::time::timeout(Duration::from_secs(2), worker).await
+                .expect("receipt admission retained its blocking worker").unwrap().unwrap_err();
+            assert_eq!(error.code, "read-deadline");
+            assert_eq!(error.status, axum::http::StatusCode::GATEWAY_TIMEOUT);
+            assert!(claims(&store, &subject(1), USED).is_empty());
+            assert_eq!(writer.stats().receipts, 0);
+            // Cancellation affected admission only, not the receipt admitted earlier.
+            drop(held);
+            writer.flush().await.unwrap();
+            assert_eq!(claims(&store, &subject(0), OUTCOME).len(), 1);
+            assert!(claims(&store, &subject(1), OUTCOME).is_empty());
+            assert_eq!(writer.stats().receipts, 1);
+        }
     }
 }

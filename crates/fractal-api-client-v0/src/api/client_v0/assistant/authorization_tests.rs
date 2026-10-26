@@ -907,3 +907,90 @@ agent "worker" { workspace "/tmp"; command "true"; restart always; }
 
 #[path = "authorization_identifier_agent_tests.rs"]
 mod identifier_agent_tests;
+
+fn deadline_projection<'a>(
+    _state: &'a AppState, _snapshot: &'a ClientSnapshot, _projection: &'a str,
+    _parameters: &'a BTreeMap<String,String>, _max_bytes: usize, _binding: &'a str,
+    _context: &'a response_body::Context,
+) -> ProjectFuture<'a> {
+    Box::pin(async { Err(ApiError::bad(smallclaims::error::Error::new(
+        "read-deadline","the read exceeded its deadline or was cancelled"))) })
+}
+
+#[tokio::test]
+async fn assistant_cancelled_receipt_admission_releases_finish_and_projection_error_workers() {
+    use futures_util::FutureExt as _;
+    use smallclaims::read_budget::{self,ReadBudget};
+    for projection_error in [false,true] {
+        let mut fixture=fixture_for_owner(SCOPES,false,"person/robin").await;
+        fixture.state.assistant_receipts=Arc::new(
+            fractal_api_core::api::client_v0::assistant::receipts::ReceiptWriter::with_capacity(1));
+        projection_read_mode(&mut fixture,"caller-bound-allow").await;
+        let context=response_body::Context {
+            state:fixture.state.clone(),client_request:true,local_only_response:false,
+            request_id:"request/test".into(),client_snapshot:None,server:None,roster:false,
+        };
+        let session=fixture.session();
+        let snapshot=new_client_snapshot(&fixture.state);
+        let (Extension(receipt),_,Json(value))=read_inner(State(fixture.state.clone()),
+            Extension(session.clone()),Extension(snapshot.clone()),
+            OriginalUri("/v1/client/assistant/summary".parse().unwrap()),HeaderMap::new(),&context).await.unwrap();
+        let slot=fixture.state.assistant_receipts.reserve().await.unwrap();
+        let held=fixture.state.store.connection.write();
+        let state=fixture.state.clone();
+        let runtime=tokio::runtime::Handle::current();
+        let (started,waiting)=tokio::sync::oneshot::channel();
+        let worker=tokio::task::spawn_blocking(move || {
+            let budget=ReadBudget::cancellable("/v1/client/assistant/summary");
+            read_budget::with(Some(budget.clone()),|| runtime.block_on(async {
+                let request=async {
+                    if projection_error {
+                        fractal_api_core::api::client_v0::assistant::authorization::read_with(
+                            State(state),Extension(session),Extension(snapshot),
+                            OriginalUri("/v1/client/assistant/summary".parse().unwrap()),HeaderMap::new(),
+                            Extension(context),deadline_projection).await.map(|_| ())
+                    } else {
+                        finish(&state,&receipt,&serde_json::to_vec(&value).unwrap(),true).await
+                    }
+                };
+                let mut request=std::pin::pin!(request);
+                assert!(request.as_mut().now_or_never().is_none());
+                assert!(started.send(budget).is_ok());
+                request.await
+            }))
+        });
+        waiting.await.unwrap().cancel();
+        let error=tokio::time::timeout(std::time::Duration::from_secs(2),worker).await
+            .expect("cancelled receipt admission retained its blocking worker").unwrap().unwrap_err();
+        assert_eq!(error.code,"read-deadline");
+        assert_eq!(error.status,StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(fixture.state.assistant_receipts.stats().receipts,0);
+        for kind in ["custom.client.assistant.v1.read-used",OUTCOME] {
+            assert!(fixture.state.store.claims_for_kind_at(kind,None,true,100).unwrap().claims.is_empty());
+        }
+        let audits=fixture.state.store.claims_for_kind_at("custom.client.assistant.v1.audit",None,true,100).unwrap().claims;
+        assert!(!audits.iter().any(|claim| claim.body["fields"]["operation"]=="read"));
+        drop(held);
+        drop(slot);
+        fixture.state.assistant_receipts.flush().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn assistant_other_read_deadline_errors_keep_the_denial_audit() {
+    let mut fixture=fixture_for_owner(SCOPES,false,"person/robin").await;
+    projection_read_mode(&mut fixture,"caller-bound-allow").await;
+    let context=response_body::Context {
+        state:fixture.state.clone(),client_request:true,local_only_response:false,
+        request_id:"request/test".into(),client_snapshot:None,server:None,roster:false,
+    };
+    let result=fractal_api_core::api::client_v0::assistant::authorization::read_with(
+        State(fixture.state.clone()),Extension(fixture.session()),Extension(new_client_snapshot(&fixture.state)),
+        OriginalUri("/v1/client/assistant/summary".parse().unwrap()),HeaderMap::new(),Extension(context),
+        deadline_projection).await;
+    assert!(matches!(result,Err(error) if error.code=="read-deadline"));
+    let audits=fixture.state.store.claims_for_kind_at("custom.client.assistant.v1.audit",None,true,100).unwrap().claims;
+    assert!(audits.iter().any(|claim| claim.body["fields"]["operation"]=="read"
+        && claim.body["fields"]["denial_code"]=="read-deadline"));
+    fixture.state.assistant_receipts.flush().await.unwrap();
+}

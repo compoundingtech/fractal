@@ -210,6 +210,8 @@ Every assistant read leaves two audit claims: `custom.client.assistant.v1.read-u
 
 For `caller-bound-allow` reads, the response does not wait for the receipts to be committed. st still checks the grant, scope, expiry, revocation, and policy revision before it builds the projection, and again just before it returns the response; a failed check denies the read as before. After that final check, once the response is serialized, st puts the receipts on a bounded in-memory queue and returns the response. When the queue is full, the next read waits for space; it never skips its receipt. A single writer commits everything waiting in the queue in one transaction (group commit). It starts as soon as receipts are waiting, with no timer or flush interval, so a receipt may be committed before or after the response reaches the caller; neither order is guaranteed. A graceful daemon shutdown writes every queued receipt before the store closes.
 
+If a read's existing deadline or cancellation ends its wait for receipt capacity, it discloses no response bytes and writes neither a receipt nor a synchronous denial audit for that abandoned admission; other deadline errors keep their existing audit behavior.
+
 A crash or forced kill loses the receipts still in the queue: those reads were answered but leave no audit claim. The queue size limits how many can be lost; how long a receipt stays queued is not guaranteed. This is acceptable because caller-bound receipts are audit evidence, not authority: the grant authorizes each read, and no later check depends on a receipt being present. Approval-once receipts are authority, because they make each proof single-use, so they stay synchronous.
 
 ## C. Scoped native writes and recipient trust

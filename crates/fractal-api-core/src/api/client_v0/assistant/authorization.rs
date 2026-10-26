@@ -263,7 +263,12 @@ pub async fn read_with(State(state): State<AppState>, Extension(session): Extens
                                Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
                                headers: HeaderMap, Extension(context): Extension<response_body::Context>,
                                project: Projector) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
-    let result=read_inner(State(state.clone()),Extension(session.clone()),Extension(snapshot),OriginalUri(uri),headers, &context, project).await;
+    let result=match read_inner_with_cause(State(state.clone()),Extension(session.clone()),Extension(snapshot),OriginalUri(uri),headers, &context, project).await {
+        // No response bytes were disclosed. Auditing this abandoned admission
+        // synchronously would re-block its worker behind the receipt writer.
+        Err(ReadFailure::CapacityAdmissionEnded(error)) => return Err(error),
+        result => result.map_err(ReadFailure::into_api),
+    };
     if result.is_err() {
         let granted=session.pairing_grant.as_deref().map(|subject| latest(&state,subject,GRANTED)).transpose()?.flatten();
         let grant_id=granted.as_ref().and_then(|claim| claim.body.pointer("/fields/grant_id")).and_then(Value::as_str);
@@ -275,6 +280,29 @@ pub async fn read_with(State(state): State<AppState>, Extension(session): Extens
 pub async fn read_inner(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                         Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
                         headers: HeaderMap, context: &response_body::Context, project: Projector) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
+    read_inner_with_cause(State(state),Extension(session),Extension(snapshot),OriginalUri(uri),headers,context,project)
+        .await.map_err(ReadFailure::into_api)
+}
+
+enum ReadFailure {
+    Api(ApiError),
+    CapacityAdmissionEnded(ApiError),
+}
+
+impl ReadFailure {
+    fn into_api(self) -> ApiError {
+        match self { Self::Api(error) | Self::CapacityAdmissionEnded(error) => error }
+    }
+}
+
+impl From<ApiError> for ReadFailure {
+    fn from(error: ApiError) -> Self { Self::Api(error) }
+}
+
+async fn read_inner_with_cause(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+                        Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
+                        headers: HeaderMap, context: &response_body::Context, project: Projector)
+    -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ReadFailure> {
     let grant_subject = session.pairing_grant.as_deref().ok_or_else(|| forbidden("assistant grant absent"))?;
     let granted = latest(&state, grant_subject, GRANTED)?.ok_or_else(|| forbidden("assistant grant absent"))?;
     let policy = effective(&state, &granted)?;
@@ -286,11 +314,11 @@ pub async fn read_inner(State(state): State<AppState>, Extension(session): Exten
         let parameters = parameters(&uri)?;
         let requested = parameters.get("max_response_bytes").map(|v| v.parse::<usize>())
             .transpose().map_err(|_| validation("response budget must be an integer"))?.unwrap_or(DEFAULT_RESPONSE_BYTES);
-        if requested == 0 || requested > MAX_RESPONSE_BYTES { return Err(validation("response budget must be 1..16384")); }
+        if requested == 0 || requested > MAX_RESPONSE_BYTES { return Err(validation("response budget must be 1..16384").into()); }
         let current = super::session(&state, &granted, session.transport)?;
         let projection = uri.path().strip_prefix("/v1/client/assistant/").ok_or_else(|| forbidden("invalid projection"))?;
         let (_, scope) = ROUTES.iter().find(|(p,_)| *p == projection).ok_or_else(|| forbidden("invalid projection"))?;
-        if !current.allows(scope) { return Err(forbidden("assistant projection scope is not granted")); }
+        if !current.allows(scope) { return Err(forbidden("assistant projection scope is not granted").into()); }
         let receipt_subject = format!("custom/client/assistant-v1-read-{}", uuid::Uuid::new_v4());
         let used = json!({
             "grant_id": fields(&policy)?["grant_id"], "mode":"caller-bound-allow",
@@ -304,11 +332,15 @@ pub async fn read_inner(State(state): State<AppState>, Extension(session): Exten
         let (snapshot,value) = match project(&state,&snapshot,projection,&parameters,requested,&binding,context).await {
             Ok(result) => result,
             Err(error) => {
-                state.assistant_receipts.enqueue(&state.store, receipt.subject, receipt.actor,
+                let space=state.assistant_receipts.reserve_for_read().await.map_err(|failure| match failure {
+                    super::receipts::AdmissionError::ReadEnded(error) => ReadFailure::CapacityAdmissionEnded(error),
+                    super::receipts::AdmissionError::Writer(error) => ReadFailure::Api(error),
+                })?;
+                state.assistant_receipts.enqueue_reserved(&state.store, receipt.subject, receipt.actor,
                     receipt.pending_used.expect("caller-bound receipt"), json!({"version":1,
                     "outcome":"denied-projection","denial_code":error.code,"returned_bytes":0,
-                    "timestamp":client_timestamp(client_now_ms())})).await?;
-                return Err(error);
+                    "timestamp":client_timestamp(client_now_ms())}),space)?;
+                return Err(error.into());
             }
         };
         return Ok((Extension(receipt),Extension(snapshot),Json(value)));
@@ -334,7 +366,7 @@ pub async fn read_inner(State(state): State<AppState>, Extension(session): Exten
             append(&state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,
                 "outcome":"denied-projection","denial_code":error.code,"returned_bytes":0,
                 "timestamp":client_timestamp(client_now_ms())}),Some(&consumed))?;
-            return Err(error);
+            return Err(error.into());
         }
     };
     Ok((Extension(receipt),Extension(snapshot),Json(value)))
