@@ -217,7 +217,8 @@ fn the_list_pages_under_a_prefix_and_keeps_loading_empty_and_failed_apart() {
     let lines = plain(&doc);
     assert_eq!(lines[0], "Documents  under doc/garden/  2+");
     assert!(lines[2].starts_with("→ doc/garden/beds  aaaaaaaaaaaa · changed 3h ago"), "{lines:?}");
-    assert_eq!(hit_on(&doc, 2), Some(&Hit::Link(format!("doc/garden/beds@{HASH_A}"))));
+    // A row opens the document by name, as a link to it does: following links back returns.
+    assert_eq!(hit_on(&doc, 2), Some(&Hit::Link("doc/garden/beds".into())));
     assert!(doc.targets.iter().any(|target| target.hit == Hit::Document(Tap::More)));
     // m asks for the next page, once.
     documents.more(Some("doc/garden/"));

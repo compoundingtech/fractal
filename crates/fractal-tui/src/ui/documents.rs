@@ -279,7 +279,7 @@ impl Documents {
             Pane::Documents(prefix) => self
                 .lists
                 .get(&list_key(prefix.as_deref()))
-                .map(|list| list.rows.iter().map(|row| row.reference.clone()).collect())
+                .map(|list| list.rows.iter().map(|row| list_target(row).to_owned()).collect())
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
@@ -311,7 +311,7 @@ impl Documents {
         let mut doc = Doc::new();
         let view = self.views.get(reference).cloned().unwrap_or_else(|| DocumentView::loading(reference));
         if let Some(back) = back {
-            doc.buttons(&[("b", &format!("back to {back}"), Hit::Document(Tap::Back), theme::ACCENT)]);
+            doc.buttons(&[("b", &format!("back to {}", short_reference(back)), Hit::Document(Tap::Back), theme::ACCENT)]);
             doc.blank();
         }
         match view {
@@ -385,7 +385,7 @@ impl Documents {
         let chosen = self.chosen.get(&super::pane::Pane::Documents(prefix.map(str::to_owned)).key()).copied();
         for (index, row) in list.rows.iter().enumerate() {
             let detail = format!("{} · {}", row.short_version, changed(Some(row.changed_at_unix_ms), now_ms));
-            link_row(&mut doc, &row.name, Some((&row.reference, &detail)), chosen == Some(index), width);
+            link_row(&mut doc, &row.name, Some((list_target(row), &detail)), chosen == Some(index), width);
         }
         if let Some(why) = list.failed {
             doc.blank();
@@ -423,10 +423,7 @@ impl Documents {
         doc.blank();
         doc.section("Documents", Some(rows.len()), width);
         for (reference, step) in &rows {
-            let label = match parse_reference(reference) {
-                Some((name, Some(version))) => format!("{name}@{}", &version[..12]),
-                _ => reference.clone(),
-            };
+            let label = short_reference(reference);
             let detail = step.as_ref().map(|step| format!("step {step}")).unwrap_or_default();
             link_row(doc, &label, Some((reference, &detail)), false, width);
         }
@@ -510,6 +507,20 @@ impl super::Ui {
             _ => return false,
         }
         true
+    }
+}
+
+/// What a row of the list opens: the document by name when the row is its latest version, as a
+/// link or Ctrl+K opens it, so following links back to it returns along the trail.
+fn list_target(row: &fractal_ui_model::documents::DocumentRow) -> &str {
+    if row.latest { &row.name } else { &row.reference }
+}
+
+/// `doc/NAME@HASH` with its hash cut to twelve characters, for a label.
+fn short_reference(reference: &str) -> String {
+    match parse_reference(reference) {
+        Some((name, Some(version))) => format!("{name}@{}", &version[..12]),
+        _ => reference.to_owned(),
     }
 }
 
