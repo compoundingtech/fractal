@@ -135,7 +135,7 @@ fn full_replay_log_line(phase: &str, reason: &str, frontier: u64, target: u64) -
             .collect()
     }
     format!(
-        "st: projection full replay phase={} reason={} frontier={frontier} target={target}",
+        "fractal: projection full replay phase={} reason={} frontier={frontier} target={target}",
         bounded(phase),
         bounded(reason)
     )
@@ -253,7 +253,7 @@ fn projection_failure_log_line(
             || ["projection_stage", "projection_claim_id", "projection_subject", "projection_operation_id", "projection_claim_kind"].iter()
                 .any(|name| details.get(*name).and_then(Value::as_str).is_some_and(|value| value.chars().take(257).count()>256)),
     });
-    format!("st: projection failure detail {diagnostic}")
+    format!("fractal: projection failure detail {diagnostic}")
 }
 
 #[cfg(test)]
@@ -392,7 +392,7 @@ mod projection_failure_diagnostic_tests {
         assert_eq!(lines.len(), 2);
         for (line, suppressed) in lines.iter().zip([0, 1]) {
             let value: Value =
-                serde_json::from_str(line.strip_prefix("st: projection failure detail ").unwrap())
+                serde_json::from_str(line.strip_prefix("fractal: projection failure detail ").unwrap())
                     .unwrap();
             assert_eq!(value["error"], error.message);
             assert_eq!(value["suppressed_errors"], suppressed);
@@ -419,7 +419,7 @@ mod projection_failure_diagnostic_tests {
         );
         assert_eq!(line.lines().count(), 1);
         let value: Value =
-            serde_json::from_str(line.strip_prefix("st: projection failure detail ").unwrap())
+            serde_json::from_str(line.strip_prefix("fractal: projection failure detail ").unwrap())
                 .unwrap();
         assert_eq!(value["error"].as_str().unwrap().chars().count(), 4096);
         assert_eq!(value["error_truncated"], true);
@@ -441,7 +441,7 @@ mod projection_failure_diagnostic_tests {
         );
         let value: Value = serde_json::from_str(
             short
-                .strip_prefix("st: projection failure detail ")
+                .strip_prefix("fractal: projection failure detail ")
                 .unwrap(),
         )
         .unwrap();

@@ -2,7 +2,7 @@
 name = "fractal-schema"
 version = "0.1.0"
 edition = "2024"
-description = "Authoritative st3 subject, resource, and claim registry"
+description = "Authoritative Fractal subject, resource, and claim registry"
 license = "MIT"
 
 [dependencies]
