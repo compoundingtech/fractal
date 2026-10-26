@@ -4238,6 +4238,7 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
         wake: MessageWakeArgs::default(),
         print_kdl: false,
         idempotency_key: Some("refuse-a-person".into()),
+        allow_undeclared_recipient: false,
     };
     for to in ["person/ada", "requester"] {
         let error = send_message(&client, args(to), Vec::new()).await.unwrap_err();

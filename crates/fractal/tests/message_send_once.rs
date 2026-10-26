@@ -40,6 +40,11 @@ async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()
         planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     let store = state.store.clone();
+    let intent = fractal_daemon::parse_intent(
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/lead\" { workspace \"/tmp\"; command \"true\" }",
+        store.origin(),
+    ).unwrap();
+    store.apply_internal(&intent, "fixture-recipients").unwrap();
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
@@ -586,5 +591,76 @@ async fn a_send_or_reply_to_a_person_is_refused_and_writes_nothing() {
         assert!(text.contains("work ask") && text.contains("work update"), "{text}");
     }
     assert_eq!(message_count(&store), 1, "a refused message was written");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_agent_recipient_is_refused_unless_explicitly_allowed() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let send = [
+        "--json", "conversations", "send", "agent/ada/tester",
+        "--from", PERSON, "--subject", "Check", "--body", "Please check.",
+    ];
+    let refused = st(&socket, &[], &send).await;
+    assert!(!refused.status.success());
+    let text = stderr(&refused);
+    assert!(text.contains("unknown-recipient") && text.contains("agent/ada/tester"), "{text}");
+    assert!(text.contains("fleet replication") && text.contains("--allow-undeclared-recipient"), "{text}");
+    assert!(text.contains("Nothing was sent"), "{text}");
+    assert_eq!(message_count(&store), 0);
+
+    let mut allowed = send.to_vec();
+    allowed.push("--allow-undeclared-recipient");
+    let sent = value(&st(&socket, &[], &allowed).await);
+    assert!(sent["sent_at"].is_string(), "{sent}");
+    assert_eq!(message_count(&store), 1);
+    // The override is per call; an earlier override cannot make an unknown seat known.
+    assert!(!st(&socket, &[], &send).await.status.success());
+    assert_eq!(message_count(&store), 1);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_to_a_historical_agent_uses_the_original_message_without_a_roster_lookup() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let parent = value(&st(&socket, &[], &[
+        "--json", "conversations", "send", WORKER,
+        "--from", "agent/ada/tester", "--body", "Check.",
+    ]).await);
+    let reply = value(&st(&socket, &[], &[
+        "--json", "conversations", "reply", parent["subject"].as_str().unwrap(),
+        "--from", WORKER, "--body", "Checked.",
+    ]).await);
+    assert_eq!(reply["requested_recipient"], "agent/ada/tester");
+    assert_eq!(message_count(&store), 2);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replicated_remote_stopped_agent_is_a_known_recipient() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let remote = Store::open_memory("operator").unwrap();
+    let intent = fractal_daemon::parse_intent(
+        "version 2\nagent \"alex/tester\" { host \"operator\"; workspace \"/tmp\"; command \"true\" }",
+        remote.origin(),
+    ).unwrap();
+    remote.apply_internal(&intent, "remote-fixture-recipient").unwrap();
+    let exchange = remote.export_replication_exchange(
+        "recipient-fixture", &store.replication_inventory().unwrap(),
+    ).unwrap();
+    store.receive_replication_exchange("operator", "recipient-fixture", &exchange).unwrap();
+    let admission = store.validate_replication_backlog().unwrap();
+    assert_eq!((admission.invalid, admission.unknown), (0, 0));
+    store.apply_replication_repairs().unwrap();
+    store.project_replication_backlog().unwrap();
+    let sent = value(&st(&socket, &[], &[
+        "--json", "conversations", "send", "agent/alex/tester",
+        "--from", PERSON, "--body", "Please check.",
+    ]).await);
+    assert_eq!(sent["requested_recipient"], "agent/alex/tester");
+    assert_eq!(message_count(&store), 1);
     server.abort();
 }

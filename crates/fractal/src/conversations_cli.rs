@@ -385,6 +385,8 @@ pub(super) async fn run_message(
                     wake: args.wake,
                     print_kdl: args.print_kdl,
                     idempotency_key: args.idempotency_key,
+                    // The original message, not a fresh roster lookup, resolves a reply.
+                    allow_undeclared_recipient: true,
                 },
                 attachments,
             )

@@ -209,6 +209,7 @@ pub(super) async fn run_attention(
                     wake: MessageWakeArgs::default(),
                     print_kdl: false,
                     idempotency_key: args.idempotency_key,
+                    allow_undeclared_recipient: false,
                 },
                 Vec::new(),
             )
