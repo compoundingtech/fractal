@@ -54,18 +54,18 @@ Pairing and grant administration are explicit owner operations, not adapter star
 
    ```sh
    fractal devices complete MEMBER_ORIGIN PAIRING_ID --assistant \
-     --profile ./assistant-profile.json
+     --profile /PATH/TO/assistant-profile.json
    ```
 
-   Completion seals the original scopes, expiry, and owner; it cannot escalate them. The CLI stores an owner-only assistant profile separate from person profiles and reports the grant ID without printing its credential.
+   Replace `/PATH/TO/assistant-profile.json` with an absolute path in a directory owned by you and not writable by others; relative profile paths are rejected. Completion seals the original scopes, expiry, and owner; it cannot escalate them. The CLI stores an owner-only assistant profile separate from person profiles and reports the grant ID without printing its credential.
 
 3. Prepare a private directory and extract only the new session's bearer into a separate credential file. The profile is JSON; it is **not** the adapter's credential-file format. For the explicitly selected profile above, use `jq` locally (never print the result):
 
    ```sh
-   install -d -m 700 ./mcp-private
+   install -d -m 700 /PATH/TO/mcp-private
    (umask 077; jq -er '.devices[-1].session.credential' \
-     ./assistant-profile.json > ./mcp-private/credential)
-   chmod 600 ./mcp-private/credential
+     /PATH/TO/assistant-profile.json > /PATH/TO/mcp-private/credential)
+   chmod 600 /PATH/TO/mcp-private/credential
    ```
 
    Keep both files private. The adapter requires a regular credential file owned by its effective user, with no group/other permission bits, at most 4096 bytes, containing one nonempty ASCII bearer token. It refuses a final-component symlink. Use a new credential-file destination rather than overwriting an untrusted path.
