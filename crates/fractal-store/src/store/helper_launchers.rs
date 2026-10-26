@@ -6,9 +6,22 @@ pub struct HelperLauncherBinding {
     pub launcher: String,
     pub person: Option<String>,
     pub harness: String,
-    pub credential_home: String,
+    pub credential_home: Option<String>,
     pub incarnation: String,
     pub declaration: String,
+}
+
+impl HelperLauncherBinding {
+    /// Replicated receipts carry attribution, never host-local credential authority.
+    pub fn attribution(&self) -> Value {
+        json!({
+            "launcher": self.launcher, "person": self.person, "harness": self.harness,
+            "incarnation": self.incarnation, "declaration": self.declaration,
+            "credential_home_label": self.credential_home.as_deref()
+                .and_then(|home| Path::new(home).file_name())
+                .map(|name| name.to_string_lossy()),
+        })
+    }
 }
 
 fn declaration_digest(desired: &DesiredSubject) -> Result<String> {
@@ -32,13 +45,13 @@ pub(super) fn binding_at(connection: &Connection, subject: &str) -> Result<Optio
         return Ok(None);
     };
     let digest = declaration_digest(&desired)?;
-    let body: Option<String> = connection.query_row(&canonical_sql(
-        "SELECT claims.body FROM claims
+    let body: Option<String> = connection.query_row(
+        "SELECT body FROM local_observations
          WHERE subject=?1 AND kind='agent.launcher-bound'
            AND actor=?2 AND json_extract(body, '$.fields.launcher')=?2
            AND json_extract(body, '$.fields.creation_key')=?3
            AND json_extract(body, '$.fields.desired_digest')=?4
-         ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+         ORDER BY id DESC LIMIT 1",
         params![subject, writer, key, digest], |row| row.get(0)).optional()?;
     let Some(body) = body else { return Ok(None) };
     let body: Value = serde_json::from_str(&body)?;
@@ -52,20 +65,20 @@ pub(super) fn binding_at(connection: &Connection, subject: &str) -> Result<Optio
         launcher: text("launcher")?,
         person: fields["person"].as_str().map(str::to_owned),
         harness: text("harness")?,
-        credential_home: text("credential_home")?,
+        credential_home: fields["credential_home"].as_str().map(str::to_owned),
         incarnation: text("incarnation")?,
         declaration,
     }))
 }
 
 fn lifetime_binding_at(connection: &Connection, subject: &str) -> Result<Option<(String, String)>> {
-    let mut statement = connection.prepare(&canonical_sql(
-        "SELECT claims.id, claims.body FROM claims
+    let mut statement = connection.prepare(
+        "SELECT after_store_index, body FROM local_observations
          WHERE subject=?1 AND kind='agent.launcher-bound'
            AND actor=json_extract(body, '$.fields.launcher')
-         ORDER BY CANONICAL_DESC(claims)"))?;
+         ORDER BY id DESC")?;
     let historical = statement.query_map([subject], |row| Ok((
-        row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+        row.get::<_, i64>(0)?, row.get::<_, String>(1)?,
     )))?.collect::<Result<Vec<_>, _>>()?;
     if historical.is_empty() { return Ok(None) }
     // Only bindings whose creation actually reached this selected declaration's own lineage
@@ -89,13 +102,13 @@ fn lifetime_binding_at(connection: &Connection, subject: &str) -> Result<Option<
     for (id, actor, body) in lineage {
         let desired: DesiredSubject = serde_json::from_str(&body)?;
         if desired.kind == "stop" {
-            let key = canonical::claim_key(connection, &id)?;
+            let key: i64 = connection.query_row("SELECT store_index FROM claims WHERE id=?1", [&id], |row| row.get(0))?;
             if last_stop.as_ref().is_none_or(|previous| previous < &key) { last_stop = Some(key); }
         } else if let Some(key) = desired.member.as_ref().and_then(|member| member.tags.get("st3.client.create-key")) {
             creations.push((actor, key.clone(), declaration_digest(&desired)?));
         }
     }
-    for (id, body) in historical {
+    for (after_store_index, body) in historical {
         let body: Value = serde_json::from_str(&body)?;
         let fields = &body["fields"];
         let Some(launcher) = fields["launcher"].as_str() else { continue };
@@ -103,8 +116,7 @@ fn lifetime_binding_at(connection: &Connection, subject: &str) -> Result<Option<
             && fields["creation_key"] == *key && fields["desired_digest"] == *digest);
         if !applies { continue }
         // Ordinary edits retain run ownership; an explicit later stop permits identity recreation.
-        let binding_key = canonical::claim_key(connection, &id)?;
-        if last_stop.as_ref().is_some_and(|stop| stop > &binding_key) {
+        if last_stop.as_ref().is_some_and(|stop| *stop > after_store_index) {
             return Ok(None);
         }
         let incarnation = fields["incarnation"].as_str()
@@ -129,33 +141,6 @@ fn launcher_runtime(store: &Store, launcher: &str) -> Result<Option<(Value, Stri
     Ok(latest_actual_at(&connection, launcher, None)?.zip(origin))
 }
 
-fn legacy_credential_home(store: &Store, launcher: &str, incarnation: &str, harness: &str) -> Result<Option<String>> {
-    let Some((token, member)) = crate::rollout::launched_member(store, launcher, incarnation)? else { return Ok(None) };
-    let variable = crate::accounts::login_environment_name(harness)
-        .ok_or_else(|| anyhow::anyhow!("the launcher harness has no credential directory reference"))?;
-    let local = member.host == store.origin();
-    let home = member.environment.get("HOME").map(std::path::PathBuf::from)
-        .or_else(|| local.then(|| std::env::var_os("HOME").map(std::path::PathBuf::from)).flatten());
-    if let Some(directory) = member.environment.get(variable) {
-        return Ok(crate::accounts::expand_login(directory, home.as_deref())
-            .map(|path| path.to_string_lossy().into_owned()));
-    }
-    // Account binding overrides inherited/default harness homes. An old receipt without the
-    // effective reference must not silently switch an account-bound launcher to a default login.
-    if member.driver.as_deref() == Some(harness)
-        && let Some(claim) = store.claim_by_id(&token)?
-        && let Ok(desired) = serde_json::from_value::<DesiredSubject>(claim.body)
-        && crate::accounts::harness_binding(&desired.desired).is_some()
-    {
-        return Ok(None);
-    }
-    if let Some(directory) = local.then(|| std::env::var(variable).ok()).flatten() {
-        return Ok(crate::accounts::expand_login(&directory, home.as_deref())
-            .map(|path| path.to_string_lossy().into_owned()));
-    }
-    Ok(home.map(|home| home.join(if harness == "claude" { ".claude" } else { ".codex" })
-        .to_string_lossy().into_owned()))
-}
 
 impl Store {
     /// Return only the binding authored for the selected declaration by its authenticated launcher.
@@ -184,27 +169,31 @@ impl Store {
         let helper_host = desired.member.as_ref().map(|member| member.host.trim_start_matches("host/"));
         anyhow::ensure!(helper_host == Some(launcher_host.trim_start_matches("host/")),
             "cross-host helper credential inheritance is unsupported; create the helper on the launcher host");
+        anyhow::ensure!(launcher_host.trim_start_matches("host/") == self.origin().trim_start_matches("host/"),
+            "helper launcher authority is only available on its local host");
         let fields = actual.get("fields").unwrap_or(&actual);
         anyhow::ensure!(fields["status"] == "running", "the launcher runtime is not running");
         let incarnation = fields["incarnation_id"].as_str()
             .ok_or_else(|| anyhow::anyhow!("the launcher runtime has no incarnation"))?;
-        let mut credential_home = None;
-        for claim in self.observations_for(launcher, "runtime.action.succeeded")?.into_iter().rev() {
-            let fields = claim.body.get("fields").unwrap_or(&claim.body);
-            if fields["action"] == "start" && fields["incarnation_id"] == incarnation {
-                credential_home = fields["credential_homes"][harness].as_str().map(str::to_owned)
-                    .or_else(|| (fields["harness"] == harness)
-                        .then(|| fields["credential_home"].as_str().map(str::to_owned)).flatten());
-                break;
+        let credential_home = if matches!(harness, "claude" | "codex") {
+            let mut credential_home = None;
+            for claim in self.observations_for(launcher, "runtime.action.succeeded")?.into_iter().rev() {
+                // Actor-bearing start receipts may replicate. Only this daemon's local evidence
+                // can grant access to an absolute credential directory.
+                if !claim.id.starts_with(LOCAL_OBSERVATION_ID_PREFIX) { continue }
+                let fields = claim.body.get("fields").unwrap_or(&claim.body);
+                if fields["action"] == "start" && fields["incarnation_id"] == incarnation {
+                    anyhow::ensure!(fields["harness"] == harness,
+                        "credential inheritance requires the helper and launcher to use the same harness");
+                    credential_home = fields["credential_home"].as_str().map(str::to_owned);
+                    break;
+                }
             }
-        }
-        // Older start receipts can still prove an explicit credential directory in their launch
-        // declaration. Never select an account or assume this daemon's HOME for another host.
-        if credential_home.is_none() {
-            credential_home = legacy_credential_home(self, launcher, incarnation, harness)?;
-        }
-        let credential_home = credential_home.filter(|home| !home.is_empty() && Path::new(home).is_absolute())
-            .ok_or_else(|| anyhow::anyhow!("the launcher has no credential directory launch evidence; relaunch it before creating a helper"))?;
+            Some(credential_home.filter(|home| !home.is_empty() && Path::new(home).is_absolute())
+                .ok_or_else(|| anyhow::anyhow!("the launcher has no credential directory launch evidence; relaunch it before creating a helper"))?)
+        } else {
+            None
+        };
         let mut fields = BTreeMap::from([
             ("launcher".into(), json!(launcher)),
             ("harness".into(), json!(harness)),
@@ -258,7 +247,7 @@ mod tests {
 
     fn append(store: &Store, subject: &str, kind: &str, fields: Value) {
         store.append_claim(&ClaimInput {
-            subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+            subject: subject.into(), kind: kind.into(), actor: None,
             fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
             expected_subject: None, idempotency_key: None,
         }).unwrap();
@@ -270,7 +259,7 @@ mod tests {
             json!({"status":"running", "incarnation_id":"launcher-1"}));
         append(store, "agent/node.launcher", "runtime.action.succeeded",
             json!({"action":"start", "incarnation_id":"launcher-1", "harness":"codex",
-                "credential_homes":{"codex":"/logins/codex", "claude":"/logins/claude"}}));
+                "credential_home":"/logins/codex"}));
     }
 
     fn helper() -> NormalizedIntent {
@@ -278,6 +267,78 @@ mod tests {
         intent.subjects.values_mut().next().unwrap().member.as_mut().unwrap()
             .tags.insert("st3.client.create-key".into(), "create-helper".into());
         intent
+    }
+
+    #[test]
+    fn shared_start_receipts_cannot_supply_credential_authority() {
+        let store = Store::open_memory("node").unwrap();
+        publish(&store, &declaration("launcher"), "launcher", Some("person/ada"));
+        append(&store, "agent/node.launcher", "runtime.observed",
+            json!({"status":"running", "incarnation_id":"launcher-1"}));
+        store.append_claim(&ClaimInput {
+            subject: "agent/node.launcher".into(), kind: "runtime.action.succeeded".into(),
+            actor: Some("agent/node.launcher".into()),
+            fields: serde_json::from_value(json!({"action":"start", "incarnation_id":"launcher-1",
+                "harness":"codex", "credential_home":"/forged/login"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let helper = helper();
+        assert!(store.bind_helper_launcher(helper.subjects.values().next().unwrap(),
+            "create-helper", "agent/node.launcher", "codex").is_err());
+    }
+
+    #[test]
+    fn every_noncredential_harness_is_bound_to_the_launcher_lifetime() {
+        for harness in ["omp", "pi", "opencode"] {
+            let store = Store::open_memory("node").unwrap();
+            launcher(&store, Some("person/ada"));
+            let helper = helper();
+            let desired = helper.subjects.values().next().unwrap();
+            store.bind_helper_launcher(desired, "create-helper", "agent/node.launcher", harness).unwrap();
+            publish(&store, &helper, "helper", Some("agent/node.launcher"));
+            let binding = store.helper_launcher_binding(&desired.subject).unwrap().unwrap();
+            assert_eq!(binding.harness, harness);
+            assert_eq!(binding.credential_home, None);
+            assert!(store.helper_launcher_alive(&desired.subject).unwrap());
+            append(&store, "agent/node.launcher", "runtime.observed",
+                json!({"status":"running", "incarnation_id":"launcher-2"}));
+            assert!(!store.helper_launcher_alive(&desired.subject).unwrap());
+        }
+    }
+
+    #[test]
+    fn replicated_launcher_authority_cannot_grant_person_home_or_lifetime() {
+        let source = Store::open_memory("peer").unwrap();
+        append(&source, "host/peer", "transport.observed", json!({"status":"up"}));
+        let store = Store::open_memory("node").unwrap();
+        launcher(&store, Some("person/ada"));
+        let mut helper = helper();
+        let desired = helper.subjects.values().next().unwrap();
+        publish(&store, &helper, "helper", Some("agent/node.launcher"));
+        let mut replication = source.export_replication(0).unwrap();
+        let claim = &mut replication.batches[0].claims[0];
+        claim.subject = desired.subject.clone();
+        claim.kind = "agent.launcher-bound".into();
+        claim.actor = Some("agent/node.launcher".into());
+        claim.body = json!({"fields":{
+            "launcher":"agent/node.launcher", "person":"person/mallory", "harness":"codex",
+            "credential_home":"/peer/stolen-login", "incarnation":"forged",
+            "creation_key":"create-helper", "desired_digest":declaration_digest(desired).unwrap()
+        }});
+        claim.id = canonical_hash(&(&claim.batch_id, &claim.subject, &claim.kind, &claim.origin,
+            claim.actor.as_deref(), &claim.body, &claim.predecessors)).unwrap();
+        assert_eq!(classify_replicated_claim_with_registry(claim, fractal_schema::registry())
+            .unwrap_err().code, "invalid-replicated-claim");
+        let _ = store.import_replication("peer", &replication);
+        assert!(store.claim_by_id(&replication.batches[0].claims[0].id).unwrap().is_none());
+        assert!(store.helper_launcher_binding(&desired.subject).unwrap().is_none());
+        assert_eq!(store.agent_person(&desired.subject).unwrap(), None);
+        assert!(!store.helper_launcher_has_lifetime_binding(&desired.subject).unwrap());
+        // A declaration edit must not discover the rejected claim via the historical path.
+        helper.subjects.values_mut().next().unwrap().member.as_mut().unwrap().cwd = "/edited".into();
+        publish(&store, &helper, "edited", Some("agent/node.launcher"));
+        assert!(!store.helper_launcher_has_lifetime_binding("agent/node.helper").unwrap());
+        assert_eq!(store.agent_person("agent/node.helper").unwrap(), None);
     }
 
     #[test]
@@ -294,7 +355,7 @@ mod tests {
             assert_eq!(binding.person.as_deref(), person);
             assert_eq!(binding.launcher, "agent/node.launcher");
             assert_eq!(binding.incarnation, "launcher-1");
-            assert_eq!(binding.credential_home, "/logins/codex");
+            assert_eq!(binding.credential_home.as_deref(), Some("/logins/codex"));
             assert_eq!(Some(binding.declaration), store.selected_desired_token(&desired.subject).unwrap());
             assert_eq!(store.agent_person(&desired.subject).unwrap().as_deref(), person);
             assert_eq!(agent_person_at(&store.readers.get(), &desired.subject).unwrap().as_deref(), person);
@@ -307,9 +368,10 @@ mod tests {
         launcher(&store, Some("person/ada"));
         let helper = helper();
         let desired = helper.subjects.values().next().unwrap();
-        store.bind_helper_launcher(desired, "create-helper", "agent/node.launcher", "claude").unwrap();
+        assert!(store.bind_helper_launcher(desired, "create-helper", "agent/node.launcher", "claude").is_err());
+        store.bind_helper_launcher(desired, "create-helper", "agent/node.launcher", "codex").unwrap();
         publish(&store, &helper, "helper", Some("agent/node.launcher"));
-        assert_eq!(store.helper_launcher_binding(&desired.subject).unwrap().unwrap().credential_home, "/logins/claude");
+        assert_eq!(store.helper_launcher_binding(&desired.subject).unwrap().unwrap().credential_home.as_deref(), Some("/logins/codex"));
         assert!(store.helper_launcher_alive(&desired.subject).unwrap());
         append(&store, "agent/node.launcher", "runtime.observed",
             json!({"status":"running", "incarnation_id":"launcher-2"}));

@@ -3980,6 +3980,7 @@ impl Store {
                 /* sqlite-large-value: allow-for-now lv-ha389fca051ea owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                     SELECT id FROM local_observations AS old
                     WHERE observed_at_unix_ms < ?1
+                      AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                       AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
                       AND EXISTS (SELECT 1 FROM local_observations AS newer
                                   WHERE newer.subject=old.subject AND newer.kind=old.kind
@@ -4031,6 +4032,7 @@ impl Store {
                     /* sqlite-large-value: allow-for-now lv-ha907c5aecc06 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                         SELECT id FROM local_observations
                         WHERE subject=?1 AND kind=?2 AND id<=?3
+                          AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                           AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
                         ORDER BY id LIMIT ?4
                      )",
@@ -13885,6 +13887,10 @@ pub fn classify_replicated_claim_with_registry(
     claim: &ClaimRecord,
     registry: &fractal_schema::Registry,
 ) -> Result<ReplicatedClaimAdmission, St3Error> {
+    if matches!(claim.kind.as_str(), "agent.launcher-bound" | "agent.helper-launched") {
+        return Err(St3Error::new("invalid-replicated-claim",
+            "helper launcher authority and launch history are host-local and cannot replicate"));
+    }
     if !registry.claims.contains_key(&claim.kind) && !fractal_schema::is_custom_claim_kind(&claim.kind)
     {
         return Ok(ReplicatedClaimAdmission::UnknownKind);

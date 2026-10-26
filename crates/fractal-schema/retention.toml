@@ -31,7 +31,9 @@
 "deploy.stop-lifted" = { class = "durable" }
 "deploy.compat-signoff" = { class = "durable" }
 "agent.account" = { class = "durable" }
-"agent.launcher-bound" = { class = "durable" }
+"agent.launcher-bound" = { class = "durable", log = "local" }
+"agent.helper-launched" = { class = "durable", log = "local" }
+"custom.client.action-result" = { class = "durable" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }
 "agent.queue.moved" = { class = "durable" }

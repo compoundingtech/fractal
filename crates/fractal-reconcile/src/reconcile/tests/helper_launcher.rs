@@ -9,6 +9,10 @@ fn publish_as(store: &Store, source: &str, key: &str, actor: Option<&str>) {
 }
 
 fn fixture(owned: bool) -> (tempfile::TempDir, Arc<Store>, Arc<FakeRuntime>, DesiredSubject) {
+    fixture_with_harness(owned, "claude")
+}
+
+fn fixture_with_harness(owned: bool, harness: &str) -> (tempfile::TempDir, Arc<Store>, Arc<FakeRuntime>, DesiredSubject) {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_memory("node").unwrap());
     let source = format!("version 2\nagent \"launcher\" {{ workspace {:?}; harness \"claude\" {{}} }}\n", root.path().display().to_string());
@@ -29,10 +33,10 @@ fn fixture(owned: bool) -> (tempfile::TempDir, Arc<Store>, Arc<FakeRuntime>, Des
             ("credential_home".into(), Value::String(root.path().join("credentials").display().to_string())),
         ]), evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
-    let source = format!("version 2\nagent \"helper\" {{ workspace {:?}; harness \"claude\" {{}}; tags st3.client.create-key=\"helper-create\" }}\n", root.path().display().to_string());
+    let source = format!("version 2\nagent \"helper\" {{ workspace {:?}; harness {harness:?} {{}}; tags st3.client.create-key=\"helper-create\" }}\n", root.path().display().to_string());
     let intent = parse_intent(&source, "node").unwrap();
     let helper = intent.subjects.values().next().unwrap().clone();
-    store.bind_helper_launcher(&helper, "helper-create", &launcher.subject, "claude").unwrap();
+    store.bind_helper_launcher(&helper, "helper-create", &launcher.subject, harness).unwrap();
     publish_as(&store, &source, "helper", Some(&launcher.subject));
     let runtime = Arc::new(FakeRuntime::default());
     runtime.ptys.lock().unwrap().push(claude_seat_pty("launcher", "running", "launcher-one"));
@@ -56,11 +60,18 @@ fn helper_launcher_inherits_credential_reference_without_impersonation_or_secret
     assert_eq!(launch.environment["ST_AGENT"], helper.subject);
     assert!(!serde_json::to_string(launch).unwrap().contains("not-for-argv-or-env"));
     assert_eq!(std::fs::read_dir(&credentials).unwrap().count(), 1);
-    let receipts = store.observations_for(&helper.subject, "runtime.action.succeeded").unwrap();
-    let receipt = receipts.iter().find(|claim| claim.body["fields"]["action"] == "start").unwrap();
-    assert_eq!(receipt.body["fields"]["launcher_binding"]["launcher"], "agent/node.launcher");
-    assert_eq!(receipt.body["fields"]["launcher_binding"]["person"], "person/avery");
-    assert_eq!(receipt.body["fields"]["credential_home"], credentials.display().to_string());
+    let receipts = store.observations_for(&helper.subject, "agent.helper-launched").unwrap();
+    let receipt = receipts.last().unwrap();
+    assert_eq!(receipt.body["fields"]["launcher"], "agent/node.launcher");
+    assert_eq!(receipt.body["fields"]["person"], "person/avery");
+    assert_eq!(receipt.body["fields"]["credential_home_label"], "credentials");
+    assert!(receipt.body["fields"]["operation_id"].is_string());
+    assert!(!serde_json::to_string(receipt).unwrap().contains(credentials.to_str().unwrap()));
+    let id = receipt.id.clone();
+    store.trim_local_observations(u128::MAX, 1, 100).unwrap();
+    assert!(store.observations_for(&helper.subject, "agent.helper-launched").unwrap().iter().any(|claim| claim.id == id));
+    store.trim_local_observations(0, 1, 0).unwrap();
+    assert!(store.observations_for(&helper.subject, "agent.helper-launched").unwrap().iter().any(|claim| claim.id == id));
 }
 
 #[test]
@@ -114,4 +125,26 @@ fn helper_launcher_declaration_edit_cannot_fall_through_to_another_credential_ho
     assert!(reconciler.bind_account(&selected, member, &mut launch).is_err());
     assert!(!launch.environment.contains_key("CLAUDE_CONFIG_DIR"));
     assert!(!launch.environment.contains_key("ST3_ACCOUNT"));
+}
+
+#[test]
+fn helper_launcher_other_harnesses_share_lifetime_without_credential_inheritance() {
+    for harness in ["omp", "pi", "opencode"] {
+        let (_root, store, runtime, helper) = fixture_with_harness(true, harness);
+        let member = helper.member.as_ref().unwrap();
+        let mut launch = member.clone();
+        let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+        reconciler.bind_account(&helper, member, &mut launch).unwrap();
+        assert!(!launch.environment.contains_key("CLAUDE_CONFIG_DIR"));
+        assert!(!launch.environment.contains_key("CODEX_HOME"));
+        assert!(store.helper_launcher_alive(&helper.subject).unwrap());
+        let launcher = store.desired_subjects_named(&["agent/node.launcher".into()]).unwrap().remove(0);
+        store.append_claim(&ClaimInput {
+            subject: launcher.subject.clone(), kind: "runtime.observed".into(), actor: None,
+            fields: member_fields(launcher.member.as_ref().unwrap(), "exited", Some("launcher-one"), false),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(!store.helper_launcher_alive(&helper.subject).unwrap());
+        assert!(reconciler.perform_start(&helper, member, "ended launcher").is_err());
+    }
 }
