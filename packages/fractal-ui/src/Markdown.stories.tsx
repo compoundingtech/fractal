@@ -5,81 +5,13 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { Button } from 'react-aria-components'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { EmbraceMarkdownPreview } from './assistant-ui/EmbraceToolPreview'
-import { Markdown, ResourceChip, completeStreamingTail, type InlineResource } from './assistant-ui/composition/Markdown'
+import { Markdown, completeStreamingTail } from './assistant-ui/composition/Markdown'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { MarkdownCanvas, languages, streamChunks, inlineStreamStages, styles } from './markdown.story-canvas'
 
-const richText = [
-  '# [**Selection** and *ordering*](https://example.com/docs/selection_(stable) "Selection guide")',
-  '',
-  '**Bold with *nested italic***, __alternate bold__, *italic*, _alternate italic_, and escaped \\*literal stars\\*. Inline code keeps `a ** b` literal.',
-  '',
-  '3. Preserve the selected row.',
-  '   - Keep **identity** stable.',
-  '     1. Read `src/model.ts`.',
-  '     2. Inspect src/selection.ts.',
-  '   - Restore focus after sorting.',
-  '4. Confirm the rendered order.',
-  '',
-  '| Resource | State | Count |',
-  '| :--- | :---: | ---: |',
-  '| `src/model.ts` | **Ready** | 3 |',
-  '| [Selection *guide*](https://example.com/guide "Detailed guide") | *Streaming* | 12 |',
-  '| Escaped \\| pipe | `a ** b` | 0 |',
-].join('\n')
-const languages = [
-  ['ts', 'export const selected: string = "row-3"'],
-  ['tsx', 'export const Row = ({ title }: { title: string }) => <strong>{title}</strong>'],
-  ['js', '// Preserve identity\nconst rows = items.filter(item => item.ready)'],
-  ['json', '{ "ready": true, "count": 3 }'],
-  ['shell', 'printf "%s\\n" "$HOME"\nfor file in src/*.ts; do echo "$file"; done'],
-  ['diff', '--- a/src/model.ts\n+++ b/src/model.ts\n@@ -1 +1 @@\n-old\n+new'],
-  ['rust', 'fn main() { let selected: Option<usize> = Some(3); println!("{:?}", selected); }'],
-  ['nix', '{ pkgs, ... }: { packages = [ pkgs.nodejs ]; enabled = true; }'],
-  ['python', 'def selected(rows):\n    return [row for row in rows if row["ready"]]'],
-  ['yaml', 'selected: row-3\nready: true\nresources:\n  - src/model.ts'],
-  ['markdown', '# Selection\n**Stable** identity and [a guide](https://example.com).'],
-  ['css', '.selected { color: var(--foreground); display: grid; }'],
-  ['unknown-language', '<script>alert("This stays literal code")</script>'],
-  ['', 'A fence without a language stays plain text.'],
-] as const
-const languageText = languages.map(([language, code]) => `\`\`\`${language}\n${code}\n\`\`\``).join('\n\n')
-const streamChunks = [
-  '# Streaming result\n\n```typescript\nconst selected = "row-3";',
-  '\nconst description = "A long row title that wraps only after the reader enables wrapping and stays wrapped as new tokens arrive in the same code fence.";',
-  '\nexport const state = { selected, description };',
-  '\n```\n\n**Complete.**\n\n```typescript\nexport const complete = true;\n```',
-] as const
-const inlineStreamStages = [
-  '**Stable',
-  '**Stable** and *ordered',
-  '**Stable** and *ordered* in `src/model.ts',
-  '**Stable** and *ordered* in `src/model.ts` — [**Selection** guide](https://example.com/gui',
-  '**Stable** and *ordered* in `src/model.ts` — [**Selection** guide](https://example.com/guide "Selection guide")',
-] as const
-const resources: readonly InlineResource[] = [{ path: 'src/model.ts', added: 3, removed: 1, preview: 'export const selected = "row-3"' }]
-const customReference: InlineResource = { path: 'src/selection.ts', added: 2, removed: 0 }
-const renderInlineReference = (path: string) => path === customReference.path ? <span data-testid="custom-inline-reference"><ResourceChip resource={customReference} /></span> : undefined
 
-type Scenario = 'rich-text' | 'languages' | 'streaming' | 'inline-streaming' | 'all'
-function MarkdownCanvas({ scenario = 'rich-text', scheme = 'dark' }: { scenario?: Scenario; scheme?: 'dark' | 'light' }) {
-  const [stage, setStage] = React.useState(0)
-  const [opened, setOpened] = React.useState<string | undefined>()
-  const openResource = React.useCallback((path?: string) => setOpened(path), [])
-  const streaming = scenario === 'streaming' || scenario === 'inline-streaming'
-  const stages = scenario === 'inline-streaming' ? inlineStreamStages : streamChunks
-  const text = scenario === 'languages' ? languageText : scenario === 'streaming' ? streamChunks.slice(0, stage + 1).join('') : scenario === 'inline-streaming' ? inlineStreamStages[stage]! : richText
-  return <main data-testid="markdown-story" data-stream-stage={stage} {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
-    <div {...stylex.props(styles.lane)}>
-      {streaming ? <div {...stylex.props(styles.toolbar)}><Button data-testid="append-stream" onPress={() => setStage(value => value + 1)} isDisabled={stage === stages.length - 1} {...stylex.props(styles.button)}>Append stream chunk</Button><span>{stage === stages.length - 1 ? 'Complete' : 'Streaming'}</span></div> : null}
-      <Markdown text={text} streaming={streaming && stage < stages.length - 1} resources={resources} onOpenResource={openResource} renderInlineReference={renderInlineReference} />
-      {opened ? <output data-testid="opened-resource">Opened {opened}</output> : null}
-      {scenario === 'all' ? <><h2 {...stylex.props(styles.heading)}>Code languages</h2><Markdown text={languageText} /><h2 {...stylex.props(styles.heading)}>Open streaming fence</h2><Markdown text={streamChunks[0]} streaming /><h2 {...stylex.props(styles.heading)}>Partial inline streams</h2>{inlineStreamStages.map(value => <Markdown key={value} text={value} streaming resources={resources} />)}</> : null}
-    </div>
-  </ThemePortal></main>
-}
 const meta = {
   title: 'Fractal UI/Markdown', component: MarkdownCanvas,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and lazily load explicit refractor grammars whose tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
@@ -88,6 +20,7 @@ const meta = {
 } satisfies Meta<typeof MarkdownCanvas>
 export default meta
 type Story = StoryObj<typeof meta>
+const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local markdown syntax and token streaming stages exercise parser and renderer contracts.' } } } satisfies Story
 
 const settle = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 const requireElement = <T extends Element>(root: Element, selector: string): T => {
@@ -98,6 +31,7 @@ const requireElement = <T extends Element>(root: Element, selector: string): T =
 
 function streamingTailStory(text: string, terminalSelector: string): Story {
   return {
+    ...contractFixture,
     render: ({ scheme }) => <main data-testid="markdown-story" {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><div {...stylex.props(styles.lane)}><Markdown text={text} streaming /></div></ThemePortal></main>,
     play: async ({ canvasElement }) => {
       await document.fonts.ready
@@ -127,7 +61,7 @@ export const StreamingHeadingLight: Story = { ...StreamingHeading, args: { schem
 export const StreamingTableLight: Story = { ...StreamingTable, args: { scheme: 'light' } }
 export const StreamingTightListLight: Story = { ...StreamingTightList, args: { scheme: 'light' } }
 export const StreamingParagraphLight: Story = { ...StreamingParagraph, args: { scheme: 'light' } }
-export const RichText: Story = {
+export const RichText: Story = { ...contractFixture, tags: ['critical'],
   play: async ({ canvasElement }) => {
     const root = requireElement(canvasElement, '[data-testid="markdown"]')
     const title = requireElement<HTMLAnchorElement>(root, 'h1 a')
@@ -143,7 +77,7 @@ export const RichText: Story = {
     if (canvasElement.querySelector('[data-testid="opened-resource"]')?.textContent !== 'Opened src/model.ts') throw new Error('Resource chip lost its open callback')
   },
 }
-export const Languages: Story = {
+export const Languages: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'languages' },
   play: async ({ canvasElement }) => {
     const fences = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')]
@@ -161,10 +95,9 @@ export const Languages: Story = {
   },
 }
 export const Light: Story = { ...RichText, args: { scheme: 'light' } }
-export const AllStates: Story = { args: { scenario: 'all' } }
 export const LanguagesLight: Story = { ...Languages, args: { scenario: 'languages', scheme: 'light' } }
-export const AllStatesLight: Story = { args: { scenario: 'all', scheme: 'light' } }
-export const StreamingControlsPersistence: Story = {
+export const AllStatesLight: Story = { ...contractFixture, args: { scenario: 'all', scheme: 'light' } }
+export const StreamingControlsPersistence: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'streaming' },
   play: async ({ canvasElement }) => {
     await document.fonts.ready
@@ -207,7 +140,7 @@ export const StreamingControlsPersistence: Story = {
   },
 }
 export const StreamingControlsPersistenceLight: Story = { ...StreamingControlsPersistence, args: { scenario: 'streaming', scheme: 'light' } }
-export const StreamingInlineMarkup: Story = {
+export const StreamingInlineMarkup: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'inline-streaming' },
   play: async ({ canvasElement }) => {
     const adversarial = '['.repeat(50_000)
@@ -246,7 +179,7 @@ export const StreamingInlineMarkup: Story = {
   },
 }
 
-export const CopyFailure: Story = {
+export const CopyFailure: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'streaming' },
   play: async ({ canvasElement }) => {
     const fence = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown-code-block"]')
@@ -258,8 +191,12 @@ export const CopyFailure: Story = {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new DOMException('Clipboard permission denied', 'NotAllowedError') } } })
     try {
       flushSync(() => copy.click())
-      await settle()
-      if (fence.dataset.copyState !== 'failed' || !fence.querySelector('[role="status"]')?.textContent?.includes('Check clipboard permissions') || copy.disabled) throw new Error('Copy failure must report the permission problem and leave retry available')
+      // The rejected write settles asynchronously: wait for the copy to leave ready/copying, not a fixed two frames.
+      for (let frame = 0; (fence.dataset.copyState === 'ready' || fence.dataset.copyState === 'copying') && frame < 600; frame++) await settle()
+      const status = fence.querySelector('[role="status"]')?.textContent ?? ''
+      if (fence.dataset.copyState !== 'failed' || !status.includes('Check clipboard permissions') || copy.disabled) {
+        throw new Error(`Copy failure must report the permission problem and leave retry available (state ${fence.dataset.copyState}, status ${JSON.stringify(status)}, disabled ${copy.disabled})`)
+      }
     } finally {
       if (descriptor === undefined) Reflect.deleteProperty(navigator, 'clipboard')
       else Object.defineProperty(navigator, 'clipboard', descriptor)
@@ -276,7 +213,7 @@ function InputInkCanvas({ scheme = 'dark', narrow = false }: { scheme?: 'dark' |
     <section {...stylex.props(styles.lane, narrow && styles.inputNarrow)}><EmbraceMarkdownPreview tone={foreground ? 'foreground' : 'default'} markdown={'The input anchors this turn.\n\n- Review the retained snapshot.\n\n| Fact | Value |\n| --- | --- |\n| Snapshot | Retained |'} /></section>
   </main>
 }
-export const InputForegroundDark1440: Story = { render: args => <InputInkCanvas scheme={args.scheme} />, play: async ({ canvasElement, args }) => {
+export const InputForegroundDark1440: Story = { ...contractFixture, render: args => <InputInkCanvas scheme={args.scheme} />, play: async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
   await userEvent.click(canvas.getByRole('button', { name: 'Rerender input' }))
   await waitFor(() => expect(canvasElement.querySelector('main')).toHaveAttribute('data-revision', '1'))
@@ -294,11 +231,3 @@ export const InputForegroundLight1440: Story = { ...InputForegroundDark1440, arg
 export const InputForegroundDark440: Story = { ...InputForegroundDark1440, render: args => <InputInkCanvas scheme={args.scheme} narrow /> }
 export const InputForegroundLight440: Story = { ...InputForegroundDark440, args: { scheme: 'light' } }
 
-const styles = stylex.create({
-  canvas: { minHeight: '100vh', boxSizing: 'border-box', padding: s.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
-  lane: { width: '100%', maxWidth: g.lane, minWidth: 0, marginInline: 'auto' },
-  inputNarrow: { maxWidth: g.polishNarrow },
-  toolbar: { display: 'flex', alignItems: 'center', gap: s.md, marginBlockEnd: s.lg },
-  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary }, ':disabled': { color: ink.fgMuted, cursor: 'default' } },
-  heading: { marginBlock: s.lg, fontSize: t.headingSize, lineHeight: t.headingLeading },
-})

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 exec >controller.log 2>&1
 
@@ -14,8 +15,9 @@ cleanup() {
 
 trap cleanup EXIT HUP INT TERM
 
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 st3 --json missions start eval/queue-revision/work \
-  --id "eval/queue-revision/work/${ST_MISSION_RUN}" \
+  --id "eval/queue-revision/work/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}" \
   --workspace "$PWD" \
   --as "$REQUESTER" > initial-run.json
 

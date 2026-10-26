@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Run the paid codex-minimal-access eval once in an isolated daemon whose config selects
 # access_mode = "auto". The eval declares its Codex seat with only a model, so the seat can reach
 # the managed st-managed profile only through the driver's defaults.
@@ -68,7 +69,8 @@ for _ in $(seq 1 150); do
 done
 [[ -S "$root/st3.sock" ]] || { echo "the eval daemon did not open its socket" >&2; exit 1; }
 
-export ST3_ENDPOINT="$root/st3.sock"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FRACTAL_ENDPOINT="$root/st3.sock" ST3_ENDPOINT="$root/st3.sock"
 "$root/bin/st3" doctor --json >"$out/doctor.json" 2>/dev/null || true
 now >"$out/posted-at"
 curl -sS --fail-with-body --unix-socket "$root/st3.sock" -H 'content-type: application/json' \

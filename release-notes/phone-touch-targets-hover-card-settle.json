@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make the Sidebar/Agent Row phone touch-target story wait for the previous row's closing hover card instead of asserting its absence synchronously, so the strict story no longer fails under merge-group load. Refs #3404.",
+  "replay": {"status": "none", "detail": "Test-only change; no replay or stored data changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No protocol or rule change."},
+  "compatibility": {"status": "none", "detail": "No runtime compatibility change; the component is unchanged."},
+  "downtime": {"status": "none", "detail": "No deployment transition."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persisted state or recovery change."}
+}

@@ -25,7 +25,7 @@ const styles = stylex.create({
 })
 const meta = {
   title: 'Fractal UI/Live polish', component: LiveActivity,
-  parameters: { layout: 'fullscreen' },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Frozen 12s/13s and 4h27m live clocks with missing-start/opacity negative controls prove elapsed text and 4.5 contrast; the exact 12-line prompt proves collapse height and focus retention, local composer history proves recall geometry, and an idle one-pane fixture proves draft survival across clock rerenders and dock spacing.' }, layout: 'fullscreen' },
   args: { scheme: 'dark' as Scheme, narrow: false, failingControl: false, contrastFailure: false, state: { _tag: 'Working' as const }, now: clock, startedAt },
   argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, narrow: { control: 'boolean' }, failingControl: { control: 'boolean', description: 'Remove the run start fact: the elapsed-label assertion must fail.' }, contrastFailure: { control: 'boolean', description: 'Reduce live-region opacity: the measured contrast assertion must fail.' } },
   render: function Render({ scheme, narrow, failingControl, contrastFailure, state, now }) {
@@ -97,7 +97,7 @@ export const Dark1440: Story = { play: async ({ mount, args }) => {
   await expect(getComputedStyle(send).opacity).toBe('1')
   await expect(send.getBoundingClientRect().width).toBe(32)
   if (args.scheme === 'light') await expect(getComputedStyle(dock).backgroundColor).toBe('rgb(252, 252, 252)')
-  const advanced = await mount(<meta.render {...args} now={args.now + 1000} />)
+  const advanced = await mount(<meta.render {...args} now={(args.now ?? clock) + 1000} />)
   await expect(within(advanced.getByRole('region', { name: 'Live activity example' })).getByTestId('live-work')).toHaveTextContent(args.state._tag === 'Working' ? 'Working · 13s' : 'Waiting for your answer · 4h 27m')
   const restoredDock = within(advanced.getByRole('region', { name: 'Composer dock example' })).getByTestId('workbench-composer-dock')
   await waitFor(() => {

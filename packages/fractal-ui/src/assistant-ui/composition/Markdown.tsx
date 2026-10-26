@@ -18,7 +18,7 @@ import yaml from 'refractor/yaml'
 import markdown from 'refractor/markdown'
 import css from 'refractor/css'
 import remarkGfm from 'remark-gfm'
-import { surfaceVars as surface, textVars as textColor, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
 export type InlineReferenceRenderer = (path: string) => React.ReactNode | undefined
@@ -60,12 +60,17 @@ function markStreamingTail() {
     tree.children.push({ type: 'element', tagName: 'span', properties: { 'data-streaming-tail': true, 'aria-hidden': true }, children: [] })
   }
 }
+/** Policy/reference context can change without invalidating the Markdown parser. */
+const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming }: { readonly source: string; readonly streaming: boolean }) {
+  return <ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown>
+})
+const markdownUrlTransform = (url: string, key: string) => key === 'src' ? url : defaultUrlTransform(url)
 
 export const Markdown = React.memo(function Markdown({ text, streaming = false, tone = 'default', resources = EMPTY_RESOURCES, onOpenResource, renderInlineReference, resolveImage, onLoadImage }: MarkdownProps) {
   const inherited = React.useContext(MarkdownImagePolicy)
   const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference: renderInlineReference ?? inherited.renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
   const source = React.useMemo(() => streaming ? completeStreamingTail(text) : text, [text, streaming])
-  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}><ReactMarkdown skipHtml urlTransform={(url, key) => key === 'src' ? url : defaultUrlTransform(url)} remarkPlugins={REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></div></MutedTone.Provider></ReferenceContext.Provider>
+  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}><ParsedMarkdown source={source} streaming={streaming} /></div></MutedTone.Provider></ReferenceContext.Provider>
 })
 
 function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
@@ -328,7 +333,7 @@ const styles = stylex.create({
   foreground: { color: textColor.fg },
   image: { maxWidth: '100%', height: 'auto' },
   imagePlaceholder: { display: 'inline-flex', alignItems: 'center', gap: s.sm, padding: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, color: textColor.fgSoft, backgroundColor: surface.controlFill, fontSize: t.metaSize },
-  imageAction: { borderWidth: 0, padding: s.xs, backgroundColor: surface.transparent, color: status.runningFg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  imageAction: { borderWidth: 0, padding: s.xs, backgroundColor: surface.transparent, color: status.runningFg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   prose: { maxWidth: g.proseMax, fontSize: t.bodySize, lineHeight: t.bodyLeading },
   heading: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading, fontWeight: t.weightSemibold, color: textColor.fg },
   list: { margin: 0, paddingInlineStart: g.textColumn, listStylePosition: 'outside' },
@@ -343,20 +348,20 @@ const styles = stylex.create({
   syntaxComment: { color: textColor.fgMuted, fontStyle: 'italic' },
   syntaxKeyword: { color: status.runningFg },
   syntaxString: { color: textColor.fgMuted },
-  syntaxLiteral: { color: status.attention },
+  syntaxLiteral: { color: `var(--fractal-diff-literal, ${status.attention})` },
   syntaxFunction: { color: textColor.fg, fontWeight: t.weightMedium },
   syntaxDeleted: { color: status.dangerFg },
   blockquote: { display: 'flex', flexDirection: 'column', gap: s.md, margin: 0, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.railStrong, color: textColor.fgMuted },
-  tableScroll: { maxWidth: '100%', overflowX: 'auto', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  tableScroll: { maxWidth: '100%', overflowX: 'auto', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit' },
   cell: { paddingInline: s.md, paddingBlock: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, verticalAlign: 'top' },
   tableHeading: { backgroundColor: surface.raised, fontWeight: t.weightSemibold, color: textColor.fg },
   alignLeft: { textAlign: 'left' }, alignCenter: { textAlign: 'center' }, alignRight: { textAlign: 'right' },
   codeToolbar: { display: 'flex', alignItems: 'center', gap: s.xs, paddingInline: s.md, paddingBlock: s.xs, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   codeLanguage: { flexGrow: 1, minWidth: 0, overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fgMuted },
-  codeButton: { flexShrink: 0, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: textColor.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset }, ':disabled': { cursor: 'default', color: textColor.fgMuted } },
+  codeButton: { flexShrink: 0, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: textColor.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset }, ':disabled': { cursor: 'default', color: textColor.fgMuted } },
   codeButtonSelected: { backgroundColor: surface.rowActive, borderColor: border.borderStrong, color: textColor.fg },
-  codePre: { margin: 0, paddingBlock: s.md, paddingInline: s.lg, overflowX: 'auto', whiteSpace: 'pre', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  codePre: { margin: 0, paddingBlock: s.md, paddingInline: s.lg, overflowX: 'auto', whiteSpace: 'pre', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   codeWrapped: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   copyStatus: { display: 'block', paddingInline: s.md, paddingBlock: s.xs, color: status.dangerFg, fontSize: t.metaSize, lineHeight: t.metaLeading },
   codeBlock: { minWidth: 0, maxWidth: '100%', margin: 0, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, overflow: 'hidden' },
@@ -364,6 +369,6 @@ const styles = stylex.create({
   paragraph: { margin: 0, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit', overflowWrap: 'anywhere' },
   streamingTail: { '::after': { content: '""', display: 'inline-block', width: g.caret, height: t.bodySize, marginInlineStart: s.xs, verticalAlign: 'text-bottom', backgroundColor: textColor.fgMuted } },
   inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
-  link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
-  resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.hairline } }, hoverCard: { maxWidth: g.tooltipMax, padding: s.lg, borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: textColor.fg, fontSize: t.metaSize, lineHeight: t.metaLeading }, resourceTitle: { display: 'flex', alignItems: 'center', gap: s.md, fontFamily: t.fontMono }, added: { color: textColor.fgMuted }, removed: { color: textColor.fgMuted }, preview: { margin: 0, marginTop: s.md, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, color: textColor.fgMuted, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
+  resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } }, hoverCard: { maxWidth: g.tooltipMax, padding: s.lg, borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: textColor.fg, fontSize: t.metaSize, lineHeight: t.metaLeading }, resourceTitle: { display: 'flex', alignItems: 'center', gap: s.md, fontFamily: t.fontMono }, added: { color: textColor.fgMuted }, removed: { color: textColor.fgMuted }, preview: { margin: 0, marginTop: s.md, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, color: textColor.fgMuted, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
 })

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}}"
 
 readonly REQUESTER=person/eval-requester
 readonly WORKER=agent/eval/seat-queue/worker
@@ -133,8 +135,9 @@ expect_next_claim() {
 
 start_run() {
   local label=$1 output run
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   output="$(st3 missions start "eval/seat-queue/$label" \
-    --id "$label-$ST_MISSION_RUN" \
+    --id "$label-${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" \
     --workspace "$PWD" \
     --as "$REQUESTER" \
     --json)"

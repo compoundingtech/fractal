@@ -26,6 +26,15 @@ const account = (input: unknown) => {
 }
 
 describe('native usage.period quota presentation', () => {
+  it('accepts both wire version names but rejects unknown or conflicting versions', () => {
+    for (const api_version of ['st3.client.v0', 'fractal.client.v0']) {
+      expect(projectNativeQuota({ ...envelope(), api_version }, NOW)).toMatchObject({ _tag: 'ok' })
+    }
+    for (const api_version of ['fractal.client.v1', 'smalltalk.client.v0', ['st3.client.v0', 'fractal.client.v0']]) {
+      expect(projectNativeQuota({ ...envelope(), api_version }, NOW))
+        .toMatchObject({ _tag: 'failed', failure: { kind: 'incompatible' } })
+    }
+  })
   it('preserves native percentages including reported zero, identity and original measurement', () => {
     const row = account(envelope())
     expect(row.accountId).toBe(reading.account_ref)

@@ -1,4 +1,4 @@
-import { ClientError, plainError, type St3Client } from '@smalltalk/st3-client'
+import { ClientError, plainError, type FractalClient } from '@fractal/client'
 
 /**
  * One read of an st document by name (the newest version) or by its immutable `name@hash`
@@ -25,7 +25,7 @@ export const documentVersion = (reference: string): { readonly name: string; rea
 const utf8 = new TextDecoder('utf-8', { fatal: true })
 
 /** Reads through `GET /v1/client/documents/content`, the route stui and the phone read. */
-export const gatewayDocuments = (client: St3Client): DocumentPort => ({
+export const gatewayDocuments = (client: FractalClient): DocumentPort => ({
   read: async (name) => {
     try {
       const { reference, bytes } = (await client.documentGet(name)).value
