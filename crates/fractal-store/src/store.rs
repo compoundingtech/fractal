@@ -8687,14 +8687,47 @@ fn latest_harness_of_incarnation_tx(
         .map_err(internal)
 }
 
+/// Whether readers fold the seat's harness to `latest` itself: no other observation of the
+/// seat is newer, and this incarnation has claimed or reported no work since it, which the
+/// harness fold reads as working until a newer observation replicates.
+fn harness_view_rests_on_tx(
+    transaction: &Transaction<'_>,
+    subject: &str,
+    incarnation: &str,
+    latest: &ClaimRecord,
+) -> Result<bool, St3Error> {
+    if latest_claim_of_kind_tx(transaction, subject, "harness.observed")?
+        .is_none_or(|claim| claim.id != latest.id)
+    {
+        return Ok(false);
+    }
+    let worked: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_actor_work_activity_index
+             WHERE actor=?1 AND json_extract(body, '$.fields.claim_incarnation')=?2
+               AND store_index>?3 AND kind IN ('work.claimed','work.progress'))",
+            params![subject, incarnation, latest.store_index],
+            |row| row.get(0),
+        )
+        .map_err(internal)?;
+    Ok(!worked)
+}
+
 /// Publish a harness observation when any field other than its observation time differs
 /// from the subject's latest replicated observation. When the harness stops working, its
 /// usage that is still only local replicates too.
+///
+/// An unchanged observation refreshes the replicated one at most once a minute, but only while
+/// the harness works or when `heartbeat` is set. A resting native driver re-stamps its state
+/// every five minutes; its event was admitted against the seat's running runtime row, so no
+/// reader needs that re-stamp replicated (a stuck runtime row is what makes the card overlay
+/// read a report's age). Those re-stamps were most of the fleet's `harness.observed` claims.
 fn publish_changed_harness_state_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     input: &ClaimInput,
     now: u128,
+    heartbeat: bool,
 ) -> Result<Option<ClaimRecord>, St3Error> {
     let latest = latest_harness_of_incarnation_tx(
         transaction,
@@ -8737,8 +8770,21 @@ fn publish_changed_harness_state_tx(
     // A resting harness keeps re-stamping its state: each re-stamp replicates the usage that
     // waited out its interval, so a reading after the turn's tally waits no longer than that.
     let due_usage = now.saturating_sub(USAGE_PUBLISH_INTERVAL_MS);
-    // Refresh remote freshness at most once a minute, without manufacturing transitions.
-    if unchanged && latest.as_ref().is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000) {
+    // Refresh remote freshness at most once a minute, without manufacturing transitions. A
+    // working harness keeps refreshing: a wake counts as taken up by a working report accepted
+    // after it was sent. A resting one replicates its unchanged state only when readers would
+    // otherwise fold the seat to something newer than it.
+    let refreshed = latest
+        .as_ref()
+        .is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000);
+    if unchanged
+        && (refreshed
+            || (resting && !heartbeat
+                && match &latest {
+                    Some(claim) => harness_view_rests_on_tx(transaction, &input.subject, &incarnation, claim)?,
+                    None => false,
+                }))
+    {
         if resting {
             publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage))?;
         }
@@ -21126,7 +21172,9 @@ pub fn append_latest_observation_publication(
             }
             let published = match input.kind.as_str() {
                 "harness.observed" => {
-                    publish_changed_harness_state_tx(transaction, &graph.origin, input, now)?
+                    publish_changed_harness_state_tx(
+                        transaction, &graph.origin, input, now, event_runtime.is_none(),
+                    )?
                 }
                 "harness.usage" => {
                     publish_due_usage_tx(transaction, &graph.origin, input, &local, now)?

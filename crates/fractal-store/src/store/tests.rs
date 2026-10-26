@@ -8013,6 +8013,158 @@ fn a_harness_state_replicates_only_when_it_changes() {
     assert!(replica.local_observations_after(0, 100).unwrap().is_empty());
 }
 
+/// Measured on the fleet (2026-10-26): two thirds of `harness.observed` claims were resting
+/// native drivers re-stamping an unchanged state every five minutes. An hour of that at rest,
+/// then an hour of a working turn, from a native driver and from a legacy poster.
+#[test]
+fn a_resting_native_harness_replicates_its_state_once_not_every_re_stamp() {
+    let minute = 60_000_u128;
+    let count = |native: bool| {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/node.worker";
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("running")),
+                    ("incarnation_id".into(), json!("inc-1")),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        let start = now_ms();
+        let mut claims = Vec::new();
+        for state in ["idle", "working"] {
+            let begin = store.claims_for(subject, Some("harness.observed")).unwrap().len();
+            for stamp in 0..=12 {
+                let at = start + if state == "idle" { 0 } else { 61 * minute } + stamp * 5 * minute;
+                append_latest_observation_publication(
+                    &store.graph,
+                    &harness_state(subject, state, at as u64),
+                    at,
+                    native.then_some("inc-1"),
+                )
+                .unwrap();
+            }
+            claims.push(store.claims_for(subject, Some("harness.observed")).unwrap().len() - begin);
+        }
+        assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 26, "the local log keeps every re-stamp");
+        claims
+    };
+    assert_eq!(count(true), [1, 13], "a native harness at rest replicates its transition only");
+    assert_eq!(count(false), [13, 13], "a legacy report keeps its heartbeat");
+}
+
+/// A resting native harness's re-stamp no longer replicates, but it still carries out the usage
+/// reading that waited out its interval.
+#[test]
+fn a_resting_native_re_stamp_still_replicates_the_usage_that_waited_its_interval() {
+    let minute = 60_000_u128;
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("incarnation_id".into(), json!("inc-1")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let start = now_ms();
+    let publish = |input: &ClaimInput, at: u128| {
+        append_latest_observation_publication(&store.graph, input, at, Some("inc-1")).unwrap();
+    };
+    let tokens = |store: &Store| {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["context_used_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    publish(&harness_state(subject, "idle", start as u64), start);
+    publish(&harness_usage(subject, "context_occupancy", 10, 0), start + minute);
+    publish(&harness_usage(subject, "context_occupancy", 20, 0), start + 2 * minute);
+    assert_eq!(tokens(&store), [10], "a later answer at rest waits for the interval");
+    publish(&harness_state(subject, "idle", (start + 5 * minute) as u64), start + 5 * minute);
+    assert_eq!(tokens(&store), [10], "its interval has not passed at this re-stamp");
+    publish(&harness_state(subject, "idle", (start + 10 * minute) as u64), start + 10 * minute);
+    assert_eq!(tokens(&store), [10, 20], "the next re-stamp replicates it");
+    assert_eq!(store.claims_for(subject, Some("harness.observed")).unwrap().len(), 1);
+}
+
+/// Work the seat claims or reports after its last replicated state makes readers fold it
+/// working, so the resting re-stamp that follows is what brings it back to rest everywhere.
+#[test]
+fn a_resting_re_stamp_after_work_activity_replicates_so_readers_see_the_seat_rest() {
+    let minute = 60_000_u128;
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("incarnation_id".into(), json!("inc-1")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let start = now_ms();
+    let idle = |at: u128| {
+        append_latest_observation_publication(
+            &store.graph, &harness_state(subject, "idle", at as u64), at, Some("inc-1"),
+        )
+        .unwrap();
+    };
+    let state = |store: &Store| {
+        current_harness_at(&store.readers.get(), subject, None).unwrap().map(|harness| harness.state)
+    };
+    let observed = |store: &Store| store.claims_for(subject, Some("harness.observed")).unwrap().len();
+    idle(start);
+    {
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        append_claim_tx(
+            &transaction,
+            &store.origin,
+            "step-run/bench/work",
+            "work.progress",
+            Some(subject),
+            &json!({"fields": {
+                "attempt": 1,
+                "status": "working",
+                "worker_reported": true,
+                "claimant": subject,
+                "claim_incarnation": "inc-1",
+                "claim_expires_at_unix_ms": start.saturating_add(60 * minute),
+                "readiness_epoch": 1,
+            }}),
+            &[],
+            None,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+    }
+    assert_eq!(state(&store).as_deref(), Some("working"));
+    idle(start + 5 * minute);
+    assert_eq!(observed(&store), 2, "the re-stamp after the work replicates");
+    assert_eq!(state(&store).as_deref(), Some("idle"));
+    idle(start + 10 * minute);
+    assert_eq!(observed(&store), 2, "a re-stamp with nothing newer stays local");
+}
+
 #[test]
 fn harness_usage_replicates_on_a_schedule_while_working_and_at_once_when_it_stops() {
     let store = Store::open_memory("node").unwrap();
