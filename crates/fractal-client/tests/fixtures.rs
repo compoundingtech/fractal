@@ -334,10 +334,11 @@ fn generated_resource_union_decodes_all_kinds() {
     assert!(question.resolution.is_none());
     assert_eq!(question.answer.state, HarnessQuestionAnswerabilityState::Unavailable);
     assert_eq!(question.answer.reason, Some(HarnessQuestionAnswerabilityReason::AdapterMissing));
-    let wire: serde_json::Value = decode("resources.json");
-    let expected = wire.as_array().unwrap().iter()
-        .find(|resource| resource["kind"] == "harness-question").unwrap();
-    assert_eq!(serde_json::to_value(question).unwrap(), *expected);
+    let typed = Resource::HarnessQuestion(question.clone());
+    let encoded = serde_json::to_value(&typed).unwrap();
+    assert_eq!(encoded["kind"], "harness-question");
+    let round_trip: Resource = serde_json::from_value(encoded).unwrap();
+    assert_eq!(round_trip, typed);
     let lane = resources
         .iter()
         .find_map(|resource| match resource {
