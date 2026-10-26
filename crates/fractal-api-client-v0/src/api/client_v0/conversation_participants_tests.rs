@@ -64,20 +64,73 @@ fn daemon_authorship_is_truthful_without_widening_legacy_sender_or_guessing_broa
     let delegated_body = session_message_body(&state, &delegated, true);
     assert_eq!(delegated_body["author"], "agent/fixture");
     assert_eq!(delegated_body["from"], "person/fixture");
-    let assistant = send(
-        "message/assistant",
-        Some("assistant/chatgpt"),
-        "assistant/chatgpt",
-        "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567",
-    );
+    // Assistant sends require the existing authorized writer, not append_claim.
+    let intent = crate::graph::parse_intent(
+        "version 2\nagent \"eval.worker\" { workspace \"/tmp/participant-fixture\"; harness \"omp\" {} }\n",
+        state.store.origin(),
+    ).unwrap();
+    state
+        .store
+        .apply_internal(&intent, "participant-recipient")
+        .unwrap();
+    let grant_subject = "custom/client/assistant-v1-participant-fixture";
+    let grant_id = "assistant-grant/0123456789abcdef01234567";
+    let session_actor = format!("assistant/chatgpt/session/{grant_id}");
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    state
+        .store
+        .append_claim(&ClaimInput {
+            subject: grant_subject.into(),
+            kind: "custom.client.assistant.v1.granted".into(),
+            actor: Some("person/fixture".into()),
+            fields: serde_json::from_value(json!({
+                "principal":"assistant/chatgpt", "session_actor":session_actor,
+                "issuer":"person/fixture", "disclosure_consent":true, "policy_revision":1,
+                "expires_at_unix_ms":expires, "scopes":["write.assistant.messages"],
+                "recipient_allowlist":["agent/eval.worker"], "grant_id":grant_id
+            }))
+            .unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let authorization = crate::store::assistant_write::AssistantWriteAuthorization {
+        grant_subject: grant_subject.into(),
+        actor: session_actor.clone(),
+        owner: "person/fixture".into(),
+        policy_revision: 1,
+        scope: "write.assistant.messages".into(),
+        recipient: Some("agent/eval.worker".into()),
+    };
+    let (assistant, appended) = state.store.append_assistant_claim_outcome(&ClaimInput {
+        subject:"message/assistant".into(), kind:"message.sent".into(), actor:Some("assistant/chatgpt".into()),
+        fields:serde_json::from_value(json!({"from":"assistant/chatgpt", "to":"agent/eval.worker", "content":"Invented assistant text", "status":"sent"})).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None,
+    }, &authorization).unwrap();
+    assert!(appended);
     let assistant_body = session_message_body(&state, &assistant, true);
     assert_eq!(assistant_body["from"], "assistant/chatgpt");
-    assert_eq!(
-        assistant_body["to"],
-        "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567"
-    );
+    assert_eq!(assistant_body["to"], "agent/eval.worker");
+    assert_eq!(assistant_body["recipients"], json!(["agent/eval.worker"]));
+    assert_eq!(assistant_body["sender_class"], "external-assistant");
+    assert_eq!(assistant_body["assistant_grant_id"], grant_id);
     assert!(assistant_body.get("author").is_none());
-    assert!(assistant_body.get("recipients").is_none());
+    let reply = send(
+        "message/assistant-reply",
+        Some("agent/eval.worker"),
+        "agent/eval.worker",
+        &session_actor,
+    );
+    let reply_body = session_message_body(&state, &reply, true);
+    assert_eq!(reply_body["from"], "agent/eval.worker");
+    assert_eq!(reply_body["author"], "agent/eval.worker");
+    assert_eq!(reply_body["to"], session_actor);
+    assert!(reply_body.get("recipients").is_none());
     let unknown = send(
         "message/unknown",
         None,
