@@ -76,11 +76,12 @@ xcodebuild() { native /usr/bin/xcodebuild "$@"; }
 sim=''
 gateway_pid=''
 metro_pid=''
+native_log_pid=''
 cleanup() {
   status=$?
   trap - EXIT INT TERM
   set +e
-  for pid in "$metro_pid" "$gateway_pid"; do
+  for pid in "$native_log_pid" "$metro_pid" "$gateway_pid"; do
     if [[ -n "$pid" ]]; then kill "$pid"; wait "$pid"; fi
   done
   if [[ -n "$sim" ]]; then
@@ -152,6 +153,8 @@ start_service "$out/metro.log" corepack pnpm exec expo start --localhost --port 
 metro_pid="$service_pid"
 wait_service "$metro_pid" 'http://localhost:8081/status' "$out/metro.log"
 run xcrun simctl install "$sim" "$out/DerivedData/Build/Products/Debug-iphonesimulator/fractal.app"
+start_service "$out/native.log" xcrun simctl spawn "$sim" log stream --style compact --level debug --predicate 'process == "fractal"'
+native_log_pid="$service_pid"
 run xcrun simctl launch "$sim" com.compoundingtech.fractal.starter -RCT_jsLocation localhost:8081
 
 cat > "$out/pair.yaml" <<'FLOW'
