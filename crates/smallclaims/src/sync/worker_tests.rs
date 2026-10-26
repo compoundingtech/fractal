@@ -635,6 +635,7 @@ async fn an_authenticated_failure_has_a_request_bound_signature() {
     let body = Bytes::from_static(b"not json");
     let request_digest = FleetAuth::body_digest(&body);
     let response = receive_exchange(
+        None,
         State(PeerState {
             backend: Local(Arc::new(plain_memory("target").unwrap())),
             node: "target".into(),
@@ -1040,6 +1041,7 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
     };
 
     let first = receive_exchange(
+        None,
         State(state.clone()),
         auth.request_headers("source", &body).unwrap(),
         body.clone(),
@@ -1050,6 +1052,7 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
     let _ = outbound_wake.borrow_and_update();
 
     let duplicate = receive_exchange(
+        None,
         State(state.clone()),
         auth.request_headers("source", &body).unwrap(),
         body,
@@ -4380,6 +4383,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     let digest = FleetAuth::body_digest(&bytes);
     let headers = auth.request_headers("birch", &bytes).unwrap();
     let interrupted = tokio::spawn(receive_exchange(
+        None,
         State(state.clone()),
         headers.clone(),
         bytes.clone(),
@@ -4400,7 +4404,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     );
 
     let started = tokio::time::Instant::now();
-    let overload = receive_exchange(State(state.clone()), headers.clone(), bytes.clone()).await;
+    let overload = receive_exchange(None, State(state.clone()), headers.clone(), bytes.clone()).await;
     assert_eq!(overload.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(started.elapsed() < REPLICATION_EXCHANGE_TIMEOUT);
     let overload_headers = overload.headers().clone();
@@ -4441,6 +4445,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
         serde_json::to_vec(&left.export_replication_summary(fleet_id).unwrap()).unwrap(),
     );
     let busy = receive_exchange(
+        None,
         State(state.clone()),
         auth.request_headers("birch", &changed).unwrap(),
         changed,
@@ -4834,6 +4839,7 @@ async fn failed_export_job_is_removed_and_identical_retry_preserves_receipt() {
     );
     for expected_status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK] {
         let response = receive_exchange(
+            None,
             State(state.clone()),
             auth.request_headers("birch", &bytes).unwrap(),
             bytes.clone(),
@@ -5025,6 +5031,7 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
         };
         let state = PeerState::new(backend, "cedar".into(), auth.clone(), fleet.clone());
         requests.push(tokio::spawn(receive_exchange(
+            None,
             State(state),
             auth.request_headers(name, &bytes).unwrap(),
             bytes,
@@ -5056,6 +5063,7 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
     let state = PeerState::new(Local(store), "cedar".into(), auth.clone(), fleet.clone());
     let started = tokio::time::Instant::now();
     let response = receive_exchange(
+        None,
         State(state),
         auth.request_headers("elm", &query).unwrap(),
         query.clone(),
