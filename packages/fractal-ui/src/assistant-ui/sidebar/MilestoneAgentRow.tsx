@@ -143,7 +143,7 @@ function SubagentCount({ count, onPress }: { readonly count: number | undefined;
   const id = count === undefined ? 'unknown' : String(count)
   return onPress === undefined
     ? <span data-subagent-count={id} {...stylex.props(styles.countHit)}>{content}</span>
-    : <Button data-subagent-count={id} onPress={onPress} {...stylex.props(styles.countHit, styles.countButton)}>{content}</Button>
+    : <Button data-subagent-count={id} aria-label={count === undefined ? 'Unreported subagents' : `${count} ${count === 1 ? 'subagent' : 'subagents'}`} onPress={onPress} {...stylex.props(styles.countHit, styles.countButton)}>{content}</Button>
 }
 
 // Name-column widths: below `compactName` the full "14 subagents" would leave the title under ~24px, so the count goes
