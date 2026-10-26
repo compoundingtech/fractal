@@ -41,7 +41,7 @@ pub struct ProviderObservation {
 /// not finish in one poll, so an observer's declared interval does not delay it.
 pub const PROVIDER_CONTINUE_MS: u128 = 1_000;
 
-pub use crate::github_admission::ProviderRateLimit;
+pub use crate::github_admission::{LocalObserverBudget, ProviderRateLimit};
 
 /// The resource a GitHub repository's observations land on: `resource/github/OWNER/REPO`.
 pub fn default_resource(locator: &str) -> String {
@@ -125,6 +125,7 @@ fn github_retry_at(headers: &reqwest::header::HeaderMap, now: u128) -> u128 {
     retry_after
         .into_iter()
         .chain(rate_reset)
+        .filter(|deadline| *deadline > now)
         .max()
         .unwrap_or_else(|| now.saturating_add(15 * 60_000))
 }
@@ -1392,6 +1393,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(observation.facts["status"], "missing");
+    }
+
+    #[test]
+    fn github_rate_limit_stale_reset_uses_real_cooldown() {
+        let now = 2_000_000;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset", "1000".parse().unwrap());
+        for status in [reqwest::StatusCode::TOO_MANY_REQUESTS, reqwest::StatusCode::FORBIDDEN] {
+            assert!(matches!(
+                github_refusal(status, &headers, r#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#),
+                Some(GithubRefusal::RateLimit)
+            ));
+        }
+        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
+        headers.insert("x-ratelimit-reset", "2000".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
+    }
+
+    #[test]
+    fn github_rate_limit_honours_retry_after_without_reset() {
+        let now = 2_000_000;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 120_000);
+        headers.insert("x-ratelimit-reset", "1000".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 120_000);
+        headers.insert(reqwest::header::RETRY_AFTER, "Thu, 01 Jan 1970 00:35:00 GMT".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), 2_100_000);
+        headers.insert(reqwest::header::RETRY_AFTER, "0".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
     }
 
     /// A provider that accepts the connection and never answers must not hold its observer forever.

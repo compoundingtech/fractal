@@ -29,7 +29,17 @@ Core, GraphQL and search use separate request counters (including GitHub
 Enterprise `/api/graphql` and `/api/v3/search` path shapes without relaxing any
 existing transport-domain policy). These are NOT GraphQL points, search-provider
 or secondary-limit guarantees. Failed sends and conditional304s remain reserved.
-Refusal adds no reservation and returns the existing typed ProviderRateLimit.
+Refusal adds no reservation and returns a typed `LocalObserverBudget`, displayed
+as “local observer budget reached, next slot at T”, not a GitHub HTTP 429.
+It persists the next local slot without raising a provider-rate-limit fault.
+
+GitHub HTTP 429 and secondary-limit 403 responses honour `Retry-After` (seconds
+or HTTP date) and `x-ratelimit-reset`, using the latest future deadline. If neither
+header names a future deadline, the observer waits fifteen minutes; a stale
+primary reset cannot turn a secondary limit into a one-second polling loop.
+Every changed refusal deadline is persisted, including when the HTTP status and
+reason have not changed, so attention evaluates the latest reset rather than
+the first refusal's expired reset.
 
 Counters are coalesced per minute/caller/resource, including unscoped traffic:
 a100000-call unscoped flood in one minute occupies one row and cannot consume

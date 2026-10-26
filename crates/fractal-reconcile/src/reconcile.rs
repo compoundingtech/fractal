@@ -47,8 +47,8 @@ use crate::model::{
     WorkSelector, ObserverSpec,
 };
 use crate::resource::{
-    ObservationRequest, ObserverCondition, ProviderRateLimit, RegisteredResourceProvider,
-    ResourceProvider,
+    LocalObserverBudget, ObservationRequest, ObserverCondition, ProviderRateLimit,
+    RegisteredResourceProvider, ResourceProvider,
 };
 use crate::store::Store;
 
@@ -16338,10 +16338,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     Err(error) => {
-                        let rate_limit = error.downcast_ref::<ProviderRateLimit>();
-                        let retry_at = rate_limit.map_or_else(
-                            || now_ms().saturating_add(60_000),
-                            |limit| limit.retry_at_unix_ms.max(now_ms().saturating_add(1_000)),
+                        let refusal_deadline = error.downcast_ref::<ProviderRateLimit>()
+                            .map(|limit| limit.retry_at_unix_ms)
+                            .or_else(|| error.downcast_ref::<LocalObserverBudget>()
+                                .map(|limit| limit.retry_at_unix_ms));
+                        let now = now_ms();
+                        let retry_at = refusal_deadline.map_or_else(
+                            || now.saturating_add(60_000),
+                            |deadline| if deadline > now { deadline }
+                                else { now.saturating_add(15 * 60_000) },
                         );
                         let reason = error.to_string();
                         completed_deadline = Some(retry_at);
@@ -16352,11 +16357,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                             actual.get("state").and_then(Value::as_str) == Some("unreachable")
                                 && actual.get("reason").and_then(Value::as_str)
                                     == Some(reason.as_str())
+                                && (refusal_deadline.is_none()
+                                    || actual.get("next_check_unix_ms").and_then(Value::as_str)
+                                        .and_then(|value| value.parse::<u128>().ok()) == Some(retry_at))
                         });
                         if !unchanged_failure || refresh_attempt.is_some() {
                             let failure_hash = hex::encode(sha2::Sha256::digest(
                                 format!(
-                                    "{operation}:{reason}:{}",
+                                    "{operation}:{reason}:{retry_at}:{}",
                                     store
                                         .claims_for(&observer_subject, Some("observer.state"))
                                         .unwrap_or_default()
@@ -35422,6 +35430,8 @@ observer "repo" {{ resource "resource/repo"; provider "github.repository"; locat
         /// An observation that asks to continue at once, as a listing longer than one read does.
         Continue,
         RateLimit,
+        RateLimitAt(u128),
+        LocalBudget(u128),
         Forbidden,
         Fail,
     }
@@ -35479,6 +35489,17 @@ observer "repo" {{ resource "resource/repo"; provider "github.repository"; locat
                         Err(anyhow::Error::new(crate::resource::ProviderRateLimit {
                             retry_at_unix_ms: now_ms() + 180_000,
                             status: 403,
+                        }))
+                    }
+                    ScriptedObservation::RateLimitAt(deadline) => {
+                        Err(anyhow::Error::new(crate::resource::ProviderRateLimit {
+                            retry_at_unix_ms: deadline,
+                            status: 403,
+                        }))
+                    }
+                    ScriptedObservation::LocalBudget(deadline) => {
+                        Err(anyhow::Error::new(crate::resource::LocalObserverBudget {
+                            retry_at_unix_ms: deadline,
                         }))
                     }
                     ScriptedObservation::Forbidden => {
@@ -35778,10 +35799,11 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
     }
 
     #[tokio::test]
-    async fn a_rate_limit_asks_a_person_only_after_it_outlasts_its_reset() {
+    async fn a_rate_limit_persists_each_new_deadline_and_clears_stale_attention() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, SCRIPTED_OBSERVER, "outlasted-rate-limit");
         let calls = Arc::new(AtomicUsize::new(0));
+        let reset = now_ms() + 180_000;
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -35791,8 +35813,9 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         .with_resource_provider(Arc::new(ScriptedResourceProvider::new(
             calls.clone(),
             [
-                ScriptedObservation::RateLimit,
-                ScriptedObservation::RateLimit,
+                ScriptedObservation::RateLimitAt(reset),
+                ScriptedObservation::RateLimitAt(reset + 180_000),
+                ScriptedObservation::RateLimitAt(reset + 360_000),
                 ScriptedObservation::Observe,
             ],
         )));
@@ -35803,7 +35826,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert_eq!(state["error_code"], "rate-limited");
         assert!(observer_items(&store).is_empty());
 
-        // The reset it named passed, and the observer is still limited.
+        // Until another refusal is observed, a missed reset can ask for attention.
         let revision = store
             .selected_desired_revision("observer/repo")
             .unwrap()
@@ -35831,7 +35854,6 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
                 idempotency_key: None,
             })
             .unwrap();
-        observe_now(&reconciler, &calls).await;
         let items = observer_items(&store);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "A GitHub rate limit outlasted its reset");
@@ -35842,6 +35864,14 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
             "{}",
             items[0].detail
         );
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["next_check_unix_ms"], (reset + 180_000).to_string());
+        assert!(observer_items(&store).is_empty(), "the new refusal supersedes the old reset");
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["next_check_unix_ms"], (reset + 360_000).to_string());
+        assert!(observer_items(&store).is_empty());
 
         // Observing again closes it.
         observe_now(&reconciler, &calls).await;
@@ -35854,6 +35884,27 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
                 .body["fields"]["state"],
             "healthy"
         );
+    }
+
+    #[tokio::test]
+    async fn a_local_observer_refusal_persists_its_slot_without_provider_attention() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, SCRIPTED_OBSERVER, "local-budget");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let slot = now_ms() + 180_000;
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).with_resource_provider(Arc::new(ScriptedResourceProvider::new(
+            calls.clone(), [ScriptedObservation::LocalBudget(slot)],
+        )));
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["error_code"], "local-observer-budget");
+        assert_eq!(state["next_check_unix_ms"], slot.to_string());
+        assert_eq!(state["reason"], format!("local observer budget reached, next slot at {slot} (Unix ms)"));
+        assert!(observer_items(&store).is_empty());
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

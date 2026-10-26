@@ -38,6 +38,24 @@ impl std::fmt::Display for ProviderRateLimit {
 
 impl std::error::Error for ProviderRateLimit {}
 
+/// This daemon's observer budget refused admission before any request reached GitHub.
+#[derive(Debug)]
+pub struct LocalObserverBudget {
+    pub retry_at_unix_ms: u128,
+}
+
+impl std::fmt::Display for LocalObserverBudget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "local observer budget reached, next slot at {} (Unix ms)",
+            self.retry_at_unix_ms
+        )
+    }
+}
+
+impl std::error::Error for LocalObserverBudget {}
+
 /// A bounded path classification: never persist URLs, repository names or query strings.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -384,9 +402,8 @@ fn admit(
             .min()
             .unwrap_or(now)
             .saturating_add(HOUR + MINUTE);
-        anyhow::bail!(ProviderRateLimit {
+        anyhow::bail!(LocalObserverBudget {
             retry_at_unix_ms: retry_at,
-            status: 429
         });
     }
     let minute = now / MINUTE * MINUTE;
@@ -845,7 +862,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exhausted_observer_reservation_returns_existing_rate_limit_without_spending() {
+    async fn exhausted_observer_reservation_is_local_without_spending() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("admission.json");
         let now = std::time::SystemTime::now()
@@ -872,10 +889,12 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(
-            error
-                .downcast_ref::<ProviderRateLimit>()
-                .is_some()
+        let local = error.downcast_ref::<LocalObserverBudget>().unwrap();
+        assert_eq!(local.retry_at_unix_ms, now + HOUR + MINUTE);
+        assert!(error.downcast_ref::<ProviderRateLimit>().is_none());
+        assert_eq!(
+            error.to_string(),
+            format!("local observer budget reached, next slot at {} (Unix ms)", now + HOUR + MINUTE)
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }

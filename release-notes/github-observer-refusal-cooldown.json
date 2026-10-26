@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Keep GitHub observer refusals on real cooldowns and distinguish local observer budgets",
+  "replay": {
+    "status": "changed",
+    "detail": "Repeated provider refusals persist their latest next-check deadline instead of retaining the first reset. Existing observer claims remain readable; no replay or backfill is required."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes or migrations."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Only future GitHub Retry-After/reset deadlines are accepted; absent a future deadline, primary and secondary limits wait fifteen minutes. The per-daemon observer cap is unchanged and is classified as a local refusal, not GitHub HTTP 429."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Observer state can report error_code local-observer-budget and a local next-slot reason. Provider rate-limited remains unchanged. Older binaries read an unknown code as unreachable; rollout directly from any preceding binary requires no intermediate version."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal binary rollout."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator steps; the cap remains per daemon, not fleet-wide."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Ordinary binary rollback is supported; persisted deadlines remain readable."
+  }
+}
