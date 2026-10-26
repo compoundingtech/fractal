@@ -4095,8 +4095,7 @@ impl Ui {
     /// Never a pending confirmation or answer: Enter, y and the
     /// commands that change things act once per press, so holding one can never repeat them.
     fn repeat_is_safe(&self, key: &KeyEvent) -> bool {
-        if self.confirm.is_some()
-            || self.answering.is_some()
+        if self.confirmation_open()
             || (self.terminal_focused()
                 && !self.palette_open()
                 && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused))

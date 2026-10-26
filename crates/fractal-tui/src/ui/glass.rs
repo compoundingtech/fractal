@@ -3086,6 +3086,20 @@ impl Ui {
         self.glasses.palette.is_some()
     }
 
+    /// Confirmation-like states never accept a held key as a fresh press.
+    pub(super) fn confirmation_open(&self) -> bool {
+        use resource_sidebar::PaletteMode as Mode;
+
+        self.confirm.is_some()
+            || self.answering.is_some()
+            || match self.glasses.palette.as_ref().and_then(|palette| palette.sidebar.as_ref()) {
+                Some(Mode::ConfirmPlace { .. } | Mode::ConfirmCreate { .. } | Mode::Delete { .. }) => true,
+                // Deliberately exhaustive: every new mode must choose its repeat policy.
+                None | Some(Mode::New { .. } | Mode::Rename { .. } | Mode::Manage { .. }
+                    | Mode::Move { .. } | Mode::Add { .. }) => false,
+            }
+    }
+
     /// The wheel scrolls the palette's list as content, three rows a step; the selection
     /// stays where it is until a key moves it.
     pub(crate) fn scroll_palette(&mut self, up: bool) {
@@ -7333,6 +7347,38 @@ mod tests {
             assert!(ui.palette_open(), "held Enter must not open the selection");
             assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell.clone())));
             assert!(ui.effects.is_empty(), "navigation must not request daemon work");
+
+            // Every confirmation mode needs a fresh press, even over a terminal.
+            use resource_sidebar::PaletteMode as Mode;
+            for (mode, commit) in [
+                (Mode::ConfirmPlace {
+                    subject: "agent/example/atlas/builder".into(), folder: None,
+                }, 'm'),
+                (Mode::ConfirmCreate {
+                    subject: "agent/example/atlas/builder".into(), name: "Review".into(),
+                }, 'm'),
+                (Mode::Delete { id: "folder-demo".into() }, 'y'),
+            ] {
+                ui.open_sidebar_palette(mode.clone());
+                assert!(ui.confirmation_open());
+                for code in [KeyCode::Char('m'), KeyCode::Char('y'), KeyCode::Enter, KeyCode::Down] {
+                    for event_kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                        let key = KeyEvent::new_with_kind(code, KeyModifiers::NONE, event_kind);
+                        ui.input_event(Event::Key(key));
+                        assert_eq!(
+                            ui.glasses.palette.as_ref().and_then(|palette| palette.sidebar.as_ref()),
+                            Some(&mode),
+                            "{event_kind:?} {code:?} must leave the confirmation open"
+                        );
+                        assert!(ui.effects.is_empty(), "{event_kind:?} must never commit {mode:?}");
+                    }
+                }
+                press(&mut ui, KeyCode::Char(commit), KeyModifiers::NONE);
+                assert!(!ui.palette_open(), "a fresh press commits {mode:?}");
+                assert!(matches!(&ui.effects[..], [Effect::EditArrangement(_)]));
+                ui.effects.clear();
+                ui.resource_sidebar.writing = false;
+            }
 
             // Normal sidebar navigation must own repeats just as it owns presses.
             ui.glasses.palette = None;
