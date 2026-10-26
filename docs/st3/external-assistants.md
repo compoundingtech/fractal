@@ -169,18 +169,30 @@ Every read carries `x-st3-scg-read-authorization`: unpadded base64url JSON `ScgR
 
 The response budget covers the entire JSON envelope. Without a query budget, the proof must name the pinned default (4096 unless lowered); an explicit `max_response_bytes` must equal the proof value. Neither may exceed the pinned maximum (16384 unless lowered). Assistant list pages return the largest ordered prefix of whole items that fits, up to `limit`; `page.next_cursor` resumes after the last returned item in the same cached snapshot. The cursor retains the requested item limit, so page lengths may vary with item sizes. If not even one item and its envelope fit, the read fails with 413 `response-budget-exceeded` naming that item's ID. Other responses or native source records over budget also fail with 413 `response-budget-exceeded`; non-UTF-8 content fails with 422 `content-not-text`. A forged, expired, or changed conversation reference returns 410 `conversation-content-invalidated`; a conversation revision mismatch, a session that is not the agent's current session, or a terminal incarnation/screen mismatch returns 409 `stale-fence`.
 
+The MCP adapter advertises exactly eleven canonical tools:
+`fractal_alerts_list`, `fractal_alert_get`, `fractal_alert_answer`,
+`fractal_missions_list`, `fractal_agents_list`, `fractal_conversations_list`,
+`fractal_conversation_detail`, `fractal_conversation_timeline`,
+`fractal_conversation_search`, `fractal_conversation_read`, and `fractal_message_send`.
+The corresponding `st_*` names are deprecated, callable aliases for the adapter's
+0.1.0 release only and are removed in `fractal-chatgpt` 0.2.0. They are hidden from
+`tools/list` so refreshed clients discover only canonical names while Johannes's
+ChatGPT connector can still call its cached names. Refresh that connector before
+0.2.0. Descriptions and input schemas remain unchanged during this compatibility
+release; old names in their cross-references denote these same handlers.
+
 The four conversation discovery tools use only `read.assistant.conversation`; they do
-not require mission, agent, work or new scopes. `st_conversations_list` returns the
-agent and current session identifiers for `st_conversation_timeline`. Copy an item's
+not require mission, agent, work or new scopes. `fractal_conversations_list` returns the
+agent and current session identifiers for `fractal_conversation_timeline`. Copy an item's
 `read` object (`agent_id`, `session_id`, `reference`, `revision`, `start`, `end`)
-directly into `st_conversation_read`, rather than synthesizing native references or
+directly into `fractal_conversation_read`, rather than synthesizing native references or
 guessing a byte range. Discovery cursors and issued content handles are bound to the
 authenticated grant and its effective policy revision; another grant cannot reuse
 them. Timeline and search pages default to 10 items and accept at most 50.
 The entire discovery continuation is authenticated, including its pinned snapshot,
 expiry and keyset; editing and re-encoding a cursor cannot transplant its grant
 binding. A detail preview's `page.next_cursor` continues through
-`st_conversation_timeline` with the returned agent and session IDs. Discovery keeps
+`fractal_conversation_timeline` with the returned agent and session IDs. Discovery keeps
 its pinned metadata rows when an agent restarts; a no-longer-current session has
 `read: null` rather than an invalid content handle or a failed page.
 
