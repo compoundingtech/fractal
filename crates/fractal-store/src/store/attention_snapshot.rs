@@ -716,6 +716,27 @@ impl Store {
             if decision.accepted_at_unix_ms > as_of {
                 continue;
             }
+            // A retry of the parked launch that has since succeeded resolves the fault: the seat is
+            // running again without anyone revising its declaration.
+            let retry_prefix = format!("runtime-crash-loop-retry:{token}:");
+            let last_retry = decisions
+                .iter()
+                .filter(|retry| {
+                    retry.body["fields"]["key"].as_str().is_some_and(|key| key.starts_with(&retry_prefix))
+                })
+                .map(crate::store::claim_log_order)
+                .max();
+            if let Some(last_retry) = last_retry
+                && self
+                    .observations_for(&desired.subject, "runtime.action.succeeded")?
+                    .iter()
+                    .any(|success| {
+                        crate::store::claim_log_order(success) > last_retry
+                            && success.body["fields"]["desired_token"].as_str() == Some(token.as_str())
+                    })
+            {
+                continue;
+            }
             let codex = decision.body["fields"]["key"]
                 .as_str()
                 .unwrap_or_default()

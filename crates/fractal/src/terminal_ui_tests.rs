@@ -67,4 +67,7 @@ fn terminal_ui_arguments_and_help_match_the_documented_surface() {
     let help = cli_help::root_help(false);
     assert!(help.contains("Open the terminal interface"));
     assert!(help.contains("Run fractal in a terminal"));
+    assert!(help.contains("From an agent:"));
+    assert!(help.contains("Inside an agent:"));
+    assert!(!help.contains("seat"));
 }

@@ -99,7 +99,7 @@ export const DEFAULT_FILTERS: readonly DisplayFilter[] = ['harness-markup', 'con
 export const SHOW_EVERYTHING: readonly DisplayFilter[] = [];
 
 // Said once at the start of a conversation st read only the newest part of.
-const NATIVE_PREFIX_NOTE = "Earlier history is not shown: st reads only the newest part of this agent's transcript";
+const NATIVE_PREFIX_NOTE = "Earlier history is not shown: Fractal reads only the newest part of this agent's transcript";
 
 // Harness records that carry no conversation: the transcript's own titles and modes. Unknown
 // records stay visible.
@@ -626,6 +626,13 @@ function headerAge(asOf: string, now: string): string | undefined {
   return hours < 24 ? `${hours}h` : `${Math.floor((seconds + 43200) / 86400)}d`;
 }
 
+/** Older daemons name this product `st` or `older st`. Grouping still uses the raw source. */
+function headerSourceLabel(source: string): string {
+  if (source === 'older st') return 'older Fractal';
+  if (source === 'st') return 'Fractal';
+  return source;
+}
+
 /** Every present field in fixed order, with shared provenance once and minority sources
  * marked individually. The shared age is the oldest field from that source, as in stui. */
 export function headerLine(header: ConversationHeader | undefined, now: string): string | null {
@@ -633,7 +640,7 @@ export function headerLine(header: ConversationHeader | undefined, now: string):
   const fields: HeaderField[] = [];
   const marker = (field: HeaderField): string => {
     const age = headerAge(field.as_of, now);
-    return `${field.source}${age ? ` · ${age} ago` : ''}`;
+    return `${headerSourceLabel(field.source)}${age ? ` · ${age} ago` : ''}`;
   };
   const marked = (label: string, field: HeaderField): string | undefined => {
     if (field === undefined) return undefined;
@@ -776,7 +783,7 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
     }
     return {...entry, body} as Entry;
   });
-  const name = (id: string): string => names.get(id) ?? (id === 'daemon/runtime' ? 'st' : id.startsWith('person/') ? id.slice('person/'.length) : short(id));
+  const name = (id: string): string => names.get(id) ?? (id === 'daemon/runtime' ? 'Fractal' : id.startsWith('person/') ? id.slice('person/'.length) : short(id));
   const stamped: ConversationEntry[] = [];
   const tools = new Map<string, number>();
   const callSources = new Map<string, Entry>();
@@ -902,7 +909,7 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
           break;
         }
         const tone = diagnosticTone(body);
-        const message = str(body.message) ?? str(body.code) ?? 'st reported a problem';
+        const message = str(body.message) ?? str(body.code) ?? 'Fractal reported a problem';
         push(entry, entry.id, { kind: 'event', tone, text: tone === 'fault' ? `error: ${message}` : message });
         break;
       }
@@ -948,7 +955,7 @@ export function entryText(entry: ConversationEntry): string {
 }
 
 /**
- * A delivery that paused while st restarted and then recovered says nothing a person needs:
+ * A delivery that paused while Fractal restarted and then recovered says nothing a person needs:
  * each such pair becomes one quiet line, and a run of them one line with a count.
  */
 export function foldDeliveryFlaps(entries: ConversationEntry[]): ConversationEntry[] {
@@ -962,7 +969,7 @@ export function foldDeliveryFlaps(entries: ConversationEntry[]): ConversationEnt
     const last = run.at(-1)!;
     const recovered = last.body.kind === 'event' && last.body.text.includes('recovered');
     const pauses = run.filter(entry => entry.body.kind === 'event' && !entry.body.text.includes('recovered')).length;
-    out.push({ ...last, id: `${run[0]!.id}…${last.id}`, body: { kind: 'event', tone: recovered ? 'quiet' : 'warning', text: recovered ? `message delivery paused ${pauses === 1 ? 'once' : `${pauses} times`} while st restarted · recovered` : 'message delivery is paused; st will retry' } });
+    out.push({ ...last, id: `${run[0]!.id}…${last.id}`, body: { kind: 'event', tone: recovered ? 'quiet' : 'warning', text: recovered ? `message delivery paused ${pauses === 1 ? 'once' : `${pauses} times`} while Fractal restarted · recovered` : 'message delivery is paused; Fractal will retry' } });
   }
   return out;
 }
@@ -1010,7 +1017,7 @@ export function freshnessLine(o: { issue: string; loaded: boolean; refreshing: b
   if (o.issue) return { text: `⚠ retrying${updated}`, tone: 'warn' };
   if (!o.loaded) return { text: '↻ loading…', tone: 'refreshing' };
   if (o.refreshing) return { text: `↻ refreshing…${updated}`, tone: 'refreshing' };
-  if (o.lastFrame === null) return { text: '● live · waiting for st', tone: 'live' };
+  if (o.lastFrame === null) return { text: '● live · waiting for Fractal', tone: 'live' };
   return { text: `● live${updated}`, tone: 'live' };
 }
 
