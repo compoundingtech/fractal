@@ -1459,12 +1459,18 @@ line per check: result, seconds, and whether the verifier, from the base, now co
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
 Without `--push`, the run keeps its records in this repository's local refs: per record a tag `refs/tags/evidence/<tree>/<record>` and a note
 `refs/notes/evidence/<tree>/<record>` (per-crate test records add `refs/tags/evidence/input/rust-tests/<key>/<record>` and
-`refs/notes/evidence-input/rust-tests/<key>/<record>`). To publish them yourself, push those refs before the branch, so the first CI run of
-the branch finds them: `git push origin 'refs/tags/evidence/*:refs/tags/evidence/*' 'refs/notes/evidence/*:refs/notes/evidence/*'
-'refs/notes/evidence-input/*:refs/notes/evidence-input/*'`, then `git push origin HEAD:BRANCH`. Each record has its own ref, so pushing all of
-them only adds the missing ones; existing evidence refs are never updated or deleted (a ruleset protects `refs/tags/evidence/**`).
-`scripts/st-test --status` then shows each check as covered, and the pull request's `evidence-gate-<check>` job shows `decision=skip ...
-signer=<principal>`.
+`refs/notes/evidence-input/rust-tests/<key>/<record>`). Run `scripts/st-test --status` to see which tree it signed and each check's coverage;
+use that full tree ID, not necessarily `HEAD^{tree}`: when protected files differ from the branch point, it signs the merge with `origin/main`.
+To publish by hand, set `tree=TREE_FROM_STATUS` and push only that tree's refs: `git push origin $(git for-each-ref
+--format='%(refname):%(refname)' "refs/tags/evidence/$tree/" "refs/notes/evidence/$tree/")`. Add the run's
+`refs/tags/evidence/input/...` and `refs/notes/evidence-input/...` refs that the remote lacks as explicit `REF:REF` arguments to that push
+(compare with `git ls-remote --refs origin 'refs/tags/evidence/input/*' 'refs/notes/evidence-input/*'`). Do not push the full evidence globs:
+a shared clone holds other runs' records too, and sending them all can fail with a remote `Internal Server Error` per ref.
+Push the evidence refs before `git push origin HEAD:BRANCH`, so the branch's first CI run finds them; existing evidence refs are never
+updated or deleted (a ruleset protects `refs/tags/evidence/**`). An agent note can yield `decision=skip ... signer=<principal>` only for
+wrapper-kind checks on `pull_request` runs, never in the merge queue (see "Agent keys"), and only when all skip conditions hold.
+A sampled pull request (one in five), or a check whose skip policy is still shadow, instead shows
+`decision=run outcome=satisfied ... signer=<principal>`: the note counts, but the real job still runs.
 On a host that runs the evidence log (`evidence-log.service` installed as a systemd user unit, see "Portable evidence" in the plan), a
 run with `--push` then starts that unit without waiting (`systemctl --user start --no-block evidence-log.service`, or the JSON argv in
 `ST_EVIDENCE_LOG_NUDGE`): a pass counts only once the log lists it, so the agent's record is logged in seconds instead of at the next
