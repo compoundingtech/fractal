@@ -23,7 +23,9 @@ export const MERGE_ONLY = [
 ]
 export const BOTH_WIDTHS = [
   'fractal-app-composer-images--several-images',
-  'fractal-ui-composer--footer-width-budget',
+  'fractal-ui-composer--footer-width-budget-narrow',
+  'fractal-ui-composer--footer-width-budget-medium',
+  'fractal-ui-composer--footer-width-budget-wide',
   'fractal-ui-composer--kit-label-resize',
   'fractal-ui-composer--layout-shapes',
   'fractal-ui-sidebar-agent-row--densities-and-children',
@@ -40,7 +42,9 @@ const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
 // in only one outer browser case. FilterBehavior retains functional coverage in all four cases.
 export const KIT_CASE_OVERRIDES = new Map([
   ['fractal-ui-transcript--no-green-all-states-light', []],
-  ['fractal-ui-composer--footer-width-budget-light', []],
+  ['fractal-ui-composer--footer-width-budget-narrow-light', []],
+  ['fractal-ui-composer--footer-width-budget-medium-light', []],
+  ['fractal-ui-composer--footer-width-budget-wide-light', []],
   ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
   // Portal theme inheritance must run in light as well as dark on every commit.
   ['fractal-ui-sidebar-milestone-agent-row--native-overlays-themed', FULL],

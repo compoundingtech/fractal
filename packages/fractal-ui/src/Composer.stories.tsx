@@ -480,25 +480,27 @@ export const EffortAllStates: Story = {
   render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{effortFrames.map(frame => <ComposerFrame key={frame.id} policy={decided} state={frame.state} effort={frame.effort} frameId={`effort.${frame.id}`} />)}</div></Surface>,
 }
 
-const footerBudgetFrames = ([320, 360, 451] as const).flatMap(composerWidth =>
+const footerBudgetFrames = (composerWidth: 320 | 360 | 451) =>
   (['C1', 'C2', 'C3'] as const).flatMap(layout => (['K1', 'K2', 'K3'] as const).flatMap(target => (['R1', 'R2', 'R3'] as const).map(running => ({
     composerWidth, policy: { layout, target, running, mentions: 'M2' } satisfies ComposerPolicy, frameId: `footer-budget.${composerWidth}.${layout}.${target}.${running}`,
-  })))))
-/** The declared width is the real form width; every footer control stays inside its running composer. */
-export const FooterWidthBudget: Story = { tags: ['critical'],
+  }))))
+/** Each width owns the full policy matrix without mounting all 81 composers in one check. */
+const footerWidthBudget = (composerWidth: 320 | 360 | 451): Story => ({
   beforeEach: clearDrafts,
   args: { state: 'running', effort: 'supported' },
-  render: args => <Surface scheme={args.scheme} testId="composer-footer-width-budget"><div aria-label="Footer width budget previews" {...stylex.props(styles.budgetPreviews)}>{footerBudgetFrames.map(frame => <ComposerFrame key={frame.frameId} {...frame} state="running" effort="supported" />)}</div></Surface>,
+  render: args => <Surface scheme={args.scheme} testId={`composer-footer-width-budget-${composerWidth}`}><div aria-label={`${composerWidth}px footer width budget previews`} {...stylex.props(styles.budgetPreviews)}>{footerBudgetFrames(composerWidth).map(frame => <ComposerFrame key={frame.frameId} {...frame} state="running" effort="supported" />)}</div></Surface>,
   play: async ({ canvasElement }) => {
     await canvasElement.ownerDocument.fonts.ready
     let previousGeometry: number[] | undefined
     // Retry through React/ResizeObserver updates, then require two matching measurements.
     await waitFor(() => {
       const cards = [...canvasElement.querySelectorAll<HTMLElement>('[data-footer-budget-width]')]
-      expect(cards).toHaveLength(81)
+      expect(cards).toHaveLength(27)
       const keyOf = (card: HTMLElement) => `${card.dataset.footerBudgetWidth}.${card.dataset.footerBudgetLayout}.${card.dataset.footerBudgetTarget}.${card.dataset.footerBudgetRunning}`
+      expect(new Set(cards.map(keyOf)).size).toBe(27)
       const geometry: number[] = []
       for (const card of cards) {
+        expect(Number(card.dataset.footerBudgetWidth)).toBe(composerWidth)
         expect(card.querySelectorAll('[data-testid="kit-composer"]')).toHaveLength(1)
         const footers = card.querySelectorAll<HTMLElement>('[data-testid="composer-footer"]')
         expect(footers).toHaveLength(1)
@@ -527,8 +529,13 @@ export const FooterWidthBudget: Story = { tags: ['critical'],
       expect(geometry).toEqual(previous)
     }, { timeout: 10_000 })
   },
-}
-export const FooterWidthBudgetLight: Story = { ...FooterWidthBudget, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+})
+export const FooterWidthBudgetNarrow: Story = { ...footerWidthBudget(320), tags: ['critical'] }
+export const FooterWidthBudgetNarrowLight: Story = { ...FooterWidthBudgetNarrow, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+export const FooterWidthBudgetMedium: Story = { ...footerWidthBudget(360), tags: ['critical'] }
+export const FooterWidthBudgetMediumLight: Story = { ...FooterWidthBudgetMedium, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+export const FooterWidthBudgetWide: Story = { ...footerWidthBudget(451), tags: ['critical'] }
+export const FooterWidthBudgetWideLight: Story = { ...FooterWidthBudgetWide, args: { scheme: 'light', state: 'running', effort: 'supported' } }
 
 /** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab. */
 export const LayoutShapes: Story = { tags: ['critical'],
