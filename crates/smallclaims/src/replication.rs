@@ -434,15 +434,40 @@ pub enum ReplicationFailurePhase {
     FollowUpExport,
 }
 
+/// Last observed HTTP client boundary. Pool acquisition is not exposed by reqwest.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplicationClientStage {
+    SendStarted,
+    Connected,
+    HeadersReceived,
+    PooledOrUnknown,
+}
+
 /// Bounded, allowlisted diagnostic metadata, not arbitrary error display or peer prose.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ReplicationExchangeFailure {
     pub code: String,
     pub phase: ReplicationFailurePhase,
     pub elapsed_ms: u64,
+    /// Whole outbound attempt, including exports, dial, earlier requests and polls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_elapsed_ms: Option<u64>,
+    /// Request serialization, hashing, signing, compression and construction before send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_ms: Option<u64>,
+    /// HTTP request body length after optional compression, excluding headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_uncompressed_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
     pub cause: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_stage: Option<ReplicationClientStage>,
 }
 
 impl ReplicationExchangeFailure {
@@ -456,7 +481,6 @@ impl ReplicationExchangeFailure {
     ) -> Self {
         if let Some(failure) = error.downcast_ref::<Self>() {
             let mut failure = failure.clone();
-            failure.elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
             if phase == ReplicationFailurePhase::FollowUpExport
                 && failure.phase == ReplicationFailurePhase::LocalExport
             {
@@ -496,8 +520,14 @@ impl ReplicationExchangeFailure {
             code: code.into(),
             phase,
             elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            attempt_elapsed_ms: None,
+            preparation_ms: None,
+            request_body_bytes: None,
+            request_body_uncompressed_bytes: None,
             http_status,
             cause,
+            correlation_id: None,
+            client_stage: None,
         }
     }
 }

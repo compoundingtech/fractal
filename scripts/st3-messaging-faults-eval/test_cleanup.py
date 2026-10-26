@@ -219,7 +219,7 @@ export default api => {
                                     receipts = [json.loads(line) for line in receipt_files[0].read_text().splitlines()]
                                     if not any(row['event'] == 'ready' for row in receipts):
                                         continue
-                                    guardian = int(values[b'SMALLTALK_TEST_SUPERVISOR'])
+                                    guardian = int(values[b'FRACTAL_TEST_SUPERVISOR'])
                                     pids = descendants(guardian)
                                     commands = [Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ') for pid in pids]
                                     for token, count in ((b' up ', 2), (b' replication-worker ', 2),

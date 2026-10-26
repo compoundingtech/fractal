@@ -2551,7 +2551,7 @@ mission "cli/child" state="ready" {
 
     for (arguments, heading) in [
         // Nothing waits on alex: now says nothing about alerts, not even a zero.
-        (vec!["now", "--as", "person/alex"], "Work: st work ls"),
+        (vec!["now", "--as", "person/alex"], "Work: fractal work ls"),
         (vec!["machines"], "MACHINES"),
         (vec!["activity", "--limit", "10"], "ACTIVITY"),
         (vec!["devices", "--as", "person/alex", "--all"], "DEVICES"),
@@ -3635,11 +3635,11 @@ fn help_starts_with_examples_and_keeps_plumbing_reachable() {
     };
     let default = help(&["--help"]);
     assert_eq!(default, help(&["help"]));
-    assert!(default.starts_with("See what needs you:\n  st now\n"));
-    assert!(default.contains("st agents new NAME --harness claude --attach"));
+    assert!(default.starts_with("See what needs you:\n  fractal now\n"));
+    assert!(default.contains("fractal agents new NAME --harness claude --attach"));
     assert!(default.contains("Everyday use:"));
-    assert!(default.contains("Inside an agent seat:"));
-    assert!(default.contains("Running st on a machine or fleet:"));
+    assert!(default.contains("Inside an agent:"));
+    assert!(default.contains("Running fractal on a machine or fleet:"));
     assert!(!default.contains("Plumbing:"));
     assert!(help(&["help", "--all"]).contains("Plumbing:"));
     assert_eq!(
@@ -4076,10 +4076,10 @@ async fn new_agent_explains_ready_starting_and_waiting_states_and_preserves_json
                 "{progress}"
             );
             for action in [
-                "st terminals attach agent/client-v0-cli.demo --as person/avery",
-                "st conversations send agent/client-v0-cli.demo --from person/avery --body 'Hello'",
-                "st agents show agent/client-v0-cli.demo",
-                "st agents stop agent/client-v0-cli.demo --as person/avery",
+                "fractal terminals attach agent/client-v0-cli.demo --as person/avery",
+                "fractal conversations send agent/client-v0-cli.demo --from person/avery --body 'Hello'",
+                "fractal agents show agent/client-v0-cli.demo",
+                "fractal agents stop agent/client-v0-cli.demo --as person/avery",
                 "--attach",
             ] {
                 assert!(rendered.contains(action), "{rendered}");
@@ -4112,7 +4112,7 @@ async fn creation_commands_end_with_actions_and_json_remains_parseable() {
             let rendered = String::from_utf8(output.stdout).unwrap();
             assert!(rendered.contains("Waiting for your device"), "{rendered}");
             assert!(
-                rendered.contains("st devices --as person/avery"),
+                rendered.contains("fractal devices --as person/avery"),
                 "{rendered}"
             );
         }
@@ -4163,12 +4163,12 @@ async fn creation_commands_end_with_actions_and_json_remains_parseable() {
             );
             let rendered = String::from_utf8(output.stdout).unwrap();
             assert!(
-                rendered.contains("st missions show mission-run/demo/human --follow"),
+                rendered.contains("fractal missions show mission-run/demo/human --follow"),
                 "{rendered}"
             );
             assert!(
                 rendered.contains(
-                    "st missions cancel mission-run/demo/human --as person/avery --reason"
+                    "fractal missions cancel mission-run/demo/human --as person/avery --reason"
                 ),
                 "{rendered}"
             );
@@ -4207,11 +4207,11 @@ async fn creation_commands_end_with_actions_and_json_remains_parseable() {
             let rendered = String::from_utf8(output.stdout).unwrap();
             assert!(rendered.contains("Started — the planner"), "{rendered}");
             assert!(
-                rendered.contains("st launch show planning-session/launch/demo/human/"),
+                rendered.contains("fractal launch show planning-session/launch/demo/human/"),
                 "{rendered}"
             );
             assert!(
-                rendered.contains("st launch cancel planning-session/launch/demo/human/"),
+                rendered.contains("fractal launch cancel planning-session/launch/demo/human/"),
                 "{rendered}"
             );
         }
@@ -4355,7 +4355,7 @@ async fn terminal_owner_lookup_finds_a_seat_beyond_the_default_page() {
     assert!(human.status.success());
     let rendered = String::from_utf8(human.stdout).unwrap();
     assert!(
-        rendered.contains("st terminals ls --state 'running' --cursor"),
+        rendered.contains("fractal terminals ls --state 'running' --cursor"),
         "{rendered}"
     );
     server.abort();

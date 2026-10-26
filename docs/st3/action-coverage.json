@@ -413,6 +413,14 @@
   ],
   "cli": [
     {
+      "command": "st deploy verify-go",
+      "description": "Verify an existing deployment GO against the local signed replica and immutable packaged policy without changing state",
+      "tests": [
+        "crates/fractal/tests/deploy_verify.rs::verifier_cli_api_uses_signed_local_replica_and_fixed_policy"
+      ],
+      "verification": "real CLI and API over a private Unix socket; signed replica, missing packaged policy and caller policy-override rejection"
+    },
+    {
       "command": "st schedules ls",
       "description": "Read one explicit page of replicated schedule declarations, then follow its cursor explicitly",
       "tests": [
@@ -663,7 +671,7 @@
     },
     {
       "command": "st alerts discuss",
-      "description": "Chat about an item: send a message to the agent involved, titled after the item, with a reference to what it is about. This is what \"Chat about this\" does in stui",
+      "description": "Chat about an item: send a message to the agent involved, titled after the item, with a reference to what it is about. This is what \"Chat about this\" does in Fractal TUI",
       "tests": [
         "crates/fractal/tests/client_v0_cli.rs::attention_discuss_sends_the_message_stui_chat_about_this_sends"
       ],
@@ -886,7 +894,7 @@
     },
     {
       "command": "st conversations timeline",
-      "description": "Show one conversation as stui shows it: messages, folded tools, Fractal. `--raw` prints every normalized entry (ids, message boundaries, tool JSON); `--json` the page",
+      "description": "Show one conversation as Fractal TUI shows it: messages, folded tools, Fractal. `--raw` prints every normalized entry (ids, message boundaries, tool JSON); `--json` the page",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_devices_and_native_import_survive_restart"
       ],
@@ -1815,7 +1823,7 @@
     },
     {
       "command": "st sekrets",
-      "description": "Run any CLI with credentials no seat can read, through the sekrets gateway",
+      "description": "Run any CLI with credentials no agent can read, through the sekrets gateway",
       "tests": [
         "crates/fractal-secrets/src/sekrets/tests.rs::a_person_runs_their_profile_without_seeing_the_store_or_other_profiles",
         "crates/fractal-secrets/src/sekrets/tests.rs::a_seat_uses_only_what_it_was_granted_and_only_with_its_daemons_word",
@@ -2342,6 +2350,19 @@
         "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st web",
+      "description": "Open the web interface for this machine's local daemon",
+      "tests": [
+        "crates/fractal/tests/web_cli.rs::web_early_parser_uses_the_public_clap_help_and_usage_statuses",
+        "crates/fractal/tests/web_cli.rs::web_state_path_that_looks_like_an_instance_flag_is_not_activated",
+        "crates/fractal/tests/web_cli.rs::web_state_path_that_looks_like_an_inventory_flag_is_not_scanned",
+        "crates/fractal/tests/web_cli.rs::web_refuses_instance_selection_instead_of_opening_the_default_installation",
+        "crates/fractal/tests/web_cli.rs::web_refuses_every_other_explicit_global_instead_of_silently_dropping_it",
+        "crates/fractal/tests/web_cli.rs::web_accepts_global_flag_text_as_a_state_path_value_not_as_a_flag"
+      ],
+      "verification": "real CLI with isolated HOME and no browser opener; public help, argument refusals, and printed browser URL"
     },
     {
       "command": "st work acknowledge",

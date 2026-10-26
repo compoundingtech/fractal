@@ -21,7 +21,7 @@ assert.equal(missionWord(served(mission('a', 'running', [step('s', 'blocked')]),
 // An older st serves none, and a word this phone does not know is not guessed at.
 assert.equal(missionWord(mission('a', 'running', [step('s', 'running')])), 'unknown');
 assert.equal(missionWord(served(mission('a', 'running'), 'becalmed')), 'unknown');
-assert.equal(missionLabel(mission('a', 'running')), 'running · st does not say');
+assert.equal(missionLabel(mission('a', 'running')), 'running · Fractal does not say');
 assert.equal(missionLabel(served(mission('a', 'running'), 'decision')), 'needs you');
 assert.equal(wordName('not_started'), 'not started');
 
@@ -29,13 +29,13 @@ for (const [word, name] of Object.entries({ needs_you: 'needs you', done: 'done'
   assert.equal(stepStyle(word).word, name, word);
 }
 assert.equal(stepStyle('working', '*').glyph, '*');
-assert.equal(stepStyle(undefined).word, 'unknown', 'an older st serves no step word');
+assert.equal(stepStyle(undefined).word, 'unknown', 'an older Fractal serves no step word');
 assert.equal(stepStyle('claimed').word, 'unknown', 'a raw step state is not a served word');
 
 assert.equal(actorName({ kind: 'person', person: 'person/avery', label: 'Avery' }, 'person/avery'), 'you');
 assert.equal(actorName({ kind: 'person', person: 'person/avery', label: 'Avery' }, 'person/blair'), 'Avery');
 assert.equal(actorName({ kind: 'agent', agent: 'agent/keeper', label: 'keeper' }), 'keeper');
-assert.equal(actorName({ kind: 'st' }), 'st');
+assert.equal(actorName({ kind: 'st' }), 'Fractal');
 assert.equal(actorName({ kind: 'nobody' }), undefined);
 
 assert.equal(missionTitle({ id: 'mission/fleet/stui/client-api', title: 'fleet/stui/client-api' }), 'fleet/stui · Client API');
@@ -43,7 +43,7 @@ assert.equal(missionTitle({ id: 'mission/fleet/stui/client-api', title: 'fleet/s
 const missions = [
   served(mission('fleet/b/idle', 'standing'), 'idle'),
   served(mission('fleet/a/work', 'running', [step('x', 'running'), step('y', 'completed')]), 'working', { progress: { done: 1, total: 2 } }),
-  served(mission('fleet/smalltalk/ci/run', 'running', [step('z', 'running')], { system: true }), 'working'),
+  served(mission('fleet/fractal/ci/run', 'running', [step('z', 'running')], { system: true }), 'working'),
 ];
 const { rows, hidden } = missionRows(missions, false, Date.parse('2026-09-30T12:00:00Z'));
 assert.deepEqual(rows.map(row => [row.word, row.title, row.done, row.total]), [['working', 'fleet/a · Work', 1, 2], ['idle', 'fleet/b · Idle', 0, 0]]);
@@ -53,8 +53,8 @@ assert.equal(missionRows(missions, true).rows.length, 3);
 // Rows from an older st list last, under "st does not say", with their raw state.
 {
   const { rows } = missionRows([mission('fleet/c/old', 'running'), ...missions], true);
-  assert.equal(rows.at(-1).label, 'running · st does not say');
-  assert.equal(missionSections(rows).at(-1).title, 'st does not say');
+  assert.equal(rows.at(-1).label, 'running · Fractal does not say');
+  assert.equal(missionSections(rows).at(-1).title, 'Fractal does not say');
 }
 
 // A failed mission ages out of the list after the day it settled, and showing hidden ones brings it back.

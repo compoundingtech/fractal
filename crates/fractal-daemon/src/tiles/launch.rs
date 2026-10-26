@@ -215,7 +215,7 @@ pub fn enter(registry_path: &Path, name: &str, command: &[OsString]) -> Result<i
     // did not record.
     let uid = registry
         .uid(name)
-        .with_context(|| format!("tile {name} has no user ID yet; start it with `st tiles run`"))?;
+        .with_context(|| format!("tile {name} has no user ID yet; start it with `fractal tiles run`"))?;
     uids::check_unclaimed(name, uid)?;
     if command.is_empty() {
         bail!("name a command to run in the tile");
@@ -227,7 +227,7 @@ pub fn enter(registry_path: &Path, name: &str, command: &[OsString]) -> Result<i
     if cgroup != expected {
         bail!(
             "st tiles enter runs only as the main process of {}, in {expected}; this process runs \
-             in {cgroup}. Start the tile with `st tiles run`",
+             in {cgroup}. Start the tile with `fractal tiles run`",
             registry::tools_unit(name)
         );
     }
@@ -421,7 +421,7 @@ impl Setup {
             format!("ST_AGENT={}", tile.agent),
             format!("ST_TILE_ENDPOINT={TILE_ENDPOINT}"),
         ];
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         environment.extend([
             format!("FRACTAL_TILE={name}"),
             format!("FRACTAL_AGENT={}", tile.agent),

@@ -55,6 +55,25 @@ const RETRY_DELAYS: [Duration; 5] = [
 /// How long a fresh request may take to prove st is answering after its stream dropped.
 const PROBE_WAIT: Duration = Duration::from_secs(3);
 
+/// `default`, or `STUI_FEED_TIMER_CAP_MS` when that is shorter: a cap on the quiet check, the
+/// ping, the pong wait and the retry delays above. Only the end-to-end tests set it, so they need
+/// not wait 20 s to see a silent link dropped.
+fn timer(default: Duration) -> Duration {
+    static CAP: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    let cap = *CAP.get_or_init(|| {
+        std::env::var("STUI_FEED_TIMER_CAP_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .map(Duration::from_millis)
+    });
+    cap.map_or(default, |cap| cap.min(default))
+}
+
+/// The wait before the attempt after `failures` failed ones.
+fn retry_delay(failures: usize) -> Duration {
+    timer(RETRY_DELAYS[failures.min(RETRY_DELAYS.len() - 1)])
+}
+
 /// The prefix of generation-scoped terminal subscription IDs.
 const TERMINAL: &str = "terminal";
 /// The subscription ID of the open conversation.
@@ -367,7 +386,7 @@ pub async fn run_members_with_sidebar(
             return;
         }
         // Wait before trying again, still honouring an unfollow meanwhile.
-        let delay = RETRY_DELAYS[failures.min(RETRY_DELAYS.len() - 1)];
+        let delay = retry_delay(failures);
         // Device gateways have no peer-online channel. Keep their retry ceiling short,
         // with jitter so clients returning together do not all reconnect at once.
         let jitter = Duration::from_millis((uuid::Uuid::now_v7().as_u128() % 500) as u64);
@@ -503,14 +522,14 @@ async fn connected(
     // so one slow answer from a busy daemon never rereads every window.
     let heard = stream.heard();
     let mut pinged: Option<Instant> = None;
-    let mut probe = tokio::time::interval(QUIET_CHECK);
+    let mut probe = tokio::time::interval(timer(QUIET_CHECK));
     probe.tick().await;
-    // Glasses are followed only where st grants them in the shape this stui reads (splits of
-    // tab groups, version 1); elsewhere stui keeps them on the device. A member still on the
-    // earlier shape would send glasses this stui cannot decode, and that drops the connection.
+    // Glasses are followed only where st grants them in the shape this Fractal TUI reads (splits of
+    // tab groups, version 1); elsewhere Fractal TUI keeps them on the device. A member still on the
+    // earlier shape would send glasses this Fractal TUI cannot decode, and that drops the connection.
     let capabilities = match client.capabilities().await {
         Ok(capabilities) => capabilities,
-        Err(error) => return Ended::Dropped(error.plain()),
+        Err(error) => return Ended::Dropped(error.human()),
     };
     let version = if glasses {
         capabilities
@@ -570,7 +589,7 @@ async fn connected(
     }
     if inventory_granted {
         for inventory in inventories.windows() {
-            if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.plain()); }
+            if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
         }
     }
     for current in conversing.iter_mut() {
@@ -602,18 +621,18 @@ async fn connected(
         tokio::select! {
             _ = probe.tick() => {
                 let quiet = heard.quiet_for();
-                if quiet < QUIET_BEFORE_PING {
+                if quiet < timer(QUIET_BEFORE_PING) {
                     pinged = None;
                     *failures = 0;
                 } else {
                     match pinged {
                         None => {
                             if let Err(error) = stream.ping().await {
-                                return Ended::Dropped(error.plain());
+                                return Ended::Dropped(error.human());
                             }
                             pinged = Some(Instant::now());
                         }
-                        Some(at) if at.elapsed() >= PONG_WAIT => {
+                        Some(at) if at.elapsed() >= timer(PONG_WAIT) => {
                             return Ended::Dropped(if remote {
                                 "the member stopped answering".into()
                             } else {
@@ -670,7 +689,7 @@ async fn connected(
                     // so the last copy shown can say it is stale (the owner's host is away).
                     CollectionEvent::Resync { id, code, message: Some(message) } if id.starts_with(CONVERSATION) => {
                         let Some(current) = conversing.iter().find(|current| current.id == id) else { continue };
-                        let message = fractal_client::plain_message(code.as_ref(), &message);
+                        let message = fractal_client::human_message(code.as_ref(), &message);
                         if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent: false }).is_err() {
                             return Ended::Closed;
                         }
@@ -685,7 +704,7 @@ async fn connected(
                         {
                             if matches!(window, Window::Inventory(_)) {
                                 if let Some(message) = message {
-                                    let plain = fractal_client::plain_message(code.as_ref(), &message);
+                                    let plain = fractal_client::human_message(code.as_ref(), &message);
                                     pending_reports.report(window, Instant::now(), plain);
                                 }
                                 continue;
@@ -694,7 +713,7 @@ async fn connected(
                             // not ready); the retries are quiet until the window loads.
                             let first = window_retries.failed(window, Instant::now());
                             if first && let Some(message) = message {
-                                let message = fractal_client::plain_message(code.as_ref(), &message);
+                                let message = fractal_client::human_message(code.as_ref(), &message);
                                 pending_reports.report(window, Instant::now(), message);
                             }
                         }
@@ -707,13 +726,13 @@ async fn connected(
                         }
                     }
                     CollectionEvent::Error { id, code, message } if id.starts_with(CONVERSATION) => {
-                        let message = fractal_client::plain_message(code.as_ref(), &message);
+                        let message = fractal_client::human_message(code.as_ref(), &message);
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
                         let permanent = !conversation_may_clear(code.as_ref());
                         // Anything else may clear: the agent starts, its host comes back, its
                         // history arrives. Ask again after a backoff.
                         if !permanent {
-                            current.retry_at = Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
+                            current.retry_at = Some(Instant::now() + retry_delay(current.failures));
                             current.failures += 1;
                         }
                         if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent }).is_err() {
@@ -726,13 +745,13 @@ async fn connected(
                                 continue;
                             }
                             if matches!(window, Window::Inventory(_)) {
-                                let plain = fractal_client::plain_message(code.as_ref(), &message);
+                                let plain = fractal_client::human_message(code.as_ref(), &message);
                                 pending_reports.report(window, Instant::now(), plain);
                                 continue;
                             }
                             // Said once, and only if it lasts; the retries are quiet until it loads.
                             if window_retries.failed(window, Instant::now()) {
-                                let message = fractal_client::plain_message(code.as_ref(), &message);
+                                let message = fractal_client::human_message(code.as_ref(), &message);
                                 pending_reports.report(window, Instant::now(), message);
                             }
                         } else if following.as_ref().is_some_and(|current| current.subscription == id)
@@ -783,14 +802,14 @@ async fn connected(
                     *inventories = wanted;
                     if !inventory_granted { continue; }
                     for inventory in previous.windows().into_iter().filter(|old| !wanted.contains(*old)) {
-                        if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.plain()); }
+                        if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.human()); }
                         let window = Window::Inventory(inventory);
                         windows.remove(&window); window_retries.loaded(window);
                         pending_reports.cancel(window);
                         if updates.send(Update::WindowStopped(window)).is_err() { return Ended::Closed; }
                     }
                     for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
-                        if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.plain()); }
+                        if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
                     }
                 }
                 Some(Command::Converse { targets }) => {
@@ -957,7 +976,7 @@ impl WindowRetries {
     /// its first failure since it last loaded, the one worth telling the person about.
     fn failed(&mut self, window: Window, now: Instant) -> bool {
         let failures = self.failures.entry(window).or_default();
-        let wait = RETRY_DELAYS[(*failures).min(RETRY_DELAYS.len() - 1)];
+        let wait = retry_delay(*failures);
         self.at.insert(window, now + wait + jitter(wait));
         *failures += 1;
         *failures == 1
@@ -1068,7 +1087,7 @@ fn terminal_failed(
             | ErrorCode::RuntimeAuthorityIndeterminate,
         ) => {
             current.retry_at =
-                Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
+                Some(Instant::now() + retry_delay(current.failures));
             current.failures += 1;
             TerminalUpdate::Reconnecting(plain)
         }
@@ -1116,7 +1135,7 @@ async fn follow(
         Err(Refusal::Unavailable(reason)) => {
             clear_following(client, stream, current).await?;
             current.retry_at =
-                Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
+                Some(Instant::now() + retry_delay(current.failures));
             current.failures += 1;
             let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Reconnecting(reason) });
             return Ok(());
@@ -1221,7 +1240,7 @@ enum Refusal {
 fn terminal_reason(code: Option<&ErrorCode>, message: &str) -> String {
     match code {
         Some(ErrorCode::StaleFence) if !message.is_empty() => message.to_owned(),
-        _ => fractal_client::plain_message(code, message),
+        _ => fractal_client::human_message(code, message),
     }
 }
 
@@ -1229,7 +1248,7 @@ fn terminal_reason(code: Option<&ErrorCode>, message: &str) -> String {
 fn refusal(error: ClientError) -> Refusal {
     let reason = match &error {
         ClientError::Api(code, message, _) => terminal_reason(Some(code), message),
-        other => other.plain(),
+        other => other.human(),
     };
     if error.is_transient() {
         Refusal::Unavailable(reason)
@@ -1551,7 +1570,7 @@ mod tests {
             "subject `agent/x` has indeterminate runtime authority",
         ));
         assert!(
-            matches!(&refused, Refusal::Unavailable(reason) if reason == "st cannot tell yet which host runs this")
+            matches!(&refused, Refusal::Unavailable(reason) if reason == "Fractal cannot tell yet which host runs this")
         );
         let refused = refusal(api_error(
             ErrorCode::Forbidden,
@@ -1563,7 +1582,7 @@ mod tests {
     #[test]
     fn stale_fence_on_the_stream_follows_again_and_the_attach_decides_if_it_restarted() {
         // st says stale-fence for an owner briefly out of reach or a viewer that idled, not only
-        // for a restart: stui follows again, and `attach` refuses a changed incarnation.
+        // for a restart: Fractal TUI follows again, and `attach` refuses a changed incarnation.
         let (tx, rx) = mpsc::channel();
         let mut current = following();
         terminal_failed(

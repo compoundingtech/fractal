@@ -38,7 +38,7 @@ fn terminal_ui_arguments_and_help_match_the_documented_surface() {
         ));
     }
     assert!(Cli::try_parse_from(["st", "ui", "--client", "--local"]).is_err());
-    // `--classic` is gone: it still parses, so stui can say what to run instead, and help
+    // `--classic` is gone: it still parses, so Fractal TUI can say what to run instead, and help
     // no longer names it.
     assert!(matches!(
         Cli::try_parse_from(["st", "ui", "--classic"]).unwrap().command,
@@ -63,8 +63,11 @@ fn terminal_ui_arguments_and_help_match_the_documented_surface() {
         Ok(_) => panic!("help exits"),
     };
     assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
-    assert!(error.to_string().contains("st ui"));
+    assert!(error.to_string().contains("fractal ui"));
     let help = cli_help::root_help(false);
     assert!(help.contains("Open the terminal interface"));
-    assert!(help.contains("Run st in a terminal"));
+    assert!(help.contains("Run fractal in a terminal"));
+    assert!(help.contains("From an agent:"));
+    assert!(help.contains("Inside an agent:"));
+    assert!(!help.contains("seat"));
 }

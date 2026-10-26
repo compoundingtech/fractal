@@ -24,6 +24,8 @@ macro_rules! say {
 
 #[derive(Args, Clone, Debug, Default)]
 pub struct SetupArgs {
+    #[arg(skip)]
+    pub json_output: bool,
     /// Your name: lowercase letters, digits, hyphens and underscores.
     #[arg(long)]
     pub person: Option<String>,
@@ -33,7 +35,7 @@ pub struct SetupArgs {
     /// Skip the setup screen: accept defaults for questions not answered by flags.
     #[arg(long)]
     pub yes: bool,
-    /// Keep st running as a user service (default: true).
+    /// Keep fractal running as a user service (default: true).
     #[arg(long, action = clap::ArgAction::Set)]
     pub service: Option<bool>,
     /// Install st3, the st link and pty in ~/.local/bin (default: true).
@@ -57,6 +59,12 @@ pub struct SetupArgs {
     /// Start the built-in Fractal Assistant after setup (default: ask, with --yes: yes).
     #[arg(long, action = clap::ArgAction::Set)]
     pub assistant: Option<bool>,
+}
+
+impl SetupArgs {
+    fn program(&self) -> &'static str {
+        if self.json_output { "st" } else { "fractal" }
+    }
 }
 
 pub struct PreparedSetup {
@@ -112,6 +120,7 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
                     &Config::default_path(),
                     true,
                     true,
+                    "fractal",
                 )
                 .await?;
             }
@@ -123,6 +132,7 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
 
 pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     require_person_process()?;
+    let program = args.program();
     let path = args.config.clone().unwrap_or_else(Config::default_path);
     // A new install records auto; a config that already exists keeps whatever mode it has,
     // including none, which reads as bypass.
@@ -233,7 +243,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     };
     check_login_path(&executable);
     if start {
-        start_daemon(&config, &executable, &path, service, true).await?;
+        start_daemon(&config, &executable, &path, service, true, program).await?;
     } else if !daemon_ready(&config).await {
         say!("Configuration saved; the daemon remains stopped.");
     }
@@ -241,7 +251,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     let initial_subject = if let Some(harness) = &harness {
         if !first_run && !args.onboarding {
             println!(
-                "This setup already existed, so the built-in Fractal Assistant is not started on its own. Run st setup --onboarding to begin."
+                "This setup already existed, so the built-in Fractal Assistant is not started on its own. Run {program} setup --onboarding to begin."
             );
             None
         } else if daemon_ready(&config).await {
@@ -251,10 +261,11 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
                     harness,
                     std::slice::from_ref(harness),
                     args.onboarding,
+                    program,
                 )
                 .await?;
                 if started.is_some() {
-                    print_assistant_summary(&config, harness)?;
+                    print_assistant_summary(&config, harness, program)?;
                 }
                 started
             } else {
@@ -265,7 +276,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
                 !args.onboarding,
                 "rerunning onboarding needs a running daemon; pass --start true"
             );
-            say!("Start the st daemon and run st setup to begin onboarding.");
+            say!("Start the st daemon and run {program} setup to begin onboarding.");
             None
         }
     } else {
@@ -313,12 +324,12 @@ async fn prepare_harness(
     if let Some(requested) = &args.harness {
         anyhow::ensure!(
             found.contains(requested),
-            "{requested} is not installed on the daemon's login PATH; install it and open a new login shell, then run st setup"
+            "{requested} is not installed on the daemon's login PATH; install it and open a new login shell, then run fractal setup"
         );
     }
     if found.is_empty() {
         say!(
-            "No supported harness is installed on the daemon's login PATH. Install Claude Code, Codex, OpenCode, Pi or Omp, then run st setup. No onboarding seat was created."
+            "No supported harness is installed on the daemon's login PATH. Install Claude Code, Codex, OpenCode, Pi or Omp, then run {} setup. No onboarding seat was created.", args.program()
         );
         return Ok(None);
     }
@@ -384,7 +395,7 @@ async fn prepare_harness(
             );
         } else {
             say!(
-                "Claude channel uses --dangerously-load-development-channels plugin:st-channel@st. st accepts its local-development dialog when starting a seat. Provider or organization channel restrictions still apply.\nOptional administrator approval policy: sudo st claude-channel install-policy"
+                "Claude channel uses --dangerously-load-development-channels plugin:st-channel@st. st accepts its local-development dialog when starting a seat. Provider or organization channel restrictions still apply.\nOptional administrator approval policy: sudo {} claude-channel install-policy", args.program()
             );
         }
     }
@@ -446,19 +457,19 @@ fn confirm_assistant(config: &Config, harness: &str, args: &SetupArgs) -> Result
         true,
     )?;
     if !start {
-        println!("Not started. Run st setup --onboarding when you want it.");
+        println!("Not started. Run {} setup --onboarding when you want it.", args.program());
     }
     Ok(start)
 }
 
 /// Name what starting the Assistant created and how to stop it.
-fn print_assistant_summary(config: &Config, harness: &str) -> Result<()> {
+fn print_assistant_summary(config: &Config, harness: &str, program: &str) -> Result<()> {
     let person = config
         .person
         .as_deref()
         .context("setup needs a person")?;
     println!(
-        "Created: the agent agent/st/assistant ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: st agents stop agent/st/assistant --as {person}",
+        "Created: the agent agent/st/assistant ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: {program} agents stop agent/st/assistant --as {person}",
         crate::onboarding::workspace(config)?.display()
     );
     Ok(())
@@ -753,7 +764,7 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
     pending.as_file().sync_all()?;
     pending
         .persist(data.join("install.json"))
-        .context("record setup-installed executables for st uninstall")?;
+        .context("record setup-installed executables for fractal uninstall")?;
     File::open(&data)?.sync_all()?;
     Ok(())
 }
@@ -829,6 +840,7 @@ async fn start_daemon(
     path: &Path,
     service: bool,
     linger: bool,
+    program: &str,
 ) -> Result<()> {
     fractal_daemon::service::preflight(service)?;
     if daemon_ready(config).await {
@@ -904,7 +916,7 @@ async fn start_daemon(
     loop {
         if daemon_ready(config).await {
             say!(
-                "Started st without a service. It stops when you reboot.\nRun `st service install` to keep it running."
+                "Started st without a service. It stops when you reboot.\nRun `{program} service install` to keep it running."
             );
             return Ok(());
         }

@@ -937,8 +937,22 @@ export type AttentionPresentation = {
   | null
 ;
   raised_by: (AttentionActor | null);
+  revision?: AttentionRevision;
   tier: "stopped" | "alert" | "today" | "later" | null;
   waiting: (AttentionWaiting | null);
+};
+
+export type AttentionRevision = {
+  from_revision: string;
+  lines: Array<AttentionRevisionLine>;
+  reason: string;
+  to_revision: string;
+  truncated: boolean;
+};
+
+export type AttentionRevisionLine = {
+  op: "+" | "-" | "~";
+  text: string;
 };
 
 export type AttentionTargetState = {
@@ -3017,6 +3031,7 @@ export type TimelineEntry = Omit<{
   body: {
 
 };
+  delivers?: string;
   final: boolean;
   id: TimelineEntryId;
   revision: number;
@@ -3419,6 +3434,16 @@ export type Usage = ResourceHeader & {
   value: UsagePeriod;
 };
 
+export type UsageAccount = {
+  account?: string;
+  credits?: UsageCredits;
+  driver?: string;
+  kind: "subscription" | "api-key";
+  name: string;
+  plan?: string;
+  provider: string;
+};
+
 export type UsageContext = {
   compactions?: number;
   last_compaction_ms?: number;
@@ -3428,6 +3453,13 @@ export type UsageContext = {
   used_percent?: number;
   used_tokens?: number;
   window_tokens?: number;
+};
+
+export type UsageCredits = {
+  budget_microusd: number;
+  period_start_ms: number;
+  unpriced_tokens: number;
+  used_microusd: number;
 };
 
 export type UsageLimit = {
@@ -3447,6 +3479,7 @@ export type UsageLimit = {
 };
 
 export type UsagePeriod = {
+  accounts?: Array<UsageAccount>;
   agent_messages?: AgentMessageEstimate;
   limits?: Array<UsageLimit>;
   rows: Array<UsageRow>;
@@ -3480,6 +3513,7 @@ export type UsagePricingRates = {
 
 export type UsageRow = {
   account?: string;
+  account_ref?: string;
   agent: Id;
   cache_write_1h_tokens: number;
   cache_write_tokens: number;

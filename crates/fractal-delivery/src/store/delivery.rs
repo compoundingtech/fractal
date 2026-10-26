@@ -1,4 +1,4 @@
-//! The part of `store::delivery` that moved up from st3-store.
+//! The part of `store::delivery` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::message_desired_recipient_match;
 use crate::message_sent_recipient_match;
@@ -103,6 +103,14 @@ pub trait DeliveryStore {
             &self,
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
+        ) -> Result<(ClaimRecord, bool), St3Error>;
+    /// Called only inside the native lease/authority guard. Metadata commits with
+    /// the first new read receipt; replay/settlement never adds or changes a binding.
+    fn append_native_mailbox_receipt_outcome(
+            &self,
+            input: &ClaimInput,
+            fence: &crate::mailbox::Fence,
+            native: Option<&crate::conversation_delivery::NativeReceipt>,
         ) -> Result<(ClaimRecord, bool), St3Error>;
     /// Search refreshes only a person's private message texts, using the same endpoint
     /// indexes as the mailbox. Other fleet writes do not invalidate this source.
@@ -328,6 +336,32 @@ impl DeliveryStore for Store {
             fence: &crate::mailbox::Fence,
         ) -> Result<(ClaimRecord, bool), St3Error> {
         self.append_claim_fenced_outcome(input, Some(fence))
+    }
+
+    fn append_native_mailbox_receipt_outcome(
+            &self,
+            input: &ClaimInput,
+            fence: &crate::mailbox::Fence,
+            native: Option<&crate::conversation_delivery::NativeReceipt>,
+        ) -> Result<(ClaimRecord, bool), St3Error> {
+        if native.is_some_and(|native| !native.valid() || input.kind != "message.read") {
+            return Err(St3Error::new(
+                "invalid-native-receipt",
+                "native proof needs a read receipt",
+            ));
+        }
+        append_claim_with_commit_context(
+            &self.graph,
+            input,
+            Some(fence),
+            None,
+            None,
+            None,
+            ClaimCommitContext {
+                native_receipt: native,
+                ..Default::default()
+            },
+        )
     }
 
     fn conversation_search_mail_stamp(&self, person: &str, through: u64) -> Result<String> {
@@ -966,7 +1000,7 @@ impl DeliveryStore for Store {
             mailbox_lease::record_argv_binding(&tx, &bound, member)?;
         }
         tx.commit().map_err(internal)?;
-        if let Some(wakes) = self.smalltalk.mailbox_wakes.get() {
+        if let Some(wakes) = self.fractal.mailbox_wakes.get() {
             wakes.owner_changed(&bound.subject, &bound.component);
         }
         Ok(bound)

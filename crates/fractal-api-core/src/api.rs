@@ -72,6 +72,8 @@ mod client_blobs;
 mod client_documents;
 #[cfg(test)]
 mod terminal_gate_evidence;
+#[cfg(all(test, target_os = "linux"))]
+mod peer_process_tests;
 mod message_bodies;
 mod client_adapters;
 mod client_diagnostics;
@@ -98,6 +100,8 @@ pub mod published_attention;
 pub mod attention_history;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
+pub use revision_changes::revision_card;
+#[cfg(any(test, feature = "test-support"))]
 pub use published_attention::{
     attention_fleet, present_attention, published_attention_rows, refresh_attention_list,
     refresh_attention_list_with,
@@ -115,6 +119,7 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
 #[cfg(target_os = "linux")]
@@ -124,6 +129,7 @@ pub use tile_endpoint::{
 };
 pub use published_lists::{start_published_lists, wait_published_lists_at_least};
 mod changes;
+mod deploy;
 
 #[cfg(test)]
 mod legacy_handler_guard_tests;
@@ -496,7 +502,7 @@ pub fn router(state: AppState) -> Router {
     router_with(state, &[])
 }
 
-/// Routes a crate above this one serves (st3-api-mailbox's mailbox stream): each family is added to
+/// Routes a crate above this one serves (fractal-api-mailbox's mailbox stream): each family is added to
 /// the route table before the envelope and leave layers wrap it, so it is served exactly as the
 /// routes listed here. `router` without them is the route table this crate alone answers.
 pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
@@ -523,6 +529,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route(
+            "/v1/deploy/verify-go",
+            post(deploy::verify_go).layer(Extension(transport)),
+        )
         .route("/v1/harnesses", get(operations::available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
         .route(
@@ -749,6 +759,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
         .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
+        .route(
+            "/v1/internal/fleet/pairing-admission",
+            post(fleet::fleet_pairing_admission),
+        )
         .route(
             "/v1/internal/fleet/admission-residue",
             get(fleet::fleet_admission_residue),
@@ -6256,6 +6270,9 @@ async fn serve_reserved_unix_with_ancestor_ready(
         // Every local connection names its caller, so request counts by client are always on.
         let mut diagnostic_connection = crate::relay_trace::Connection::capture();
         let peer_pid = local_peer_pid(&stream);
+        // This must precede dispatch: the numeric peer PID can be recycled while
+        // a descendant continues using the connector's inherited socket.
+        let peer_process = local_peer_process(&stream).ok();
         let app = app.clone();
         tokio::spawn(async move {
             if let Some(connection) = &mut diagnostic_connection {
@@ -6291,6 +6308,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                 let bound_agent = bound_agent.clone();
                 let caller = caller.clone();
                 let delivery_peer = delivery_peer.clone();
+                let peer_process = peer_process.clone();
                 async move {
                     let mut request = request.map(Body::new);
                     if let Some(connection) = diagnostic_connection {
@@ -6299,6 +6317,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(pid) = peer_pid {
                         request.extensions_mut().insert(LocalPeer {
                             pid,
+                            peer_process,
                             ancestor: bound_agent.clone(),
                         });
                     }
@@ -6353,7 +6372,7 @@ fn harness_ancestor(mut pid: u32) -> Option<String> {
     let mut seen = BTreeSet::new();
     while pid > 1 && pid != std::process::id() && seen.insert(pid) {
         let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
             let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
             (key == name).then(|| value.to_owned())
@@ -6413,7 +6432,7 @@ fn native_delivery_identity(
             _ => None,
         }
     })?;
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     let agent = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
         env.iter().find_map(|entry| {
             let (key, value) = entry.split_once('=')?;
@@ -6428,6 +6447,43 @@ fn native_delivery_identity(
         archives_inbox,
     })
 }
+/// Capture the kernel connector generation, independently of generic local auth.
+pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fractal_runtime::PeerProcessIdentity> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::{FromRawFd as _, OwnedFd};
+        let pid = local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?;
+        // Linux 6.5 added SO_PEERPIDFD; older libc headers may not name it yet.
+        const SO_PEERPIDFD: libc::c_int = 77;
+        let mut fd: libc::c_int = -1;
+        let mut length = std::mem::size_of_val(&fd) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, SO_PEERPIDFD,
+                (&mut fd as *mut libc::c_int).cast(), &mut length)
+        };
+        let pidfd = if result == 0 {
+            anyhow::ensure!(fd >= 0, "SO_PEERPIDFD returned an invalid descriptor");
+            // Successful SO_PEERPIDFD transfers a fresh descriptor to us.
+            let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+            anyhow::ensure!(length as usize == std::mem::size_of_val(&fd),
+                "SO_PEERPIDFD returned an invalid descriptor length");
+            owned
+        } else {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ENOPROTOOPT | libc::EINVAL)) {
+                anyhow::bail!("helper credential inheritance requires Linux SO_PEERPIDFD (kernel 6.5+): {error}");
+            }
+            anyhow::bail!("SO_PEERPIDFD failed: {error}");
+        };
+        fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
+    }
+}
+
 
 #[cfg(target_os = "linux")]
 pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
@@ -7395,27 +7451,9 @@ fn doctor_report_with_operation_drift(
             message: error.to_string(),
         }),
     }
-    match operations::owner_operational_repair_plan(state) {
-        Ok(plan) if plan.items.is_empty() => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "pass".into(),
-            message: "the graph has no repairable operational contradictions".into(),
-        }),
-        Ok(plan) => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "warn".into(),
-            message: format!(
-                "{} graph-authorized repairs are available; inspect `st repair dry-run` token {}",
-                plan.items.len(),
-                plan.token
-            ),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "fail".into(),
-            message: format!("could not compute the operational repair plan: {error}"),
-        }),
-    }
+    checks.push(operations::operational_repair_check(
+        operations::owner_operational_repair_plan(state),
+    )?);
     checks.push(
         terminal_exec_gates_check(&state.store).unwrap_or_else(|error| DoctorCheck {
             name: "terminal-exec-gates".into(),
@@ -10096,6 +10134,8 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
 #[derive(Clone, Debug)]
 pub struct LocalPeer {
     pub pid: u32,
+    /// Accept-time generation witness; absent if the platform cannot prove it.
+    pub peer_process: Option<fractal_runtime::PeerProcessIdentity>,
     pub ancestor: Option<String>,
 }
 

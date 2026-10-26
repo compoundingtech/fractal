@@ -1,7 +1,7 @@
 //! The claim store: the claim log and its batches, replica envelopes and their admission,
 //! replication between members, documents and blobs, and checkpoints.
 //!
-//! A runtime built on the graph, such as smalltalk, keeps its projections in the same database
+//! A runtime built on the graph, such as Fractal, keeps its projections in the same database
 //! and plugs them in through [`Runtime`]: the store calls it to create its tables, to validate a
 //! replicated claim's kind and fields, and to project admitted claims.
 
@@ -58,6 +58,8 @@ mod membership_query_tests;
 mod repair_operation_tests;
 #[cfg(test)]
 mod schema_install_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod contents;
 pub mod prepared_seal;
 #[cfg(test)]
 mod prepared_seal_tests;
@@ -765,6 +767,10 @@ pub const SCHEMA: &str = core_schema!("", "");
 /// Contains BEGIN IMMEDIATE and COMMIT; cannot run inside an open transaction.
 pub const FRESH_SCHEMA: &str = core_schema!("BEGIN IMMEDIATE;", "COMMIT;");
 
+/// [`FRESH_SCHEMA`] with its transaction left open, so a fresh open commits the schema
+/// version with the first tables.
+const FRESH_SCHEMA_UNCOMMITTED: &str = core_schema!("BEGIN IMMEDIATE;", "");
+
 /// The store's schema version, set once the graph's and the runtime's tables exist.
 pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
 
@@ -891,12 +897,37 @@ impl Store {
     /// Open the store at `path`, creating it when it does not exist, with `runtime`'s tables
     /// and projections beside the graph's.
     pub fn open(path: &Path, origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
-        let origin = origin.into();
+        Self::open_with(path, origin.into(), runtime, true, |_| {})
+    }
+
+    /// [`Self::open`] with the initialization of a fresh database committed the way it was
+    /// before deferred durability (`defer_fresh_durability` false), and `prepare` run on the
+    /// writer connection before anything is read or written, so a test can observe or stop
+    /// its commits.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_for_initialization_test(
+        path: &Path,
+        origin: impl Into<String>,
+        runtime: Arc<dyn Runtime>,
+        defer_fresh_durability: bool,
+        prepare: impl FnOnce(&Connection),
+    ) -> Result<Self> {
+        Self::open_with(path, origin.into(), runtime, defer_fresh_durability, prepare)
+    }
+
+    fn open_with(
+        path: &Path,
+        origin: String,
+        runtime: Arc<dyn Runtime>,
+        defer_fresh_durability: bool,
+        prepare: impl FnOnce(&Connection),
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let mut connection = Connection::open(path)
             .with_context(|| format!("open st database {}", path.display()))?;
+        prepare(&connection);
         let path = crate::sqlite::opened_database_path(&connection, path)?;
         let has_meta: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
@@ -924,7 +955,7 @@ impl Store {
         // page cache. The default (~2 MiB per connection) churns against the
         // large durable claim store during otherwise quiet replication.
         connection.pragma_update(None, "cache_size", -(crate::sqlite::WRITE_CACHE_KIB as i64))?;
-        Self::create_schema(&connection, &*runtime)?;
+        let fresh = Self::create_schema_with(&connection, &*runtime, defer_fresh_durability)?;
         separate_staged_blobs(&mut connection)?;
         {
             let transaction = connection.transaction()?;
@@ -932,6 +963,12 @@ impl Store {
             transaction.commit()?;
         }
         runtime.finish_open_projections(&mut connection)?;
+        if fresh && defer_fresh_durability {
+            // Back to the member's setting before `from_connection` commits its first meta rows,
+            // which a fresh store always writes: that commit fsyncs the WAL, and with it every
+            // frame the initialization wrote, before open returns.
+            connection.pragma_update(None, "synchronous", "FULL")?;
+        }
         let readers = ReadPool::new(&path, false)?;
         Self::from_connection(
             connection,
@@ -975,6 +1012,20 @@ impl Store {
     /// Check and migrate the schema, then create the graph's tables, the runtime's, and the
     /// triggers that keep digests current.
     fn create_schema(connection: &Connection, runtime: &dyn Runtime) -> Result<()> {
+        Self::create_schema_with(connection, runtime, false).map(|_| ())
+    }
+
+    /// [`Self::create_schema`], returning whether the database began empty. With
+    /// `defer_fresh_durability`, a fresh database's initialization commits at
+    /// synchronous=NORMAL after the core schema: in WAL mode that is corruption-safe and
+    /// skips the fsync on each of its many small commits. The caller sets FULL again
+    /// before its next commit, and that commit's WAL fsync makes the initialization
+    /// durable. An existing database is opened exactly as before.
+    fn create_schema_with(
+        connection: &Connection,
+        runtime: &dyn Runtime,
+        defer_fresh_durability: bool,
+    ) -> Result<bool> {
         // Only an empty database can batch DDL without changing upgrade progress or locking
         // ordinary reopens. Determine this before any migration or schema hook creates objects.
         let fresh: bool = connection.query_row(
@@ -989,7 +1040,19 @@ impl Store {
         }
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f86346fb38f owner=smallclaims::store TODO=trace-statement-and-value-representation */ if fresh { FRESH_SCHEMA } else { SCHEMA })?;
+        if fresh {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8680754156af owner=smallclaims::store TODO=trace-statement-and-value-representation */ FRESH_SCHEMA_UNCOMMITTED)?;
+            // The version commits with the first tables. A first open stopped after this
+            // reopens as a current store, which the existing-store path below completes; a
+            // store with tables at version 0 is refused as an old one.
+            connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc1e68820d94d owner=smallclaims::store TODO=trace-statement-and-value-representation */ "COMMIT")?;
+        } else {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hab2af578d954 owner=smallclaims::store TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        }
+        if fresh && defer_fresh_durability {
+            connection.pragma_update(None, "synchronous", "NORMAL")?;
+        }
         repair_ledger::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
@@ -1031,7 +1094,7 @@ impl Store {
         })?;
         projection_digest::initialize(connection, runtime.digest_tables())?;
         checkpoint_capture_epoch::initialize(connection)?;
-        Ok(())
+        Ok(fresh)
     }
 
     /// Wrap an opened, initialized writer connection and its read pool.
@@ -1183,7 +1246,7 @@ pub struct ReplicationSnapshot {
     pub inventory_generation: i64,
     pub inventory: CompactReplicationInventory,
     pub buckets: Vec<ReplicationInventoryBucket>,
-    /// The inventory digest state before each range in `buckets`.
+    /// The inventory digest state before each range in `buckets`, then its terminal state.
     pub digest_prefixes: Vec<Sha256>,
     pub authority_digest: String,
     pub graph_generation: i64,
@@ -1575,16 +1638,20 @@ impl CompactReplicationInventory {
     }
 
     /// Set the inventory digest by resuming at range `from`; the value equals
-    /// `refresh_digest`. `prefixes[i]` holds the digest state before `buckets[i]`, which must
-    /// list the held identities range by range, and no range before `from` may have changed
-    /// since `prefixes` was built. Ranges are ordered by writer, so new envelopes re-hash only
-    /// their own later ranges and those of later writers.
+    /// `refresh_digest`. `prefixes[i]` holds the digest state before `buckets[i]`, with
+    /// one terminal state after the last bucket. The buckets must list the held identities
+    /// range by range, and no range before `from` may have changed since `prefixes` was built.
+    /// Ranges are ordered by writer, so new envelopes re-hash only their own later ranges and
+    /// those of later writers. An unchanged inventory does no hashing or prefix scan.
     pub fn resume_digest(
         &mut self,
         buckets: &[ReplicationInventoryBucket],
         prefixes: &mut Vec<Sha256>,
         from: usize,
     ) {
+        if from == buckets.len() && prefixes.len() == buckets.len() + 1 {
+            return;
+        }
         let from = from.min(prefixes.len().saturating_sub(1));
         let mut digest = match prefixes.get(from) {
             Some(state) => state.clone(),
@@ -1616,6 +1683,7 @@ impl CompactReplicationInventory {
             position = end;
         }
         debug_assert_eq!(position, self.envelopes.len());
+        prefixes.push(digest.clone());
         self.digest = hex::encode(digest.finalize());
     }
 
@@ -2527,6 +2595,41 @@ impl Store {
         }
         Ok(signatures)
     }
+    /// Whether an accepted copy of this claim has envelope provenance signed by this node.
+    /// Origin text and principal attribution alone do not authenticate a writer.
+    pub fn claim_has_authenticated_self_writer(&self, claim_id: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        let Some(key) = fleet_meta(&connection, principals::OWN_NODE_KEY)? else {
+            return Ok(false);
+        };
+        let Some(fleet_id) = fleet_meta(&connection, "fleet_id")? else {
+            return Ok(false);
+        };
+        let mut statement = connection.prepare_cached(
+            "SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
+             FROM replica_records AS records
+             JOIN replica_envelopes AS envelopes
+               USING (writer, sequence, envelope_hash)
+             JOIN replica_envelope_signatures AS signatures
+               USING (writer, sequence, envelope_hash)
+             WHERE records.claim_id=?1 AND records.state='valid'
+               AND envelopes.receipt_state='validated'
+               AND records.writer=?2 AND signatures.member_key=?3",
+        )?;
+        let rows = statement.query_map(params![claim_id, self.origin, key], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        for row in rows {
+            let (sequence, hash, signature) = row?;
+            if VerifiedEnvelopeSignature::verify(
+                &fleet_id, &self.origin, sequence, &hash, &key, &signature,
+            ).is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
 
     /// Envelopes this node admitted before it knew that their writer is keyed or that their
     /// incarnation had ended. Admission decisions are not revisited, so these stay admitted;
@@ -3465,6 +3568,14 @@ impl Store {
             if bound != request.member_key || bound_name.as_deref() != Some(&request.name) {
                 return Ok(FleetRedemption::Refused("bound-to-another-key"));
             }
+            if request.node_id.is_some()
+                && self.verify_fleet_pairing_admission(
+                    &request.name, &request.member_key, request.node_id.as_deref().unwrap_or_default(),
+                ).is_err()
+                && admitted_claim.is_some()
+            {
+                return Ok(FleetRedemption::Refused("bound-to-another-node"));
+            }
             // The same joiner again: admit it again without new claims, unless the claims were
             // interrupted before they were written.
             let admitted_claim = match admitted_claim {
@@ -3483,25 +3594,54 @@ impl Store {
                 first: false,
             });
         }
-        let floor =
+        // A new pairing permit may replace an expired/rejected one after st already
+        // admitted the joiner. Reuse only the verified incarnation's exact signed
+        // identity; never turn a fresh invite into permission to take another name.
+        let membership = self.fleet_membership()?;
+        let reused = match membership.state(&request.name) {
+            crate::fleet::MemberState::Current(member)
+                if !migrate
+                    && member.via == "invite"
+                    && member.member_key == request.member_key
+                    && member.mode == request.mode
+                    && request.node_id.is_some()
+                    && member.node_id == request.node_id =>
+            {
+                self.verify_fleet_pairing_admission(
+                    &request.name, &request.member_key,
+                    request.node_id.as_deref().unwrap_or_default(),
+                )?;
+                Some((member.admitted_claim.clone(), member.start.checked_sub(1).filter(|floor| *floor != 0)))
+            }
+            _ => None,
+        };
+        let floor = if let Some((_, floor)) = &reused {
+            *floor
+        } else {
             match self.fleet_name_floor(&request.name, request.writer_head.is_some(), migrate)? {
                 Ok(floor) => floor,
                 Err(reason) => return Ok(FleetRedemption::Refused(reason)),
-            };
+            }
+        };
         let bound = {
             let connection = self.connection.write();
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hb2eb7457a31f owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_invite_tokens SET bound_key=?2, bound_name=?3, writer_floor=?4
+                /* sqlite-large-value: allow-for-now lv-h19c2bdfa18d0 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_invite_tokens SET bound_key=?2, bound_name=?3, writer_floor=?4, admitted_claim=?5
                  WHERE invite_id=?1 AND bound_key IS NULL AND token IS NOT NULL",
-                params![request.invite, request.member_key, request.name, floor],
+                params![request.invite, request.member_key, request.name, floor, reused.as_ref().map(|(claim, _)| claim)],
             )?
         };
         if bound == 0 {
             // Another request bound it first.
             return Ok(FleetRedemption::Refused("bound-to-another-key"));
         }
-        let admitted =
-            self.append_fleet_admission(request, migrate, floor, created_by.as_deref())?;
+        let admitted = if let Some((claim, _)) = reused {
+            self.append_fleet_invite_redemption(request)?;
+            self.replication_snapshot()?;
+            claim
+        } else {
+            self.append_fleet_admission(request, migrate, floor, created_by.as_deref())?
+        };
         Ok(FleetRedemption::Admitted {
             token,
             writer_floor: floor,
@@ -3562,6 +3702,25 @@ impl Store {
         Ok(Ok(Some(held.unwrap_or(0).max(ended_end))))
     }
 
+    fn append_fleet_invite_redemption(
+        &self,
+        request: &crate::fleet::handshake::JoinRequest,
+    ) -> Result<()> {
+        self.append_claim(&ClaimInput {
+            subject: format!("fleet-invite/{}", request.invite),
+            kind: "fleet.invite-redeemed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("name".into(), Value::String(request.name.clone())),
+                ("member_key".into(), Value::String(request.member_key.clone())),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("fleet-invite-redeemed:{}", request.invite)),
+        })?;
+        Ok(())
+    }
+
     pub fn append_fleet_admission(
         &self,
         request: &crate::fleet::handshake::JoinRequest,
@@ -3574,21 +3733,7 @@ impl Store {
             fleet_meta(&connection, "fleet_id")?.context("this store is not in a fleet")?
         };
         let invite_subject = format!("fleet-invite/{}", request.invite);
-        self.append_claim(&ClaimInput {
-            subject: invite_subject.clone(),
-            kind: "fleet.invite-redeemed".into(),
-            actor: None,
-            fields: BTreeMap::from([
-                ("name".into(), Value::String(request.name.clone())),
-                (
-                    "member_key".into(),
-                    Value::String(request.member_key.clone()),
-                ),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some(format!("fleet-invite-redeemed:{}", request.invite)),
-        })?;
+        self.append_fleet_invite_redemption(request)?;
         let mut fields = BTreeMap::from([
             ("fleet_id".into(), Value::String(fleet_id)),
             (
@@ -3606,6 +3751,9 @@ impl Store {
             ("invite".into(), Value::String(invite_subject)),
             ("mode".into(), Value::String(request.mode.clone())),
         ]);
+        if let Some(node_id) = &request.node_id {
+            fields.insert("node_id".into(), Value::String(node_id.clone()));
+        }
         if let Some(floor) = writer_floor {
             fields.insert("writer_floor".into(), Value::from(floor));
         }
@@ -3631,6 +3779,29 @@ impl Store {
         // Seed and sign at once: the joiner's first exchange must find itself admitted.
         self.replication_snapshot()?;
         Ok(admitted.id)
+    }
+
+    /// Export only st authority: a verified current incarnation must admit this exact
+    /// member key and Fabric identity. The external adapter owns any resulting policy.
+    pub fn verify_fleet_pairing_admission(
+        &self,
+        name: &str,
+        member_key: &str,
+        node_id: &str,
+    ) -> Result<()> {
+        let membership = self.fleet_membership()?;
+        let crate::fleet::MemberState::Current(member) = membership.state(name) else {
+            anyhow::bail!("the pairing member is not a verified current fleet member");
+        };
+        anyhow::ensure!(
+            member.member_key == member_key && member.node_id.as_deref() == Some(node_id),
+            "the signed membership does not bind this member key to this Fabric node"
+        );
+        anyhow::ensure!(
+            node_id.len() == 64 && node_id.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "the pairing Fabric node identity is invalid"
+        );
+        Ok(())
     }
 
     /// Revoke an invite. Any member can; the sponsor erases the token when it sees the claim.

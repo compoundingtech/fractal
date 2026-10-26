@@ -89,7 +89,7 @@ describe('agent declaration read', () => {
     expect(new URL(request!).searchParams.get('show_env_values')).toBe('false')
     expect(urls.some(url => url.includes('show_env_values=true'))).toBe(false)
     const state = agentDeclarationState(observed({ value }))
-    expect(state).toEqual({ _tag: 'Ready', text: kdl, language: 'kdl', source: 'Canonical KDL from st · revision rev-7 · environment values redacted' })
+    expect(state).toEqual({ _tag: 'Ready', text: kdl, language: 'kdl', source: 'Canonical KDL from Fractal · revision rev-7 · environment values redacted' })
   })
 
   it('maps waiting, refusal, failure and stale reads to honest panel states', () => {
@@ -116,7 +116,7 @@ describe('mission definition read', () => {
     expect(state._tag).toBe('Ready')
     if (state._tag !== 'Ready') return
     expect(state.language).toBe('json')
-    expect(state.source).toBe('Structured definition · revision rev-3 · st serves no mission KDL; environment values redacted')
+    expect(state.source).toBe('Structured definition · revision rev-3 · Fractal serves no mission KDL; environment values redacted')
     for (const secret of secrets) expect(state.text).not.toContain(secret)
     expect(state.text).toContain(WITHHELD_DECLARATIONS)
   })
