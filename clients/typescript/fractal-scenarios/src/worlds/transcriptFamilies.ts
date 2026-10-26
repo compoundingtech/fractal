@@ -32,20 +32,20 @@ export const transcriptFamilies: WorldDefinition = {
         sequence, revision: 1, timestamp: ctx.t.at(atMs), final: true,
       }
     }
-    const request = (atMs: number, text: string): TimelineEntry => ({
-      ...next(atMs), role: 'user', type: 'message',
-      body: { message_id: scenarioId(ctx, 'message', `request-${sequence}`), from: person.id, to: member.id,
-        blocks: [{ id: `request-${sequence}`, kind: 'text', source_type: 'text', payload: { text } }] },
-    })
+    const request = (atMs: number, text: string): TimelineEntry[] => [
+      { ...next(atMs), role: 'user', type: 'message',
+        body: { message_id: scenarioId(ctx, 'message', `request-${sequence}`), from: person.id, to: member.id } },
+      { ...next(atMs), role: 'user', type: 'content', body: { media_type: 'text/plain', text } },
+    ]
     const items: TimelineEntry[] = [
-      request(-120_000, 'Inspect the release report before exporting it.'),
+      ...request(-120_000, 'Inspect the release report before exporting it.'),
       { ...next(-116_000), role: 'assistant', type: 'content', body: {
         media_type: 'text/markdown', text: 'I will compare the release scope and report totals before exporting.',
         blocks: [{ id: 'inspection-reasoning', kind: 'reasoning', source_type: 'reasoning', visibility: 'visible',
           payload: { text: 'Compare the report totals with the release scope before requesting an export.' } }],
       } },
       { ...next(-112_000), role: 'assistant', type: 'status', body: { status: 'completed', detail: 'Inspection plan ready.' } },
-      request(-100_000, 'Compare the release scope and retrieve the report totals.'),
+      ...request(-100_000, 'Compare the release scope and retrieve the report totals.'),
       { ...next(-96_000), role: 'assistant', type: 'tool_call', body: {
         call_id: 'inspect-report', name: 'catalog.compare_release',
         arguments: { releases: ['atlas-7', 'atlas-8'], include: { totals: true, sections: ['runtime', 'client'] }, limit: 3 },
@@ -55,7 +55,7 @@ export const transcriptFamilies: WorldDefinition = {
         content: { release: 'atlas-8', totals: { passed: 18, failed: 0 }, sections: [{ name: 'runtime', ready: true }, { name: 'client', ready: true }] },
       } },
       { ...next(-88_000), role: 'system', type: 'status', body: { status: 'completed', detail: 'Both report sections are ready.' } },
-      request(-76_000, 'Export the checked report.'),
+      ...request(-76_000, 'Export the checked report.'),
       { ...next(-72_000), role: 'assistant', type: 'tool_call', body: {
         call_id: 'failed-export', name: 'reports.export', arguments: { release: 'atlas-8', formats: ['json', 'csv'], destination: { bucket: 'demo-reports' } },
       } },
@@ -66,14 +66,14 @@ export const transcriptFamilies: WorldDefinition = {
       { ...next(-64_000), role: 'system', type: 'status', body: {
         status: 'failed', detail: 'Export worker lost; report totals retained, but no export result was received.',
       } },
-      request(-52_000, 'Retry the export, but stop if the destination is still unavailable.'),
+      ...request(-52_000, 'Retry the export, but stop if the destination is still unavailable.'),
       { ...next(-48_000), role: 'assistant', type: 'tool_call', body: {
         call_id: 'cancelled-export', name: 'reports.export', arguments: { release: 'atlas-8', formats: ['json'], destination: { bucket: 'demo-reports' }, dry_run: true },
       } },
       { ...next(-44_000), role: 'system', type: 'status', body: {
         status: 'cancelled', detail: 'Operator cancelled the retry while its destination check was outstanding; no export was produced.',
       } },
-      request(-8_000, 'Summarize what is safe to hand off without an export.'),
+      ...request(-8_000, 'Summarize what is safe to hand off without an export.'),
     ]
     const partial: TimelineEntry = { ...next(0), role: 'assistant', type: 'content', final: false,
       body: { media_type: 'text/markdown', text: 'The report totals are retained; checking the handoff summary.' } }

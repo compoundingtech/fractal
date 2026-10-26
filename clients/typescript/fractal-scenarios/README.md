@@ -6,6 +6,8 @@ replays them. [spec.md](spec.md) is the contract.
 The registered catalog contains 26 worlds: seven recorded narratives, the authored
 `transcript-families` conversation, empty/loading/forward-compatibility edges, twelve
 failed-sync causes, replication divergence, `huge` and Unicode.
+`transcript-families` prompts use a user message header followed by user `text/plain`
+content, preserving prompt text and speaker attribution through `conversationEntries()`.
 
 ## Recorded narratives
 
