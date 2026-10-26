@@ -46,7 +46,7 @@ pub(super) fn ensure_supported_protocol(codex: &str) -> Result<String> {
         output.status.success(),
         "{codex} app-server schema generation failed ({}): {}",
         output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
+        super::diagnostic_output_tail(&output.stderr)
     );
     let read_schema = |name: &str| -> Result<Value> {
         let path = generated.path().join(name);
