@@ -1506,7 +1506,10 @@ async fn keep_fleet_view_current<B: Backend>(
 /// The sync routes beside `routes`, served with `state`.
 pub fn peer_router<B: Backend>(state: PeerState<B>, routes: Router<PeerState<B>>) -> Router {
     Router::new()
-        .route(EXCHANGE_PATH, post(receive_exchange))
+        .route(
+            EXCHANGE_PATH,
+            post(receive_exchange).layer(axum::middleware::from_fn(observe_exchange_body)),
+        )
         .route(
             LEAVE_RECEIPT_PATH,
             post(receive_leave_receipt).layer(DefaultBodyLimit::max(16_384)),
@@ -2250,6 +2253,79 @@ pub fn replication_http_client() -> reqwest::Client {
 
 const EXCHANGE_CORRELATION_HEADER: &str = "x-fractal-exchange-id";
 
+/// Captures the wire body before Axum's `Bytes` extractor can wait on an upload.
+struct ExchangeRequestBody {
+    inner: axum::body::Body,
+    timing: Arc<ExchangeTiming>,
+    bytes: u64,
+    complete: bool,
+    failed: bool,
+}
+
+impl hyper::body::Body for ExchangeRequestBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, axum::Error>>> {
+        let result = std::pin::Pin::new(&mut self.inner).poll_frame(cx);
+        match &result {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    self.bytes = self.bytes.saturating_add(data.len() as u64);
+                }
+            }
+            std::task::Poll::Ready(Some(Err(_))) => self.failed = true,
+            std::task::Poll::Ready(None) => {
+                self.complete = true;
+                self.timing.record("body-read-complete");
+            }
+            std::task::Poll::Pending => {}
+        }
+        result
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        hyper::body::Body::size_hint(&self.inner)
+    }
+}
+
+impl Drop for ExchangeRequestBody {
+    fn drop(&mut self) {
+        if !self.complete {
+            let head = self.timing.boundary("head-received");
+            tracing::info!(
+                target: "smallclaims::replication",
+                correlation_id = %self.timing.id,
+                head_received_unix_ms = head.map(|event| event.unix_ms),
+                request_body_bytes = self.bytes,
+                body_read_error = self.failed,
+                "replication exchange request body incomplete"
+            );
+        }
+    }
+}
+
+async fn observe_exchange_body(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let timing = Arc::new(ExchangeTiming::server(request.headers()));
+    timing.record("head-received");
+    request.extensions_mut().insert(Arc::clone(&timing));
+    let (parts, body) = request.into_parts();
+    let body = axum::body::Body::new(ExchangeRequestBody {
+        inner: body,
+        timing,
+        bytes: 0,
+        complete: false,
+        failed: false,
+    });
+    next.run(axum::extract::Request::from_parts(parts, body)).await
+}
+
 struct ExchangeTiming {
     id: String,
     started: std::time::Instant,
@@ -2267,6 +2343,24 @@ struct ExchangeBoundary {
 }
 
 impl ExchangeTiming {
+    fn server(headers: &HeaderMap) -> Self {
+        Self {
+            // Unauthenticated diagnostic input, never an authorization decision.
+            id: headers.get(EXCHANGE_CORRELATION_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                .map_or_else(|| uuid::Uuid::now_v7().to_string(), |id| id.to_string()),
+            started: std::time::Instant::now(),
+            server: true,
+            boundaries: Default::default(),
+        }
+    }
+
+    fn boundary(&self, stage: &str) -> Option<ExchangeBoundary> {
+        self.boundaries.lock().expect("exchange timing lock poisoned")
+            .0.iter().flatten().find(|event| event.stage == stage).copied()
+    }
+
     fn record(&self, stage: &'static str) {
         let boundary = ExchangeBoundary {
             stage,
@@ -2335,12 +2429,17 @@ impl ExchangeTiming {
             .map(|stage| boundaries.0.iter().flatten().find(|event| event.stage == stage).copied())
     }
 
-    fn summarize_server(&self, status: StatusCode) {
+    fn summarize_server(&self, status: StatusCode, body_bytes: usize) {
         let [ingress, backend, headers] = self.server_boundaries();
+        let head = self.boundary("head-received");
+        let body = self.boundary("body-read-complete");
         tracing::info!(
             target: "smallclaims::replication",
             correlation_id = %self.id,
             status = status.as_u16(),
+            head_received_unix_ms = head.map(|event| event.unix_ms),
+            body_read_complete_unix_ms = body.map(|event| event.unix_ms),
+            request_body_bytes = body_bytes,
             server_ingress_unix_ms = ingress.map(|event| event.unix_ms),
             server_ingress_elapsed_us = ingress.map(|event| event.elapsed_us),
             backend_done = backend.is_some(),
@@ -2413,25 +2512,21 @@ where
 }
 
 async fn receive_exchange<B: Backend>(
+    timing: Option<axum::Extension<Arc<ExchangeTiming>>>,
     State(state): State<PeerState<B>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let timing = Arc::new(ExchangeTiming {
-        // Unauthenticated diagnostic input, never an identity or authorization decision.
-        id: headers.get(EXCHANGE_CORRELATION_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| uuid::Uuid::parse_str(value).ok())
-            .map_or_else(|| uuid::Uuid::now_v7().to_string(), |id| id.to_string()),
-        started: std::time::Instant::now(),
-        server: true,
-        boundaries: Default::default(),
-    });
+    let timing = timing.map_or_else(
+        || Arc::new(ExchangeTiming::server(&headers)),
+        |axum::Extension(timing)| timing,
+    );
+    let body_bytes = body.len();
     timing.record("server-ingress");
     let response = receive_exchange_inner(State(state), headers, body, &timing).await;
     // Axum owns socket writes. This is the handoff boundary, not a wire-write timestamp.
     timing.record("response-headers-ready");
-    timing.summarize_server(response.status());
+    timing.summarize_server(response.status(), body_bytes);
     response
 }
 
