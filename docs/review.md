@@ -69,9 +69,11 @@ All at one exact head:
 3. **Every check is signed at this head** (`scripts/st-test --status`; or the merge of this head with `main`, where the protected
    files moved), and none is red; the required checks on GitHub agree. A skipped check is a pass only where its signed note says
    why it was skipped.
-4. **No flake.** A crate with a test that passed only on a retry is not signed (so item 3 fails), on every path, not only the
-   evidence, policy, workflow and store paths. The flake is fixed or its test is fixed first; it is never waived by assumption, and
-   the reviewer does not record it as unrelated.
+4. **No flake.** A crate with a test that passed only on a retry is not signed in its own per-crate record, so on every path
+   that check is left for CI and item 3 fails. The whole-tree gate note still signs a retried pass and records the tests as
+   `flaky_tests`: a signed note with `flaky_tests` other than none is a finding to be dispositioned (the test is fixed, or the
+   owner records why it is unrelated), not an automatic red. A flake is never waived by assumption, and the reviewer does not
+   record one as unrelated on its own.
 5. **It does what its description says, with tests that would fail without it.** The reviewer finds the test that fails on the
    old behaviour (or checks the author's claim that it does) and asks whether its assertions would catch the mistake it claims
    to catch. For a change that only touches tests, the reviewer reads intent: no coverage dropped, no assertion weakened, the
