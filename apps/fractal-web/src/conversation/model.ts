@@ -88,6 +88,8 @@ export const SendState = Schema.TaggedUnion({
 })
 export type SendState = typeof SendState.Type
 
+const BackgroundJobState = Schema.Literals(['running', 'completed', 'failed', 'cancelled', 'unknown'])
+
 /** Harness facts retained by the q101 app stopgap until adapters emit typed TimelineBlocks. */
 export const HarnessNotice = Schema.TaggedUnion({
   SubagentResult: {
@@ -103,8 +105,13 @@ export const HarnessNotice = Schema.TaggedUnion({
     payload: Schema.String, raw: Schema.String,
   },
   BackgroundJob: {
-    jobId: Schema.String, label: Schema.optional(Schema.String), state: Schema.Literals(['running', 'completed', 'failed', 'cancelled', 'unknown']),
+    jobId: Schema.String, label: Schema.optional(Schema.String), state: BackgroundJobState,
     duration: Schema.optional(Schema.String),
+    payload: Schema.String, raw: Schema.String,
+  },
+  /** Several native jobs in one fact; outcome counts are in reader order, not arrival order. */
+  BackgroundJobGroup: {
+    outcomes: Schema.Array(Schema.Struct({ state: BackgroundJobState, count: Schema.Int })),
     payload: Schema.String, raw: Schema.String,
   },
   Compaction: { payload: Schema.String, raw: Schema.String },

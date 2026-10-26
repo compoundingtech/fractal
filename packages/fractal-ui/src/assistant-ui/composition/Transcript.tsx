@@ -83,6 +83,7 @@ export interface TranscriptProps {
   readonly scrollToBottomKey?: string
   /** Contextual landmark names when multiple transcript views share one canvas. */
   readonly landmarkContext?: string
+  /** Host-owned last child of a finished turn; never called while the turn is still running. */
   readonly renderTurnFooter?: (turn: TranscriptTurn) => React.ReactNode
   /** C8/E14: preserve the current seat prose header until the turn-language pick; hosts may compare the headerless path. */
   readonly showSeatHeader?: boolean
@@ -282,7 +283,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onO
     {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
     {shown.map((item, index) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continues[index]!}><RunCopyText.Provider value={runTexts[index]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider>)}
     {turn.work.running && <LiveActivity state={turn.activity ?? { _tag: 'Working' }} startedAt={turn.work.startedAt} now={now} />}
-    {renderFooter?.(turn)}
+    {!turn.work.running && renderFooter?.(turn)}
   </section>
 })
 /** Host clock keeps elapsed labels deterministic and pauses with the conversation clock. */

@@ -6,7 +6,7 @@ import { HarnessNotice } from './assistant-ui/composition/HarnessNotice'
 import { Button } from './assistant-ui/composition/Controls'
 import { UnsupportedRecord } from './assistant-ui/composition/UnsupportedRecord'
 import { harnessWeightExamples } from './assistant-ui/composition/HarnessNotice.fixtures'
-import { backgroundJobStateLabel, type BackgroundJobState, type HarnessWeight } from './assistant-ui/embrace-data/model'
+import { backgroundJobOutcomeCounts, backgroundJobOutcomeSummary, backgroundJobStateLabel, type BackgroundJobState, type EventItem, type HarnessNotice as HarnessNoticeData, type HarnessWeight } from './assistant-ui/embrace-data/model'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
@@ -119,6 +119,88 @@ export const JobOutcomesDark1440: Story = jobOutcomes('dark', 'wide')
 export const JobOutcomesLight1440: Story = jobOutcomes('light', 'wide')
 export const JobOutcomesDark440: Story = jobOutcomes('dark', 'narrow')
 export const JobOutcomesLight440: Story = jobOutcomes('light', 'narrow')
+
+type NoticeItem = EventItem & { readonly notice: HarnessNoticeData }
+const omp = { kind: 'harness', label: 'OMP' } as const
+/** Five native jobs in one fact, listed in arrival order; the reader summary must not follow it. */
+const mixedArrival: readonly { readonly name: string; readonly state: BackgroundJobState }[] = [
+  { name: 'Docs build', state: 'completed' }, { name: 'Lint', state: 'unknown' }, { name: 'Browser checks', state: 'failed' },
+  { name: 'Migration dry run', state: 'cancelled' }, { name: 'Type check', state: 'running' },
+]
+const mixedSummary = '5 background jobs · 1 failed, 1 running, 1 cancelled, 1 status not reported, 1 completed'
+const jobGroup = (id: string, jobs: typeof mixedArrival): NoticeItem => {
+  const outcomes = backgroundJobOutcomeCounts(jobs.map(job => job.state))
+  return { _tag: 'Event', id, kind: 'background-job', title: `${jobs.length} background jobs · ${backgroundJobOutcomeSummary(outcomes)}`, text: jobs.map(job => job.name).join('\n'), sender: omp, data: {},
+    notice: { _tag: 'BackgroundJobGroup', outcomes, payload: jobs.map(job => `- ${job.name}: ${backgroundJobStateLabel(job.state)}`).join('\n'), raw: '' } }
+}
+const subagent = (id: string, status: string): NoticeItem => ({ _tag: 'Event', id, kind: 'subagent-result', title: `RowWorker · ${status} · 2m`, text: 'Subagent result', sender: omp, data: {},
+  notice: { _tag: 'SubagentResult', taskId: 'RowWorker', agent: 'task', status, duration: '2m', payload: 'Subagent result', raw: '' } })
+const outcomeRows = (reversed: boolean): readonly NoticeItem[] => [
+  jobGroup('mixed/failed-group', reversed ? [...mixedArrival].reverse() : mixedArrival),
+  jobGroup('mixed/quiet-group', [{ name: 'Docs build', state: 'completed' }, { name: 'Type check', state: 'running' }]),
+  subagent('mixed/cancelled-subagent', 'cancelled'),
+  subagent('mixed/completed-subagent', 'completed'),
+  { _tag: 'Event', id: 'mixed/completed-job', kind: 'background-job', title: 'Background job completed', text: 'Native job', sender: omp, data: {}, notice: { _tag: 'BackgroundJob', jobId: 'job_done', state: 'completed', payload: '', raw: '' } },
+]
+
+/** Grouped and single outcomes share one language: only failure is red with an alert, only completion earns a check. */
+function MixedJobOutcomes({ scheme, width }: { readonly scheme: Scheme; readonly width: 'narrow' | 'wide' }) {
+  const [reversed, setReversed] = React.useState(false)
+  return <section aria-label="Mixed job outcomes" data-scheme={scheme} {...stylex.props(styles.root, width === 'narrow' ? styles.narrow : styles.wide, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <div {...stylex.props(styles.controls)}><Button variant="outline" onPress={() => setReversed(value => !value)}>Reverse arrival order</Button></div>
+    {variants.map(({ weight, name }) => <section key={weight} aria-label={name} data-testid={`mixed-outcomes-${weight}`} {...stylex.props(styles.column)}>
+      <h2 {...stylex.props(styles.title)}>{name}</h2>
+      {outcomeRows(reversed).map(item => <HarnessNotice key={item.id} weight={weight} item={item} />)}
+    </section>)}
+  </section>
+}
+
+const checkPath = 'M3 8.5 6.5 12 13 4.5'
+const alertPath = 'M8 2 14.5 13.5H1.5z'
+const mixedOutcomes = (scheme: Scheme, width: 'narrow' | 'wide'): Story => ({
+  args: { scheme },
+  render: () => <MixedJobOutcomes scheme={scheme} width={width} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const row = (weight: HarnessWeight, id: string) => canvas.getByTestId(`mixed-outcomes-${weight}`).querySelector<HTMLElement>(`[data-item-id="${id}"]`)!
+    const pill = (weight: HarnessWeight, id: string) => within(row(weight, id)).getByTestId('harness-kind')
+    const icon = (weight: HarnessWeight, id: string) => row(weight, id).querySelector('svg path')?.getAttribute('d')
+    for (const { weight } of variants) {
+      const group = row(weight, 'mixed/failed-group')
+      await expect(group).toHaveTextContent(mixedSummary)
+      await expect(pill(weight, 'mixed/failed-group')).toHaveTextContent('failed')
+      await expect(icon(weight, 'mixed/failed-group')).toBe(alertPath)
+      const neutral = getComputedStyle(pill(weight, 'mixed/quiet-group')).color
+      await expect(getComputedStyle(pill(weight, 'mixed/failed-group')).color).not.toBe(neutral)
+      // A mixed group without failure stays neutral: its lead outcome, no alert, no success check.
+      await expect(pill(weight, 'mixed/quiet-group')).toHaveTextContent('running')
+      await expect(icon(weight, 'mixed/quiet-group')).not.toBe(alertPath)
+      await expect(icon(weight, 'mixed/quiet-group')).not.toBe(checkPath)
+      // Cancelled is not failure: neutral pill colour, neutral icon.
+      await expect(pill(weight, 'mixed/cancelled-subagent')).toHaveTextContent('cancelled')
+      await expect(getComputedStyle(pill(weight, 'mixed/cancelled-subagent')).color).toBe(neutral)
+      await expect(icon(weight, 'mixed/cancelled-subagent')).not.toBe(alertPath)
+      await expect(icon(weight, 'mixed/cancelled-subagent')).not.toBe(checkPath)
+      // Completion reads the same for a subagent and a job.
+      await expect(icon(weight, 'mixed/completed-subagent')).toBe(checkPath)
+      await expect(icon(weight, 'mixed/completed-job')).toBe(checkPath)
+    }
+    const before = variants.map(({ weight }) => pill(weight, 'mixed/failed-group'))
+    await userEvent.click(canvas.getByRole('button', { name: 'Reverse arrival order' }))
+    for (const [index, { weight }] of variants.entries()) {
+      await expect(row(weight, 'mixed/failed-group')).toHaveTextContent(mixedSummary)
+      await expect(pill(weight, 'mixed/failed-group')).toBe(before[index])
+      await expect(pill(weight, 'mixed/failed-group')).toHaveTextContent('failed')
+      await expect(within(row(weight, 'mixed/failed-group')).getByTestId('harness-excerpt')).toHaveTextContent(/^Type check/)
+    }
+    const read = within(row('row', 'mixed/failed-group')).getByRole('button', { name: 'Read results' })
+    await userEvent.click(read)
+    await expect(read).toHaveAttribute('aria-expanded', 'true')
+    await expect(within(row('row', 'mixed/failed-group')).getByText('Browser checks: failed')).toBeVisible()
+  },
+})
+export const MixedJobOutcomesDark1440: Story = mixedOutcomes('dark', 'wide')
+export const MixedJobOutcomesLight440: Story = mixedOutcomes('light', 'narrow')
 
 const styles = stylex.create({
   root: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(22rem, 1fr))', gap: s.section, minHeight: '100vh', padding: s.section, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },

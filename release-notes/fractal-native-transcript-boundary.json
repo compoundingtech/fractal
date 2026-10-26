@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Enforce native transcript visibility across content, tool invocations, orphan and joined results; render unsupported records with redacted capped Inspect previews and typed harness events as quiet rows with failed-job styling. Show reported native model, token usage and cost once at the end of each turn through the optional kit renderTurnFooter slot; turns without reported facts have no footer.",
+  "summary": "Enforce native transcript visibility across content, tool invocations, orphan and joined results; render unsupported records with redacted capped Inspect previews and typed harness events as quiet rows with failed-job styling. Show the last response's reported native model, token usage and cost once at the end of each finished turn through the optional kit renderTurnFooter slot; turns without reported facts have no footer.",
   "replay": {
     "status": "none",
     "detail": "No replay or rebuild."

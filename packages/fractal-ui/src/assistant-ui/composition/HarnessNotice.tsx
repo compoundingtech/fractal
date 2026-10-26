@@ -1,19 +1,31 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
-import { backgroundJobStateLabel, type EventItem, type HarnessNotice as HarnessNoticeData, type HarnessWeight } from '../embrace-data/model.ts'
+import { backgroundJobGroupLead, backgroundJobStateLabel, harnessOutcomeTone, type EventItem, type HarnessNotice as HarnessNoticeData, type HarnessOutcomeTone, type HarnessWeight } from '../embrace-data/model.ts'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { Icon, type IconName } from './Icons'
 import { Markdown } from './Markdown'
 
 const presentation: { readonly [Tag in HarnessNoticeData['_tag']]: { readonly icon: IconName; readonly kind: string; readonly noun: string } } = {
-  SubagentResult: { icon: 'check', kind: 'Subagent', noun: 'result' },
+  SubagentResult: { icon: 'clock', kind: 'Subagent', noun: 'result' },
   Irc: { icon: 'message', kind: 'IRC', noun: 'message' },
   BackgroundJob: { icon: 'clock', kind: 'Background job', noun: 'result' },
+  BackgroundJobGroup: { icon: 'clock', kind: 'Background jobs', noun: 'results' },
   Compaction: { icon: 'panel', kind: 'Summary', noun: 'summary' },
   Interjection: { icon: 'pencil', kind: 'Interjection', noun: 'message' },
   SkillInvocation: { icon: 'gear', kind: 'Skill', noun: 'details' },
   Delivery: { icon: 'send', kind: 'Delivery', noun: 'message' },
+}
+
+/** Outcome overrides the kind icon: alert only for failure, check only for completion; every other outcome keeps the neutral kind icon. */
+const toneIcon: { readonly [Tone in HarnessOutcomeTone]: IconName | undefined } = { failed: 'alert', completed: 'check', neutral: undefined }
+const pillText = (notice: HarnessNoticeData, kind: string): string => {
+  switch (notice._tag) {
+    case 'SubagentResult': return notice.status
+    case 'BackgroundJob': return backgroundJobStateLabel(notice.state)
+    case 'BackgroundJobGroup': return backgroundJobStateLabel(backgroundJobGroupLead(notice.outcomes))
+    default: return kind
+  }
 }
 
 /**
@@ -26,13 +38,13 @@ export function HarnessNotice({ item, weight = 'card' }: { readonly item: EventI
   const time = item.at === undefined ? NaN : Date.parse(item.at)
   const [expanded, setExpanded] = React.useState(false)
   const shown = presentation[notice._tag]
-  const failed = (notice._tag === 'SubagentResult' && notice.status !== 'completed')
-    || (notice._tag === 'BackgroundJob' && notice.state === 'failed')
+  const tone = harnessOutcomeTone(notice)
+  const failed = tone === 'failed'
   const noun = shown.noun
   const payload = /^[\s]*[\[{]/.test(notice.payload) ? `\`\`\`json\n${notice.payload}\n\`\`\`` : notice.payload
   const row = weight === 'row'
   return <Disclosure isExpanded={expanded} onExpandedChange={setExpanded} data-testid="harness-notice" data-harness-kind={item.kind} data-harness-weight={weight} data-item-id={item.id} {...stylex.props(styles.base, row ? styles.row : styles.card)}>
-    <div {...stylex.props(styles.header)}><Icon name={failed ? 'alert' : shown.icon} size={14} /><span {...stylex.props(styles.label)}>{item.title}</span><span data-testid="harness-kind" {...stylex.props(styles.pill, failed && styles.pillFailed)}>{notice._tag === 'SubagentResult' ? notice.status : notice._tag === 'BackgroundJob' ? backgroundJobStateLabel(notice.state) : shown.kind}</span>{Number.isFinite(time) && <time dateTime={item.at} {...stylex.props(styles.time)}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>
+    <div {...stylex.props(styles.header)}><Icon name={(tone === undefined ? undefined : toneIcon[tone]) ?? shown.icon} size={14} /><span {...stylex.props(styles.label)}>{item.title}</span><span data-testid="harness-kind" {...stylex.props(styles.pill, failed && styles.pillFailed)}>{pillText(notice, shown.kind)}</span>{Number.isFinite(time) && <time dateTime={item.at} {...stylex.props(styles.time)}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>
     <p data-testid="harness-excerpt" {...stylex.props(styles.excerpt, row && styles.rowIndent)}>{item.text}</p>
     <Button slot="trigger" data-testid="harness-trigger" {...stylex.props(styles.trigger, row && styles.rowIndent)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={14} />{expanded ? `Hide ${noun}` : `Read ${noun}`}</Button>
     {/* The frame lives inside the panel: a collapsed hidden=until-found panel still keeps its own box in Chromium. */}

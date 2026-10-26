@@ -19,6 +19,7 @@ const { SendUnconfirmed } = await server.ssrLoadModule('/src/assistant-ui/compos
 const { ThinkingRun } = await server.ssrLoadModule('/src/assistant-ui/composition/ThinkingEntry.tsx')
 const { WorkLogV1 } = await server.ssrLoadModule('/src/assistant-ui/taste/WorkLogV1.tsx')
 const { workLogTurnFromItems } = await server.ssrLoadModule('/src/assistant-ui/taste/work-log.ts')
+const { convertConversationItem } = await server.ssrLoadModule('/src/assistant-ui/embrace-converter.ts')
 
 const now = Date.parse('2026-01-15T12:30:00Z')
 const prompt = { _tag: 'Text', id: 'prompt/example', role: 'user', text: 'Keep the visible rows grouped.', attachments: [], streaming: false, at: new Date(now).toISOString() }
@@ -88,13 +89,13 @@ test('a sent image is a named file card unless the host resolves it, and never a
   assert.doesNotMatch(resolved, /src="blob\/unnamed"/)
 })
 
-test('the optional host footer renders once per turn as its last child', () => {
+test('the optional host footer renders once per finished turn as its last child, never below a running turn', () => {
   const turns = [
     { ...turn, id: 'first', prompt: undefined },
     { ...turn, id: 'second', prompt: undefined, work: { ...turn.work, running: true } },
     { ...turn, id: 'without-facts', prompt: undefined },
   ]
-  const facts = new Map([['first', 'model-one · 100 tokens · $0.0100'], ['second', 'model-two · 200 tokens · $0.0200']])
+  const facts = new Map([['first', 'Last response: model-one · 100 tokens · $0.01'], ['second', 'Last response: model-two · 200 tokens · $0.02']])
   const called = []
   const renderTurnFooter = entry => {
     called.push(entry)
@@ -105,12 +106,25 @@ test('the optional host footer renders once per turn as its last child', () => {
     options: { messages: [], isRunning: true, onNew: async () => {} },
   }, React.createElement(Transcript, { turns, title: 'Host footer', sync: { _tag: 'Live', since: now }, now, observedAt: now, renderTurnFooter: footer })))
   const markup = render(renderTurnFooter)
-  assert.deepEqual(called, turns)
-  assert.equal([...markup.matchAll(/data-testid="host-turn-footer"/g)].length, 2)
-  assert.match(markup, /model-one · 100 tokens · \$0\.0100<\/footer><\/section>/)
-  assert.match(markup, /data-testid="live-work"[\s\S]*model-two · 200 tokens · \$0\.0200<\/footer><\/section>/)
+  // The running turn is never offered to the host: its Working row stays the last child.
+  assert.deepEqual(called, [turns[0], turns[2]])
+  assert.equal([...markup.matchAll(/data-testid="host-turn-footer"/g)].length, 1)
+  assert.match(markup, /model-one · 100 tokens · \$0\.01<\/footer><\/section>/)
+  assert.match(markup, /data-testid="live-work"/)
+  assert.doesNotMatch(markup, /model-two/)
   assert.match(markup, /data-item-id="without-facts"[^>]*><\/section>/)
+  // Once the same turn finishes, its footer appears.
+  turns[1] = { ...turns[1], work: { ...turns[1].work, running: false } }
+  assert.match(render(renderTurnFooter), /model-two · 200 tokens · \$0\.02<\/footer><\/section>/)
   assert.doesNotMatch(render(undefined), /<footer|host-turn-footer|model-one|model-two/)
+})
+
+test('a converted error notice names retryability only when it is reported true', () => {
+  const notice = { _tag: 'Notice', id: 'notice/error', kind: 'error', text: 'Model call failed.', detail: 'Provider unavailable.', at: new Date(now).toISOString() }
+  const text = item => convertConversationItem(item).content.map(part => part.text).join('')
+  assert.equal(text({ ...notice, retryable: true }), 'Model call failed.\nProvider unavailable.\nRetryable')
+  assert.equal(text({ ...notice, retryable: false }), 'Model call failed.\nProvider unavailable.')
+  assert.equal(text(notice), 'Model call failed.\nProvider unavailable.')
 })
 
 test('host-owned header omits only the duplicate band, including unavailable history', () => {

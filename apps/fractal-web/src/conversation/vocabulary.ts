@@ -1,7 +1,7 @@
 import type { TimelineBlock, TimelineEntry, TimelineView, UnknownCase } from '@fractal/client/schema'
 import { Match } from 'effect'
 import type { ConversationItem, HarnessNotice } from './model.ts'
-import { backgroundJobStateLabel } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-data/model.ts'
+import { backgroundJobOutcomeCounts, backgroundJobOutcomeSummary, backgroundJobStateLabel } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-data/model.ts'
 import { q101OmpEnvelopeStopgap } from './q101OmpEnvelopeStopgap.ts'
 
 export type Equals<TA, TB> = (<T>() => T extends TA ? 1 : 2) extends (<T>() => T extends TB ? 1 : 2) ? true : false
@@ -64,15 +64,13 @@ export const viewCases = {
         ...(job.duration_ms === undefined ? {} : { duration: `${job.duration_ms} ms` }), payload: '', raw: '',
       } })
     }
-    const counts = new Map<JobOutcome, number>()
-    for (const job of view.jobs) {
-      const state = jobOutcome(job)
-      counts.set(state, (counts.get(state) ?? 0) + 1)
-    }
-    const summary = [...counts].map(([state, count]) => `${count} ${backgroundJobStateLabel(state)}`).join(', ')
-    const only = counts.size === 1 ? [...counts.keys()][0] : undefined
+    // Counts follow reader rank (failed first, completed last), so permuted arrivals read the same.
+    const outcomes = backgroundJobOutcomeCounts(view.jobs.map(jobOutcome))
+    const only = outcomes.length === 1 ? outcomes[0]!.state : undefined
+    const summary = backgroundJobOutcomeSummary(outcomes)
     const title = only !== undefined ? `${view.jobs.length} background jobs ${backgroundJobStateLabel(only)}` : `${view.jobs.length} background jobs${summary === '' ? '' : ` · ${summary}`}`
-    return item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'background-job', title, text: view.jobs.map(job => job.name ?? job.id).join('\n'), sender: sender(ctx), data: {} })
+    const payload = view.jobs.map(job => `- ${job.name ?? job.id}: ${backgroundJobStateLabel(jobOutcome(job))}`).join('\n')
+    return item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'background-job', title, text: view.jobs.map(job => job.name ?? job.id).join('\n'), sender: sender(ctx), data: {}, notice: { _tag: 'BackgroundJobGroup', outcomes, payload, raw: '' } })
   },
   irc: (view, ctx) => {
     const parsed = stopgap(ctx)

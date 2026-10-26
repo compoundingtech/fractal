@@ -147,7 +147,7 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
       return item.kind === 'error' ? {
         ...common, role: 'assistant',
         status: { type: 'incomplete', reason: 'error', error: { message: item.text } },
-        content: [{ type: 'text', text: `${item.text}${item.detail ? `\n${item.detail}` : ''}` }],
+        content: [{ type: 'text', text: `${item.text}${item.detail ? `\n${item.detail}` : ''}${item.retryable === true ? '\nRetryable' : ''}` }],
       } : {
         ...common, role: 'system',
         content: [{ type: 'text', text: `${item.kind} · ${item.text}${item.detail ? `\n${item.detail}` : ''}` }],

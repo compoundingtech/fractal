@@ -148,14 +148,15 @@ export const Settled: Story = { tags: ['critical'], play: async ({ canvasElement
   await expect(canvasElement.querySelector('[data-testid="live-work"]')).toBeNull()
 } }
 export const SettledLight: Story = { ...Settled, args: { scheme: 'light' } }
-/** The host supplies facts and presentation; the kit only owns the per-turn slot. */
+/** The host supplies facts and presentation; the kit only owns the per-turn slot, offered for finished turns. */
 export const TurnFooter: Story = {
   tags: ['critical'],
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exercises the host-supplied per-turn footer slot with exact local facts, independent of scenario data.' } },
-  render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={cases.settled} onRetry={() => {}} renderTurnFooter={() => <footer data-testid="example-turn-footer">example-model · 4,200 tokens · $0.0250</footer>} /></main>,
+  render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={cases.settled} onRetry={() => {}} renderTurnFooter={() => <footer data-testid="example-turn-footer">Last response: example-model · 4,200 tokens · $0.025</footer>} /></main>,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const turns = await canvas.findAllByTestId('transcript-turn')
+    await expect(canvas.queryByTestId('live-work')).toBeNull()
     await expect(canvas.getAllByTestId('example-turn-footer')).toHaveLength(turns.length)
     for (const turn of turns) await expect(turn.lastElementChild).toHaveAttribute('data-testid', 'example-turn-footer')
   },

@@ -32,6 +32,7 @@ const { UnsupportedRecord } = await server.ssrLoadModule('/src/assistant-ui/comp
 const { Transcript } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
 const { EmbraceRuntimeProvider, RuntimeAdoptedIds } = await server.ssrLoadModule('/src/assistant-ui/EmbraceRuntime.tsx')
 const { convertConversationItem } = await server.ssrLoadModule('/src/assistant-ui/embrace-converter.ts')
+const { backgroundJobOutcomeCounts } = await server.ssrLoadModule('/src/assistant-ui/embrace-data/model.ts')
 
 const unsupported = {
   _tag: 'Unsupported', id: 'unsupported/example', harness: 'omp', recordKind: 'model_usage',
@@ -105,6 +106,52 @@ for (const scheme of ['dark', 'light']) test(`${scheme} background jobs label ea
       assert.doesNotMatch(container.querySelector('[data-testid=harness-notice]').textContent, /\bunknown\b/i)
       assert.equal(container.querySelector('button').getAttribute('aria-expanded'), 'false')
     }
+  } finally { await act(async () => root.unmount()); container.remove() }
+})
+const checkPath = 'M3 8.5 6.5 12 13 4.5'
+const alertPath = 'M8 2 14.5 13.5H1.5z'
+test('grouped job outcomes read failed, running, cancelled, unknown, completed for every arrival order', () => {
+  const states = ['completed', 'unknown', 'failed', 'cancelled', 'running', 'failed']
+  const ordered = [{ state: 'failed', count: 2 }, { state: 'running', count: 1 }, { state: 'cancelled', count: 1 }, { state: 'unknown', count: 1 }, { state: 'completed', count: 1 }]
+  const permutations = list => list.length <= 1 ? [list] : list.flatMap((head, index) => permutations([...list.slice(0, index), ...list.slice(index + 1)]).map(rest => [head, ...rest]))
+  for (const arrival of permutations(states)) assert.deepEqual(backgroundJobOutcomeCounts(arrival), ordered)
+  assert.deepEqual(backgroundJobOutcomeCounts([]), [])
+})
+for (const scheme of ['dark', 'light']) test(`${scheme} subagent and job outcomes share one presentation`, async () => {
+  const container = document.createElement('section'); document.body.append(container)
+  Object.assign(container, sx.props(...baselineTheme, scheme === 'light' && lightTheme))
+  const root = createRoot(container)
+  const base = { _tag: 'Event', at: '2026-01-15T12:00:00Z', sender: { kind: 'harness', label: 'OMP' }, data: {} }
+  const subagent = status => ({ ...base, id: `subagent/${status}`, kind: 'subagent-result', title: `RowWorker · ${status}`, text: 'Subagent result', notice: { _tag: 'SubagentResult', taskId: 'RowWorker', agent: 'task', status, duration: '2m', payload: 'Subagent result', raw: '' } })
+  const job = state => ({ ...base, id: `job/${state}`, kind: 'background-job', title: `Background job ${state}`, text: 'Native job', notice: { _tag: 'BackgroundJob', jobId: 'j', state, payload: '', raw: '' } })
+  const group = (id, states) => ({ ...base, id, kind: 'background-job', title: `${states.length} background jobs`, text: 'Native jobs', notice: { _tag: 'BackgroundJobGroup', outcomes: backgroundJobOutcomeCounts(states), payload: '- Alpha: failed', raw: '' } })
+  const items = [subagent('completed'), subagent('cancelled'), subagent('failed (exit 1)'), subagent('merge failed'), job('completed'), job('cancelled'), job('failed'), job('running'),
+    group('group/failed', ['completed', 'running', 'failed', 'cancelled']), group('group/quiet', ['completed', 'running']), group('group/done', ['completed', 'completed'])]
+  try {
+    await act(async () => root.render(React.createElement(React.Fragment, null, items.map(item => React.createElement(HarnessNotice, { key: item.id, item, weight: 'row' })))))
+    const notice = id => container.querySelector(`[data-item-id="${id}"]`)
+    const pill = id => notice(id).querySelector('[data-testid=harness-kind]')
+    const icon = id => notice(id).querySelector('svg path').getAttribute('d')
+    const failedIds = ['subagent/failed (exit 1)', 'subagent/merge failed', 'job/failed', 'group/failed']
+    const neutralIds = ['subagent/cancelled', 'job/cancelled', 'job/running', 'group/quiet']
+    const completedIds = ['subagent/completed', 'job/completed', 'group/done']
+    const neutralClass = pill('job/completed').className
+    for (const id of failedIds) { assert.equal(icon(id), alertPath, id); assert.notEqual(pill(id).className, neutralClass, id) }
+    // Cancelled is not failure: a cancelled subagent matches a cancelled job, neither red nor alert nor check.
+    for (const id of neutralIds) { assert.notEqual(icon(id), alertPath, id); assert.notEqual(icon(id), checkPath, id); assert.equal(pill(id).className, neutralClass, id) }
+    assert.equal(icon('subagent/cancelled'), icon('job/cancelled'))
+    for (const id of completedIds) { assert.equal(icon(id), checkPath, id); assert.equal(pill(id).className, neutralClass, id) }
+    assert.equal(pill('group/failed').textContent, 'failed')
+    assert.equal(pill('group/quiet').textContent, 'running')
+    assert.equal(pill('group/done').textContent, 'completed')
+    const trigger = notice('group/failed').querySelector('[data-testid=harness-trigger]')
+    assert.equal(trigger.textContent, 'Read results'); assert.equal(trigger.getAttribute('aria-expanded'), 'false')
+    await act(async () => trigger.click())
+    assert.equal(trigger.getAttribute('aria-expanded'), 'true')
+    assert.equal(notice('group/failed').querySelector('[data-testid=harness-payload] li').textContent, 'Alpha: failed')
+    // Failing control: a success icon painted on a failed group must fail the alert assertion.
+    const path = notice('group/failed').querySelector('svg path'); path.setAttribute('d', checkPath)
+    assert.throws(() => assert.equal(icon('group/failed'), alertPath)); path.setAttribute('d', alertPath)
   } finally { await act(async () => root.unmount()); container.remove() }
 })
 
