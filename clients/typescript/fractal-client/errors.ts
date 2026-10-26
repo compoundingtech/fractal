@@ -1,6 +1,6 @@
-// What st's errors mean to a person, and whether trying again may help. The Rust client has the
-// same rules (ClientError::plain and is_transient in crates/fractal-client), so every client says
-// the same thing and retries the same things.
+// Human-only error rendering, matching ClientError::human / human_message in the Rust client.
+// Rust plain()/plain_message() retain legacy wording for gate reports and durable consumers.
+// Neither path mutates the server's code, message or error envelope.
 import { ClientError } from './Client.generated.ts';
 
 type Code = ClientError['response']['code'];
@@ -17,8 +17,10 @@ export function plainMessage(code: Code | string | undefined, message: string): 
     case 'remote-unavailable': return host ? `${host} cannot be reached right now` : 'the host this lives on cannot be reached right now';
     case 'rate-limited': return 'Fractal asked to slow down for a moment';
     case 'runtime-authority-indeterminate': return 'Fractal cannot tell yet which host runs this';
+    case 'runtime-list-not-ready': return 'Fractal is still preparing the runtime list; try again shortly';
+    case 'runtime-list-ended': return 'the runtime list stopped updating; restart fractal';
     case 'idempotency-conflict': return 'this was already sent once in another form, so it was not sent again';
-    case 'unsupported-capability': return `Fractal does not do that yet (${message})`;
+    case 'unsupported-capability': return `this Fractal does not do that yet (${message})`;
     case 'not-found': return `it is gone: ${message}`;
     case 'forbidden': return `not allowed: ${message}`;
     case 'internal': return `Fractal hit a problem: ${message}`;
@@ -27,6 +29,15 @@ export function plainMessage(code: Code | string | undefined, message: string): 
     case 'timeline-history-incomplete': return message === 'the retained transcript starts after its first entries; st cannot show it from the start'
       ? 'the retained transcript starts after its first entries; Fractal cannot show it from the start'
       : message;
+    case 'blob-too-large': return 'the image is too large; the limit is 10 MiB';
+    case 'unsupported-media-type': return 'only PNG, JPEG, GIF and WebP images can be attached';
+    case 'blob-content-mismatch': return 'the file is not the kind of image it says it is';
+    case 'blob-quota-exceeded': return 'too many images were uploaded recently; try again later';
+    case 'blob-not-found': return 'this image is not stored on this machine';
+    case 'document-not-synced': return 'this version of the document has not reached this host yet';
+    case 'blob-expired': return 'this image was removed after its retention window; the message text remains';
+    case 'response-budget-exceeded': return 'the answer is larger than the requested response budget';
+    case 'content-not-text': return 'this content is not plain text, so it was not returned';
     default: return message;
   }
 }
@@ -65,7 +76,7 @@ export function plainError(error: unknown): string {
   if (appliedAnswer(error) === 'unknown') return 'Fractal may have taken it and has not confirmed it yet; sending it again is safe';
   if (error instanceof ClientError) return plainMessage(error.response.code, error.response.message);
   if (error instanceof Error) {
-    if (/network request failed|failed to fetch/i.test(error.message)) return 'Fractal cannot be reached right now';
+    if (/network request failed|failed to fetch/i.test(error.message)) return `the connection to Fractal broke (${error.message})`;
     if (/timed? ?out|deadline/i.test(error.message)) return 'Fractal took too long to answer; it may or may not have done it';
     return error.message;
   }

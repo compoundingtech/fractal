@@ -1059,14 +1059,37 @@ test('legacy product sentences render as Fractal without rewriting other server 
     assert.equal(plainMessage('timeline-history-incomplete', 'the retained transcript starts after its first entries; st cannot show it from the start'), 'the retained transcript starts after its first entries; Fractal cannot show it from the start');
     assert.equal(plainMessage('timeline-history-incomplete', 'st kept a partial note'), 'st kept a partial note');
     assert.equal(plainMessage('internal', 'disk full'), 'Fractal hit a problem: disk full');
-    assert.equal(plainMessage('unsupported-capability', 'widgets'), 'Fractal does not do that yet (widgets)');
+    assert.equal(plainMessage('unsupported-capability', 'widgets'), 'this Fractal does not do that yet (widgets)');
     assert.equal(plainMessage(undefined, 'please use st'), 'please use st');
     const refused = (code, details = {}) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'm', retryable: false, details }, 409);
     assert.equal(plainError(refused('forbidden')), 'not allowed: m');
     assert.equal(refused('forbidden').response.api_version, 'st3.client.v0');
-    assert.equal(plainError(new TypeError('Network request failed')), 'Fractal cannot be reached right now');
+    assert.equal(plainError(new TypeError('Network request failed')), 'the connection to Fractal broke (Network request failed)');
     assert.equal(plainError(new TypeError('please use st')), 'please use st');
     const unconfirmed = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'message-send-unconfirmed', message: 'the database has not confirmed the send', retryable: false, details: { applied: 'unknown' } }, 503);
     assert.equal(plainError(unconfirmed), 'Fractal may have taken it and has not confirmed it yet; sending it again is safe');
     assert.equal(unconfirmed.response.message, 'the database has not confirmed the send');
+});
+
+test('human error sentences match the shared Rust cases without mutating wire envelopes', () => {
+    const cases = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../fixtures/clients/plain-errors-v1.json'), 'utf8'));
+    for (const fixture of cases) {
+        if (fixture.kind === 'api') {
+            assert.equal(plainMessage(fixture.code ?? undefined, fixture.message), fixture.human, JSON.stringify(fixture));
+        }
+        if (fixture.kind === 'transport') {
+            const error = new TypeError(fixture.message);
+            assert.equal(plainError(error), fixture.human);
+            assert.equal(error.message, fixture.message);
+        } else if (fixture.code) {
+            const error = new ClientError({
+                api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
+                request_id: 'request/parity', code: fixture.code, message: fixture.message,
+                retryable: false, details: fixture.kind === 'applied-unknown' ? { applied: 'unknown' } : {},
+            }, 409);
+            const before = JSON.stringify(error.response);
+            assert.equal(plainError(error), fixture.human, JSON.stringify(fixture));
+            assert.equal(JSON.stringify(error.response), before);
+        }
+    }
 });

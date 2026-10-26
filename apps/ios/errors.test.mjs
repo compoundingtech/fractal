@@ -10,7 +10,7 @@ assert.equal(plainMessage('not-found', 'agent `agent/x` does not exist'), 'it is
 assert.equal(plainMessage(undefined, 'invalid subscription'), 'invalid subscription');
 const refused = code => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'm', retryable: false, details: {} }, 409);
 assert.equal(plainError(refused('forbidden')), 'not allowed: m');
-assert.equal(plainError(new TypeError('Network request failed')), 'Fractal cannot be reached right now');
+assert.equal(plainError(new TypeError('Network request failed')), 'the connection to Fractal broke (Network request failed)');
 
 assert.ok(isTransient(refused('stale-fence')) && !isTransient(refused('not-found')));
 assert.ok(isTransientCode(undefined) && isTransientCode('page-cursor-expired') && !isTransientCode('forbidden'));

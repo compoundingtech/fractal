@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No stored conversation events or claims are rewritten."},
   "schema": {"status": "none", "detail": "No schema, JSON field, actor kind, error code or wire value changes."},
   "rules": {"status": "none", "detail": "No registry, checkpoint or daemon rule changes."},
-  "compatibility": {"status": "none", "detail": "Human rendering uses Fractal for daemon compatibility, connection failures and delivery notices. Legacy server values remain accepted and unchanged in storage and on the wire."},
+  "compatibility": {"status": "none", "detail": "Human rendering uses Fractal for daemon compatibility, connection failures and delivery notices. Rust plain()/plain_message() retain their legacy gate-report wording because it reaches durable gate.result claims and gate-check JSON; explicit human()/human_message() render only UI/stderr with matching TypeScript fixture coverage. Server envelopes, stored values and wire messages are unchanged."},
   "downtime": {"status": "none", "detail": "No service interruption or new startup work."},
   "manual": {"status": "none", "detail": "No migration, re-pairing or operator action required."},
   "recovery": {"status": "none", "detail": "Recovery and retry behavior are unchanged; only human-facing wording changes."}

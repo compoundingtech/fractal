@@ -124,7 +124,7 @@ async fn follow_conversation(
                 message: Some(message),
                 ..
             }) => {
-                let message = fractal_client::plain_message(code.as_ref(), &message);
+                let message = fractal_client::human_message(code.as_ref(), &message);
                 if stalled.as_deref() != Some(message.as_str()) {
                     eprintln!("st: {message} · trying again");
                     stalled = Some(message);

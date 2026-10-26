@@ -4,6 +4,8 @@ The four-tab Expo app uses the generated `st3.client.v0` TypeScript client. Its 
 
 Status, compatibility and connection notices call the daemon Fractal. An “older Fractal” label means the paired host does not serve the current presentation fields; its reported state is shown without inferring a newer state. These human labels do not rename protocol actor kinds, error codes or stored conversation events.
 
+The TypeScript human error helpers match Rust's explicit `human()` / `human_message()` renderers through `fixtures/clients/plain-errors-v1.json`. Rust's legacy `plain()` / `plain_message()` wording is retained for gate reports, because those report strings also enter durable claims and gate-check JSON. Neither human path mutates the original error envelope.
+
 ## Connect
 
 1. On a trusted st3 machine, begin device pairing for the intended person with `st devices pair --as person/ada --full-control "iPhone"` if this trusted device should send messages and use mission/work, runtime, and terminal controls. Without `--full-control`, pairing intentionally grants the limited default projection, glasses, arrangement, terminal-output, attention, and launch scopes; an existing limited device must be re-paired to gain controls.

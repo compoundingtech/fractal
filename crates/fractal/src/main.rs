@@ -5043,13 +5043,17 @@ fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
     if native_driver {
         plain_error(error)
     } else {
-        doctor_cli::human_outage_message(error).unwrap_or_else(|| plain_error(error))
+        doctor_cli::human_outage_message(error).unwrap_or_else(|| render_client_error(error, true))
     }
 }
 
 /// The error chain as printed, with an st client-API error said in plain words and its code in
 /// parentheses for scripts, rather than a Rust enum name (`StaleFence`).
 fn plain_error(error: &anyhow::Error) -> String {
+    render_client_error(error, false)
+}
+
+fn render_client_error(error: &anyhow::Error, human: bool) -> String {
     let full = format!("{error:#}");
     let Some(api) = error
         .chain()
@@ -5064,7 +5068,8 @@ fn plain_error(error: &anyhow::Error) -> String {
         .ok()
         .and_then(|code| code.as_str().map(str::to_owned))
         .unwrap_or_default();
-    full.replace(&api.to_string(), &format!("{} ({code})", api.plain()))
+    let message = if human { api.human() } else { api.plain() };
+    full.replace(&api.to_string(), &format!("{message} ({code})"))
 }
 
 static DAEMON_WAIT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();

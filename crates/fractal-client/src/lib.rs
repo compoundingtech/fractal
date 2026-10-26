@@ -837,26 +837,40 @@ impl ClientError {
         matches!(self, ClientError::Transport(_)) || self.applied() == Some("unknown")
     }
 
-    /// What went wrong in words a person reads: no codes and no Rust names. st's own message
-    /// follows where it says something the sentence does not.
+    /// Stable plain diagnostic used by gate reports and other machine/durable consumers.
+    /// Keep its legacy wording; use `human()` only at a human presentation boundary.
     pub fn plain(&self) -> String {
+        self.render_plain(false)
+    }
+
+    /// Human-only diagnostic. Does not mutate the server envelope or stored message.
+    pub fn human(&self) -> String {
+        self.render_plain(true)
+    }
+
+    fn render_plain(&self, human: bool) -> String {
+        let product = if human { "Fractal" } else { "st" };
         match self {
             ClientError::Api(..) if self.applied() == Some("unknown") => {
-                "st may have taken it and has not confirmed it yet; sending it again is safe".into()
+                format!(
+                    "{product} may have taken it and has not confirmed it yet; sending it again is safe"
+                )
             }
-            ClientError::Api(code, message, _) => plain_message(Some(code), message),
+            ClientError::Api(code, message, _) => render_message(Some(code), message, human),
             ClientError::Transport(message) if message.contains("deadline") => {
-                "st took too long to answer; it may or may not have done it".into()
+                format!("{product} took too long to answer; it may or may not have done it")
             }
-            ClientError::Transport(message) => format!("the connection to st broke ({message})"),
+            ClientError::Transport(message) => {
+                format!("the connection to {product} broke ({message})")
+            }
             ClientError::Unreachable(unreachable) => {
                 format!(
-                    "st is not answering at {} (restarting?)",
+                    "{product} is not answering at {} (restarting?)",
                     unreachable.endpoint
                 )
             }
             ClientError::Protocol(message) => {
-                format!("st sent something this client cannot read ({message})")
+                format!("{product} sent something this client cannot read ({message})")
             }
         }
     }
@@ -892,8 +906,18 @@ impl ClientError {
 /// begins with it keeps st's own words.
 pub const PROMPT_REFUSAL_PREFIX: &str = "that prompt ";
 
-/// An error st sent (a code, when it gave one, and its message) as a person reads it.
+/// Stable diagnostic wording for machine/durable consumers, including gate reports.
 pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
+    render_message(code, message, false)
+}
+
+/// Human-only rendering of an API error; raw code and message remain unchanged.
+pub fn human_message(code: Option<&ErrorCode>, message: &str) -> String {
+    render_message(code, message, true)
+}
+
+fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> String {
+    let product = if human { "Fractal" } else { "st" };
     let Some(code) = code else {
         return message.to_owned();
     };
@@ -906,7 +930,7 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         // answered elsewhere or replaced, or only its terminal can answer it.
         ErrorCode::StaleFence if message.starts_with(PROMPT_REFUSAL_PREFIX) => message.to_owned(),
         ErrorCode::StaleFence => {
-            "st changed while this was on its way, so it was not applied".into()
+            format!("{product} changed while this was on its way, so it was not applied")
         }
         ErrorCode::PageCursorExpired | ErrorCode::CursorGap => {
             "the list changed while it was being read".into()
@@ -915,23 +939,30 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
             Some(host) => format!("{host} cannot be reached right now"),
             None => "the host this lives on cannot be reached right now".into(),
         },
-        ErrorCode::RateLimited => "st asked to slow down for a moment".into(),
+        ErrorCode::RateLimited => format!("{product} asked to slow down for a moment"),
         ErrorCode::RuntimeAuthorityIndeterminate => {
-            "st cannot tell yet which host runs this".into()
+            format!("{product} cannot tell yet which host runs this")
         }
         ErrorCode::RuntimeListNotReady => {
-            "st is still preparing the runtime list; try again shortly".into()
+            format!("{product} is still preparing the runtime list; try again shortly")
         }
-        ErrorCode::RuntimeListEnded => "the runtime list stopped updating; restart fractal".into(),
+        ErrorCode::RuntimeListEnded => {
+            "the runtime list stopped updating; restart fractal".into()
+        }
         ErrorCode::IdempotencyConflict => {
             "this was already sent once in another form, so it was not sent again".into()
         }
         ErrorCode::UnsupportedCapability => {
-            format!("this st does not do that yet ({message})")
+            format!("this {product} does not do that yet ({message})")
         }
         ErrorCode::NotFound => format!("it is gone: {message}"),
         ErrorCode::Forbidden => format!("not allowed: {message}"),
-        ErrorCode::Internal => format!("st hit a problem: {message}"),
+        ErrorCode::Internal => format!("{product} hit a problem: {message}"),
+        ErrorCode::TimelineHistoryIncomplete
+            if human && message == "the retained transcript starts after its first entries; st cannot show it from the start" =>
+        {
+            "the retained transcript starts after its first entries; Fractal cannot show it from the start".into()
+        }
         ErrorCode::TimelineHistoryIncomplete
         | ErrorCode::InventoryUnavailable
         | ErrorCode::ConversationContentInvalidated
@@ -942,7 +973,9 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::UnsupportedMediaType => {
             "only PNG, JPEG, GIF and WebP images can be attached".into()
         }
-        ErrorCode::BlobContentMismatch => "the file is not the kind of image it says it is".into(),
+        ErrorCode::BlobContentMismatch => {
+            "the file is not the kind of image it says it is".into()
+        }
         ErrorCode::BlobQuotaExceeded => {
             "too many images were uploaded recently; try again later".into()
         }
@@ -961,9 +994,7 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::ResponseBudgetExceeded => {
             "the answer is larger than the requested response budget".into()
         }
-        ErrorCode::ContentNotText => {
-            "this content is not plain text, so it was not returned".into()
-        }
+        ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
