@@ -1,5 +1,20 @@
 use super::*;
 
+#[test]
+fn launch_diagnostic_retains_only_current_attempt_last_twenty_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("app-server.log");
+    let previous = "previous incarnation diagnostic\n";
+    let current = (0..30).map(|i| format!("stderr line {i}\n")).collect::<String>();
+    fs::write(&path, format!("{previous}{current}")).unwrap();
+    let tail = app_server_log_tail(&path, previous.len() as u64).unwrap();
+    assert_eq!(tail.lines().count(), 20);
+    assert!(tail.starts_with("stderr line 10\n"));
+    assert!(tail.ends_with("stderr line 29"));
+    assert!(!tail.contains("previous"));
+    assert_eq!(app_server_log_tail(&path, fs::metadata(&path).unwrap().len()).unwrap(), "");
+}
+
 // Shared CI runs several workspace suites at once; these waits test event ordering,
 // not a two-second performance bound.
 const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);

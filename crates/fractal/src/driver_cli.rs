@@ -2190,6 +2190,24 @@ fn spawn_codex_provider(
     })
 }
 
+fn codex_launch_outcome(outcome: Result<()>, ready: bool) -> Result<()> {
+    match outcome {
+        Ok(()) if !ready => anyhow::bail!(
+            "Codex launch failed: the provider exited with exit status 0 before becoming ready"
+        ),
+        other => other,
+    }
+}
+
+#[test]
+fn codex_launch_clean_exit_before_ready_is_a_failure() {
+    let error = codex_launch_outcome(Ok(()), false).unwrap_err();
+    assert!(error.to_string().contains("exit status 0 before becoming ready"));
+    assert!(codex_launch_outcome(Ok(()), true).is_ok());
+    assert_eq!(codex_launch_outcome(Err(anyhow::anyhow!("schema incompatible")), false)
+        .unwrap_err().to_string(), "schema incompatible");
+}
+
 async fn drive_codex_native(
     client: &Client,
     subject: &str,
@@ -2316,7 +2334,9 @@ async fn drive_codex_native(
                 #[cfg(feature = "test-support")]
                 if completion_announced { fixture_codex_completion_phase(&task).await?; }
             }
-            result = &mut task, if completion_announced || fixture_completion_task_enabled() => {
+            // Preflight can fail before creating any harness observation. Waiting for an
+            // ended event here would hide that error indefinitely.
+            result = &mut task => {
                 let outcome = result.context("joining the Codex driver")?;
                 if let Some(session) = detached_session(&outcome) {
                     loop_state.delivery_episode = delivery.episode;
@@ -2367,6 +2387,8 @@ async fn drive_codex_native(
                 if let Err(error) = observations.drain(client, subject, "codex", &mut loop_state.ready).await {
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
+                let exit_code = if outcome.is_ok() { 0 } else { 1 };
+                let outcome = codex_launch_outcome(outcome, loop_state.ready);
                 // The harness is gone, and its subagents with it.
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
@@ -2374,6 +2396,23 @@ async fn drive_codex_native(
                 )
                 .await;
                 if let Err(error) = &outcome {
+                    if !loop_state.ready {
+                        let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
+                            subject: subject.into(),
+                            kind: "harness.observed".into(),
+                            actor: Some(subject.into()),
+                            fields: BTreeMap::from([
+                                ("state".into(), Value::String("ended".into())),
+                                ("driver".into(), Value::String("codex".into())),
+                                ("incarnation_id".into(), Value::String(incarnation.clone())),
+                                ("exit".into(), Value::String(format!("exit {exit_code}"))),
+                                ("reason".into(), Value::String(format!("{error:#}"))),
+                            ]),
+                            evidence: Vec::new(),
+                            expected_subject: None,
+                            idempotency_key: Some(format!("codex-launch-failed:{subject}:{incarnation}")),
+                        }).await;
+                    }
                     let reason = format!("{error:#}").chars().take(2_000).collect::<String>();
                     let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
                         subject: subject.into(),
@@ -2382,13 +2421,27 @@ async fn drive_codex_native(
                         fields: BTreeMap::from([
                             ("severity".into(), Value::String("error".into())),
                             ("status".into(), Value::String("failed".into())),
-                            ("code".into(), Value::String("codex-driver-failed".into())),
+                            ("code".into(), Value::String(if loop_state.ready { "codex-driver-failed" } else { "codex-launch-failed" }.into())),
                             ("reason".into(), Value::String(reason)),
                             ("incarnation_id".into(), Value::String(incarnation.clone())),
                         ]),
                         evidence: Vec::new(),
                         expected_subject: None,
                         idempotency_key: Some(format!("codex-driver-failed:{subject}:{incarnation}")),
+                    }).await;
+                    let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
+                        subject: subject.into(),
+                        kind: "runtime.observed".into(),
+                        actor: Some(subject.into()),
+                        fields: BTreeMap::from([
+                            ("status".into(), Value::String("exited".into())),
+                            ("runtime_id".into(), Value::String(runtime_id.clone())),
+                            ("incarnation_id".into(), Value::String(incarnation.clone())),
+                            ("exit_code".into(), Value::from(exit_code)),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: Some(native_exit_key(subject, &runtime_id, &incarnation)),
                     }).await;
                 }
                 return outcome;

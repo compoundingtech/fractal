@@ -44,7 +44,8 @@ pub(super) fn ensure_supported_protocol(codex: &str) -> Result<String> {
         .with_context(|| format!("generating the Codex app-server schema from {codex}"))?;
     anyhow::ensure!(
         output.status.success(),
-        "{codex} app-server schema generation failed: {}",
+        "{codex} app-server schema generation failed ({}): {}",
+        output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
     let read_schema = |name: &str| -> Result<Value> {
