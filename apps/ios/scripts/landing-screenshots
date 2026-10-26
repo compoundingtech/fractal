@@ -138,6 +138,13 @@ wait_service() {
   printf 'Timed out waiting for %s\n' "$url" >&2
   return 1
 }
+run node --input-type=module -e '
+  import { createRequire } from "node:module";
+  import { WebSocketServer } from "ws";
+  const require = createRequire(import.meta.url);
+  const { name, version } = require("ws/package.json");
+  console.log(JSON.stringify({ name, version, path: import.meta.resolve("ws"), server: typeof WebSocketServer }));
+'
 start_service "$out/demoGateway.log" node demoGateway.mjs 8791
 gateway_pid="$service_pid"
 wait_service "$gateway_pid" 'http://127.0.0.1:8791/v1/client/capabilities' "$out/demoGateway.log"

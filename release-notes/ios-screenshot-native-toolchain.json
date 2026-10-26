@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Build iOS landing screenshots with Apple's native toolchain and an Xcode 26 hosted runner instead of inherited Nix compiler overrides",
+  "summary": "Repair iOS landing screenshot capture with Apple's native toolchain, an Xcode 26 hosted runner, and the demo gateway's declared ws ESM server dependency",
   "replay": {"status": "none", "detail": "Screenshot tooling only; no replay changes."},
   "schema": {"status": "none", "detail": "No schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rule change."},
