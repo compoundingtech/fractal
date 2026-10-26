@@ -3291,9 +3291,9 @@ fn an_attention_item_names_its_kind_sender_and_age() {
     if let Some(ClientResource::Attention(shown)) = page.items.first_mut() {
         shown.update = item.update.clone();
     }
-    let rendered = render_product_page("NOW", &page, "st now");
+    let rendered = render_product_page("NOW", &page, "fractal now");
     assert!(
-        rendered.contains("  action (marks it read): st alerts show launch/release"),
+        rendered.contains("  action (marks it read): fractal alerts show launch/release"),
         "{rendered}"
     );
     item.state = "snoozed".into();
