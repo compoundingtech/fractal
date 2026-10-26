@@ -38,6 +38,27 @@ fn daemon_authorship_is_truthful_without_widening_legacy_sender_or_guessing_broa
         assert_eq!(body["recipients"], json!([recipient]));
         assert_eq!(body["message_id"], claim.subject);
     }
+    // The canonical actor and displayed sender can differ under delegation.
+    let delegated = send(
+        "message/delegated",
+        Some("agent/fixture"),
+        "person/fixture",
+        "agent/worker",
+    );
+    let delegated_body = session_message_body(&state, &delegated, true);
+    assert_eq!(delegated_body["author"], "agent/fixture");
+    assert_eq!(delegated_body["from"], "person/fixture");
+    let assistant = send(
+        "message/assistant",
+        Some("assistant/fixture"),
+        "assistant/fixture",
+        "assistant/worker",
+    );
+    let assistant_body = session_message_body(&state, &assistant, true);
+    assert_eq!(assistant_body["from"], "assistant/fixture");
+    assert_eq!(assistant_body["to"], "assistant/worker");
+    assert!(assistant_body.get("author").is_none());
+    assert!(assistant_body.get("recipients").is_none());
     let unknown = send(
         "message/unknown",
         None,
@@ -100,4 +121,50 @@ fn participant_negotiation_is_exact_and_legacy_relays_remove_only_new_message_fi
         assert_eq!(page["items"][0], expected);
         assert_eq!(page["items"][1], opaque);
     }
+}
+
+#[test]
+fn cached_timeline_continuations_respect_each_readers_participant_negotiation() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "participants-cache-fixture");
+    let snapshot = new_client_snapshot(&state);
+    let mut session = ClientSession::local(Some("person/fixture")).unwrap();
+    let items = (1..=2).map(|number| json!({
+        "id":format!("timeline-entry/participants/{number}"), "sequence":number,
+        "revision":1, "timestamp":"2099-01-01T00:00:00Z", "role":"user", "type":"message", "final":true,
+        "body":{"message_id":format!("message/fixture-{number}"), "from":"person/fixture", "to":"agent/worker",
+            "author":"daemon/runtime", "recipients":["agent/worker"]}
+    })).collect();
+    let first = client_page(
+        &state,
+        &snapshot,
+        "timeline/session/participants",
+        items,
+        &ClientListQuery {
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let query = ClientListQuery {
+        limit: Some(1),
+        cursor: first.page.next_cursor,
+        ..Default::default()
+    };
+    assert!(query.cursor.is_some());
+    let legacy = timeline_value(&state, &snapshot, &session, "participants", &query)
+        .unwrap()
+        .0;
+    assert_eq!(legacy["items"][0]["body"]["to"], "agent/worker");
+    assert!(legacy["items"][0]["body"].get("author").is_none());
+    assert!(legacy["items"][0]["body"].get("recipients").is_none());
+    session.conversation_message_participants = true;
+    let current = timeline_value(&state, &snapshot, &session, "participants", &query)
+        .unwrap()
+        .0;
+    assert_eq!(current["items"][0]["body"]["author"], "daemon/runtime");
+    assert_eq!(
+        current["items"][0]["body"]["recipients"],
+        json!(["agent/worker"])
+    );
 }

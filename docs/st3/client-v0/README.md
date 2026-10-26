@@ -2520,14 +2520,16 @@ Capability `conversation-message-participants` v1 and
 `X-St3-Features: conversation-message-participants.v1` opt into optional message
 body `author: ActorRef` and `recipients: ParticipantRef[]`. Prefer these when
 present; otherwise retain the existing from/to fallback. The scalar from/to
-properties remain optional ParticipantRef values. A runtime-authored wake or
+properties retain their optional SenderRef/TimelineRecipientRef scalar types,
+including existing assistant principals. A runtime-authored wake or
 fault has author `daemon/runtime`; it omits the invalid legacy from value rather
 than relabeling that daemon as an agent/person. Absent or unprovable canonical
 claim actors supply no author. The typed owner relay preserves both fields;
 unnegotiated gateway/cache clients receive neither.
 
-Recipients currently contains the one destination proven by this canonical
-message.sent claim. Legacy broadcasts stored as multiple distinct message
+Recipients currently contains the one ParticipantRef destination proven by this
+canonical message.sent claim; destinations outside that type keep their legacy
+scalar without an invented recipient. Legacy broadcasts stored as multiple distinct message
 subjects remain distinct: neither matching text nor temporal proximity proves
 one shared send. This slice adds truthful optional identities without changing
 SEND, receipt, idempotency, grouping, ordering or paging semantics. Native turns

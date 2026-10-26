@@ -16,10 +16,14 @@ fn participant(value: Option<&Value>) -> Option<&str> {
 
 pub fn apply(body: &mut Value, claim: &ClaimRecord, negotiated: bool) {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
-    // These legacy properties remain optional ParticipantRef scalars. A daemon is
-    // not a ParticipantRef: omit that invalid optional value, never relabel it.
+    // Keep the existing SenderRef/TimelineRecipientRef scalar contract, including
+    // external assistants. A daemon is neither: omit it, never relabel it.
     for name in ["from", "to"] {
-        if let Some(value) = participant(fields.get(name)) {
+        if let Some(value) = fields
+            .get(name)
+            .and_then(Value::as_str)
+            .and_then(|value| reference(value, &["agent", "assistant", "person", "step"]))
+        {
             body[name] = json!(value);
         }
     }
