@@ -1061,8 +1061,8 @@ The consumption check enforces both directions: a missing or invalid declaration
 story must consume its declared slices, and an exempt story must not declare slices or scenario
 args or call `useScenarioSlice`. Forbidden hook reads are recorded out of band as well as thrown,
 so a React error boundary cannot hide a violation. Exemptions appear in the check output with
-their reasons. The consumer pins their sorted `file#export` identities and modes, as well as the
-count, so even a count-neutral exemption swap is visible in review.
+their reasons. Each CSF exports its reviewed `scenarioExemptions` as sorted `export:mode` ids.
+The collected exemptions must equal their union, so an exemption swap is visible in that file’s review.
 Blocked story files have a separate explicit undeclared-story ratchet with blocking PR numbers;
 the ratchet fails if it grows or retains an entry after the story gains a declaration.
 

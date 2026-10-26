@@ -140,7 +140,7 @@ fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
         json!({"id": "ada/claude/weekly", "kind": "budget", "status": "stale", "target": "100% allowance",
             "current": "40% used", "window": "weekly", "remaining_percent": 60.0,
             "resets_at_unix_ms": 86_400_000u64, "explain": "An allowance that resets."}),
-        json!({"id": "cpu", "kind": "objective", "status": "no-data", "target": "≤ 2 cores",
+        json!({"id": "cpu", "kind": "objective", "status": "no-data", "target": "≤ 1 core over the hour",
             "current": "not measured", "window": "1h", "remaining_percent": null, "explain": "x"}),
     ];
     let list = render_slo_list(&rows);

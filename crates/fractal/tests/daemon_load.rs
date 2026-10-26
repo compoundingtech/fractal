@@ -78,11 +78,12 @@ const BASELINE_RUNS: usize = 5;
 /// The daemon's CPU, in cores, may differ from the baseline by this much whatever the ratio.
 const CPU_SLACK: f64 = 0.05;
 
-/// The daemon's average CPU over the run may not pass this many cores: the CPU target in
-/// `slo/targets.toml`, built into st3. A missing file fails the build and an invalid one fails
-/// the run; there is no default.
+/// The daemon's average CPU over the run may not pass this many cores: `load_max_cores` in
+/// `slo/targets.toml`, built into st3, the bound under this synthetic load rather than the
+/// member's production target. A missing file fails the build and an invalid one fails the run;
+/// there is no default.
 fn cpu_budget() -> f64 {
-    fractal_daemon::slo::targets().cpu.max_cores
+    fractal_daemon::slo::targets().cpu.load_max_cores
 }
 
 /// Requests in flight at once before the load stops adding more; a daemon this far behind fails.
@@ -1250,7 +1251,7 @@ fn unchanged_work_tolerates_bounded_shared_runner_variation() {
 #[test]
 fn targets_come_from_the_targets_file_and_describe_without_gating() {
     // The CPU budget is the file's, not a copy of it here.
-    assert_eq!(cpu_budget(), fractal_daemon::slo::targets().cpu.max_cores);
+    assert_eq!(cpu_budget(), fractal_daemon::slo::targets().cpu.load_max_cores);
     // Each request stands for the path in the file that serves it, and takes that target's
     // owner-side p99, so editing the file moves these without editing this test.
     let targets = fractal_daemon::slo::targets();

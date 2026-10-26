@@ -30,6 +30,7 @@ import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
 import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
+import { formatDuration } from '@fractal/ui/human-time/format'
 import { useGatewaySync } from '../data/react.tsx'
 import { NarrowLayoutContext } from '@fractal/ui/assistant-ui/shell'
 import { PhoneAgentDrawer, type PhoneAgentDrawerHandle } from './PhoneAgentDrawer.tsx'
@@ -662,7 +663,7 @@ const GatewayConnectionStatus = () => {
   // The band's title already says "Reconnecting"; its detail is the next try, after syncLine's grace delay.
   const text = line === undefined ? undefined
     : status._tag === 'Stale' && status.reason._tag === 'Reconnecting'
-      ? `Next try in ${Math.ceil(Math.max(0, status.reason.nextAt - now) / 1000)}s · attempt ${status.reason.attempt}`
+      ? `Next try in ${formatDuration(Math.ceil(Math.max(0, status.reason.nextAt - now) / 1000) * 1000)} · attempt ${status.reason.attempt}`
       : line.text
   return <ConnectionStatus
     state={network._tag === 'Offline' ? 'offline' : reconnecting ? 'reconnecting' : status._tag === 'Stale' ? 'stale' : status._tag === 'Failed' ? 'failed' : 'live'}

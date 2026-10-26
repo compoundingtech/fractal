@@ -61,6 +61,8 @@ pub mod start_jobs;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
+#[cfg(test)]
+mod schedule_admission_tests;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -131,9 +133,14 @@ const DEADLINE_SOURCE_RETRY_MS: u128 = 5_000;
 // draws no graph change, and a pass used to read every running seat's screen.
 const SCREEN_POLL_EVERY_MS: u128 = 10_000;
 
-/// When a seat's retention was last checked, why the seat is held (if it is), and what the
-/// check read.
-type SeatRetention = (u128, Option<String>, BTreeSet<String>);
+/// Why a seat is held (if it is), and what the retention check read.
+type SeatRetention = (Option<String>, BTreeSet<String>);
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read a seat's retention answer from the store.
+    static SEAT_RETENTION_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 // A seat kept running past its run is checked again this soon for unread mail and other work.
 // Reading a conversation message does not wake the reconciler, so this check is what lets the
@@ -164,7 +171,10 @@ fn schedule_admission_ready(
     host: &str,
     configured: &[String],
     since: u128,
+    schedule: &DesiredSubject,
 ) -> Result<bool> {
+    // Include the due callback: an armed timer cannot bypass a staged or conflicting owner.
+    store.owned_desired_guard(schedule).map_err(anyhow::Error::new)?;
     if store.replication_projection_deferred()
         || store.replication_catching_up()
         || store
@@ -192,10 +202,42 @@ fn schedule_admission_ready(
         return Ok(true);
     }
     let sync = store.replication_peer_sync(&peers);
-    Ok(!sync.values().any(|peer| peer.peer_only_envelopes > 0)
-        && sync
-            .values()
-            .any(|peer| peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0))
+    let strict = sync.values().any(|peer| peer.stale && peer.peer_only_envelopes > 0)
+        && schedule_requires_complete_history(store, schedule)?;
+    Ok(schedule_progress_ready(sync.values(), since, strict))
+}
+
+/// Moving a schedule (or removing its standby) must not turn an old missing-history
+/// comparison into permission to run on a second host. Conservatively retain the strict
+/// policy for the entire retained history after any role/owner change, not just a timeout.
+fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) -> Result<bool> {
+    let Some(current) = owned_schedule_spec(store, schedule)? else { return Ok(true) };
+    if current.standby.is_some() { return Ok(true); }
+    for claim in store.claims_for(&schedule.subject, Some("intent.desired"))? {
+        let Some(previous) = crate::graph::schedule_spec(&claim.body["desired"], &claim.origin) else {
+            return Ok(true);
+        };
+        if previous.host != current.host || previous.standby.is_some()
+            || claim.body["owner_run"].as_str() != schedule.owner_run.as_deref()
+            || claim.body["owner_generation"].as_str() != schedule.owner_generation.as_deref()
+            || claim.body["owner_step"].as_str() != schedule.owner_step.as_deref() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn schedule_progress_ready<'a>(
+    sync: impl IntoIterator<Item = &'a smallclaims::replication::ReplicationPeerSync>,
+    since: u128,
+    strict: bool,
+) -> bool {
+    let mut complete = false;
+    for peer in sync {
+        if peer.peer_only_envelopes > 0 && (strict || !peer.stale) { return false; }
+        complete |= peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0;
+    }
+    complete
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -14390,28 +14432,48 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Why a run-owned stop must wait for `seat`: it holds a message nobody has read, or work in a
     /// run other than the one that is ending. The stop declaration stays, so the seat stops once
-    /// both are gone. Read at most every [`SEAT_RETENTION_CHECK_MS`] per seat.
+    /// both are gone. The answer is read again only when something it read changed: a seat with
+    /// thousands of messages costs a view of each one, so a held seat's 60 s recheck only wakes the
+    /// pass that notices a change.
     fn seat_retention(&self, seat: &str, owner_run: &str) -> Result<Option<String>> {
         if !seat.starts_with("agent/") {
             return Ok(None);
         }
         let now = now_ms();
-        if let Some((at, reason, reads)) = self
+        let item = format!("retain:{seat}");
+        let cached = self
             .seat_retention
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(seat)
-            && now.saturating_sub(*at) < SEAT_RETENTION_CHECK_MS
-        {
-            // The cached answer stands until the next check, and depends on what that check read.
-            for key in reads {
-                smallclaims::touched::note_read(|| key.clone());
+            .filter(|_| !self.incremental.needs(&item, now))
+            .cloned();
+        let reason = match cached {
+            // The cached answer stands while nothing it read changed, and depends on those reads.
+            Some((reason, reads)) => {
+                for key in reads {
+                    smallclaims::touched::note_read(|| key);
+                }
+                reason
             }
-            if reason.is_some() {
-                smallclaims::touched::note_due(at.saturating_add(SEAT_RETENTION_CHECK_MS));
-            }
-            return Ok(reason.clone());
+            None => self.read_seat_retention(seat, owner_run, &item)?,
+        };
+        if reason.is_some() {
+            smallclaims::touched::note_due(now.saturating_add(SEAT_RETENTION_CHECK_MS));
+            self.arm_restart(&item, now.saturating_add(SEAT_RETENTION_CHECK_MS));
         }
+        Ok(reason)
+    }
+
+    /// Read `seat`'s retention answer and remember it, with what it read, as incremental `item`.
+    fn read_seat_retention(
+        &self,
+        seat: &str,
+        owner_run: &str,
+        item: &str,
+    ) -> Result<Option<String>> {
+        #[cfg(test)]
+        SEAT_RETENTION_READS.with(|count| count.set(count.get() + 1));
         let (reason, reads) = smallclaims::touched::record(|| -> Result<Option<String>> {
             let unread = self
                 .store
@@ -14438,16 +14500,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
         });
         let reason = reason?;
+        self.incremental.evaluated(item, reads.clone(), None);
         self.seat_retention
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(seat.to_owned(), (now, reason.clone(), reads));
-        if reason.is_some() {
-            self.arm_restart(
-                &format!("retain:{seat}"),
-                now.saturating_add(SEAT_RETENTION_CHECK_MS),
-            );
-        }
+            .insert(seat.to_owned(), (reason.clone(), reads));
         Ok(reason)
     }
 
@@ -14545,12 +14602,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn schedules_caught_up(&self) -> Result<bool> {
+    fn schedules_caught_up(&self, schedule: &DesiredSubject) -> Result<bool> {
         schedule_admission_ready(
             &self.store,
             &self.host,
             &self.schedule_peers,
             self.started_at_unix_ms,
+            schedule,
         )
     }
 
@@ -14590,7 +14648,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if self.schedule_has_open_work(&schedule.subject)? {
             return Ok(());
         }
-        if !self.schedules_caught_up()? {
+        if !self.schedules_caught_up(schedule)? {
             self.arm_restart("stage/schedule-sync", now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
             return Ok(());
         }
@@ -14843,7 +14901,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     },
                     _ => false,
                 };
-                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at)
+                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at, &schedule_declaration)
                     .unwrap_or(false);
                 let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
                 let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
@@ -15027,7 +15085,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .remove(&schedule.subject);
             return Ok(());
         }
-        if !self.schedules_caught_up()? {
+        if !self.schedules_caught_up(schedule)? {
             self.arm_restart("stage/schedule-sync", now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
             return Ok(());
         }
@@ -34095,6 +34153,26 @@ version 2
             desired.subject == format!("agent/{run_id}/worker") && desired.kind == "stop"
         }));
 
+        // While nothing the answer read changes, the held seat's minute rechecks reuse it: a
+        // seat's mailbox is not read again, however many messages it holds.
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        let start = now_ms();
+        SEAT_RETENTION_READS.with(|count| count.set(0));
+        for minute in 1..=3 {
+            smallclaims::store::set_thread_clock(Some(
+                start + minute * (SEAT_RETENTION_CHECK_MS + 1_000),
+            ));
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(SEAT_RETENTION_READS.with(std::cell::Cell::get), 0);
+        assert!(runtime.stops.lock().unwrap().is_empty());
+
         // Once the message is read the stop goes ahead.
         for (kind, status) in [
             ("message.staged", "staged"),
@@ -34113,7 +34191,6 @@ version 2
                 })
                 .unwrap();
         }
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
     }
@@ -34191,7 +34268,6 @@ version 2
         store
             .set_step_state(&elsewhere[0], "completed", None)
             .unwrap();
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
         assert!(store.fault_items(None).unwrap().is_empty());
@@ -34442,7 +34518,6 @@ mission "held-stop" state="ready" {
                 })
                 .unwrap();
         }
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
         assert!(store.fault_items(None).unwrap().is_empty());
