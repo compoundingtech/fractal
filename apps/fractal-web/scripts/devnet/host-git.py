@@ -29,12 +29,14 @@ def validate_config(path, env):
                            input=content, cwd=TRUSTED_CWD, env=env, capture_output=True)
     if check.returncode:
         raise RuntimeError('host Git cannot parse repository-local configuration')
+    rejected = set()
     for entry in check.stdout.split(b'\0'):
         if not entry:
             continue
         key = entry.split(b'\n', 1)[0].decode('utf-8')
         if key not in LOCAL_KEYS and not re.fullmatch(r'branch\.[^\n]+\.(remote|merge)', key):
-            raise RuntimeError('host Git refuses non-allowlisted repository-local configuration')
+            rejected.add(key)
+    return rejected
 
 
 def run(args):
@@ -52,10 +54,13 @@ def run(args):
         metadata = repo / '.git'
         if metadata.is_symlink() or not metadata.is_dir():
             raise RuntimeError('host Git requires launcher-owned directory metadata')
-        validate_config(metadata / 'config', env)
+        rejected = validate_config(metadata / 'config', env)
         worktree_config = metadata / 'config.worktree'
         if worktree_config.exists() or worktree_config.is_symlink():
-            validate_config(worktree_config, env)
+            rejected.update(validate_config(worktree_config, env))
+        if rejected:
+            raise RuntimeError('host Git refuses non-allowlisted repository-local configuration: '
+                               + ', '.join(repr(key) for key in sorted(rejected)))
     return subprocess.run(['git', *POLICY, *args], cwd=TRUSTED_CWD, env=env).returncode
 
 

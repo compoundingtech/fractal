@@ -69,7 +69,7 @@ class HostBoundaryTest(unittest.TestCase):
             'protocol.ext.allow', 'url.fixture.insteadOf', 'http.proxy', 'http.proxyAuthMethod',
             'include.path', 'includeIf.gitdir:fixture.path', 'alias.fixture',
             'filter.fixture.clean', 'merge.fixture.driver', 'diff.fixture.command', 'diff.fixture.textconv',
-            'core.hooksPath', 'core.fsmonitor', 'future.unknown',
+            'core.hooksPath', 'core.fsmonitor', 'future.unknown', 'gc.rerereunresolved',
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -90,6 +90,7 @@ class HostBoundaryTest(unittest.TestCase):
                                             capture_output=True, text=True, timeout=10)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn('non-allowlisted', result.stderr)
+                    self.assertIn(key.lower(), result.stderr)
                     self.assertFalse(marker.exists())
             # Per-worktree config is validated before Git can activate it too.
             config.write_bytes(original)
@@ -98,6 +99,22 @@ class HostBoundaryTest(unittest.TestCase):
                                      '-C', str(repo), 'status', '--porcelain'], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('non-allowlisted', result.stderr)
+            self.assertIn('credential.helper', result.stderr)
+
+    def test_host_git_names_all_rejected_keys_across_both_configs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / 'repo'
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            config = repo / '.git/config'
+            with config.open('a') as stream:
+                stream.write('[gc]\n rerereunresolved = 15\n[core]\n pager = forbidden\n')
+            (repo / '.git/config.worktree').write_text('[filter "x"]\n clean = forbidden\n')
+            result = subprocess.run([sys.executable, '-I', str(SCRIPTS / 'host-git.py'),
+                                     '-C', str(repo), 'status', '--porcelain'],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            for key in ('gc.rerereunresolved', 'core.pager', 'filter.x.clean'):
+                self.assertIn(key, result.stderr)
 
 
 if __name__ == '__main__':
