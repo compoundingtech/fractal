@@ -643,6 +643,24 @@ fn duplicate_paths_keep_run_identity_and_the_actual_seat_after_pipeline_sort() {
             ),
         ]
     );
+    // An agent owner reads as its name with its id beside it; agentless work is Fractal's.
+    let owners = missions[0]
+        .steps
+        .iter()
+        .map(|step| (step.owner.as_deref(), step.owner_id.as_deref()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners,
+        [
+            (Some("Fractal"), None),
+            (Some("claimant"), Some("agent/claimant")),
+            (Some("assigned"), Some("agent/assigned")),
+        ]
+    );
+    assert_eq!(
+        missions[0].steps[1].owner_identity().as_deref(),
+        Some("claimant · agent/claimant")
+    );
     for id in ["a", "b", "c"] {
         let metadata = &missions[0].step_metadata[&format!("step-run/{id}/build")];
         assert_eq!(metadata.blocked_reason, Some(format!("reason for {id}")));

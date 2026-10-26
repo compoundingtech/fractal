@@ -107,7 +107,11 @@ pub struct Step {
     pub seat: Option<String>,
     pub name: String,
     pub state: StepState,
+    /// Who holds the step as a person reads it: "you", a name, or "Fractal" for agentless work.
     pub owner: Option<String>,
+    /// The agent id beside an agent owner's name; a pane too narrow for it shows the name alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
     pub note: Option<String>,
     pub after: Vec<String>,
     pub age: String,
@@ -116,6 +120,16 @@ pub struct Step {
     pub gates: Vec<String>,
     pub attempt: u32,
     pub blockers: Vec<String>,
+}
+
+impl Step {
+    /// The owner with its agent id beside it (`Maintainer · agent/…`), its whole identity.
+    pub fn owner_identity(&self) -> Option<String> {
+        self.owner.as_ref().map(|name| match &self.owner_id {
+            Some(id) => format!("{name} · {id}"),
+            None => name.clone(),
+        })
+    }
 }
 
 /// Raw step facts, independent of state-specific blocker presentation and queue notes.
@@ -314,13 +328,14 @@ pub(crate) fn in_hand(state: &str) -> bool {
     matches!(state, "claimed" | "working" | "running" | "verifying")
 }
 
-/// How a client names who holds a step: "you" for its reader, else the name st serves.
-fn owner_text(owner: &Actor, reader: &str) -> Option<String> {
+/// How a client names who holds a step: "you" for its reader, else the name st serves, and an
+/// agent's id beside its name.
+fn owner_text(owner: &Actor, reader: &str) -> Option<(String, Option<String>)> {
     match owner {
-        Actor::Person { person, .. } if person == reader => Some("you".into()),
-        Actor::Person { label, .. } => Some(label.clone()),
-        Actor::Agent { agent, label } => Some(format!("{label} · {agent}")),
-        Actor::St => Some("st".into()),
+        Actor::Person { person, .. } if person == reader => Some(("you".into(), None)),
+        Actor::Person { label, .. } => Some((label.clone(), None)),
+        Actor::Agent { agent, label } => Some((label.clone(), Some(agent.clone()))),
+        Actor::St => Some(("Fractal".into(), None)),
         Actor::Nobody => None,
     }
 }
@@ -372,6 +387,9 @@ pub fn adapt<'a>(
                     let shown = presented.as_ref().and_then(|presented| {
                         presented.steps.iter().find(|shown| shown.id == step.id)
                     });
+                    let (owner, owner_id) = shown
+                        .and_then(|shown| owner_text(&shown.owner, reader))
+                        .map_or((None, None), |(name, id)| (Some(name), id));
                     Step {
                         id: step.id.clone(),
                         seat: (!step.agentless)
@@ -379,7 +397,8 @@ pub fn adapt<'a>(
                             .flatten(),
                         name: step.path.clone(),
                         state: shown.map_or(StepState::Unknown, |shown| shown.word),
-                        owner: shown.and_then(|shown| owner_text(&shown.owner, reader)),
+                        owner,
+                        owner_id,
                         note: shown.and_then(|shown| shown.note.clone()),
                         after: vec![],
                         age: display.age(&step.since, now),

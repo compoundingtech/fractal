@@ -2890,7 +2890,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
                 span(format!("{} ", step.name), theme::text()),
                 span(word, theme::fg(color)),
                 span(
-                    format!("  {}", step.owner.as_deref().unwrap_or("nobody")),
+                    format!("  {}", step.owner_identity().as_deref().unwrap_or("nobody")),
                     theme::dim(),
                 ),
             ]));
@@ -2942,7 +2942,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
 pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'static str) -> Doc {
     let mut doc = Doc::new();
     let details = &agent.details;
-    let unknown = || span("st has not said", theme::dim());
+    let unknown = || span("Fractal has not said", theme::dim());
     // A close control on the pane itself, not only on the header rule.
     let close = "× close";
     doc.targets.push(super::doc::Target {

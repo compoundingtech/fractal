@@ -874,6 +874,7 @@ fn step(
         name: s(name),
         state,
         owner: owner.map(s),
+        owner_id: None,
         note: note.map(s),
         after: after.iter().map(|name| s(name)).collect(),
         age: s(age),

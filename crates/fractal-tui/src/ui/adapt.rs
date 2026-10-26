@@ -311,10 +311,12 @@ fn tier(id: &str) -> Option<Tier> {
     }
 }
 
-/// Who st names, as a person reads it: an agent by its label and id, st's own machinery as
-/// "st", a mission or a person as st labels it.
+/// Who Fractal names, as a person reads it: an agent by its label and id, Fractal's own
+/// machinery as "Fractal", a mission or a person as Fractal labels it.
 fn who(actor: &fractal_client::AttentionActor) -> String {
-    if actor.id.starts_with("agent/") && actor.label != "st" {
+    if actor.label == "st" {
+        "Fractal".into()
+    } else if actor.id.starts_with("agent/") {
         format!("{} · {}", actor.label, actor.id)
     } else {
         actor.label.clone()
@@ -610,7 +612,7 @@ pub fn preview(name: &str, normalized: &Value) -> MissionPreview {
             let assignee = match selector["kind"].as_str() {
                 Some("assigned") => selector["agent"].as_str().map(short).unwrap_or_default(),
                 Some("available") => "any of several".into(),
-                Some("agentless") => "st".into(),
+                Some("agentless") => "Fractal".into(),
                 _ => "—".into(),
             };
             if let Some(agent) = selector["agent"].as_str()
@@ -1775,6 +1777,7 @@ mod tests {
         let preview = preview("harbor/audit", &normalized);
         assert_eq!(preview.goals, vec!["Audit dependencies"]);
         assert_eq!(preview.steps[0].assignee, "example/auditor");
+        assert_eq!(preview.steps[1].assignee, "Fractal");
         assert_eq!(preview.steps[1].after, vec!["scan"]);
         assert!(preview.steps[1].asks_you);
         assert_eq!(preview.agents.len(), 1);
@@ -2207,7 +2210,7 @@ mod tests {
             matches!(&item.kind, AttentionKind::Review { feedback: true, step, .. } if step == "review")
         );
         assert_eq!(item.agent.as_deref(), Some("agent/example/auditor"));
-        assert_eq!(item.raised_by.as_deref(), Some("st"));
+        assert_eq!(item.raised_by.as_deref(), Some("Fractal"));
         assert_eq!(item.waiting.as_deref(), Some("step review"));
     }
 
