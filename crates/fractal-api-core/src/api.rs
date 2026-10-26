@@ -119,6 +119,7 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
@@ -813,6 +814,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/mission-runs/{run}/report-to",
             post(runs::set_mission_run_report),
         )
+        .route(
+            "/v1/mission-runs/{run}/waiting-on",
+            get(waiting_on::get_run_waiting_on),
+        )
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
@@ -1343,8 +1348,6 @@ fn request_trace(
     if !crate::otel::export_enabled() {
         return None;
     }
-    use opentelemetry::trace::TraceContextExt as _;
-    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
     let span_name = format!("{} {route}", method.as_str());
     let span = tracing::info_span!(
         target: "st3::http",
@@ -1370,16 +1373,7 @@ fn request_trace(
         "st.writer.wait_ms" = tracing::field::Empty,
         "st.writer.ops" = tracing::field::Empty,
     );
-    let remote = crate::otel::extract_remote_context(headers);
-    let parent = remote.span();
-    let context = parent.span_context();
-    if context.is_valid() {
-        span.record(
-            "st.parent.sampled",
-            context.is_sampled() && context.trace_state().get("st").is_none(),
-        );
-    }
-    span.set_parent(remote);
+    crate::otel::set_remote_parent(&span, crate::otel::extract_remote_context(headers));
     Some(span)
 }
 
