@@ -634,6 +634,20 @@ adds one to a counter, so a catch-up is seen rather than hidden from the target.
 
 It contributes at most 4 attribute series and counts only while daemon metrics are enabled.
 
+## Assistant read receipt telemetry
+
+Caller-bound assistant read receipts commit on one background writer after the read returns
+(docs/st3/external-assistants.md). Each writer transaction records how many receipts it
+committed; a receipt that fails to commit is counted and logged at `error` with its subject.
+
+| Instrument | Type | Unit | Complete attribute set |
+| --- | --- | --- | --- |
+| `st.assistant.read_receipts.batch.size` | Histogram | `{receipt}` | none; buckets `1,2,4,…,256` |
+| `st.assistant.read_receipts.failures` | Counter | `{receipt}` | none |
+
+Both record only while daemon metrics are enabled. The same distribution is available in
+process from `ReceiptWriter::stats`, and each commit logs `receipt_count` at `debug`.
+
 ## Daemon startup telemetry (O11Y-R10, O11Y-R11, O11Y-R14, O11Y-R16, O11Y-R18)
 
 ```text

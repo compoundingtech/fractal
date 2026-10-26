@@ -216,6 +216,7 @@ async fn delivery_recovery_control(
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        assistant_receipts: Default::default(),
     };
     let delay = delayed.clone();
     let read_count = reads.clone();
@@ -885,6 +886,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        assistant_receipts: Default::default(),
     };
     let pending_count = pending.clone();
     let bound_count = bound.clone();

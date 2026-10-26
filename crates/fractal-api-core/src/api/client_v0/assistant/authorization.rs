@@ -8,7 +8,7 @@ use super::reads::{DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES};
 fn default_response_bytes() -> usize { DEFAULT_RESPONSE_BYTES }
 fn max_response_bytes() -> usize { MAX_RESPONSE_BYTES }
 pub const HEADER: &str = "x-st3-scg-read-authorization";
-const USED: &str = "custom.client.assistant.v1.read-used";
+pub(super) const USED: &str = "custom.client.assistant.v1.read-used";
 pub const OUTCOME: &str = "custom.client.assistant.v1.read-outcome";
 pub const ROUTES: &[(&str, &str)] = &[
     ("summary", "read.assistant.summary"), ("attention", "read.assistant.attention"),
@@ -78,6 +78,7 @@ pub struct ReadAuthorization {
 pub struct ReadReceipt {
     pub subject: String,
     consumed_claim: String,
+    pending_used: Option<Value>,
     grant_subject: String,
     pub actor: String,
     transport: &'static str,
@@ -233,7 +234,7 @@ pub fn verify(state: &AppState, session: &ClientSession, path: &str, parameters:
     if latest(state,&nonce_subject,USED)?.is_some() {
         return Err(forbidden("the SCG read approval has already been consumed; private results cannot replay"));
     }
-    let receipt = ReadReceipt {subject:nonce_subject,consumed_claim:String::new(),grant_subject:subject.into(),
+    let receipt = ReadReceipt {subject:nonce_subject,consumed_claim:String::new(),pending_used:None,grant_subject:subject.into(),
         actor:current.actor,transport:session.transport,policy_revision:payload.policy_revision,
         proof_expiry:payload.expires_at_unix_ms,max_response_bytes:requested};
     Ok((granted,receipt))
@@ -291,16 +292,25 @@ pub async fn read_inner(State(state): State<AppState>, Extension(session): Exten
         let (_, scope) = ROUTES.iter().find(|(p,_)| *p == projection).ok_or_else(|| forbidden("invalid projection"))?;
         if !current.allows(scope) { return Err(forbidden("assistant projection scope is not granted")); }
         let receipt_subject = format!("custom/client/assistant-v1-read-{}", uuid::Uuid::new_v4());
-        let consumed = append(&state, receipt_subject.clone(), USED, &current.actor, json!({
+        let used = json!({
             "grant_id": fields(&policy)?["grant_id"], "mode":"caller-bound-allow",
             "projection":projection, "request_digest":request_digest(uri.path(), &parameters)?,
             "max_response_bytes":requested, "timestamp":client_timestamp(client_now_ms())
-        }), None)?;
-        let receipt = ReadReceipt { subject:receipt_subject, consumed_claim:consumed.id,
+        });
+        let receipt = ReadReceipt { subject:receipt_subject, consumed_claim:String::new(), pending_used:Some(used),
             grant_subject:grant_subject.into(), actor:current.actor, transport:session.transport,
             policy_revision:fields(&policy)?["policy_revision"].as_u64().unwrap_or(0),
             proof_expiry:fields(&policy)?["expires_at_unix_ms"].as_u64().unwrap_or(0), max_response_bytes:requested };
-        let (snapshot,value) = project(&state,&snapshot,projection,&parameters,requested,&binding,context).await?;
+        let (snapshot,value) = match project(&state,&snapshot,projection,&parameters,requested,&binding,context).await {
+            Ok(result) => result,
+            Err(error) => {
+                state.assistant_receipts.enqueue(&state.store, receipt.subject, receipt.actor,
+                    receipt.pending_used.expect("caller-bound receipt"), json!({"version":1,
+                    "outcome":"denied-projection","denial_code":error.code,"returned_bytes":0,
+                    "timestamp":client_timestamp(client_now_ms())})).await?;
+                return Err(error);
+            }
+        };
         return Ok((Extension(receipt),Extension(snapshot),Json(value)));
     }
     let authorization = proof(&headers)?;
@@ -332,6 +342,11 @@ pub async fn read_inner(State(state): State<AppState>, Extension(session): Exten
 
 pub async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
                           within_budget: bool) -> Result<(),ApiError> {
+    // Backpressure can take arbitrarily long. Reserve space before the final
+    // synchronous authorization check, never let a queue wait age that check.
+    let space = if receipt.pending_used.is_some() {
+        Some(state.assistant_receipts.reserve().await?)
+    } else { None };
     let _transition=TRANSITIONS.lock().await;
     // The consumed approval remains authoritative even if the grant expires or is revoked
     // while the projection is being built. Record that final denial before returning it.
@@ -345,10 +360,15 @@ pub async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
         }
         Ok(())
     })();
-    let consumed=latest(state,&receipt.subject,USED)?.ok_or_else(|| forbidden("read consent receipt absent"))?;
-    if consumed.id!=receipt.consumed_claim {return Err(forbidden("read consent receipt changed"));}
+    // Caller-bound receipts do not consume authority. Their causal link is constructed
+    // by the writer inside the same transaction, never by reading an uncommitted USED.
+    let consumed = if receipt.pending_used.is_none() {
+        let consumed=latest(state,&receipt.subject,USED)?.ok_or_else(|| forbidden("read consent receipt absent"))?;
+        if consumed.id!=receipt.consumed_claim {return Err(forbidden("read consent receipt changed"));}
+        Some(consumed)
+    } else { None };
     let delivered=within_budget && authorization.is_ok();
-    append(state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,
+    let outcome = json!({"version":1,
         "policy_revision":receipt.policy_revision,"transport":receipt.transport,
         "max_response_bytes":receipt.max_response_bytes,
         "returned_bytes":if delivered {bytes.len()} else {0},"budget_used":bytes.len(),
@@ -356,9 +376,17 @@ pub async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
         "denial_code":authorization.as_ref().err().map(|error| error.code.as_str())
             .or(if within_budget {None} else {Some("response-budget-exceeded")}),
         "outcome":if authorization.is_err() {"denied-authorization"} else if within_budget {"delivered"} else {"denied-budget"},
-        "timestamp":client_timestamp(client_now_ms())}),Some(&consumed))?;
+        "timestamp":client_timestamp(client_now_ms())});
+    if let (Some(used), Some(space)) = (&receipt.pending_used, space) {
+        state.assistant_receipts.enqueue_reserved(&state.store, receipt.subject.clone(), receipt.actor.clone(),
+            used.clone(), outcome, space)?;
+    } else {
+        append(state,receipt.subject.clone(),OUTCOME,&receipt.actor,outcome,consumed.as_ref())?;
+    }
     if authorization.is_err() {
-        let grant_id=consumed.body.pointer("/fields/grant_id").and_then(Value::as_str);
+        let grant_id=receipt.pending_used.as_ref().and_then(|used| used.get("grant_id"))
+            .or_else(|| consumed.as_ref().and_then(|claim| claim.body.pointer("/fields/grant_id")))
+            .and_then(Value::as_str);
         audit(state,"read",&receipt.actor,receipt.transport,grant_id,&authorization)?;
     }
     authorization

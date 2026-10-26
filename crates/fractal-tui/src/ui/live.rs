@@ -4083,6 +4083,7 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            assistant_receipts: Default::default(),
         };
         let path = socket.clone();
         let server = tokio::spawn(async move {
@@ -4128,7 +4129,7 @@ mod tests {
                 owning_person: None,
                 store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
-                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(),
+                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
             };
             let path = socket.to_owned();
             let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap(); });
@@ -4190,6 +4191,7 @@ mod tests {
                 client_relay: None,
                 native_session_home: None,
                 planner_default: Default::default(),
+                assistant_receipts: Default::default(),
             };
             let path = socket.to_owned();
             let server = tokio::spawn(async move {
@@ -4614,6 +4616,7 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: fractal_daemon::model::PlannerSpec::default(),
+            assistant_receipts: Default::default(),
         };
         let socket = root.path().join("daemon.sock");
         let server_path = socket.clone();

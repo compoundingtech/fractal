@@ -22,12 +22,17 @@ fn signing_key() -> Ed25519KeyPair {
 }
 
 async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
+    fixture_for_owner(scopes,pin_trust,OWNER).await
+}
+
+async fn fixture_for_owner(scopes: &[&str], pin_trust: bool, owner: &str) -> Fixture {
     let root=tempfile::tempdir().unwrap();
-    let state=super::super::super::tests::test_state_named(root.path(),"assistant-proof-tests");
+    let mut state=super::super::super::tests::test_state_named(root.path(),"assistant-proof-tests");
+    state.owning_person=Some(owner.into());
     let request=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
         "device_name":"assistant","assistant_id":PRINCIPAL,"scopes":scopes,
         "disclosure_consent":true,"consent_evidence":"axe:igubz7"})).unwrap();
-    let Json(challenge)=begin(state.clone(),ClientSession::local(Some(OWNER)).unwrap(),request).await.unwrap();
+    let Json(challenge)=begin(state.clone(),ClientSession::local(Some(owner)).unwrap(),request).await.unwrap();
     let device_key=signing_key();
     let request=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"code":challenge["code"],
         "device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(device_key.public_key().as_ref())})).unwrap();
@@ -36,7 +41,7 @@ async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
     let mut fixture=Fixture {root,state,credential:paired["credential"].as_str().unwrap().into(),
         grant:paired["grant"]["id"].as_str().unwrap().into(),revision:1,attestor:signing_key(),shim:signing_key()};
     if pin_trust {
-        let Json(grant)=pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
+        let Json(grant)=pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(owner)).unwrap()),
             AxumPath(fixture.grant.clone()),Json(fixture.trust_request())).await.unwrap();
         fixture.revision=grant["policy_revision"].as_u64().unwrap();
     }
@@ -627,8 +632,103 @@ async fn projection_read_mode(fixture: &mut Fixture, mode: &str) {
         "expires_in_seconds":3600,"disclosure_consent":true,"consent_evidence":"projection-isolation",
         "minimal_read_mode":mode})).unwrap();
     let Json(grant)=super::super::update_policy(State(fixture.state.clone()),
-        Extension(ClientSession::local(Some(OWNER)).unwrap()),AxumPath(fixture.grant.clone()),Json(policy)).await.unwrap();
+        Extension(ClientSession::local(fixture.state.owning_person.as_deref()).unwrap()),AxumPath(fixture.grant.clone()),Json(policy)).await.unwrap();
     fixture.revision=grant["policy_revision"].as_u64().unwrap();
+}
+
+#[tokio::test]
+async fn assistant_caller_bound_response_does_not_wait_for_receipt_commit() {
+    let mut fixture=fixture_for_owner(SCOPES,false,"person/robin").await;
+    projection_read_mode(&mut fixture,"caller-bound-allow").await;
+    // Hold only the writer: synchronous grant checks continue on the read pool.
+    let writer=fixture.state.store.connection.write();
+    let (status,value,_)=tokio::time::timeout(std::time::Duration::from_secs(5),
+        fixture.request("/v1/client/assistant/summary",None)).await
+        .expect("caller-bound response waited for a receipt commit");
+    assert_eq!(status,StatusCode::OK,"{value}");
+    for kind in ["custom.client.assistant.v1.read-used",OUTCOME] {
+        assert!(fixture.state.store.claims_for_kind_at(kind,None,true,100).unwrap().claims.is_empty());
+    }
+    drop(writer);
+    fixture.state.assistant_receipts.flush().await.unwrap();
+    let used=fixture.state.store.claims_for_kind_at("custom.client.assistant.v1.read-used",None,true,100)
+        .unwrap().claims;
+    let outcomes=fixture.state.store.claims_for_kind_at(OUTCOME,None,true,100).unwrap().claims;
+    assert_eq!(used.len(),1);
+    assert_eq!(outcomes.len(),1);
+    assert_eq!(outcomes[0].subject,used[0].subject);
+    assert_eq!(outcomes[0].body["evidence"],json!([used[0].id]));
+    assert_eq!(outcomes[0].body["fields"]["outcome"],"delivered");
+}
+
+#[tokio::test]
+async fn assistant_caller_bound_revocation_is_checked_before_delivery() {
+    let mut fixture=fixture_for_owner(SCOPES,false,"person/robin").await;
+    projection_read_mode(&mut fixture,"caller-bound-allow").await;
+    let context=response_body::Context {
+        state:fixture.state.clone(),client_request:true,local_only_response:false,
+        request_id:"request/test".into(),client_snapshot:None,server:None,roster:false,
+    };
+    let (Extension(receipt),_,Json(value))=read_inner(State(fixture.state.clone()),
+        Extension(fixture.session()),Extension(new_client_snapshot(&fixture.state)),
+        OriginalUri("/v1/client/assistant/summary".parse().unwrap()),HeaderMap::new(),&context).await.unwrap();
+    let _=super::super::revoke(State(fixture.state.clone()),
+        Extension(ClientSession::local(Some("person/robin")).unwrap()),AxumPath(fixture.grant.clone())).await.unwrap();
+    assert_eq!(finish(&fixture.state,&receipt,&serde_json::to_vec(&value).unwrap(),true).await
+        .unwrap_err().status,StatusCode::FORBIDDEN);
+    assert_eq!(fixture.request("/v1/client/assistant/summary",None).await.0,StatusCode::FORBIDDEN);
+    fixture.state.assistant_receipts.flush().await.unwrap();
+    let outcome=latest(&fixture.state,&receipt.subject,OUTCOME).unwrap().unwrap();
+    assert_eq!(outcome.body["fields"]["outcome"],"denied-authorization");
+    assert_eq!(outcome.body["fields"]["returned_bytes"],0);
+}
+
+#[tokio::test]
+async fn assistant_caller_bound_rechecks_authorization_after_queue_backpressure() {
+    use futures_util::FutureExt as _;
+    let mut fixture=fixture_for_owner(SCOPES,false,"person/robin").await;
+    fixture.state.assistant_receipts=Arc::new(
+        fractal_api_core::api::client_v0::assistant::receipts::ReceiptWriter::with_capacity(1));
+    projection_read_mode(&mut fixture,"caller-bound-allow").await;
+    let context=response_body::Context {
+        state:fixture.state.clone(),client_request:true,local_only_response:false,
+        request_id:"request/test".into(),client_snapshot:None,server:None,roster:false,
+    };
+    let (Extension(receipt),_,Json(value))=read_inner(State(fixture.state.clone()),
+        Extension(fixture.session()),Extension(new_client_snapshot(&fixture.state)),
+        OriginalUri("/v1/client/assistant/summary".parse().unwrap()),HeaderMap::new(),&context).await.unwrap();
+    // Reserve the only slot without holding the database writer or a grant-transition lock.
+    let held=fixture.state.assistant_receipts.reserve().await.unwrap();
+    let bytes=serde_json::to_vec(&value).unwrap();
+    let mut delivery=std::pin::pin!(finish(&fixture.state,&receipt,&bytes,true));
+    assert!(delivery.as_mut().now_or_never().is_none());
+    let _=super::super::revoke(State(fixture.state.clone()),
+        Extension(ClientSession::local(Some("person/robin")).unwrap()),AxumPath(fixture.grant.clone())).await.unwrap();
+    drop(held);
+    assert_eq!(delivery.await.unwrap_err().status,StatusCode::FORBIDDEN);
+    fixture.state.assistant_receipts.flush().await.unwrap();
+    let outcome=latest(&fixture.state,&receipt.subject,OUTCOME).unwrap().unwrap();
+    assert_eq!(outcome.body["fields"]["outcome"],"denied-authorization");
+    assert_eq!(outcome.body["fields"]["returned_bytes"],0);
+}
+
+#[tokio::test]
+async fn assistant_approval_once_consumption_stays_synchronous() {
+    let fixture=fixture_for_owner(SCOPES,true,"person/robin").await;
+    let payload=fixture.payload("summary","");
+    let header=fixture.header(&payload,&fixture.attestor);
+    let mut headers=HeaderMap::new();
+    headers.insert(HEADER,header.parse().unwrap());
+    let context=response_body::Context {
+        state:fixture.state.clone(),client_request:true,local_only_response:false,
+        request_id:"request/test".into(),client_snapshot:None,server:None,roster:false,
+    };
+    let (Extension(receipt),_,_)=read_inner(State(fixture.state.clone()),
+        Extension(fixture.session()),Extension(new_client_snapshot(&fixture.state)),
+        OriginalUri("/v1/client/assistant/summary".parse().unwrap()),headers,&context).await.unwrap();
+    assert!(latest(&fixture.state,&receipt.subject,"custom.client.assistant.v1.read-used").unwrap().is_some());
+    assert!(latest(&fixture.state,&receipt.subject,OUTCOME).unwrap().is_none());
+    assert_eq!(fixture.request("/v1/client/assistant/summary",Some(&header)).await.0,StatusCode::FORBIDDEN);
 }
 
 async fn projection_cursor_isolation(change_mode: bool) {

@@ -393,7 +393,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         node: "todo-liveness".into(), state_dir: root.path().into(),
         pty_root: root.path().join("pty"), pty_binary: "pty".into(),
         fleet_id: None, configured_peers: vec![], client_relay: None,
-        native_session_home: None, planner_default: Default::default(),
+        native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
     };
     let path = root.path().join("api.sock");
     let socket = path.clone();
@@ -2295,6 +2295,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -2388,6 +2389,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -2464,6 +2466,7 @@ async fn trace_wait_starts_after_existing_events() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let app = router(state).layer(axum::middleware::from_fn(
@@ -5588,6 +5591,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -5677,6 +5681,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
         pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
         client_relay: None, native_session_home: None, owning_person: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
@@ -7581,6 +7586,7 @@ async fn serve_test_store(
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {

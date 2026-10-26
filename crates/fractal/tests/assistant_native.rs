@@ -65,7 +65,7 @@ impl Harness {
             node: "assistant-native".into(), state_dir: root.path().into(),
             pty_root: root.path().join("pty"), pty_binary: PathBuf::from("pty"),
             fleet_id: None, configured_peers: vec![], client_relay: None,
-            native_session_home: None, planner_default: Default::default(),
+            native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
         };
         Self { local: fractal_daemon::api::router(state.clone()), fabric: fractal_daemon::api::fabric_router(state.clone()), root, state }
     }
