@@ -16354,7 +16354,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                         let previous = store.latest_actual_value(&observer_subject).ok().flatten();
                         let condition = ObserverCondition::of(&error, previous.as_ref());
                         let state = if matches!(condition, ObserverCondition::LocalBudget(_)) {
-                            "throttled"
+                            // Existing readers alert on degraded and reject new state values.
+                            // Local admission made no provider attempt; retain facts and expose the defer code/deadline.
+                            "healthy"
                         } else {
                             "unreachable"
                         };
@@ -35905,7 +35907,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         observe_now(&reconciler, &calls).await;
         let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
         assert_eq!(state["error_code"], "local-observer-budget");
-        assert_eq!(state["state"], "throttled");
+        assert_eq!(state["state"], "healthy", "compatible non-fault deferred receipt");
         assert_eq!(state["next_check_unix_ms"], slot.to_string());
         assert_eq!(state["reason"], format!("local observer budget reached, next slot at {slot} (Unix ms)"));
         assert!(observer_items(&store).is_empty());

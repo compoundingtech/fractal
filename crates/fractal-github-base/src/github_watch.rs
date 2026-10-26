@@ -862,11 +862,6 @@ pub fn watch_view(
         {
             "degraded"
         }
-        (None, Some(observer))
-            if observer.get("state").and_then(Value::as_str) == Some("throttled") =>
-        {
-            "throttled"
-        }
         _ => "active",
     };
     json!({
@@ -879,13 +874,11 @@ pub fn watch_view(
         "state": state,
         "ended": ended.and_then(|ended| ended.get("reason")).cloned(),
         "reason": observer_state
-            .filter(|_| matches!(state, "degraded" | "throttled"))
+            .filter(|observer| state != "ended" && (state == "degraded"
+                || observer["error_code"] == "local-observer-budget"))
             .and_then(|observer| observer.get("reason"))
-            .cloned(),
-        "next_check_unix_ms": observer_state
-            .filter(|_| state == "throttled")
-            .and_then(|observer| observer.get("next_check_unix_ms"))
-            .cloned(),
+            .and_then(Value::as_str)
+            .map(|reason| if state == "active" { format!("throttled: {reason}") } else { reason.to_owned() }),
         "title": facts.and_then(|facts| facts.get("title")).cloned(),
         "url": facts.and_then(|facts| facts.get("url")).cloned(),
         "thread_state": facts.and_then(|facts| facts.get("state")).cloned(),
@@ -907,14 +900,13 @@ mod tests {
     #[test]
     fn a_locally_throttled_watch_shows_its_next_slot_without_degradation() {
         let observer = json!({
-            "state": "throttled", "error_code": "local-observer-budget",
+            "state": "healthy", "error_code": "local-observer-budget",
             "reason": "local observer budget reached, next slot at 1000 (Unix ms)",
             "next_check_unix_ms": "1000"
         });
         let view = watch_view("watch/github/acme/garden/12/agent/node.test", &watch(), None, None, Some(&observer));
-        assert_eq!(view["state"], "throttled");
-        assert_eq!(view["reason"], observer["reason"]);
-        assert_eq!(view["next_check_unix_ms"], "1000");
+        assert_eq!(view["state"], "active", "keep the existing watch wire vocabulary");
+        assert_eq!(view["reason"], "throttled: local observer budget reached, next slot at 1000 (Unix ms)");
         let ended = json!({"reason": "ended"});
         assert_eq!(watch_view("watch/test", &watch(), Some(&ended), None, Some(&observer))["state"], "ended");
     }

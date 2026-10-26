@@ -5734,6 +5734,7 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
     let state = match text("state") {
         "ended" => format!("ended ({})", text("ended")),
         "degraded" => format!("degraded: {}", text("reason")),
+        "active" if !text("reason").is_empty() => format!("active ({})", text("reason")),
         state => state.to_owned(),
     };
     let until = view
