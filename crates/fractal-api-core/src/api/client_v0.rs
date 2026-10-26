@@ -45,6 +45,7 @@ pub mod search;
 pub mod arrangements;
 pub mod conversation_blocks;
 pub mod conversation_delivery;
+pub mod conversation_participants;
 pub mod collection_windows;
 pub mod inventory;
 pub mod published_missions;
@@ -439,6 +440,7 @@ pub struct ClientSession {
     pub custom_forms: bool,
     pub conversation_blocks: bool,
     pub conversation_delivery_links: bool,
+    pub conversation_message_participants: bool,
     /// Internal assistant projection option, never negotiated by native clients.
     pub assistant_content_handles: bool,
     pub messages_paging: bool,
@@ -461,6 +463,7 @@ impl ClientSession {
             custom_forms: true,
             conversation_blocks: false,
             conversation_delivery_links: false,
+            conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
@@ -503,6 +506,7 @@ impl ClientSession {
                 custom_forms,
                 conversation_blocks: false,
                 conversation_delivery_links: false,
+                conversation_message_participants: false,
                 assistant_content_handles: false,
                 messages_paging: false,
                 scopes: ["read.projections", "terminal.read"]
@@ -526,6 +530,7 @@ impl ClientSession {
             custom_forms,
             conversation_blocks: false,
             conversation_delivery_links: false,
+            conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
@@ -546,6 +551,7 @@ impl ClientSession {
             custom_forms: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
+            conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
@@ -608,6 +614,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         json!({ "id": action, "version": 0, "state": state })
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
+    capabilities.push(json!({"id":"conversation-message-participants", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"conversation-delivery-links", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"push-registration", "version":1, "state":if session.pairing_issued_here && session.transport != "unix" {"granted"} else {"unavailable"}}));
@@ -682,6 +689,9 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "conversation-blocks.v1")
         });
+    let conversation_message_participants = request.headers().get("x-st3-features")
+        .and_then(|value| value.to_str().ok()).is_some_and(|value|
+            value.split(',').any(|feature| feature.trim() == "conversation-message-participants.v1"));
     let conversation_delivery_links = request.headers().get("x-st3-features")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.split(',').any(|feature|
@@ -725,6 +735,7 @@ pub fn authenticate(
             session.custom_forms = custom_forms;
             session.conversation_blocks = conversation_blocks;
             session.conversation_delivery_links = conversation_delivery_links;
+            session.conversation_message_participants = conversation_message_participants;
             session.messages_paging = messages_paging;
             return Ok(session);
         }
@@ -764,6 +775,7 @@ pub fn authenticate(
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     session.conversation_blocks = conversation_blocks;
     session.conversation_delivery_links = conversation_delivery_links;
+    session.conversation_message_participants = conversation_message_participants;
     session.messages_paging = messages_paging;
     if request.method() == axum::http::Method::POST
         && request.uri().path() == "/v1/client/diagnostics"
@@ -830,6 +842,7 @@ pub fn paired_client_session(
         custom_forms,
         conversation_blocks: false,
         conversation_delivery_links: false,
+        conversation_message_participants: false,
         assistant_content_handles: false,
         messages_paging: false,
         scopes,
@@ -870,6 +883,7 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
     let mut current = paired_client_session(state, &paired, session.transport, session.custom_forms)?;
     current.conversation_blocks = session.conversation_blocks;
     current.conversation_delivery_links = session.conversation_delivery_links;
+    current.conversation_message_participants = session.conversation_message_participants;
     current.messages_paging = session.messages_paging;
     if current.authority_actor != session.authority_actor {
         return Err(forbidden("the client session authority changed"));
@@ -1967,14 +1981,13 @@ pub fn session_message_content(session: &ClientSession, session_id: &str, claim:
     body
 }
 
-pub fn session_message_body(state: &AppState, claim: &ClaimRecord) -> Value {
+pub fn session_message_body(state: &AppState, claim: &ClaimRecord, participants: bool) -> Value {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
     let mut body = json!({
         "message_id": claim.subject,
         "reply_to": fields.get("in_reply_to"),
-        "from": fields.get("from"),
-        "to": fields.get("to"),
     });
+    conversation_participants::apply(&mut body, claim, participants);
     if let Some(title) = fields.get("title").and_then(Value::as_str) {
         body["title"] = Value::String(title.to_owned());
     }
@@ -2099,7 +2112,7 @@ pub fn native_session_messages(
             let stamp = client_timestamp(claim.accepted_at_unix_ms);
             let digest = hex::encode(Sha256::digest(claim.id.as_bytes()));
             let base = claim.store_index.saturating_mul(4);
-            items.push(json!({"id":format!("timeline-entry/{}/{}-message", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base, "revision":1, "timestamp":stamp, "role":role, "type":"message", "final":true, "body":session_message_body(state, &claim)}));
+            items.push(json!({"id":format!("timeline-entry/{}/{}-message", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base, "revision":1, "timestamp":stamp, "role":role, "type":"message", "final":true, "body":session_message_body(state, &claim, session.conversation_message_participants)}));
             items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":session_message_content(session, session_id, &claim)}));
         }
         items.sort_by(timeline_order);
@@ -3142,6 +3155,7 @@ pub fn timeline_value(
             .as_deref()
             .and_then(|cursor| offset_continuation_header(state, session, &session_id, snapshot, cursor));
         for item in &mut page.items {
+            conversation_participants::legacy_item(item, session);
             if !session.conversation_delivery_links && let Some(item) = item.as_object_mut() { item.remove("delivers"); }
             if !session.conversation_blocks && let Some(body) = item["body"].as_object_mut() {
                 body.remove("blocks");
@@ -3575,7 +3589,7 @@ pub fn timeline_first_page(
             items.push(json!({
                 "id": entry_id(&claim, "message"), "sequence": base_sequence,
                 "revision": 1, "timestamp": timestamp, "role": role, "type": "message",
-                "final": true, "body": session_message_body(state, &claim)
+                "final": true, "body": session_message_body(state, &claim, session.conversation_message_participants)
             }));
             items.push(json!({
                 "id": entry_id(&claim, "content"), "sequence": base_sequence + 1,
