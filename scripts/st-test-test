@@ -61,6 +61,9 @@ def apparent_gb(path):
     return sum(file.stat().st_size for file in path.rglob('*') if file.is_file()) / 1e9
 
 
+NEEDS_TREE = st_test.needs_tree
+
+
 class PoolTreeTest(unittest.TestCase):
     """Pool reuse without a signer or remote: only disposable local worktrees are involved."""
 
@@ -135,6 +138,9 @@ class StTest(unittest.TestCase):
         patcher = mock.patch.dict(st_test.LOCAL, {'demo': ['sh', '-c', 'echo ran']}, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        trees = mock.patch.object(st_test, 'needs_tree', return_value=True)  # demo stands in for a check that builds, so the pool is exercised
+        trees.start()
+        self.addCleanup(trees.stop)
 
     def commit(self, name, content, branch=None):
         if branch:
@@ -755,6 +761,18 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn('all 1 pool trees are in use', err)
 
+    def test_a_run_of_checks_that_build_nothing_takes_no_pool_tree_and_never_waits_for_one(self):
+        self.commit('b.txt', 'two')
+        self.assertTrue(NEEDS_TREE(['ci-script-tests', 'linux-gate']))
+        self.assertFalse(NEEDS_TREE(['ci-script-tests', 'typescript-client', 'genie-freshness']))
+        with mock.patch.object(st_test, 'needs_tree', NEEDS_TREE), \
+                mock.patch.object(st_test, 'acquire_tree', side_effect=AssertionError('a light run waits for no tree')):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertFalse((self.home / '.cache/st-test/pools').exists(), 'no pool tree was made')
+        statement, = self.statements()
+        self.assertIn(git(self.work, 'rev-parse', 'HEAD^{tree}'), json.dumps(statement))
+
     def test_the_pool_holds_the_heavy_slots_plus_one_trees_unless_told_otherwise(self):
         with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True):
             self.assertEqual(st_test.pool_size(), 2)
@@ -1225,6 +1243,16 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
         self.assertEqual(self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'CARGO_INCREMENTAL': '1'})[0], 0)
         self.assertEqual(seen.read_text().split(), ['0', '1'])
+
+    def test_a_check_that_builds_nothing_starts_as_light_and_a_build_never_does(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "${{BUILD_ADMISSION_CLASS:-unset}}" >> {seen}']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+            code, out, err = self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'BUILD_ADMISSION_CLASS': 'light'})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen.read_text().split(), ['light', 'unset'])
 
     def test_a_heavy_run_says_how_big_its_target_ended(self):
         self.commit('b.txt', 'two')

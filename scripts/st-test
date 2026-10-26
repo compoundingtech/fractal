@@ -527,6 +527,13 @@ def target_worktree(base, scratch):
     return directory, commit
 
 
+def needs_tree(checks):
+    """Whether a run of `checks` takes a pool tree: what a tree keeps is a warm cargo target, which only a check that builds (BUILDS) uses. A run
+    of light checks alone (ci-script-tests, typescript-client, genie-freshness) takes a throwaway worktree instead of waiting behind runs that
+    build for a tree it does not need (2026-10-26: a 10-second ci-script-tests rerun waited behind 30-minute runs)."""
+    return any(name in BUILDS for name in checks)
+
+
 def pool_size():
     """How many persistent trees the pool holds: ST_TEST_TREES, else the host's heavy slots plus one; None (off) for fresh worktrees."""
     value = POOL_SETTINGS.get('ST_TEST_TREES', '')
@@ -1196,6 +1203,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         skips = env_skips_file(scratch, RUST_TESTS)
         environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit), CI_TEST_ENV_SKIPS=str(skips))
         environment.setdefault('CARGO_INCREMENTAL', '0')  # as the other checks: no incremental state in a one-shot build
+        environment.pop('BUILD_ADMISSION_CLASS', None)  # it builds: never a light start
         if target:
             environment['CARGO_TARGET_DIR'] = str(target)
         started = time.monotonic()
@@ -1609,6 +1617,8 @@ def main(argv):
         (Path(scratch) / 'pid').write_text(str(os.getpid()))
         directory = Path(scratch) / 'tree'
         pool_trees, tree_lock, tree_target, n = pool_size(), None, None, None
+        if not needs_tree(checks):
+            pool_trees = None  # a throwaway worktree, as with ST_TEST_TREES=off, and no wait for a tree
         try:
             if pool_trees:
                 root = pool_root()
@@ -1698,6 +1708,12 @@ def main(argv):
                 environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                 if target and name in BUILDS:
                     environment['CARGO_TARGET_DIR'] = str(target)
+                # The nix wrapper admits a `nix develop`/`nix shell` start as heavy unless told the shell compiles no Rust: a check that
+                # builds nothing starts as light (as the pre-sign worker starts .#web and .#genie), and one that builds never does.
+                if name in BUILDS:
+                    environment.pop('BUILD_ADMISSION_CLASS', None)
+                else:
+                    environment['BUILD_ADMISSION_CLASS'] = 'light'
                 if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
                     # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
                     environment['CI_TEST_JUNIT'] = str(gate_report)
