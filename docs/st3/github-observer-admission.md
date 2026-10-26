@@ -114,10 +114,15 @@ it freezes the starting watermark, retains sweep versions and saves exact Link
 continuations. Before advancing the watermark it revalidates from that starting
 point until two complete ordered page-version sequences agree. This recovers
 rows shifted into already-read pages; repeated shifts require further sweeps.
-Each poll still reads at most ten pages per listing. Continuous collection churn
-can defer watermark advancement: REST offset pagination cannot give an atomic
-snapshot. Sweep bookkeeping uses fixed-size rolling digests; deduplication keeps
-the identities needed for the active sweep and prunes only after commit.
+Each poll still reads at most ten pages per listing. After two nonmatching completed
+sweeps, immediate reconciliation is exhausted: preserve both scan states and frozen
+watermarks, return the ordinary provider deadline, and let the observer use normal
+cadence instead of one-second continuation. Further pagination also remains at
+normal cadence until the backed-off scan converges. Thus continuous churn cannot
+keep reconciliation one-second-hot or force an unsafe watermark commit. Continuous
+churn can defer watermark advancement: REST offset pagination cannot give an atomic
+snapshot. Sweep bookkeeping uses fixed-size digests/counters; deduplication keeps
+the active sweep identities and prunes only after commit.
 Optional cursor fields default on old records; no storage version change,
 migration or backfill is required.
 

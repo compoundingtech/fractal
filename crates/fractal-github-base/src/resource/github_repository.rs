@@ -64,6 +64,9 @@ const ITEM_MENTIONS: usize = 50;
 /// How far behind the local clock a first watermark starts, for clock skew with GitHub.
 const WATERMARK_SKEW: Duration = Duration::from_secs(5 * 60);
 
+/// Bound immediate reconciliation; persistent churn must not create a one-second hot loop.
+const IMMEDIATE_RECONCILIATION_SWEEPS: u8 = 2;
+
 /// Repository listing watermarks overlap by one second, making GitHub's exclusive `since`
 /// inclusive at its timestamp precision. Idle polls keep the same URL and ETag. Version maps
 /// deduplicate identity/update-time/content and retain the timestamp boundary, or the whole
@@ -107,6 +110,8 @@ struct ListingScan {
     newest: Option<String>,
     digest: String,
     previous: Option<String>,
+    #[serde(default)]
+    unstable_sweeps: u8,
 }
 
 struct ContentDigest(Sha256);
@@ -155,7 +160,9 @@ fn finish_listing(
     }
     if progress.previous.as_ref() != Some(&progress.digest) {
         progress.previous = Some(std::mem::take(&mut progress.digest));
-        return true;
+        progress.unstable_sweeps = progress.unstable_sweeps
+            .saturating_add(1).min(IMMEDIATE_RECONCILIATION_SWEEPS);
+        return progress.unstable_sweeps < IMMEDIATE_RECONCILIATION_SWEEPS;
     }
     *watermark = progress.newest.take().into_iter().chain(watermark.take()).max();
     *scan = None;
@@ -1690,11 +1697,15 @@ pub async fn observe_at(
             &client, &base, &repository, token, cache_for, now_ms() as u64,
         ).await;
     }
+    // Once either listing exhausts its reconciliation burst, throttle the observation,
+    // including pagination in the other listing. Keep every frozen watermark and cursor.
+    let reconcile_backoff = [&cursor.items_scan, &cursor.comments_scan].into_iter()
+        .flatten().any(|scan| scan.unstable_sweeps >= IMMEDIATE_RECONCILIATION_SWEEPS);
     Ok(ProviderObservation {
         facts: Value::Object(facts),
         cursor: Some(serde_json::to_string(&cursor)?),
-        // A listing longer than one read continues at once.
-        next_check_unix_ms: now_ms().saturating_add(if more {
+        // Large listings continue immediately only while the reconciliation burst permits it.
+        next_check_unix_ms: now_ms().saturating_add(if more && !reconcile_backoff {
             super::PROVIDER_CONTINUE_MS
         } else {
             300_000
@@ -3499,6 +3510,48 @@ mod tests {
             assert_eq!(cursor.comments_since.as_deref(), Some(at));
         }
         assert!(complete, "stable page versions eventually commit both watermarks");
+    }
+
+    #[tokio::test]
+    async fn continuously_changing_sweeps_fall_back_to_normal_polling_without_committing() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let at = "2026-09-10T00:00:00Z";
+        let start = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        for page in 1..=11 {
+            let path = if page == 1 { start.to_owned() } else { format!("{start}&page={page}") };
+            github.route(&path, json!([issue(page, at, json!({}))]));
+            if page < 11 {
+                github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+            }
+        }
+        let token = GithubAuth::test("continuous-churn-token");
+        let mut cursor = Some(json!({"items_since": at}).to_string());
+        for sweep in 0..6 {
+            // Every new sweep sees a different page version, even within one timestamp second.
+            github.route(start, json!([issue(1, at, json!({"title": format!("edit {sweep}")}))]));
+            for part in 0..2 {
+                let before = now_ms();
+                let observation = observe_at(request(&["mentions"], cursor.as_deref(), None), &base, Some(&token))
+                    .await.unwrap();
+                let state = RepositoryCursor::parse(observation.cursor.as_deref());
+                assert_eq!(state.items_since.as_deref(), Some(at));
+                assert!(state.items_scan.is_some(), "never force-commit an unstable sweep");
+                if sweep >= 2 || (sweep == 1 && part == 1) {
+                    assert!(observation.next_check_unix_ms >= before + 300_000,
+                        "exhausted bursts use the ordinary provider deadline, not a one-second continuation");
+                    assert_eq!(state.items_scan.as_ref().unwrap().unstable_sweeps, IMMEDIATE_RECONCILIATION_SWEEPS);
+                }
+                cursor = observation.cursor;
+            }
+        }
+        // Backoff keeps enough state to converge later; it is not an error or forced commit.
+        for _ in 0..2 {
+            let observation = observe_at(request(&["mentions"], cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            cursor = observation.cursor;
+        }
+        assert!(RepositoryCursor::parse(cursor.as_deref()).items_scan.is_none());
     }
 
     #[test]
