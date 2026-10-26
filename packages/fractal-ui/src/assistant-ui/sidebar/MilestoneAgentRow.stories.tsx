@@ -605,7 +605,7 @@ export const ReportedDetails: Story = {
 
 /** Count fixtures: plural, singular, zero (no chip), unreported, and long titles that must truncate before the count. */
 const countRow = (key: string, title: string, subagentCount: number | undefined, extra: Partial<Row> = {}): Row => ({
-  ...base, ref: `agent/example-count-${key}`, id: `count-${key}`, title, status: 'working', statusLabel: 'Working', host: 'build-3', subagentCount,
+  ...base, ref: `agent/example-count-${key}`, id: `count-${key}`, title, status: 'working', statusLabel: 'Working', host: 'build-3', subagentCount, childrenKnown: subagentCount !== undefined,
   lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 95_000 }, ...extra,
 })
 const countRows = [
