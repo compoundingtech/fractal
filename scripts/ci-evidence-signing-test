@@ -414,6 +414,27 @@ with tempfile.TemporaryDirectory() as directory:
     assert 'source_inputs' not in project_run(dict(PROJECT_BASE_SHA=''))[1]['inputs'], 'no base commit, no key'
     print('passed: source_inputs is signed only when the base evidence-verify projects a well-formed key; every other case is an exact-tree note')
 
+    # --- base_inputs: the digest of a base file the verdict depends on, taken at the base the job compared against (BASE_INPUTS_SHA)
+    DIGEST = 'e' * 64
+    calls = tmp / 'verify-calls.jsonl'
+    with_verify(f'import json,sys\nopen({str(calls)!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                f'print(json.dumps({{"source_inputs": {KEY!r}, "base_inputs": {{"clippy_base_baseline_sha256": {DIGEST!r}}}}}))\n')
+    done, facts = project_run(dict(BASE_INPUTS_SHA='c' * 40))
+    assert done.returncode == 0 and facts['inputs']['clippy_base_baseline_sha256'] == DIGEST, done.stdout + done.stderr
+    bases = [argv[argv.index('--policy-from') + 1] for argv in map(json.loads, calls.read_text().splitlines())]
+    assert bases == ['b' * 40, 'c' * 40], bases  # the key from the project base, the base inputs from the job's own base
+    calls.unlink()
+    assert project_run()[1]['inputs']['clippy_base_baseline_sha256'] == DIGEST, 'without BASE_INPUTS_SHA, the project base'
+    assert 'clippy_base_baseline_sha256' not in project_run(dict(BASE_INPUTS_SHA=''))[1]['inputs'], 'set but empty: no base'
+    assert 'clippy_base_baseline_sha256' not in project_run(dict(BASE_INPUTS_SHA='0' * 40))[1]['inputs'], \
+        'a job that compared against no base records none, so its note covers no run that judges one'
+    for bad in ('"E' + 'e' * 63 + '"', '"present"', '7', 'null'):
+        with_verify(f'print(\'{{"source_inputs": null, "base_inputs": {{"clippy_base_baseline_sha256": {bad}}}}}\')\n')
+        assert 'clippy_base_baseline_sha256' not in project_run()[1]['inputs'], bad
+    with_verify('print(\'{"source_inputs": null, "base_inputs": {"absent_base": "absent", "Bad-Name": "absent"}}\')\n')
+    assert project_run()[1]['inputs'].get('absent_base') == 'absent' and 'Bad-Name' not in project_run()[1]['inputs']
+    print('passed: base_inputs are signed from the base the job compared against, well-formed values only, none when it compared against none')
+
     # --- the linux-gate aggregate carries its input key too; its job sets no PROJECT_BASE_SHA, so the base comes from the event payload
     def aggregate_run(payload, extra=None):
         event = tmp / 'event.json'

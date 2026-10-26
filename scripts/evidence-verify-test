@@ -505,8 +505,8 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
 # The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
-HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests'})
-HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests'})
+HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests', 'linux-clippy'})
+HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests', 'linux-clippy'})
 
 
 def policy_text(**overrides):
@@ -1377,7 +1377,7 @@ class CommittedPolicy(unittest.TestCase):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
         modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')['require'] for check in json.loads(text)['checks']}
         self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'ci-script-tests': 'shadow', 'fractal-web': 'off',
-                                 'rust-tests': 'off'})
+                                 'rust-tests': 'off', 'linux-clippy': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
             if mode != 'off':
@@ -1823,6 +1823,57 @@ class ValueRules(unittest.TestCase):
         code, out, _ = self.f.cli(*common, '--run-input', 'kit_inputs')
         self.assertEqual(json.loads(out)['reason'], 'error', out)
 
+
+    def test_base_inputs_are_validated_strictly(self):
+        for bad in ({'base_inputs': ['clippy_base_baseline_sha256']}, {'base_inputs': {'': 'a.json'}},
+                    {'base_inputs': {'x': ''}}, {'base_inputs': {'x': '../a.json'}}, {'base_inputs': {'x': 3}}):
+            with self.assertRaises(evidence_verify.Failure, msg=repr(bad)) as caught:
+                self.policy(**bad)
+            self.assertEqual(caught.exception.reason, 'error', repr(bad))
+        self.assertEqual(self.policy()['kinds']['wrapper']['base_inputs'], {})
+
+    def test_a_base_input_is_the_digest_of_the_bases_file_computed_by_the_verifier_never_taken_from_the_caller(self):
+        """linux-clippy's ratchet reads the base's baseline: a note covers a run only while the base's file is the one it measured against."""
+        doc = json.loads(policy_text())
+        doc['checks']['unit']['kinds']['wrapper'] = {'command': ['make', 'test'],
+                                                     'base_inputs': {'clippy_base_baseline_sha256': '.github/clippy-baseline.json'}}
+        self.f.git('config', 'user.email', 't@example.invalid')
+        self.f.git('config', 'user.name', 't')
+
+        def commit_base(baseline):
+            policy = self.f.repo / '.st' / 'evidence-skip-policy.json'
+            policy.parent.mkdir(exist_ok=True)
+            policy.write_text(json.dumps(doc))
+            target = self.f.repo / '.github' / 'clippy-baseline.json'
+            if baseline is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.parent.mkdir(exist_ok=True)
+                target.write_text(baseline)
+            self.f.git('add', '-A', '.st', '.github')
+            self.f.git('commit', '-q', '-m', 'base')
+            return self.f.git('rev-parse', 'HEAD').strip()
+
+        def ask(base, *extra):
+            code, out, _ = self.f.cli('--tree', self.tree, '--check', 'unit', '--keys', str(self.f.keys), '--policy-from', base,
+                                      '--repository', 'org/repo', *extra)
+            return json.loads(out).get('reason') or 'satisfied'
+        base = commit_base('{"counts": {}}\n')
+        digest = hashlib.sha256(b'{"counts": {}}\n').hexdigest()
+        projected = json.loads(self.f.cli('--tree', self.tree, '--check', 'unit', '--project', '--policy-from', base,
+                                          '--repository', 'org/repo')[1])
+        self.assertEqual(projected['base_inputs'], {'clippy_base_baseline_sha256': digest}, 'a signer reads the value to record here')
+        self.assertEqual(ask(base), 'no_record')
+        self.note(clippy_base_baseline_sha256=digest)
+        self.assertEqual(ask(base), 'satisfied')
+        self.assertEqual(ask(base, '--run-input', 'clippy_base_baseline_sha256=' + 'f' * 64), 'satisfied', 'the caller cannot override it')
+        moved = commit_base('{"counts": {"a": 1}}\n')  # the base's baseline changed: the old measurement no longer counts
+        self.assertEqual(ask(moved), 'wrong_input')
+        self.assertEqual(ask(moved, '--run-input', 'clippy_base_baseline_sha256=' + digest), 'wrong_input')
+        gone = commit_base(None)
+        self.assertEqual(ask(gone), 'wrong_input')
+        self.note(clippy_base_baseline_sha256='absent')
+        self.assertEqual(ask(gone), 'satisfied', 'a base without the file has the value absent')
 
 class InputKeyed(unittest.TestCase):
     """A note of another tree counts when it carries the same key for the check's declared input paths."""

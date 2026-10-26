@@ -1092,9 +1092,10 @@ tree that edits its own lane never skips on one. It is inert until a check's own
 `pull_request` only, so the intersection is empty and a queue note skips nothing. That flip is made per check, on its own measured trigger,
 and `.st/evidence-keys` names the key (a `queue/NAME` line) only once it exists; deleting that line revokes it.
 
-#### Input values (`input_order`, `shard_inputs`)
+#### Input values (`input_order`, `shard_inputs`, `base_inputs`)
 
-`required_inputs` checks only that an input is present. Two optional keys on a kind's rule check values. They apply whatever the signer level.
+`required_inputs` checks only that an input is present. Three optional keys on a kind's rule check values. They apply whatever the signer
+level.
 
 **`input_order`** maps an input to its values, strongest first, for example `{"kit_inputs": ["true", "false"]}`. A note covers a run only
 when its value ranks at or above the run's own value.
@@ -1120,6 +1121,16 @@ fractal-web's policy checks both. The run's own `kit_inputs` reaches the verifie
 - A malformed `RUN_INPUTS` is dropped, so no note covers the run.
 
 `scripts/evidence-flip-ready` does not propose fractal-web's flip until both keys are in the policy.
+
+**`base_inputs`** maps an input to a file whose content at the accepted base the verdict depends on, though the file is not in the tree,
+for example linux-clippy's `{"clippy_base_baseline_sha256": ".github/clippy-baseline.json"}` (its ratchet fails a tree whose baseline
+rose above the base's). A note covers a run only when it recorded the sha256 of that file at the run's accepted base, or `absent` when
+the base has none.
+- The verifier computes the run's value itself from `--policy-from`. A `--run-input` of the same name is ignored, so no caller can
+  supply it.
+- `evidence-verify --project` prints the values (`base_inputs`) for a signer to record. `ci-evidence-signing` records them at
+  `BASE_INPUTS_SHA`, the base the job compared against, and records none when that is empty or all zeros.
+- The base's file changes rarely, so a note stays reusable across merges until it does (docs/keyed-clippy.md).
 
 `app_test_set=related` (pull requests run the app tests reached from their own diff) has no value rule: every pull request's base is a
 main commit that passed the full set, and the merge queue runs everything. It must be revisited before the merge queue stops running what a

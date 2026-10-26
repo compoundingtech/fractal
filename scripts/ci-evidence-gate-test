@@ -39,9 +39,10 @@ REPOSITORY = 'org/repo'
 CHECKS = ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web')
 # The checks with an entry in the skip policy: every gated one (fractal-web's entry is shadow, see its own tests).
 POLICY_CHECKS = CHECKS
-# Every evidence gate job: the checks above and rust-tests, whose note covers one crate and whose gate asks whether every workspace
-# member has one (evidence-verify --members; its end-to-end test is scripts/st-test-test's PerCrate).
-GATED = CHECKS + ('rust-tests',)
+# Every evidence gate job: the checks above, rust-tests, whose note covers one crate and whose gate asks whether every workspace
+# member has one (evidence-verify --members; its end-to-end test is scripts/st-test-test's PerCrate), and linux-clippy, keyed by
+# what the clippy stage reads (docs/keyed-clippy.md). Both are shadow (enforce false).
+GATED = CHECKS + ('rust-tests', 'linux-clippy')
 WEEK = 7 * 24 * 3600
 # The wrapper notes' exact strings, as the note jobs record them (nix-evidence, #2795 / #2803), written out
 # here independently of the policy file so a typo in either cannot make the test agree with itself.
@@ -980,8 +981,9 @@ class EndToEnd(unittest.TestCase):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
         enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
-        # rust-tests (per crate, scripts/st-test) has a policy entry and a gate job of its own, in shadow (enforce false).
-        self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS + ('rust-tests',)))
+        # rust-tests (per crate, scripts/st-test) and linux-clippy (keyed) have a policy entry and a gate job of their own, in shadow
+        # (enforce false).
+        self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS + ('rust-tests', 'linux-clippy')))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
         for check, entry in policy['checks'].items():
             self.assertIn(entry.get('enforce', False), (True, False), check)
@@ -1657,9 +1659,10 @@ class WorkflowStructure(unittest.TestCase):
         flags_line = re.search(r'^          STAGE_SKIPS: (.*)$', aggregate, re.M).group(1)
         # The aggregate's GATE_SKIP is true when any gate its stages read decided skip, and reads exactly those gates.
         gate_skip = re.search(r'^          GATE_SKIP: (.*)$', aggregate, re.M).group(1)
-        self.assertEqual(set(re.findall(r'needs\.evidence-gate-([a-z-]+)\.outputs\.skip', gate_skip)), {'linux-gate', 'rust-tests'})
-        for lg, rt in itertools.product((False, True), repeat=2):
-            self.assertEqual(self.truth(gate_skip, {'linux-gate': lg, 'rust-tests': rt}, 'pull_request'), lg or rt)
+        self.assertEqual(set(re.findall(r'needs\.evidence-gate-([a-z-]+)\.outputs\.skip', gate_skip)),
+                         {'linux-gate', 'rust-tests', 'linux-clippy'})
+        for lg, rt, lc in itertools.product((False, True), repeat=3):
+            self.assertEqual(self.truth(gate_skip, {'linux-gate': lg, 'rust-tests': rt, 'linux-clippy': lc}, 'pull_request'), lg or rt or lc)
 
         def stage_flags(gates):
             """The per-stage skip flags the workflow would compute for these gate decisions."""
@@ -1678,11 +1681,12 @@ class WorkflowStructure(unittest.TestCase):
 
         tests = ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4')
         checked = 0
-        for event, lg, rt in itertools.product(('pull_request', 'merge_group'), (False, True), (False, True)):
-            # linux-gate's own note covers every stage; the per-crate rust-tests notes cover the test stages only.
-            gates = {'linux-gate': lg, 'rust-tests': rt}
+        for event, lg, rt, lc in itertools.product(('pull_request', 'merge_group'), (False, True), (False, True), (False, True)):
+            # linux-gate's own note covers every stage; the per-crate rust-tests notes cover the test stages only; a keyed linux-clippy
+            # note covers clippy only.
+            gates = {'linux-gate': lg, 'rust-tests': rt, 'linux-clippy': lc}
             runs = {job: self.truth(self.job_condition(blocks[job]), gates, event) for job in self.LINUX_JOB_LEVEL}
-            label = (event, lg, rt)
+            label = (event, lg, rt, lc)
             # The build runs whenever any job that needs its output does real work...
             dependents_work = any(runs[j] for j in tests)
             if dependents_work:
@@ -1692,11 +1696,11 @@ class WorkflowStructure(unittest.TestCase):
             for job in self.LINUX_JOB_LEVEL:
                 if job == 'linux-test-build' or (event == 'pull_request' and job in ('linux-tests-shard-3', 'linux-tests-shard-4')):
                     continue
-                covered = (lg or rt) if job in tests else lg  # clippy and fleet compatibility: linux-gate's note only
+                covered = (lg or rt) if job in tests else (lg or lc) if job == 'linux-clippy' else lg  # fleet compatibility: linux-gate's
                 self.assertEqual(not runs[job], covered, label + (job,))
             # The real aggregate accepts the consistent outcome...
             results = {n: ('success' if runs.get(n, True) else 'skipped') for n in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']}
-            skip = 'true' if lg or rt else None  # GATE_SKIP: some gate the stages read decided skip
+            skip = 'true' if lg or rt or lc else None  # GATE_SKIP: some gate the stages read decided skip
             self.assertTrue(accepts(event, results, skip, gates), label)
             # ...and rejects a failure in ANY job that ran, even under a skip.
             for victim in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']:
@@ -1704,18 +1708,20 @@ class WorkflowStructure(unittest.TestCase):
                     broken = {**results, victim: 'failure'}
                     self.assertFalse(accepts(event, broken, skip, gates), label + (victim,))
             # ...and rejects a skipped upgrade-impact even under a skip: it is never covered by it.
-            if lg or rt:
+            if lg or rt or lc:
                 self.assertFalse(accepts(event, {**results, 'upgrade-impact': 'skipped'}, skip, gates), label)
             # ...and rejects skipped stages when no stage's own rule said skip (no gate decided to skip).
             if any(v == 'skipped' for n, v in results.items() if n not in ('linux-tests-shard-3', 'linux-tests-shard-4')):
-                self.assertTrue(lg or rt, label)  # a stage can only be skipped when a gate it reads decided skip
-                self.assertFalse(accepts(event, results, None, gates, flags=stage_flags({'linux-gate': False, 'rust-tests': False})), label)
-            # ...and, with only the per-crate gate saying skip, rejects a skipped clippy or fleet compatibility: not covered by it.
-            if rt and not lg:
-                for stage in ('linux-clippy', 'linux-fleet-compat'):
+                self.assertTrue(lg or rt or lc, label)  # a stage can only be skipped when a gate it reads decided skip
+                none = {'linux-gate': False, 'rust-tests': False, 'linux-clippy': False}
+                self.assertFalse(accepts(event, results, None, gates, flags=stage_flags(none)), label)
+            # ...and, without linux-gate's own skip, rejects a skipped stage that the gates that did say skip do not cover.
+            if not lg:
+                uncovered = ['linux-fleet-compat'] + ([] if lc else ['linux-clippy']) + ([] if rt else ['linux-tests'])
+                for stage in uncovered if rt or lc else []:
                     self.assertFalse(accepts(event, {**results, stage: 'skipped'}, skip, gates), label + (stage,))
             checked += 1
-        self.assertEqual(checked, 8)
+        self.assertEqual(checked, 16)
 
     def test_a_stage_skipped_for_an_unrelated_reason_fails_even_when_the_aggregate_gate_said_skip(self):
         aggregate = self.blocks()['linux-gate']

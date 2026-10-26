@@ -25,6 +25,7 @@ clippy_and_codegen() {
   python3 scripts/ci-build-snapshot-test || return
   python3 scripts/build-stamp-watch-test || return
   python3 scripts/clippy-ratchet-test || return
+  python3 scripts/dep-info-check-test || return
   python3 scripts/crate-cut-test || return
   cargo metadata --no-deps --format-version 1 --locked > "$logs/clippy-metadata.json" || return
   rustc --version > "$logs/clippy-rustc.txt" || return
@@ -39,6 +40,8 @@ clippy_and_codegen() {
     base_args=(--base-ref "$CLIPPY_BASE_SHA")
   fi
   python3 scripts/clippy_ratchet.py --logs "$logs" "${base_args[@]}" || return
+  # Every file those compiles read must be in linux-clippy's input key, or its notes could cover a tree they never measured.
+  python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --jsonl 'clippy-*.jsonl' || return
   cargo run --locked -p fractal-client-codegen -- --check
 }
 

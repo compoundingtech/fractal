@@ -85,7 +85,8 @@ REQUIRE_MODES = ('off', 'shadow', 'reject')
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 PATH_PART = re.compile(r'[A-Za-z0-9._@+=,~#-]+')
 MAX_INPUTS = 300
-KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels', 'by_level', 'input_order', 'shard_inputs'}
+KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels', 'by_level', 'input_order', 'shard_inputs',
+             'base_inputs'}
 SHARD_KEYS = {'count', 'results', 'pull_request_count'}
 LEVEL_KEYS = {'command', 'required_inputs', 'bind_inputs', 'events', 'lane'}
 EVENTS = ('pull_request', 'merge_group')
@@ -123,6 +124,26 @@ def checked_value_rules(rule, where):
             raise Failure('error', f'skip policy for {where}: shard_inputs needs count and results input names, and an optional '
                           'pull_request_count from 1 to 16')
     return {key: list(values) for key, values in order.items()}, (dict(shards) if shards is not None else None)
+
+
+def checked_base_inputs(rule, where):
+    """`base_inputs` maps an input name to a file whose content at the accepted base the verdict depends on, though it is not in the tree
+    (linux-clippy's ratchet reads the base's .github/clippy-baseline.json). A note covers a run only when its value is the sha256 of that
+    file at this run's base, or `absent` when the base has none; the verifier computes the run's value itself (base_input_values)."""
+    base = rule.get('base_inputs', {})
+    if not (isinstance(base, dict) and all(isinstance(k, str) and k and isinstance(v, str) and v for k, v in base.items())):
+        raise Failure('error', f'skip policy for {where}: base_inputs maps an input name to a path')
+    return {key: declared_paths([path], f'skip policy for {where}: base_inputs')[0] for key, path in base.items()}
+
+
+def base_input_values(repo, base, rules):
+    """{input: sha256 of its file at `base`, or 'absent'} for every base_inputs entry of the check's kinds."""
+    values = {}
+    for rule in (rules or {}).get('kinds', {}).values():
+        for key, path in rule.get('base_inputs', {}).items():
+            code, data = no_lazy(repo, 'show', '--end-of-options', f'{base}:{path}')
+            values[key] = hashlib.sha256(data).hexdigest() if code == 0 else 'absent'
+    return values
 
 
 def policy_rules(text, check, repository):
@@ -179,6 +200,7 @@ def policy_rules(text, check, repository):
             raise Failure('error', f'skip policy for {check}: kind {kind!r} is not valid')
         command, required, bind = checked_command_inputs(rule, f'{check}/{kind}')
         order, shards = checked_value_rules(rule, f'{check}/{kind}')
+        base_inputs = checked_base_inputs(rule, f'{check}/{kind}')
         prefix = rule.get('runner_prefix')
         kind_levels = rule.get('trust_levels')
         if kind_levels is not None and not (isinstance(kind_levels, list) and kind_levels
@@ -219,7 +241,7 @@ def policy_rules(text, check, repository):
                        'by_level': by_level,
                        # Values, not just presence: the note's value must cover the run's (input_order), and a sharded job's
                        # inputs must name every shard as a success (shard_inputs). Whatever the signer level.
-                       'input_order': order, 'shard_inputs': shards}
+                       'input_order': order, 'shard_inputs': shards, 'base_inputs': base_inputs}
     return {'kinds': kinds, 'trust_levels': tuple(levels), 'max_age_s': max_age, 'enforce': enforce,
             'inputs': inputs, 'sample_one_in': sample, 'require': require,
             'events': list(check_events) if check_events is not None else None}
@@ -236,6 +258,13 @@ def value_checks(rule, inputs, run_inputs, attempts):
             raise Failure('wrong_input', f'record input {key} is {note_value!r}, not one of {", ".join(order)}', attempts=attempts)
         if order.index(note_value) > order.index(run_value):
             raise Failure('wrong_input', f'record input {key}={note_value} does not cover this run\'s {key}={run_value}',
+                          attempts=attempts)
+    for key in rule.get('base_inputs', {}):
+        run_value, note_value = run_inputs.get(key), inputs.get(key)
+        if not run_value:
+            raise Failure('no_run_input', f'the accepted base\'s {key} is not known, so no record can cover it', attempts=attempts)
+        if note_value != run_value:
+            raise Failure('wrong_input', f'record input {key}={note_value} is not the accepted base\'s {key}={run_value}',
                           attempts=attempts)
     shards = rule.get('shard_inputs')
     if shards:
@@ -1236,8 +1265,10 @@ def main(argv):
                 paths = declared_paths([p for p in args.paths.split(',') if p], '--paths')
             else:
                 paths = rules['inputs'] if rules is not None else None
+            # base_inputs: the values a signer records for the policy's base_inputs (the same ones this verifier will compare).
             print(json.dumps({'source_inputs': project(args.repo, tree, paths) if paths else None,
-                              'paths': list(paths) if paths else None, 'tree': tree, 'check': args.check}, indent=2))
+                              'paths': list(paths) if paths else None, 'tree': tree, 'check': args.check,
+                              'base_inputs': base_input_values(args.repo, args.policy_from, rules) if rules is not None else {}}, indent=2))
             return 0
         if args.keys_from:
             keyfile = tempfile.NamedTemporaryFile(suffix='.keys')
@@ -1268,6 +1299,8 @@ def main(argv):
             if not sep or not key:
                 raise Failure('error', f'--run-input must be KEY=VALUE, not {pair!r}')
             run_inputs[key] = value
+        if rules is not None:  # computed here from the accepted base, never taken from the caller
+            run_inputs.update(base_input_values(args.repo, args.policy_from, rules))
         log_keys = os.path.abspath(args.log_keys) if args.log_keys else None
         if args.log_keys_from:
             code, text = no_lazy(args.repo, 'show', '--end-of-options', f'{args.log_keys_from}:{LOG_KEY_PATH}')

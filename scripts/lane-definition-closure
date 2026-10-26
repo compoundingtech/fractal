@@ -81,6 +81,10 @@ VERDICT_DATA = {
         '.github/fleet-compat-baseline.json': 'the release the fleet-compat stage runs against (scripts/compat-baseline)',
         '.github/messaging-compat-baseline.json': 'the release the messaging compatibility tests run against (scripts/ci-local)',
     },
+    'linux-clippy': {
+        '.github/clippy-baseline.json': 'the warnings clippy may still report (scripts/clippy_ratchet.py)',
+        '.github/clippy-splits.json': 'how the clippy stage splits the workspace (scripts/clippy_ratchet.py)',
+    },
     'rust-tests': {
         '.config/daily-only.filterset': 'the tests the PR run leaves to the daily run (scripts/ci-nextest)',
         '.github/messaging-compat-baseline.json': 'the release the messaging compatibility tests run against (scripts/ci-local)',

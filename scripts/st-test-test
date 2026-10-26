@@ -2050,12 +2050,14 @@ class PerCrate(StTest):
         self.assertIn('to run: base, top', out)
 
     def test_rust_tests_is_in_the_default_suite_after_linux_gate(self):
-        self.assertEqual(st_test.OPT_IN, frozenset())
+        # Only linux-clippy is opt-in: linux-gate's own run still includes clippy, so a default run never runs it twice.
+        self.assertEqual(st_test.OPT_IN, frozenset({'linux-clippy'}))
         self.assertIn('rust-tests', st_test.BUILDS)
         for flags in ((), ('--all',)):
             code, out, err = self.run_st_test('--list', *flags)
             names = [line.split(':')[0] for line in out.splitlines()]
             self.assertIn('rust-tests', names, flags)
+            self.assertNotIn('linux-clippy', names, flags)
             self.assertLess(names.index('linux-gate') if 'linux-gate' in names else -1, names.index('rust-tests'), flags)
         code, out, err = self.run_st_test('--list', '--check', 'rust-tests')
         self.assertIn('rust-tests: python3 scripts/ci-rust-test-result', out)
