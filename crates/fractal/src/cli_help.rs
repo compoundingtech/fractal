@@ -31,7 +31,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "Inside an agent seat",
+        "Inside an agent",
         &["work", "changes", "gh", "claim", "diagnostic", "trace", "skill"],
     ),
     (
@@ -101,7 +101,7 @@ pub(super) fn all_help_requested(arguments: &[std::ffi::OsString]) -> bool {
 pub(super) fn root_help(all: bool) -> String {
     let command = Cli::command();
     let mut output = String::from(
-        "See what needs you:\n  fractal now\n\nRun fractal in a terminal to open the interface:\n  fractal\n  fractal ui --space NAME\n\nStart an agent and talk to it:\n  fractal agents new NAME --harness claude --attach\n\nSee what is running:\n  fractal missions ls\n  fractal agents ls\n\nFrom an agent seat:\n  fractal skill\n  fractal work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or fractal work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: fractal [OPTIONS] <COMMAND>\n",
+        "See what needs you:\n  fractal now\n\nRun fractal in a terminal to open the interface:\n  fractal\n  fractal ui --space NAME\n\nStart an agent and talk to it:\n  fractal agents new NAME --harness claude --attach\n\nSee what is running:\n  fractal missions ls\n  fractal agents ls\n\nFrom an agent:\n  fractal skill\n  fractal work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or fractal work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: fractal [OPTIONS] <COMMAND>\n",
     );
     for (heading, names) in GROUPS {
         if *heading == "Plumbing" && !all {
@@ -329,9 +329,9 @@ mod tests {
         assert!(default.starts_with("See what needs you:\n  fractal now\n"));
         assert!(default.contains("fractal agents new NAME --harness claude --attach"));
         assert!(default.contains("fractal missions ls\n  fractal agents ls"));
-        assert!(default.find("Everyday use:") < default.find("Inside an agent seat:"));
+        assert!(default.find("Everyday use:") < default.find("Inside an agent:"));
         assert!(
-            default.find("Inside an agent seat:")
+            default.find("Inside an agent:")
                 < default.find("Running fractal on a machine or fleet:")
         );
         assert!(!default.contains("Plumbing:"));
