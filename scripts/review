@@ -192,26 +192,78 @@ SCHEMA_NOTE = """{
 
 
 def extract_json(text):
-    """The last JSON object in text that has a verdict key; tolerates a code fence or prose around it."""
+    """The last JSON object in text that has a verdict key; tolerates a code fence or prose around it.
+
+    The last, not the first: a model that quotes an example object before its answer must be read as its answer.
+    """
     decoder = json.JSONDecoder()
     found = None
-    for match in re.finditer(r"\{", text):
+    position = 0
+    while (start := text.find("{", position)) != -1:
         try:
-            value, _ = decoder.raw_decode(text[match.start():])
+            value, length = decoder.raw_decode(text[start:])
         except ValueError:
+            position = start + 1
             continue
+        position = start + length
         if isinstance(value, dict) and "verdict" in value:
             found = value
-            break
     if found is None:
         raise Failed("the agent's answer holds no JSON object with a verdict")
     return found
+
+
+READ_ONLY_CLAUDE = {"Read", "Grep", "Glob", "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git blame:*)", "Bash(git merge-tree:*)"}
+READ_ONLY_OMP = {"read", "grep", "find"}
+WIDENING = {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--auto-approve", "--yolo", "--full-auto",
+            "--dangerously-bypass-approvals-and-sandbox"}
+
+
+def option(command, name):
+    """The value after the flag NAME in COMMAND, or None."""
+    for index, part in enumerate(command[:-1]):
+        if part == name:
+            return command[index + 1]
+    return None
+
+
+def restriction_problem(command):
+    """Why COMMAND is not a read-only agent invocation, or None when it is.
+
+    The diff under review is untrusted input, so the reviewing agent must not be able to run anything or write anything. A command
+    passes when it carries one of the restrictions the supported CLIs have, with nothing that widens it: codex --sandbox read-only;
+    claude --allowedTools limited to Read, Grep, Glob and read-only git, with --permission-mode dontAsk; omp --tools limited to
+    read, grep and find, with --no-extensions.
+    """
+    widening = sorted(WIDENING & set(command))
+    if widening:
+        return f"it carries {widening[0]}"
+    if option(command, "--approval-mode") == "yolo":
+        return "it carries --approval-mode yolo"
+    if "--sandbox" in command:
+        return None if option(command, "--sandbox") == "read-only" else "its --sandbox is not read-only"
+    if "--allowedTools" in command:
+        outside = sorted(set(re.findall(r"Bash\([^)]*\)|\S+", option(command, "--allowedTools") or "")) - READ_ONLY_CLAUDE)
+        if outside:
+            return f"--allowedTools allows {outside[0]}"
+        if option(command, "--permission-mode") != "dontAsk":
+            return "claude needs --permission-mode dontAsk so that nothing outside --allowedTools is approved"
+        return None
+    if "--tools" in command:
+        tools = set(filter(None, (option(command, "--tools") or "").split(",")))
+        if not tools or tools - READ_ONLY_OMP:
+            return f"--tools allows {sorted(tools - READ_ONLY_OMP)[0] if tools - READ_ONLY_OMP else 'nothing'}"
+        return None if "--no-extensions" in command else "omp needs --no-extensions so that no extension adds a tool"
+    return "it has no read-only restriction (codex --sandbox read-only, claude --allowedTools, omp --tools)"
 
 
 def run_harness(config, name, model, prompt, cwd, timeout):
     settings = config["harnesses"].get(name)
     if settings is None:
         raise Failed(f"no harness {name!r} in {CONFIG} (have {sorted(config['harnesses'])})")
+    problem = restriction_problem(settings["command"])
+    if problem:
+        raise Failed(f"harness {name!r} is not read-only: {problem}")
     model = model or settings.get("model")
     out_file = tempfile.NamedTemporaryFile(prefix="review-out-", delete=False)
     out_file.close()

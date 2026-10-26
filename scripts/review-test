@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """scripts/review with a fake agent CLI: what it sends, how it assembles and validates the verdict, what it serves from the record,
 and when it refuses."""
+import importlib.machinery
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -11,6 +13,12 @@ sys.dont_write_bytecode = True
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+_loader = importlib.machinery.SourceFileLoader("review_script", str(HERE / "review"))
+_spec = importlib.util.spec_from_loader("review_script", _loader)
+_module = importlib.util.module_from_spec(_spec)
+_loader.exec_module(_module)
+restriction_problem, extract_json = _module.restriction_problem, _module.extract_json
 
 FAKE = '''#!/usr/bin/env python3
 import json, os, sys
@@ -78,8 +86,8 @@ class Review(unittest.TestCase):
     def write_config(self, family):
         self.config.write_text(json.dumps({
             "version": 1, "default": "fake", "timeout_seconds": 60, "structure_only": ["**/*.lock"],
-            "harnesses": {"fake": {"family": family, "model": "fake-1", "command": [str(self.fake / "agent")], "model_args": [], "parse": "text"},
-                          "fake-claude": {"family": "anthropic", "model": None, "command": [str(self.fake / "agent")], "parse": "claude-json"}},
+            "harnesses": {"fake": {"family": family, "model": "fake-1", "command": [str(self.fake / "agent"), "--sandbox", "read-only"], "model_args": [], "parse": "text"},
+                          "fake-claude": {"family": "anthropic", "model": None, "command": [str(self.fake / "agent"), "--sandbox", "read-only"], "parse": "claude-json"}},
         }))
 
     def git(self, *args):
@@ -287,6 +295,32 @@ class Review(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(verdict["read"]["structure"], [])
         self.assertIn("+changed", self.prompts()[0])
+
+    def test_every_configured_harness_is_read_only(self):
+        config = json.loads((ROOT / ".st/review-harness.json").read_text())
+        self.assertTrue(config["harnesses"])
+        for name, settings in config["harnesses"].items():
+            self.assertIsNone(restriction_problem(settings["command"]), name)
+
+    def test_a_command_without_a_read_only_restriction_is_refused(self):
+        for command in (["omp", "-p"], ["omp", "-p", "--tools", "read,bash", "--no-extensions"], ["omp", "-p", "--tools", "read"],
+                        ["codex", "exec", "--sandbox", "workspace-write"], ["codex", "exec", "--sandbox", "read-only", "--yolo"],
+                        ["claude", "-p", "--allowedTools", "Read Bash(git log:*) Bash"], ["claude", "-p", "--allowedTools", "Read Grep Bash(rm:*)", "--permission-mode", "dontAsk"],
+                        ["claude", "-p", "--allowedTools", "Read", "--permission-mode", "acceptEdits"], ["claude", "-p"]):
+            self.assertIsNotNone(restriction_problem(command), command)
+
+    def test_a_harness_without_the_restriction_does_not_run(self):
+        config = json.loads(self.config.read_text())
+        config["harnesses"]["fake"]["command"] = [str(self.fake / "agent")]
+        self.config.write_text(json.dumps(config))
+        done, _ = self.review()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("not read-only", done.stderr)
+        self.assertEqual(self.prompts(), [])
+
+    def test_the_last_verdict_object_in_an_answer_is_the_answer(self):
+        text = 'for example {"verdict": "CHANGES"} and then {"verdict": "GO", "text": "x"} done'
+        self.assertEqual(extract_json(text)["verdict"], "GO")
 
 
 if __name__ == "__main__":

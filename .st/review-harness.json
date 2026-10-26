@@ -21,7 +21,7 @@
     "omp": {
       "family": "multi",
       "model": null,
-      "command": ["omp", "-p", "--no-session", "--cwd", "{cwd}"],
+      "command": ["omp", "-p", "--no-session", "--no-extensions", "--tools", "read,grep,find", "--cwd", "{cwd}"],
       "model_args": ["--model", "{model}"],
       "parse": "text"
     }

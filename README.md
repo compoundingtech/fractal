@@ -127,7 +127,9 @@ scripts/review --harness codex      # choose the agent CLI: claude, codex or omp
 scripts/review --author-family anthropic   # refuse a reviewer of the same model family as the author
 ```
 
-- It runs the agent CLI you have in a detached checkout of the head with read-only tools. The deterministic risk score
+- It runs the agent CLI you have in a detached checkout of the head with read-only tools: the diff is untrusted input, so a harness
+  whose command carries no read-only restriction (codex `--sandbox read-only`, claude `--allowedTools` of Read, Grep, Glob and
+  read-only git, omp `--tools read,grep,find`) is refused. The deterministic risk score
   (`scripts/review-risk`) and the per-file patch-ids are computed by script from the diff; the model adds its own score, and the final
   risk is the higher of the two. The risk script, the verdict validator and their schema are always the base's, never the head's.
 - The verdict is one JSON file that must validate against `.st/review-verdict.schema.json`. If it does not, the review fails and
