@@ -3432,6 +3432,7 @@ mod tree_tests {
         let mission = missions.iter_mut().find(|mission| !mission.steps.is_empty()).unwrap();
         mission.word = Word::Watching;
         mission.steps[0].owner = Some("st".into());
+        mission.steps[0].owner_is_system = true;
         let id = mission.id.clone();
         let serialized = serde_json::to_value(&*mission).unwrap();
         assert_eq!(serialized["steps"][0]["owner"], "st");

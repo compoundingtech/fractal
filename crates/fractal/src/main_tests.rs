@@ -505,6 +505,8 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
 
 #[test]
 fn diagnostic_prefix_preserves_gate_and_native_driver_contracts() {
+    assert_eq!(ClientMessage::Human.product_name(), "Fractal");
+    assert_eq!(ClientMessage::Stable.product_name(), "st");
     for legacy in ["st", "st3"] {
         assert_eq!(ClientMessage::Human.diagnostic_prefix(legacy), "fractal");
         assert_eq!(ClientMessage::Stable.diagnostic_prefix(legacy), legacy);

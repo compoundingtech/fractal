@@ -5087,6 +5087,13 @@ impl ClientMessage {
         }
     }
 
+    fn product_name(self) -> &'static str {
+        match self {
+            Self::Stable => "st",
+            Self::Human => "Fractal",
+        }
+    }
+
     fn error(self, error: &fractal_client::ClientError) -> String {
         match self {
             Self::Stable => error.plain(),
@@ -6754,7 +6761,7 @@ async fn check_before_publish(
             !required,
             "this st daemon cannot check exec gates; update it"
         );
-        stderr_message("st", format_args!("this st daemon cannot check exec gates; publishing without the check"));
+        stderr_message("st", format_args!("this {} daemon cannot check exec gates; publishing without the check", ClientMessage::for_output(false).product_name()));
         return Ok(());
     };
     let broken = view

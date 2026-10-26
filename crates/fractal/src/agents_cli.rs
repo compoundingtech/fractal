@@ -842,7 +842,7 @@ async fn run_agent_new(
             Err(error)
                 if fractal_daemon::client::is_missing_route(&error) || fractal_daemon::client::is_not_found(&error) =>
             {
-                crate::stderr_message("st", format_args!("the daemon is older than this st and cannot check which providers are installed; creating the seat anyway"));
+                crate::stderr_message("st", format_args!("the daemon is older than this {} and cannot check which providers are installed; creating the seat anyway", ClientMessage::for_output(false).product_name()));
             }
             Err(error) => return Err(error),
         }
