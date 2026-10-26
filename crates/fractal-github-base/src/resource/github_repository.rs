@@ -3532,7 +3532,7 @@ mod tests {
             github.route(start, json!([issue(1, at, json!({"title": format!("edit {sweep}")}))]));
             for part in 0..2 {
                 let before = now_ms();
-                let observation = observe_at(request(&["mentions"], cursor.as_deref(), None), &base, Some(&token))
+                let observation = observe_at(request(&["issues"], cursor.as_deref(), None), &base, Some(&token))
                     .await.unwrap();
                 let state = RepositoryCursor::parse(observation.cursor.as_deref());
                 assert_eq!(state.items_since.as_deref(), Some(at));
@@ -3547,7 +3547,7 @@ mod tests {
         }
         // Backoff keeps enough state to converge later; it is not an error or forced commit.
         for _ in 0..2 {
-            let observation = observe_at(request(&["mentions"], cursor.as_deref(), None), &base, Some(&token))
+            let observation = observe_at(request(&["issues"], cursor.as_deref(), None), &base, Some(&token))
                 .await.unwrap();
             cursor = observation.cursor;
         }
