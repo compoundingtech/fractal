@@ -93,6 +93,7 @@ mod tests {
             })),
         };
         let item = Attention {
+            deadline: None,
             id: "attention/first".into(),
             tier: Tier::Stopped,
             title: "Choose".into(),

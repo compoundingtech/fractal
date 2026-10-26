@@ -73,7 +73,7 @@ impl View for Family {
     fn definition(&self) -> Definition {
         Definition {
             name: self.view(),
-            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v2",
+            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v3",
             kinds: &[],
             local_kinds: match self {
                 Self::Person => &[PERSON_CHANGE, PERSON_CLOCK],
@@ -366,6 +366,12 @@ pub fn resource(item: &AttentionItemView) -> Result<Value> {
       "operational":{"layer":"current","actionable":true,"reasons":[]},"alert":item.is_alert()});
     if item.conversation.is_some() {
         row["conversation_ids"] = json!(item.conversations());
+    }
+    if let Some(deadline) = item.deadline_unix_ms {
+        row["deadline_at"] = json!(crate::client_values::client_timestamp(deadline));
+    }
+    if let Some(default) = &item.default_answer {
+        row["default_answer"] = default.clone();
     }
     for (name, value) in [
         ("conversation_id", &item.conversation),

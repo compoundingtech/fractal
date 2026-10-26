@@ -31,6 +31,7 @@ const AGENT: &str = "agent/example/atlas/builder";
 
 fn ask(agent: &str) -> Attention {
     Attention {
+        deadline: None,
         id: "ask/probe".into(),
         tier: Tier::Stopped,
         title: "Ship the release?".into(),

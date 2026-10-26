@@ -521,6 +521,12 @@ pub struct Attention {
     pub priority: String,
     pub state: String,
     pub requested_at: String,
+    /// When a person-step ask resolves by itself if nobody answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<String>,
+    /// The ask's answer that applies at its deadline; absent, it times out without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<AskDefaultAnswer>,
     #[serde(default)]
     pub targets: Vec<String>,
     #[serde(default)]
@@ -3781,6 +3787,12 @@ pub struct PersonAnswer {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+}
+/// The answer of a person-step ask that applies at its deadline.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AskDefaultAnswer {
+    pub id: String,
+    pub label: String,
 }
 /// A response to a person ask, as the asker reads it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

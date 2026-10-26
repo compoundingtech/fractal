@@ -170,6 +170,8 @@ impl Store {
             // The exact call it asks about, as its hook or driver named it for this observation.
             let call = prompt_call(&connection, &seat, &harness)?;
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: claim,
                 priority: "high".into(),
                 kind: "harness-prompt".into(),
@@ -521,6 +523,8 @@ impl Store {
                 continue;
             }
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: claim.id,
                 priority: "high".into(),
                 kind: "fault".into(),
@@ -649,6 +653,8 @@ impl Store {
             ),
         };
         Ok(Some(AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             episode: state.id,
             priority: if severity == "warning" {
                 "normal"
@@ -752,6 +758,8 @@ impl Store {
             let source = desired.subject;
             let diagnostic = self.last_driver_diagnostic(&source)?;
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: decision.id.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
                 subject: source.clone(), person: reviewer.into(), requester_id: None, launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
                 title: if codex { "A Codex agent stopped after repeated failures" } else { "An agent stopped after repeated runtime failures" }.into(),
@@ -839,6 +847,8 @@ impl Store {
                 None => " The driver has left no diagnostic: it never ran.".into(),
             };
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: token.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
                 subject: source.clone(), person: REVIEWER.into(), requester_id: None, launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
                 title: "An agent seat has not started".into(),
@@ -879,6 +889,8 @@ impl Store {
                 continue;
             }
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: format!("deadline-admission-missing:{id}"),
                 priority: "high".into(), kind: "fault".into(), review_mode: None,
                 subject: run.subject.clone(), person: run.requester.clone(),
@@ -1027,6 +1039,8 @@ impl Store {
             }
             let source = desired.subject;
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: first.id.clone(),
                 priority: "high".into(),
                 kind: "fault".into(),
@@ -1454,7 +1468,29 @@ pub fn person_attention_item(
         Some(_) => ("done", &["--text", "FEEDBACK"]),
         None => ("done", &["--summary", "RESPONSE"]),
     };
+    // An ask resolves by itself at its deadline, with its default answer if it names one.
+    let (deadline_unix_ms, default_answer) = match &ask {
+        Some(ask) if !person_work::is_update(ask) => {
+            let (since, default_ms) = person_work::ask_deadline_policy(connection)?;
+            let default_answer = person_work::ask_default_answer(ask).and_then(|id| {
+                request
+                    .as_ref()?
+                    .get("answers")?
+                    .as_array()?
+                    .iter()
+                    .find(|answer| answer["id"] == id)
+                    .map(|answer| json!({"id": id, "label": answer["label"]}))
+            });
+            (
+                person_work::ask_deadline(ask, since, default_ms),
+                default_answer,
+            )
+        }
+        _ => (None, None),
+    };
     Ok(Some(AttentionItemView {
+        deadline_unix_ms,
+        default_answer,
         episode,
         priority: "normal".into(),
         kind: "person-step".into(),
@@ -1661,6 +1697,8 @@ impl Store {
             ),
         };
         Ok(Some(AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             episode: claim,
             priority: "high".into(),
             kind: "harness-prompt".into(),
@@ -1813,6 +1851,8 @@ impl Store {
             let tool = fields["status"].as_str().unwrap_or("tool");
             let reason = fields["reason"].as_str().filter(|reason| !reason.is_empty()).unwrap_or("no reason given");
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: claim,
                 priority: "high".into(),
                 kind: "harness-prompt".into(),

@@ -5337,6 +5337,8 @@ impl Store {
         let mut items = Vec::new();
         for fault in self.signature_state_faults()? {
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: format!("{}:{}", fault.code, fault.subject),
                 priority: "high".into(),
                 kind: "fault".into(),
@@ -12091,6 +12093,8 @@ fn attention_action(label: &str, argv: &[&str]) -> AttentionActionView {
 
 fn attention_item_from_failure(request: AttentionRequestView) -> AttentionItemView {
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: request.request.clone(),
         priority: if request.severity == "warning" {
             "normal"

@@ -1694,6 +1694,8 @@ mod tests {
     #[test]
     fn attention_list_shows_kind_age_targets_and_safe_commands() {
         let item = AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             kind: "fault".into(),
             episode: "failure-one".into(),
             priority: "high".into(),

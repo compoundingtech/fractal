@@ -564,6 +564,9 @@ impl Ui {
                 text::run(item.title.clone(), theme::bold()),
             ];
             head.push(text::run(format!("  {} ago", item.age), theme::dim()));
+            if let Some(deadline) = &item.deadline {
+                head.push(text::run(format!(" · {deadline}"), theme::dim()));
+            }
             rows.extend(
                 text::wrap(&head, width, &[], &[text::run("   ", theme::dim())], None)
                     .into_iter()
@@ -810,6 +813,7 @@ mod tests {
 
     fn prompt(id: &str, answers: &[&str]) -> Attention {
         Attention {
+            deadline: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: "agent/example/atlas is waiting for a permission".into(),
@@ -1231,6 +1235,7 @@ mod tests {
         }
         let request: fractal_client::StructuredRequest = serde_json::from_value(value).unwrap();
         Attention {
+            deadline: None,
             id: "attention/release".into(),
             tier: Tier::Stopped,
             title: "How far does the release go?".into(),
@@ -1261,6 +1266,34 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Every ask has a deadline: its card says how long is left and what then applies, worded
+    /// as the web and phone word it.
+    #[test]
+    fn an_ask_card_says_how_long_is_left_and_what_then_applies() {
+        let now = "2026-10-26T08:00:00Z";
+        assert_eq!(
+            crate::ui::adapt::ask_deadline("2026-10-26T11:00:00Z", Some("Hold"), now),
+            "answer within 3h, or “Hold” applies"
+        );
+        assert_eq!(
+            crate::ui::adapt::ask_deadline("2026-10-28T08:00:00Z", None, now),
+            "answer within 2d, or it times out"
+        );
+        assert_eq!(
+            crate::ui::adapt::ask_deadline("2026-10-26T07:00:00Z", None, now),
+            "answer within 0s, or it times out"
+        );
+        let mut item = request(None);
+        item.deadline = Some("answer within 3h, or “Hold” applies".into());
+        let mut ui = with_alerts(vec![item]);
+        ui.live = true;
+        let shown = texts(&ui.expanded_band("agent/example/atlas", 120));
+        assert!(
+            shown.contains("1m ago · answer within 3h, or “Hold” applies"),
+            "{shown}"
+        );
     }
 
     /// The asker's recommended answer leads its card even when it is fourth, so the three-button

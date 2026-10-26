@@ -618,10 +618,9 @@ impl PersonWorkStore for Store {
             // A concurrent new ask is handled by the next notified reconcile pass.
             return Ok(PersonAskPass::default());
         }
-        let default_ms = self.default_ask_deadline_ms();
         self.connection.batched(|tx| -> Result<PersonAskPass> {
             let asks = person_asks_for_reconcile(tx)?;
-            let since = ask_deadlines_since(tx)?;
+            let (since, default_ms) = ask_deadline_policy(tx)?;
             let mut pass = PersonAskPass::default();
             let mut ended = 0;
             for ask in asks {

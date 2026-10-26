@@ -525,6 +525,11 @@ export type ArrangementTombstoneRegister = {
   value: true;
 };
 
+export type AskDefaultAnswer = {
+  id: string;
+  label: string;
+};
+
 export type AssistantAgentDetailRequest = {
   agent_id: AgentId;
   max_response_bytes?: AssistantResponseBytes;
@@ -879,6 +884,8 @@ export type Attention = ResourceHeader & {
   custom_form?: {
 
 };
+  deadline_at?: Timestamp;
+  default_answer?: AskDefaultAnswer;
   detail: string;
   episode?: string;
   fix?: {

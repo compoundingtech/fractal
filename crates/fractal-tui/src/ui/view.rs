@@ -170,6 +170,9 @@ pub struct Attention {
     /// Who is waiting, e.g. "Atlas Builder on harbor".
     pub waiting: Option<String>,
     pub age: String,
+    /// When an ask resolves by itself and what then applies, e.g. `answer within 3h, or “Hold”
+    /// applies`. None on an item with no deadline.
+    pub deadline: Option<String>,
     pub mission: Option<String>,
     /// The agent that did the work or raised the item: who to talk to about it.
     pub agent: Option<String>,

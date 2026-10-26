@@ -1051,6 +1051,13 @@ from when this member first ran a build with deadlines (the `person_ask_deadline
 key in its `meta` table), or from when it was asked, whichever is later. Old asks therefore do
 not all resolve at once on the deploy. An update waits for nobody and has no deadline.
 
+The person's home shows each ask's deadline and default. The attention row carries
+`deadline_at` and, when the ask names one, `default_answer` (`{id, label}`). The web app, the
+terminal interface and the phone word it the same way, for example `answer within 3h, or
+“Keep it open” applies` or `answer within 2d, or it times out`. The member keeps its
+`[asks] default_deadline` in `meta` (`person_ask_default_deadline_ms`), so the home and the
+reconciler count an older ask's deadline from the same default.
+
 #### Structured requests
 
 `st work ask --request FILE` (or `request` on the client `work.ask` action) adds a typed question

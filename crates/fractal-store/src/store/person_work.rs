@@ -46,6 +46,24 @@ pub fn ask_deadlines_since(connection: &Connection) -> Result<u128> {
         .unwrap_or(0))
 }
 
+/// The `meta` key holding this node's `[asks] default_deadline`, so that transaction code, such
+/// as a person's home, reads the same default the reconciler resolves asks with.
+pub const ASK_DEFAULT_DEADLINE: &str = "person_ask_default_deadline_ms";
+
+/// When this node started counting ask deadlines, and its default deadline.
+pub fn ask_deadline_policy(connection: &Connection) -> Result<(u128, u64)> {
+    let default = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [ASK_DEFAULT_DEADLINE],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_ASK_DEADLINE_MS);
+    Ok((ask_deadlines_since(connection)?, default))
+}
+
 /// Records, once, that this node counts ask deadlines from `now`.
 pub fn start_counting_ask_deadlines(connection: &Connection, now: u128) -> Result<()> {
     connection.execute(
@@ -74,10 +92,24 @@ pub fn ask_default_answer(ask: &ClaimRecord) -> Option<&str> {
 }
 
 impl Store {
-    /// Sets how long a person has to answer an ask that names no deadline.
-    pub fn set_default_ask_deadline_ms(&self, deadline_ms: u64) {
+    /// Sets how long a person has to answer an ask that names no deadline. It is kept in `meta`
+    /// too, written only when it changes, for the asks that carry no deadline of their own.
+    pub fn set_default_ask_deadline_ms(&self, deadline_ms: u64) -> Result<()> {
         self.default_ask_deadline_ms
             .store(deadline_ms, std::sync::atomic::Ordering::Relaxed);
+        if ask_deadline_policy(&self.readers.get())?.1 == deadline_ms {
+            return Ok(());
+        }
+        self.connection
+            .batched(|tx| {
+                tx.execute(
+                    /* sqlite-large-value: allow-for-now lv-hcb7506bd8ba2 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    params![ASK_DEFAULT_DEADLINE, deadline_ms.to_string()],
+                )
+                .map(drop)
+            })
+            .map_err(anyhow::Error::msg)??;
+        Ok(())
     }
 
     pub fn default_ask_deadline_ms(&self) -> u64 {

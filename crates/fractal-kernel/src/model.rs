@@ -1974,6 +1974,12 @@ pub struct AttentionItemView {
     #[serde(default)]
     pub targets: Vec<String>,
     pub requested_at_unix_ms: u128,
+    /// When a person ask resolves by itself if nobody answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_unix_ms: Option<u128>,
+    /// The answer that then applies, `{id, label}`. Absent, the ask times out without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<Value>,
     #[serde(default)]
     pub actions: Vec<AttentionActionView>,
 }

@@ -430,6 +430,7 @@ fn usage() -> Vec<fractal_client::UsageRow> {
 fn attention() -> Vec<Attention> {
     vec![
         Attention {
+            deadline: None,
             conversations: vec![],
             id: s("attention/1"),
             tier: Tier::Stopped,
@@ -465,6 +466,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            deadline: None,
             conversations: vec![],
             id: s("attention/2"),
             tier: Tier::Stopped,
@@ -495,6 +497,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            deadline: None,
             conversations: vec![],
             id: s("attention/3"),
             tier: Tier::Today,
@@ -559,6 +562,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            deadline: None,
             conversations: vec![],
             id: s("attention/4"),
             tier: Tier::Alert,
@@ -583,6 +587,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            deadline: None,
             conversations: vec![],
             id: s("attention/5"),
             tier: Tier::Today,
@@ -612,6 +617,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            deadline: None,
             conversations: vec![],
             id: s("attention/6"),
             tier: Tier::Later,

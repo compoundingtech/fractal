@@ -627,6 +627,8 @@
             "priority": { "enum": ["critical", "high", "normal", "low"] },
             "state": { "enum": ["open", "resolved"] },
             "requested_at": { "$ref": "#/$defs/Timestamp" },
+            "deadline_at": { "$ref": "#/$defs/Timestamp", "description": "When a person-step ask resolves by itself if nobody answers it. Absent on an update and on daemons that predate deadlines." },
+            "default_answer": { "$ref": "#/$defs/AskDefaultAnswer" },
             "targets": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
             "target_states": { "type": "array", "items": { "$ref": "#/$defs/AttentionTargetState" } },
             "actions": { "type": "array", "items": { "type": "string", "enum": [
@@ -2826,6 +2828,11 @@
         "outcome": {"enum": ["accept", "decline", "request_changes"], "description": "Required on a decision answer; absent on a choice option."},
         "conditions": {"type": "array", "items": {"type": "string"}}
       }
+    },
+    "AskDefaultAnswer": {
+      "type": "object", "required": ["id", "label"],
+      "description": "The answer of a person-step ask that applies at its deadline. Absent, the ask times out without an answer.",
+      "properties": {"id": {"type": "string"}, "label": {"type": "string"}}
     },
     "PersonAnswerInput": {
       "type": "object", "additionalProperties": false,

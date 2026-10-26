@@ -393,6 +393,8 @@ impl Store {
                     Some(&review.mission_run),
                 )?;
                 items.push(AttentionItemView {
+                    deadline_unix_ms: None,
+                    default_answer: None,
                     conversation,
                     ..attention_item_from_review(review)
                 });
@@ -813,7 +815,7 @@ impl Store {
                 subject: first.subject.clone(), person: owner, requester_id: None, launch_id: None,
                 variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: Some(first.subject.clone()),
                 title, detail,
-                request: None, mission: None, mission_run: None, step: None,
+                request: None, deadline_unix_ms: None, default_answer: None, mission: None, mission_run: None, step: None,
                 targets: names.iter().map(|name| (*name).to_owned()).collect(),
                 requested_at_unix_ms: first.requested_at,
                 actions: vec![crate::model::AttentionActionView { label: "Attach to log in".into(),
@@ -1029,6 +1031,8 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
 
 fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: review.request.clone(),
         priority: "normal".into(),
         kind: "human-gate".into(),
@@ -1092,6 +1096,8 @@ fn attention_item_from_planning(
     preview: &PlanningPreviewView,
 ) -> AttentionItemView {
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: preview.hash.clone(),
         priority: "normal".into(),
         kind: "launch-approval".into(),
@@ -1154,6 +1160,8 @@ fn attention_item_from_revision(
 ) -> AttentionItemView {
     let preview_hash = proposal.preview_hash.as_deref().unwrap_or_default();
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: format!("{}:{}", proposal.source_generation, preview_hash),
         priority: "normal".into(),
         kind: "revision-approval".into(),

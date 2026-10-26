@@ -1254,6 +1254,14 @@ export const ArrangementPage = /*#__PURE__*/ (() => Schema.Struct({
 export type ArrangementPage = typeof ArrangementPage.Type
 export type ArrangementPageEncoded = typeof ArrangementPage.Encoded
 
+/** The answer of a person-step ask that applies at its deadline. Absent, the ask times out without an answer. */
+export const AskDefaultAnswer = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String,
+  "label": Schema.String
+}).annotate({ identifier: "AskDefaultAnswer", description: "The answer of a person-step ask that applies at its deadline. Absent, the ask times out without an answer." }))()
+export type AskDefaultAnswer = typeof AskDefaultAnswer.Type
+export type AskDefaultAnswerEncoded = typeof AskDefaultAnswer.Encoded
+
 /** Inclusive bound on the entire JSON envelope. Omitted means the grant pin's default_response_bytes; an explicit value must not exceed the pin's max_response_bytes. */
 export const AssistantResponseBytes = /*#__PURE__*/ (() => Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(16384)).annotate({ identifier: "AssistantResponseBytes", description: "Inclusive bound on the entire JSON envelope. Omitted means the grant pin's default_response_bytes; an explicit value must not exceed the pin's max_response_bytes." }))()
 export type AssistantResponseBytes = typeof AssistantResponseBytes.Type
@@ -1791,6 +1799,9 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "conversation_ids": optionalKey(Schema.Array(Id)).annotate({ description: "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." }),
   /** Data-only registered reply form; absent on native attention. */
   "custom_form": optionalKey(Schema.Record(Schema.String, Schema.Unknown)).annotate({ description: "Data-only registered reply form; absent on native attention." }),
+  /** When a person-step ask resolves by itself if nobody answers it. Absent on an update and on daemons that predate deadlines. */
+  "deadline_at": optionalKey(Timestamp),
+  "default_answer": optionalKey(AskDefaultAnswer),
   "detail": Schema.String,
   "episode": optionalKey(Schema.String),
   "fix": optionalKey(Schema.Record(Schema.String, Schema.Unknown)),

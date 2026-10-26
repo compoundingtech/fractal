@@ -4133,6 +4133,13 @@ fn client_attention_resources_from_items(
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);
         }
+        // An ask resolves by itself at its deadline, with its default answer if it has one.
+        if let Some(deadline) = item.deadline_unix_ms {
+            resource["deadline_at"] = json!(client_timestamp(deadline));
+        }
+        if let Some(default) = item.default_answer {
+            resource["default_answer"] = default;
+        }
         for (name, value) in [
             ("conversation_id", item.conversation),
             ("requester_id", item.requester_id),
@@ -6931,6 +6938,8 @@ fn doctor_attention_items(
     let mut items = store.attention_snapshot(None, now)?;
     items.extend(store.fault_snapshot(now)?.into_iter().map(|fault| {
         crate::model::AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             person: fault.owner.unwrap_or_else(|| "no owning agent".into()),
             ..fault.item
         }

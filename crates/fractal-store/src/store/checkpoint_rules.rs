@@ -1358,6 +1358,8 @@ impl Store {
             return Ok(Vec::new());
         }
         Ok(vec![AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             episode: format!("{}:{writer}", checkpoint_name(first_waiting)), priority: "normal".into(), kind: "fault".into(),
             review_mode: None, subject: checkpoint.clone(), person: "person/operator".into(), requester_id: None,
             launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None, title: format!("Checkpoints are waiting for {}", waiting.join(", ")),

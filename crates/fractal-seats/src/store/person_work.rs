@@ -728,6 +728,18 @@ mission "person-work" state="ready" {{
             .into_iter()
             .find(|item| item.subject == ask.subject)
             .unwrap();
+        // The person's home shows when the ask resolves by itself and what then applies.
+        assert_eq!(item.deadline_unix_ms, Some(deadline));
+        assert_eq!(
+            item.default_answer,
+            Some(json!({"id": "keep-open", "label": "Keep it open"}))
+        );
+        let row = fractal_store::store::attention_ivm::resource(&item).unwrap();
+        assert_eq!(
+            row["deadline_at"],
+            json!(fractal_store::client_values::client_timestamp(deadline))
+        );
+        assert_eq!(row["default_answer"]["label"], "Keep it open");
         assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
         assert!(
             store.attention_items(Some("person/avery")).unwrap().iter().all(|item| item.subject != ask.subject),
@@ -774,7 +786,7 @@ mission "person-work" state="ready" {{
         input.default_answer = Some("friday".into());
         assert_eq!(store.ask_person(&input).unwrap_err().code, "invalid-default-answer");
         input.default_answer = None;
-        store.set_default_ask_deadline_ms(2 * 3_600_000);
+        store.set_default_ask_deadline_ms(2 * 3_600_000).unwrap();
         let ask = store.ask_person(&input).unwrap();
         let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
         let deadline = u128::from(claim.body["fields"]["deadline_unix_ms"].as_u64().unwrap());
@@ -839,6 +851,10 @@ mission "person-work" state="ready" {{
         start_counting_ask_deadlines(&store.connection.write(), deploy).unwrap();
         // A later start does not move the count.
         start_counting_ask_deadlines(&store.connection.write(), deploy + day).unwrap();
+        let item = store.attention_items(Some("person/avery")).unwrap().into_iter()
+            .find(|item| item.subject == subject).unwrap();
+        assert_eq!(item.deadline_unix_ms, Some(deploy + day), "the home shows the deadline from the deploy");
+        assert_eq!(item.default_answer, None);
         let pass = store.reconcile_person_asks_at(asked.accepted_at_unix_ms + day).unwrap();
         assert_eq!(pass, PersonAskPass { changed: false, next_deadline: Some(deploy + day) });
         assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "waiting-person");

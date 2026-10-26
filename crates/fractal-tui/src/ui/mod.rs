@@ -7231,6 +7231,7 @@ mod tests {
     fn a_custom_request_sends_the_generic_reply_and_has_no_yes_no_shortcut() {
         let mut world = demo::world();
         world.attention = Load::Ready(vec![Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/garden".into(),
             tier: Tier::Today,
@@ -7515,6 +7516,7 @@ mod tests {
     fn answering_a_request_leaves_the_next_one_closed() {
         let mut world = demo::world();
         let asks = |id: &str| Attention {
+            deadline: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7564,6 +7566,7 @@ mod tests {
     #[test]
     fn a_reconnect_keeps_the_answer_box_open_after_earlier_asks_left() {
         let asks = |id: &str| Attention {
+            deadline: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7874,6 +7877,7 @@ mod tests {
             ..Default::default()
         };
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/pick".into(),
             tier: Tier::Stopped,
@@ -7953,6 +7957,7 @@ mod tests {
                 attachments: Vec::new(),
             };
             let item = Attention {
+                deadline: None,
                 conversations: vec![],
                 id: "attention/feedback".into(),
                 tier: Tier::Stopped,
@@ -8087,6 +8092,7 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/shipped".into(),
             tier: Tier::Stopped,
@@ -8171,6 +8177,7 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/choose".into(),
             tier: Tier::Stopped,
@@ -8263,6 +8270,7 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/decide".into(),
             tier: Tier::Stopped,
@@ -8342,6 +8350,7 @@ mod tests {
         let mut world = demo::world();
         let mission = "mission/release-proof";
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/capacity".into(),
             tier: Tier::Stopped,
@@ -8393,6 +8402,7 @@ mod tests {
     fn an_update_shows_what_was_asked_for_and_clears_once_read() {
         let mut world = demo::world();
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/update".into(),
             tier: Tier::Later,
@@ -8626,6 +8636,7 @@ mod tests {
             items.insert(
                 0,
                 Attention {
+                    deadline: None,
                     conversations: vec![],
                     id: "attention/request".into(),
                     tier: Tier::Stopped,

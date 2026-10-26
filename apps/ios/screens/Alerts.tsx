@@ -3,7 +3,7 @@ import { Alert, Linking, Pressable, ScrollView, useWindowDimensions, View } from
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { TimelineEntry } from '../../../clients/typescript/fractal-client';
-import { ANSWERS, alertsIn, answerLabel, requestImages, cleanMessageText, isRequest, offeredAnswers, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer, report, spaced, yesNo, ago, type KeptAttention, type PendingCall } from '@fractal/views';
+import { ANSWERS, alertsIn, answerLabel, askDeadline, requestImages, cleanMessageText, isRequest, offeredAnswers, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer, report, spaced, yesNo, ago, type KeptAttention, type PendingCall } from '@fractal/views';
 import { agentName } from '../agentsView';
 import type { RootParams } from '../navigation';
 import { attentionKindLabel } from '../presentation';
@@ -45,13 +45,15 @@ function AlertCard({ item, agentId, open, onToggle, calls }: { item: KeptAttenti
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const seats = (item.conversation_ids ?? []).filter(id => id !== agentId).map(id => { const seat = data.agents.find(candidate => candidate.id === id); return seat ? agentName(seat) : id.replace(/^agent\//, ''); });
   const from = (() => { const asker = data.agents.find(candidate => candidate.id === (item.requester_id ?? agentId)); return asker ? agentName(asker) : (item.requester_id ?? agentId).replace(/^agent\//, ''); })();
+  const deadline = askDeadline(item);
+  const meta = `${attentionKindLabel(item.attention_kind)} · waited ${ago(item.requested_at)}${deadline ? ` · ${deadline}` : ''}`;
   return <View style={{ borderLeftWidth: 3, borderLeftColor: theme.person, backgroundColor: theme.surface0, borderRadius: 6, padding: 8, gap: 6 }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={onToggle}>
       <T numberOfLines={open ? undefined : 1}><T bold color={theme.person}>◆ alert  </T><T bold>{item.title}</T></T>
-      {open ? null : <T dim numberOfLines={1}>{attentionKindLabel(item.attention_kind)} · waited {ago(item.requested_at)}</T>}
+      {open ? null : <T dim numberOfLines={1}>{meta}</T>}
     </Pressable>
     {open ? <View style={{ gap: 8 }}>
-      <T dim>{attentionKindLabel(item.attention_kind)} · waited {ago(item.requested_at)}</T>
+      <T dim>{meta}</T>
       <AlertBody item={item} from={from} calls={calls} seats={seats} />
       <Button label="details" color={theme.subtext0} onPress={() => navigation.navigate('Attention', { id: item.id })} />
     </View> : null}

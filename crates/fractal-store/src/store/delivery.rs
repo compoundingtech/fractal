@@ -331,6 +331,8 @@ impl Store {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 items.push(AttentionItemView {
+                    deadline_unix_ms: None,
+                    default_answer: None,
                     episode: failure.id.clone(),
                     priority: "high".into(),
                     kind: "fault".into(),
