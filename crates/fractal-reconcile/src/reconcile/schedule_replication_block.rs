@@ -65,7 +65,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             due_tick(&spec, last, wall.min(i64::MAX as u128) as i64)?
         };
-        let Some((occurrence, scheduled_at)) = candidate else { return Ok(()) };
+        let Some((occurrence, scheduled_at)) = candidate else {
+            return self.clear_schedule_replication_block(schedule);
+        };
         let (deadline, report) = {
             let mut blocks = self.schedule_replication_blocks.lock().unwrap_or_else(PoisonError::into_inner);
             let block = blocks.entry(schedule.subject.clone()).or_insert_with(|| BlockedTick {
@@ -78,7 +80,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             let deadline = block.observed_wall.saturating_add(BLOCKED_TICK_AFTER.as_millis());
             let report = (block.observed.elapsed() >= BLOCKED_TICK_AFTER)
-                .then(|| (block.occurrence, block.scheduled_at, block.observed_wall));
+                .then_some((block.occurrence, block.scheduled_at, block.observed_wall));
             (deadline, report)
         };
         if let Some((occurrence, scheduled_at, observed_wall)) = report {
@@ -260,5 +262,38 @@ mission "orchard" state="ready" {
         reconciler.reconcile_schedule(&schedule).unwrap();
         assert_ne!(store.operational_failure(&attention).unwrap().unwrap().status, "pending");
         assert!(reconciler.schedule_replication_blocks.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn persisted_warning_retires_after_restart_and_replicated_completion() {
+        let (store, reconciler, schedule) = setup(r#"at "2020-01-01T00:00:00Z""#);
+        let wall = now_ms();
+        reconciler.observe_schedule_replication_gate(&schedule, false, wall).unwrap();
+        tokio::time::advance(BLOCKED_TICK_AFTER).await;
+        reconciler.observe_schedule_replication_gate(&schedule, false, wall + 900_000).unwrap();
+        let attention = attention_subject(&schedule.subject, "node");
+        assert_eq!(store.operational_failure(&attention).unwrap().unwrap().status, "pending");
+        drop(reconciler);
+        let restarted = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new())).with_schedule_peers(vec!["peer".into()]);
+        assert!(restarted.schedule_replication_blocks.lock().unwrap().is_empty());
+        assert_eq!(store.operational_failure(&attention).unwrap().unwrap().status, "pending");
+        let peer = Store::open_memory("peer").unwrap();
+        peer.append_claim(&ClaimInput {
+            subject: schedule.subject.clone(), kind: "schedule.occurrence-reached".into(), actor: None,
+            fields: BTreeMap::from([
+                ("revision".into(), Value::String(store.selected_desired_revision(&schedule.subject).unwrap().unwrap())),
+                ("occurrence".into(), Value::from(0)),
+                ("scheduled_at_unix_ms".into(), Value::String("1577836800000".into())),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("peer-completed".into()),
+        }).unwrap();
+        store.import_replication("peer", &peer.export_replication(0).unwrap()).unwrap();
+        restarted.observe_schedule_replication_gate(&schedule, false, wall + 900_001).unwrap();
+        assert_ne!(store.operational_failure(&attention).unwrap().unwrap().status, "pending");
+        assert!(restarted.schedule_replication_blocks.lock().unwrap().is_empty());
+        tokio::time::advance(BLOCKED_TICK_AFTER).await;
+        restarted.observe_schedule_replication_gate(&schedule, false, wall + 1_800_001).unwrap();
+        assert_ne!(store.operational_failure(&attention).unwrap().unwrap().status, "pending");
     }
 }
