@@ -3,6 +3,12 @@ use kdl::{KdlDocument, KdlEntry, KdlNode};
 
 pub use fractal_client::agent_branch;
 
+/// Convert a complete agent subject to the identity expected by the declaration grammar.
+/// Short identities retain the grammar's host scoping; slash-qualified identities stay exact.
+pub fn agent_identity(name: &str) -> &str {
+    name.strip_prefix("agent/").unwrap_or(name)
+}
+
 pub fn validate_agent_checkout(args: &fractal_client::AgentCreateParameters) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.repo.is_some()
@@ -105,7 +111,7 @@ pub fn agent_document(
         body.nodes_mut().push(creation_tags(key));
     }
     body.nodes_mut().push(kdl_node("restart", ["always"]));
-    let mut agent = kdl_node("agent", [args.name.as_str()]);
+    let mut agent = kdl_node("agent", [agent_identity(&args.name)]);
     agent.set_children(body);
     publication_document(agent)
 }
@@ -241,6 +247,27 @@ pub async fn claim_initial_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn created_agent_subjects_normalize_qualified_ids_once_and_preserve_host_scoping() {
+        for (identity, expected) in [
+            ("worker", "agent/test.worker"),
+            ("team/worker", "agent/team/worker"),
+            ("test.worker", "agent/test.worker"),
+        ] {
+            for name in [identity.to_owned(), format!("agent/{identity}")] {
+                let parameters = fractal_client::AgentCreateParameters {
+                    name,
+                    harness: "codex".into(),
+                    ..Default::default()
+                };
+                let source = agent_document(&parameters, "/tmp", false, None);
+                let intent = crate::graph::parse_intent(&source, "test").unwrap();
+                assert_eq!(intent.subjects.len(), 1, "{source}");
+                assert!(intent.subjects.contains_key(expected), "{source}");
+            }
+        }
+    }
 
     #[test]
     fn a_shell_with_no_directory_starts_in_home_and_one_with_a_directory_keeps_it() {
