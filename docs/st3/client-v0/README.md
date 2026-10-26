@@ -1499,7 +1499,8 @@ submits the runtime resource ID as `target_id` and copies its `incarnation_id` a
 same authority as `agent.create`: the session's concrete person, or a local agent acting as
 itself (free mode).
 Stop publishes the same desired stop as `st agents stop`, even if no runtime is live, and
-preserves the immutable declaration. Start restores the unambiguous preceding agent
+preserves the immutable declaration. A nonblank `reason` is kept in that stop and returns in
+the agent's `end_reason` with the actor once the seat has stopped. Start restores the unambiguous preceding agent
 declaration with its original identity and host, like `st agents start` without overrides.
 Mission-owned agents must instead be changed through their mission. Both actions copy the
 selected desired claim ID into `fence.runtime_desired_revision`, reject stale fences, and

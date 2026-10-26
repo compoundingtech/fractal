@@ -657,7 +657,17 @@ export const AgentEndReason = /*#__PURE__*/ (() => Schema.Struct({
   "ended_at": Timestamp,
   "exit_code": optionalKey(Schema.Int),
   "exit_signal": optionalKey(Schema.String),
-  "kind": Schema.Literals(["completed","stopped-by-person","stopped-by-agent","crashed","harness-exited","host-lost","retired"]),
+  "kind": openEnum([
+  "completed",
+  "stopped-by-person",
+  "stopped-by-agent",
+  "stopped-by-mission",
+  "parked",
+  "crashed",
+  "harness-exited",
+  "host-lost",
+  "retired"
+]),
   "reason": optionalKey(Schema.String)
 }).annotate({ identifier: "AgentEndReason" }))()
 export type AgentEndReason = typeof AgentEndReason.Type
