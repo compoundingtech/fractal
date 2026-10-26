@@ -144,6 +144,15 @@ fences. The result is an ordinary completed action with a nested `harness_answer
 containing its status and the authoritative resolution. `accepted` acknowledges adapter
 settlement; it does not prove the harness resumed or completed a later turn.
 
+Receipt replay and key occupancy are owner-local authority, not replicated metadata.
+Generic receipts come from reserved `client.action-result` local observations with the
+local origin and no actor; any legacy `custom.client.action-result` for the key refuses
+with `legacy-action-receipt-untrusted` before settlement. Harness receipts remain in the
+already-reserved, system-only compact resolution: only an originating local resolution
+with no actor can authorize replay or reserve a local key. Peer resolutions remain
+readable as terminal metadata but never become local replay authority. This reads existing
+claim provenance; it changes no stored format, retention rule or replication policy.
+
 Invalid selections return `invalid-answer` and typed `details.reason`:
 `unknown_option`, `too_many`, `required_missing`, `empty_single`, `too_long`,
 `unknown_question`, `other_not_allowed` or `note_not_allowed`. Malformed envelopes

@@ -339,7 +339,7 @@ fn uninstall_stops_an_instance_daemon_that_runs_without_a_service() {
     let refused = erase(&fixture, None);
     assert!(!refused.status.success());
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("stop st3 up"),
+        String::from_utf8_lossy(&refused.stderr).contains("stop fractal up"),
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
@@ -1107,7 +1107,7 @@ async fn the_assistant_asks_first_and_an_existing_setup_never_starts_it_on_its_o
         declined.contains("agent that runs on your own codex account, so it uses your codex usage and quota"),
         "{declined}"
     );
-    assert!(declined.contains("Not started. Run st setup --onboarding"), "{declined}");
+    assert!(declined.contains("Not started. Run fractal setup --onboarding"), "{declined}");
     assert!(store.mission_run("st/onboarding").unwrap().is_none());
     assert!(store.selected_desired_token("agent/st/assistant").unwrap().is_none());
     // The configuration exists now: ordinary setup, with the daemon answering and no history,
@@ -1120,7 +1120,7 @@ async fn the_assistant_asks_first_and_an_existing_setup_never_starts_it_on_its_o
     let explicit = success(&run(setup(&["--onboarding"])).await);
     assert!(explicit.contains("Created: the agent agent/st/assistant (codex"), "{explicit}");
     assert!(
-        explicit.contains("Stop it with: st agents stop agent/st/assistant --as person/ada"),
+        explicit.contains("Stop it with: fractal agents stop agent/st/assistant --as person/ada"),
         "{explicit}"
     );
     // An explicit start is a distinct run, counted in the mission's history.
@@ -1318,4 +1318,13 @@ fn skipping_sets_up_st_and_no_agent() {
             .unwrap();
     assert_eq!(table["person"].as_str(), Some("person/ada"));
     assert!(table.get("codex_work_without_asking").is_none(), "no Codex, so no setting");
+}
+
+#[test]
+fn setup_advice_preserves_json_stdout_without_changing_human_commands() {
+    for (flags, program) in [(&["--json"][..], "st"), (&[][..], "fractal")] {
+        let fixture = Fixture::new();
+        let output = success(&fixture.setup_config_only(flags));
+        assert!(output.contains(&format!("then run {program} setup. No onboarding seat was created.")), "{output}");
+    }
 }

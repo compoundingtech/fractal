@@ -181,7 +181,7 @@ async fn open_in(
                 (Ok(_), None) => unreachable!("a Fabric stream needs an owner"),
             }
         }
-        Err(error) => gateway(terminal, "local PTY discovery", &error.plain(), false),
+        Err(error) => gateway(terminal, "local PTY discovery", &error.human(), false),
     }
 }
 
@@ -254,7 +254,7 @@ async fn over_fabric(
     let capabilities = client
         .capabilities()
         .await
-        .map_err(|error| Miss::NotThisTerminal(error.plain()))?;
+        .map_err(|error| Miss::NotThisTerminal(error.human()))?;
     for scope in ["terminal.read", "terminal.control"] {
         if !capabilities.value.capabilities.iter().any(|capability| {
             capability.id == scope && capability.state == fractal_client::CapabilityState::Granted

@@ -495,13 +495,21 @@ def main(argv):
             assert git(tmp / 'scratch.git', 'for-each-ref', 'refs') == before, 'a refusal must sign nothing'
         (lane_repo / 'scripts/lane.sh').write_text('lane, but fewer tests\n')
         git(lane_repo, 'commit', '-qam', 'edit the lane')
-        before = git(tmp / 'scratch.git', 'for-each-ref', 'refs')
+        # A tree that edits its own lane is signed too (2026-10-26), and its note carries the EDITED definition's digest, not the base's.
         edited = lane_wrap(lane_argv, '--lanes-from', base)
-        assert edited.returncode == 1 and b'changes the definition of lane linux-gate' in edited.stderr and b'scripts/lane.sh' in edited.stderr, edited.stderr
-        assert git(tmp / 'scratch.git', 'for-each-ref', 'refs') == before
+        assert edited.returncode == 0 and b'edits lane linux-gate (scripts/lane.sh)' in edited.stderr, edited.stderr
+        noted = json.loads(edited.stderr.decode()[edited.stderr.decode().index('{'):])
+        edited_inputs = json.loads(git(tmp / 'scratch.git', 'cat-file', 'blob', git(tmp / 'scratch.git', 'ls-tree', '-r', noted['record']).split()[2])
+                                   )['predicate']['observed']['inputs']
+        definition = verifier.lane_definition(
+            str(lane_repo), git(lane_repo, 'rev-parse', base + '^{tree}'), git(lane_repo, 'rev-parse', 'HEAD^{tree}'),
+            verifier.lane_rules(git(lane_repo, 'show', base + ':.st/required-lanes.json'), 'linux-gate'))
+        assert definition['changed'] == ['scripts/lane.sh'] and definition['tree_sha256'] != definition['sha256'], definition
+        assert edited_inputs['lane_definition_sha256'] == definition['tree_sha256'], edited_inputs
         plain = lane_wrap(lane_argv)  # without the flag nothing about lanes is recorded
         assert plain.returncode == 0
-        print('passed: --lanes-from records the base\'s lane digest, and refuses another argv, a missing lane or lane file, and a tree that edits its own lane, signing nothing')
+        print('passed: --lanes-from records the lane digest as the tree defines it (the base\'s when untouched, the edited one for a lane edit), '
+              'and refuses another argv, a missing lane or lane file, signing nothing')
 
         def crate_wrap(crate, command, keys_file=signers, *extra):
             tree_id = git(repo, 'rev-parse', 'HEAD^{tree}')

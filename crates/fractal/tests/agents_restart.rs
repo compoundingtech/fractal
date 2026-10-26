@@ -1198,7 +1198,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
         )
         .await,
     );
-    assert!(running.contains("st agents restart"), "{running}");
+    assert!(running.contains("fractal agents restart"), "{running}");
     succeeded(
         &st(
             &socket,

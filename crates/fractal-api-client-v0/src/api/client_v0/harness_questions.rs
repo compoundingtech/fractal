@@ -151,7 +151,7 @@ pub(super) async fn answer(state: &AppState, session: &ClientSession, request: &
     live_input_session(state, &question.agent, &question.runtime_incarnation).map_err(|error| {
         if error.code == "stale-incarnation" { stale(error.message) } else { error }
     })?;
-    if question.resolution.as_ref().and_then(|resolution| resolution.receipt.as_ref())
+    if trusted_harness_receipt(state, &question)
         .is_some_and(|receipt| receipt.actor_key == actor_key) {
         return Ok(result(state, request, &question, "accepted", &digest));
     }
@@ -302,6 +302,100 @@ mod tests {
         assert_eq!(sink.calls.load(Ordering::SeqCst), 0);
         request.parameters["answers"] = json!({"q0":{"positions":[1]}});
         assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "accepted");
+    }
+
+    #[tokio::test]
+    async fn legacy_action_receipts_refuse_harness_answers_before_settlement() {
+        for actor in [None, Some("person/alex".to_owned())] {
+            let (_root, mut state, session, _question, request) = fixture();
+            let sink = Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false });
+            state.harness_question_sink = Some(sink.clone());
+            let digest = hex::encode(Sha256::digest(
+                format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
+            state.store.append_claim(&ClaimInput {
+                subject: format!("custom/client/action-{}", &digest[..32]),
+                kind: "custom.client.action-result".into(),
+                actor,
+                fields: BTreeMap::from([
+                    ("request_digest".into(), json!(action_request_digest(&request).unwrap())),
+                    ("result".into(), json!({"status":"completed"})),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let before = state.store.index().unwrap();
+            assert_eq!(invoke(&state, &session, &request).await.unwrap_err().code,
+                "legacy-action-receipt-untrusted");
+            assert_eq!(state.store.index().unwrap(), before);
+            assert_eq!(sink.calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_harness_receipts_neither_replay_nor_reserve_a_local_action_key() {
+        let (_root, mut state, _session, question, request) = fixture();
+        let session = ClientSession::for_tests_scoped("person/alex", "person/alex",
+            &["terminal.control", "read.projections", "control.arrangements"]);
+        let sink = Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false });
+        state.harness_question_sink = Some(sink.clone());
+        let peer = Store::open_memory("peer").unwrap();
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        peer.bind_fleet(FLEET).unwrap();
+        state.store.bind_fleet(FLEET).unwrap();
+        peer.append_claim(&ClaimInput {
+            subject: "host/peer".into(), kind: "transport.observed".into(), actor: None,
+            fields: BTreeMap::from([("status".into(), json!("up"))]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        peer.append_claim(&ClaimInput {
+            subject: question.id.clone(), kind: fractal_schema::harness_questions::RESOLVED.into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!("answered")),
+                ("revision".into(), json!(question.revision)),
+                ("answers".into(), json!({"q0":{"positions":[1],"timed_out":false}})),
+                ("receipt".into(), json!(Receipt {
+                    actor_key: fractal_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key),
+                    request_digest: action_request_digest(&request).unwrap(),
+                    action_id: request.id.clone(),
+                })),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let exchange = peer.export_replication_exchange(FLEET, &state.store.replication_inventory().unwrap()).unwrap();
+        state.store.receive_replication_exchange("peer", FLEET, &exchange).unwrap();
+        assert!(state.store.validate_replication_backlog().unwrap().valid > 0);
+        state.store.project_replication_backlog().unwrap();
+        let question = held(&state, &question.id).unwrap();
+        assert_eq!(question.resolution.as_ref().unwrap().origin, "peer");
+        assert!(trusted_harness_receipt(&state, &question).is_none());
+        let before = state.store.index().unwrap();
+        assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "already_resolved");
+        assert_eq!(state.store.index().unwrap(), before);
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 0);
+        let generic = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(), id: "action/alex".into(),
+            action_type: "arrangement.edit".into(), idempotency_key: request.idempotency_key,
+            fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Fence::default() },
+            parameters: json!({"subject":"arrangement/person/alex/019a0000-0000-7000-8000-000000000001",
+                "owner":"person/alex","operations":[{"op":"create","name":"Sidebar"}]}),
+        };
+        assert_eq!(invoke(&state, &session, &generic).await.unwrap().0["status"], "completed");
+    }
+
+    #[test]
+    fn harness_receipt_provenance_requires_local_origin_and_no_actor() {
+        let (_root, state, _session, mut question, request) = fixture();
+        state.store.resolve_harness_question(&question.id, Status::Answered, &question.revision,
+            &BTreeMap::new(), Some(&Receipt {
+                actor_key: "a".repeat(64), request_digest: "b".repeat(64), action_id: request.id,
+            })).unwrap();
+        question = held(&state, &question.id).unwrap();
+        assert!(trusted_harness_receipt(&state, &question).is_some());
+        question.resolution.as_mut().unwrap().actor = Some("person/alex".into());
+        assert!(trusted_harness_receipt(&state, &question).is_none());
+        question.resolution.as_mut().unwrap().actor = None;
+        question.resolution.as_mut().unwrap().origin = "peer".into();
+        assert!(trusted_harness_receipt(&state, &question).is_none());
     }
 
     #[tokio::test]

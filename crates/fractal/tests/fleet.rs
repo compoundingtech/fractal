@@ -1775,7 +1775,7 @@ async fn a_leaked_code_is_visible_and_can_be_revoked() {
     let rightful = Node::new(root.path(), "laptop");
     let refused = rightful.join(&code, &[]);
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("st fleet invites"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("fractal fleet invites"));
 
     for node in [&a, &m] {
         wait_until(
@@ -2772,7 +2772,7 @@ async fn uninstall_leaves_nothing_behind() {
     ]);
     assert!(!first.status.success());
     assert!(
-        String::from_utf8_lossy(&first.stderr).contains("stop st3 up"),
+        String::from_utf8_lossy(&first.stderr).contains("stop fractal up"),
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
@@ -2786,8 +2786,8 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only what the test itself created remains: empty XDG roots, the stub pty, and the login
-    // profiles that put it on PATH.
+    // Only what the test itself created remains: empty XDG roots, the stub pty, and the shell
+    // profiles (fish's config.fish among them) that put it on PATH.
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -2798,7 +2798,10 @@ async fn uninstall_leaves_nothing_behind() {
                 "home/.profile",
                 "home/.bash_profile",
                 "home/.zprofile",
+                "home/.zshrc",
                 "config",
+                "config/fish",
+                "config/fish/config.fish",
                 "state",
                 "data",
                 "run",
@@ -3671,7 +3674,7 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
             args.push("--prefer");
         }
         let output = node.st_ok(&args);
-        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         assert_eq!(
             configured_file(&node).transports,
             if prefer_on_add {
@@ -3702,14 +3705,14 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
             "--no-service",
         ]);
         if !prefer_on_add {
-            assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+            assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         }
         let preferred = configured_file(&node);
         assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
         assert_eq!(preferred.fabric_protocol, before.fabric_protocol);
         assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
         let output = node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
-        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         assert_eq!(configured_file(&node).transports, ["loopback", "tailscale"]);
     }
 }
@@ -3771,7 +3774,7 @@ async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
     );
     assert!(
         String::from_utf8_lossy(&output.stdout)
-            .contains("Restart st3 daemon and st3 replication-worker")
+            .contains("Restart fractal daemon and fractal replication-worker")
     );
     let preferred = configured_file(&node);
     assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);

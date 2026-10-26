@@ -42,7 +42,7 @@ def in_shadow(path, text):
                 del entry['sample_one_in']  # a check without one: the flip adds it
         return json.dumps(policy, indent=2) + '\n'
     if path == flip.DOC:
-        rows = ''.join(f'| `{check}` | true | `pull_request` | 5 | 2026-10-23 |\n' for check in IN_SHADOW)
+        rows = ''.join(f'| `{check}` | true | `pull_request` | 1 | 2026-10-23 |\n' for check in IN_SHADOW)
         assert rows in text, 'the enforced rows of the two checks moved: update in_shadow'
         return text.replace(rows, '| `genie-freshness`, `linux-gate` | false | - | 5 or 1 | - |\n')
     for test_path, name in flip.TEST_LISTS:

@@ -223,7 +223,7 @@
       "resources.observation-complete": "primary-observation-state-or-delivery-operation; terminal-refusal"
     },
     "durable_exceptions": {
-      "client.actions": "custom.client.action-result-receipt",
+      "client.actions": "server-only-owner-local-client.action-result-receipt; durable-retention-class-with-normal-age-count-trimming-not-pinned; idempotency-retention-window-unchanged; legacy-custom.client.action-result-refused-before-dispatch-with-409-legacy-action-receipt-untrusted",
       "message.send": "deterministic-message-subject",
       "work.ask": "deterministic-person-ask-identity",
       "claims.append": "operation-identity-and-checkpoint-tombstones"
