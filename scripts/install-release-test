@@ -5,7 +5,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 . "$repo/scripts/script-test-supervisor"
 install_fixture() { python3 "$repo/scripts/test-signal-target" "$work/package/install.sh" "$@"; }
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'chmod -R u+w "$work"; rm -rf "$work"' EXIT
 # These fixtures test regular-file installation; native macOS app transactions
 # are covered separately by install-macos-test.
 mkdir -p "$work/platform-bin"
@@ -15,6 +15,9 @@ export PATH="$work/platform-bin:$PATH"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 export FRACTAL_MACOS_INSTALL_HOME="$work/macos-home" ST_MACOS_INSTALL_HOME="$work/macos-home"
 mkdir -p "$work/package/bin" "$work/installed"
+mkdir -p "$work/package/share/fractal-web/assets"
+printf 'new-web\n' > "$work/package/share/fractal-web/index.html"
+printf 'new-script\n' > "$work/package/share/fractal-web/assets/main.js"
 cp "${INSTALL_RELEASE_TEST_SCRIPT:-$repo/scripts/install-release}" "$work/package/install.sh"
 for binary in st3 pty; do
   printf '#!/bin/sh\necho new-%s\n' "$binary" > "$work/package/bin/$binary"
@@ -23,6 +26,8 @@ for binary in st3 pty; do
 done
 ln -s /missing/old-st "$work/installed/st"
 ln -s /missing/old-ui "$work/installed/stui"
+# Nix outputs carry read-only modes; mutable installations must not inherit them.
+chmod -R a-w "$work/package/share/fractal-web"
 install_fixture --bin-dir "$work/installed"
 test "$(readlink "$work/installed/st")" = st3
 test "$("$work/installed/st")" = new-st3
@@ -32,6 +37,27 @@ for binary in st3 pty; do
 done
 test ! -e "$work/installed/stui"
 test ! -L "$work/installed/stui"
+test "$(cat "$work/share/fractal-web/index.html")" = new-web
+test "$(cat "$work/share/fractal-web/assets/main.js")" = new-script
+python3 - "$work/share/fractal-web" <<'PY_WEB_MODES'
+from pathlib import Path
+import sys
+web = Path(sys.argv[1])
+assert web.stat().st_mode & 0o200
+assert all(path.stat().st_mode & 0o200 for path in web.rglob('*'))
+PY_WEB_MODES
+chmod -R u+w "$work/package/share/fractal-web"
+# Upgrading a prior read-only installation must also clean up its replaced tree.
+chmod -R a-w "$work/share/fractal-web"
+install_fixture --bin-dir "$work/installed" --quiet
+test "$(cat "$work/share/fractal-web/index.html")" = new-web
+test ! -e "$work/installed/.smalltalk-install.lock"
+# Missing assets fail before replacing either commands or the installed web tree.
+mv "$work/package/share/fractal-web/index.html" "$work/package/share/fractal-web/index.saved"
+if install_fixture --bin-dir "$work/installed"; then exit 1; fi
+test "$("$work/installed/st")" = new-st3
+test "$(cat "$work/share/fractal-web/index.html")" = new-web
+mv "$work/package/share/fractal-web/index.saved" "$work/package/share/fractal-web/index.html"
 # Missing payload and directory collisions must fail before replacing installed files.
 rm "$work/package/bin/pty"
 if install_fixture --bin-dir "$work/installed"; then exit 1; fi
@@ -130,6 +156,7 @@ chmod 0700 "$work/prior/st3" "$work/prior/pty" "$work/prior/stui"
 rm "$work/prior/st"
 ln -s /previous/st3 "$work/prior/st"
 export INSTALL_FAIL_DEST="$work/prior/pty"
+printf 'previous-web\n' > "$work/share/fractal-web/index.html"
 if install_fixture --bin-dir "$work/prior" --quiet; then exit 1; fi
 for name in st3 pty stui; do
   test "$(cat "$work/prior/$name")" = "previous-$name"
@@ -138,6 +165,7 @@ done
 test "$(readlink "$work/prior/st")" = /previous/st3
 test ! -e "$work/prior/.smalltalk-install.lock"
 python3 -c 'import os,sys; assert sorted(os.listdir(sys.argv[1])) == ["pty", "st", "st3", "stui"]' "$work/prior"
+test "$(cat "$work/share/fractal-web/index.html")" = previous-web
 rm "$INSTALL_FAIL_MARKER"
 export INSTALL_FAIL_DEST="$work/fresh/pty"
 if install_fixture --bin-dir "$work/fresh" --quiet; then exit 1; fi

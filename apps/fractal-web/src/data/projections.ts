@@ -123,6 +123,7 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     state: leafText(row.state),
     ...(description === undefined ? {} : { description }),
     usage: usageOf(row),
+    incarnationId: Option.getOrUndefined(row.incarnation_id),
     checkout: fromOption(row.checkout),
     workspace: fromOption(row.workspace),
     startedAt: unknown,
@@ -297,6 +298,8 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   sameKnown(a.startedAt, b.startedAt) &&
   sameKnown(a.endedAt, b.endedAt) &&
   sameKnown(a.usage, b.usage, decodedUsageEquivalence) &&
+  a.incarnationId === b.incarnationId &&
+  a.contextObservedAfter === b.contextObservedAfter &&
   sameKnown(a.checkout, b.checkout, sameCheckout) &&
   sameKnown(a.workspace, b.workspace) &&
   sameKnown(a.blockedOn, b.blockedOn) &&
@@ -327,18 +330,31 @@ export const createProjections = (): {
   let previousFleet: Fleet | undefined
   let previousViews: MissionView[] = []
   let previousSubjects: SubjectSummary[] = []
+  const lifecycles = new Map<string, { readonly incarnationId: string | undefined; readonly contextObservedAfter: number | undefined; readonly contextAt: number | undefined }>()
   return {
     fleetFromAgents: (rows) => {
       if (rows === previousRows && previousFleet !== undefined) return previousFleet
       const previousAgents = new Map(previousFleet?.agents.map((agent) => [agent.ref, agent]))
       const projected = rows.map((row) => {
-        let agent = agents.get(row)
-        if (agent === undefined) {
-          const candidate = agentFromRow(row)
-          const previous = previousAgents.get(row.id)
-          agent = previous !== undefined && sameAgent(previous, candidate) ? previous : candidate
-          agents.set(row, agent)
+        let candidate = agents.get(row)
+        if (candidate === undefined) {
+          candidate = agentFromRow(row)
+          agents.set(row, candidate)
         }
+        const previous = previousAgents.get(row.id)
+        // UsageSummary spans incarnations; an unchanged occupancy timestamp cannot prove a
+        // new incarnation's context. A strictly newer reading restores the reported claim.
+        // The lifecycle is per ref, not per fleet: a ref that leaves a bounded roster window and
+        // returns (even as the same or a cloned DTO) keeps its incarnation and fence.
+        const context = candidate.usage._tag === 'Known' ? candidate.usage.value.context : undefined
+        const contextAt = context === undefined ? undefined : DateTime.toEpochMillis(context.observed_at_unix_ms)
+        const prior = lifecycles.get(row.id)
+        const contextObservedAfter = prior !== undefined && prior.incarnationId !== candidate.incarnationId
+          ? Math.max(prior.contextObservedAfter ?? 0, DateTime.toEpochMillis(row.updated_at), prior.contextAt ?? 0, contextAt ?? 0)
+          : prior?.contextObservedAfter
+        lifecycles.set(row.id, { incarnationId: candidate.incarnationId, contextObservedAfter, contextAt: contextAt ?? prior?.contextAt })
+        if (contextObservedAfter !== undefined) candidate = { ...candidate, contextObservedAfter }
+        const agent = previous !== undefined && sameAgent(previous, candidate) ? previous : candidate
         return agent
       })
       const connected = new Map<string, boolean>()

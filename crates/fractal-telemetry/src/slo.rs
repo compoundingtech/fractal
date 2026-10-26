@@ -743,7 +743,7 @@ mod tests {
 
     #[test]
     fn every_route_path_in_the_targets_file_is_a_route_the_daemon_serves() {
-        // api.rs's route table and the route families the daemon adds to it (st3-daemon's `api::router`).
+        // api.rs's route table and the route families the daemon adds to it (fractal-daemon's `api::router`).
         let source = [
             include_str!("../../fractal-api-core/src/api.rs"),
             include_str!("../../fractal-api-mailbox/src/api/mailbox.rs"),

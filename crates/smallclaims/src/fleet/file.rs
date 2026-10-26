@@ -142,6 +142,10 @@ pub struct FleetFile {
     pub sponsor_routes: Vec<String>,
     pub mode: FleetMode,
     pub port: Option<u16>,
+    /// Enabled automatic transports, in dial preference order; loopback is always last.
+    /// An omitted list defaults to Tailscale then Fabric; an explicit empty list disables both.
+    /// Explicit config peer (`--peer`) routes retain precedence over this list.
+    #[serde(default = "default_transports")]
     pub transports: Vec<String>,
     pub fabric_protocol: Option<String>,
     /// Accept HMAC-only exchanges from config peers. True only during a migration.
@@ -152,6 +156,10 @@ pub struct FleetFile {
     pub fabric: Option<PathBuf>,
     pub tailscale: Option<PathBuf>,
     pub removed: Option<FleetRemoval>,
+}
+
+fn default_transports() -> Vec<String> {
+    vec!["tailscale".into(), "fabric".into()]
 }
 
 impl FleetFile {
@@ -283,5 +291,35 @@ impl FleetFile {
             self.node_key_file.as_path()
         };
         Self::resolve(state_dir, path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_transport_list_defaults_to_tailscale_then_fabric() {
+        let file: FleetFile = toml::from_str("").unwrap();
+        assert_eq!(file.transports, ["tailscale", "fabric"]);
+    }
+
+    #[test]
+    fn explicit_transport_lists_preserve_empty_disabled_and_reordered_values() {
+        for (input, expected) in [
+            ("transports = []", vec![]),
+            ("transports = ['fabric']", vec!["fabric"]),
+            ("transports = ['tailscale']", vec!["tailscale"]),
+            (
+                "transports = ['fabric', 'tailscale']",
+                vec!["fabric", "tailscale"],
+            ),
+        ] {
+            let file: FleetFile = toml::from_str(input).unwrap();
+            assert_eq!(file.transports, expected, "{input}");
+            let round_trip: FleetFile =
+                toml::from_str(&toml::to_string(&file).unwrap()).unwrap();
+            assert_eq!(round_trip.transports, expected, "{input}");
+        }
     }
 }

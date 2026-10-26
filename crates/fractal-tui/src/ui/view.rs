@@ -54,7 +54,7 @@ pub struct World {
     pub host: String,
     pub link: Link,
     /// Peers this host's graph has diverged from: the same envelopes project a different graph
-    /// here, so what stui shows can be wrong until the host is repaired.
+    /// here, so what Fractal TUI shows can be wrong until the host is repaired.
     pub diverged: Vec<String>,
     /// Lists st stopped serving after they loaded, each with st's reason: the rows shown are the
     /// last it sent, and may be out of date until it serves them again. Left out of the shared
@@ -262,6 +262,9 @@ pub enum AttentionKind {
         seat_id: String,
         /// What st says it is about; the call it would make is in the seat's conversation.
         text: String,
+        /// Native question identity, independent of whether a client may submit an answer.
+        #[serde(skip)]
+        question: bool,
         /// Answers a client may send (`allow`, `deny`); empty when the prompt is answered in
         /// the seat's terminal.
         answers: Vec<String>,
@@ -289,6 +292,14 @@ pub enum AttentionKind {
         /// The images it carries, read from st through the ask.
         images: Vec<fractal_conversation_ui::MailImage>,
     },
+    /// A row st did not place in a way this client knows: an older st presents nothing, and a
+    /// newer one may name a group or card this client does not know. It shows st's text and
+    /// why, keeps st's alert flag, and offers no answer of its own.
+    Unplaced {
+        text: String,
+        why: String,
+        alert: bool,
+    },
     /// Information the person asked an agent for (`st work update`): it asks nothing, and it
     /// clears once they read it.
     Update {
@@ -304,7 +315,11 @@ pub enum AttentionKind {
 impl AttentionKind {
     /// Whether a card of this kind blocks or waits on the person.
     pub fn is_alert(&self) -> bool {
-        !matches!(self, AttentionKind::Update { .. } | AttentionKind::Message { .. })
+        match self {
+            AttentionKind::Update { .. } | AttentionKind::Message { .. } => false,
+            AttentionKind::Unplaced { alert, .. } => *alert,
+            _ => true,
+        }
     }
 
     pub fn word(&self) -> &'static str {
@@ -319,6 +334,7 @@ impl AttentionKind {
             AttentionKind::Login { .. } => "login",
             AttentionKind::Request { .. } => "request",
             AttentionKind::Update { .. } => "update",
+            AttentionKind::Unplaced { .. } => "unplaced",
         }
     }
 }
@@ -448,6 +464,8 @@ impl Subagent {
 /// What the details pane shows about an agent. Every field is optional: st may not say.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct AgentDetails {
+    /// Pending mailbox custody shown on retired agents.
+    pub mail_custody: Option<String>,
     /// The goal of the step it holds now.
     pub goal: Option<String>,
     pub claimed: Option<String>,
@@ -477,7 +495,7 @@ pub struct AgentDetails {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reach {
-    /// The machine stui is talking to.
+    /// The machine Fractal TUI is talking to.
     Here,
     /// It replicates with this machine directly.
     Direct,

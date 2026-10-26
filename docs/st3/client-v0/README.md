@@ -23,15 +23,54 @@ hand.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
 `fractal.client.*` aliases, including error and visualization version fields.
-The generated sender constants and request defaults remain `st3.*`. A sender
-cutover must offer both WebSocket subprotocols, Fractal first: servers select
-`fractal.*` only when offered, and clients retain the WebSocket library's
-offered-protocol guard. Rust and Swift models keep their existing lossless string
-decoding behavior; accepting aliases does not reject previously tolerated versions.
-The legacy terminal route likewise selects either `st3.terminal.v1` or
-`fractal.terminal.v1` and still permits upgrades with no supported subprotocol.
+WebSocket senders now offer only the corresponding `fractal.client.*` protocol
+and `fractal.cap.*` capability. **Land and deploy this sender cutover only after
+every receiving fleet host runs #3430 (or a later accepting release).** That
+receiver accepts either single alias, not both surface aliases in one offer:
+collections/conversation require one surface; terminal requires one surface
+plus one capability (or just the surface for direct PEEK). An old second offer
+would therefore not bridge a receiver missing alias support.
+
+Old-only clients continue connecting to the accepting receivers. New senders
+do not connect to pre-alias receivers and do not retry with old names. Rollback
+across that boundary restores old-only senders before downgrading receivers.
+The acceptance bridge is
+`arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both`, with the #3032 R5 hard
+sunset of 2026-11-01. Clients retain the WebSocket library's offered-protocol
+guard; server responses selecting an unoffered protocol remain invalid.
+Rust and Swift models keep their existing lossless string decoding behavior.
+The legacy terminal connector offers `fractal.terminal.v1`; its accepting route
+continues supporting old `st3.terminal.v1` clients and protocol-free upgrades.
 This transport vocabulary does not rename signed peer envelope tags, signature
 domains, durable identities, JSON Schema annotations or local provenance labels.
+
+### R9 WebSocket sender inventory
+
+| Sender owner | Surfaces | Source/provenance |
+| --- | --- | --- |
+| Generated Rust client | raw PTY (including direct PEEK), terminal screen, conversation, collections | `crates/fractal-client-codegen/templates/lib.rs.in` → `crates/fractal-client/src/lib.rs`; constants in `templates/generated.rs.in` → `src/generated.rs` |
+| Generated TypeScript client | terminal screen, conversation, collections | `crates/fractal-client-codegen/templates/Client.ts.in` → `clients/typescript/fractal-client/Client.generated.ts` |
+| Generated Swift client | terminal screen, conversation, collections, native collection windows | `crates/fractal-client-codegen/templates/Client.swift.in` → `clients/swift/FractalClient/Sources/FractalClient/Client.swift`; terminal constant in `templates/Models.swift.in` → `Sources/FractalClient/Models.swift` |
+| Peer raw-lease relay | raw PTY with capability | `crates/fractal-peer/src/peer/raw_lease.rs` |
+| Secrets terminal connector | legacy terminal framing, protocol `fractal.terminal.v1` | `crates/fractal-secrets/src/client.rs` |
+| Web early connection | collections before the application loads | `apps/fractal-web/src/web/index.html` |
+
+All generated artifacts continue to come from `cargo run -p fractal-client-codegen`;
+templates are the authority and generated provenance markers remain intact.
+The SDK browser socket (`apps/fractal-web/packages/fractal-sdk/src/effect/trace.ts`)
+and iOS native adapter (`apps/ios/collectionSocket.ts`) forward the generated
+client's protocol array rather than owning protocol spellings.
+Scenario replay (`clients/typescript/fractal-scenarios/src/replay/index.ts`) already
+accepts equivalent offers for one surface and identical capability aliases.
+Test-only protocol writers include the Rust raw-terminal activity/handshake
+fixtures, TypeScript contract handshake fixture, Swift request tests,
+`apps/ios/fakeFeed.mjs`, `apps/ios/collectionSocket.test.mjs` and
+`apps/fractal-web/scripts/early-connect-proof.mjs`; sender expectations use the
+new protocol spellings. Old-only receiver fixtures remain useful compatibility
+coverage and are not globally renamed.
+HTTP header names and API/error/visualization version writers are a separate
+cutover scope: this change leaves those names and all cryptographic and
+signed-envelope bytes unchanged.
 
 
 `ResourceHeader.operational` describes current versus historical state, actionability, reasons,
@@ -224,7 +263,7 @@ server; it must not infer `"standing"`, `"owner"`, or `"bounded"` from other fie
 Like the other forward-compatible response enums, the wire schema accepts future strings.
 Generated clients decode an unfamiliar value as `Unknown` without dropping the roster row;
 this differs from an absent field, which means no lifecycle was declared.
-See [agent declarations](../kdl-lifecycle.md#definitions-do-not-start-work).
+See [agent declarations](../../site/reference/configuration.md#definitions-do-not-start-work).
 
 ### Agent activity and human blocking
 
@@ -251,7 +290,7 @@ or projection parity on older members.
 The generated agent-state type is an open string. Consumers requiring `running` treat
 `restarting` as not yet ready. `agents new --wait` keeps waiting (first starts are unchanged);
 `agents restart` also requires a different incarnation before completing. CLI prints the state;
-its unrecognized-state help remains the starting explanation. stui/phone/web rendering is not
+its unrecognized-state help remains the starting explanation. Fractal TUI/phone/web rendering is not
 qualified by this daemon PR and must not be described as verified.
 
 An agent's `harness_state` describes activity independently of its optional `blocked_on`, `ask`,
@@ -337,6 +376,26 @@ Request bodies never select an actor. Device credentials are scoped, individuall
 different from fleet replication secrets. A remote client is always online: v0 has no offline
 mutation queue, push notification sender, cached graph authority, or multi-master replication.
 A paired phone may register a push token ([push registration](push.md)), but nothing sends to it.
+
+### Native Fabric carrier
+
+The CLI and native generated-client transports accept
+`fabric://<node-or-name>/st3-client-v0`. The local Fabric daemon dials the remote
+client gateway protocol directly. An explicit NodeID needs no name lookup;
+otherwise the target must match one trusted Fabric peer name, ignoring ASCII
+case. Ambiguous names fail instead of selecting a peer arbitrarily.
+
+Only `/v1/client/` and `/v1/health` may use this transport. Private routes,
+absolute URLs, and path traversal fail before a Fabric dial. Requests do not
+inherit the trusted-local Unix person's authority merely because Fabric returns
+a local tunnel socket. The gateway still authenticates the paired client and
+checks its scopes and device signatures.
+
+For CLI requests, `FRACTAL_CLIENT_CREDENTIAL` explicitly supplies the remote
+bearer credential. It is never part of the endpoint URL. The reusable Rust client
+uses `Client::fabric(endpoint).with_credential(credential)`.
+Browser and phone runtimes cannot directly invoke a host-local Fabric daemon;
+their existing authenticated HTTP(S) gateway transport remains available.
 
 ### Tailnet carrier
 
@@ -538,7 +597,7 @@ Rust exposes `Client::resources_list` with `ResourcesFilter` and a typed resourc
 Swift and TypeScript expose `resourcesList` with equivalent typed filters and items. Resource
 observations are distinct from operational resources: their `kind` is an open resource-vocabulary
 string, not the operational resource union's discriminator. This list route does not add a
-`resources` subscription to `st3.client.collections.v0`.
+`resources` subscription to `fractal.client.collections.v0`.
 
 
 ### Seat workspace directories
@@ -576,7 +635,7 @@ a managed declaration return `not-found`; conflicting declarations or a stop wit
 unambiguous predecessor return `validation-failed`. No directory is inferred from the seat ID.
 
 For the full attach, stop/start, and suspend/resume recipe, see
-[seat lifecycle](../../seat-lifecycle.md#find-a-workspace-and-return-to-an-interactive-seat).
+[agent lifecycle](../../seat-lifecycle.md#find-a-workspace-and-return-to-an-interactive-agent).
 
 ### Applied subject definitions
 
@@ -836,8 +895,31 @@ waiting episode. `source_kind`, `episode`, `source_id`, `priority`, `requested_a
 `action_parameters` describe the source and its current remedy. Completed, cancelled, removed,
 retired, or replaced sources disappear before cleanup; a failed run can retain its own fault.
 Pending held subscription requests are not attention sources. Historical `attention.*` claims
-remain audit data. Both raw legacy mutation routes and `attention.resolve` return
-`attention-migrated`; capabilities mark that action unsupported.
+remain audit data. `attention.resolve` returns `attention-migrated`; capabilities mark
+that client action unsupported. The raw resolve and withdraw routes support only the
+narrow source adapters in [person delegation](../person-delegation.md).
+
+`GET /v1/client/attention?history=true` (also `/alerts`) and
+`GET /v1/client/now?history=true` without `actor` or `owner_run` now return **only closed
+source resolutions**, separate from open Home. Previously the history flag was ignored
+and these reads returned the open list; older daemons still do so. An older daemon's
+open result is not closed-history evidence. No in-repository caller currently sends
+these history requests. Attention history returns 422 `validation-failed` for `actor`, `owner_run`, `status`,
+`owner`, `native_only=true`, or a `state` other than `resolved`. Unfiltered Now history
+returns 422 `validation-failed` for `status`, `owner`, `native_only=true`, or a non-resolved state. Now with
+`actor` or `owner_run` keeps the existing work-filtered open/combined behavior and its
+validation even with `history=true`; that request does not enter the closed-history path.
+
+Only closed history sends the optional `page.omitted_items`. This count is approximate:
+it can undercount decoded rows that fail to bind to their original, and overcount damaged
+rows whose owner or relevance is unknown. Zero does not establish complete history.
+Sparse pages can be empty with `has_more=true`; follow the bounded cursor and preserve
+incomplete-history information. SQL still classifies bounded JSON per candidate, while
+known noise rows skip Rust body decoding; the existing indexed plan is not a measured
+SQL-cost guarantee. A known owner's oversized original returns 503 on exact detail,
+while another person's detail is 404; an unreadable row with no established owner is
+also 404 for a person session. The [delegation guide](../person-delegation.md) gives
+the row, byte, cursor and all-receiver Operations rollout boundaries.
 
 An agent asks through `work.ask` (`person_id`, `title`, `reason`, and exactly one of `step_id` or
 `new_run`). Claimed work requires its current generation, definition, attempt, readiness, and
@@ -880,7 +962,7 @@ wording) gets a new card, so an action through the old one returns `stale-fence`
 nothing. A client then re-reads attention and, if a card of the same `attention_kind` for the
 same `source_id` is open, acts once more through it; it does not retry the old card. A review st
 no longer asks returns `validation-failed`, and its message says why: who already answered it
-and how, or what moved on since it was asked. The terminal UI does both on its live and classic screens.
+and how, or what moved on since it was asked. The terminal UI does both.
 
 Clients must evict removed source cards and replace their window from fresh snapshots on
 reconnect. The iOS cache version is 4 and the terminal UI's is 3; older cached cards are discarded. Offline
@@ -957,7 +1039,7 @@ imply that an active claim is making progress.
 
 A trusted local agent session (`--as agent/PATH` on the local Unix API) holds every scope a person's
 local session holds and may invoke every action, recorded with the agent as its actor; see
-[free mode](../kdl-lifecycle.md#free-mode). Glasses stay a person's own: an agent session reads and
+[free mode](../../site/reference/configuration.md#free-mode). Glasses stay a person's own: an agent session reads and
 writes none. Each action keeps its own fences, and a review still needs its named reviewer.
 
 `GET /v1/client/agent-queues/{agent_id}` returns one `AgentQueue` value for a seat: its
@@ -1151,7 +1233,7 @@ are grandfathered: their older claims do not contain the caller-key association.
 expires those rows or rewrites those claims. A separate follow-up deletes the fixed legacy
 cohort **30 days after actual deployment**, outside realistic client retry horizons. Operations
 must record the deployment timestamp and due date in
-[the legacy cleanup follow-up](https://github.com/compoundingtech/smalltalk/issues/1741).
+[the legacy cleanup follow-up](https://github.com/compoundingtech/fractal/issues/1741).
 That future deletion is an explicit legacy exception, not an indefinite dedupe guarantee.
 
 Cleanup adds, drops and changes **no indexes**. It seeks the first rowid above a persisted legacy
@@ -1185,12 +1267,24 @@ or checkpoint authority. Existing canonical claims and checkpoint rules are unch
 
 Asks, attention actions, message sends and held effects are not pinned by this local-response
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.
-Client actions keep their durable `custom.client.action-result` receipt; normal claim append
-uses its existing operation identity and checkpoint tombstones. Cleanup never deletes these
-claims. Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
+Client actions keep their server-only `client.action-result` receipt in the owner-local
+observation log, with the same durable retention class and ordinary age/count trimming;
+it is not pinned. This does not extend the existing idempotency retention window.
+Replay and receipt compare-and-set read the owner's local receipts, not peer claims.
+Only `agent.launcher-bound` and `agent.helper-launched` are pinned against local age/count
+trimming. Normal claim append uses its existing operation identity and checkpoint tombstones.
+Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
 follow `retryable`, and this new code is terminal. TypeScript/phone `isTransient` and
 `retryTransient` likewise stop on this code; the phone's fresh-fence `notApplied` retry list
 contains only stale-fence/rate-limited. Swift preserves unknown codes and `retryable: false`.
+
+Legacy `custom.client.action-result` receipts cannot prove server authorship, even
+with a local origin and absent/null actor. A retry whose key has any such receipt
+fails closed with HTTP 409 `legacy-action-receipt-untrusted` before dispatch or
+side effects. This covers both actor-bearing old server receipts and old
+client-forged receipts; neither is silently upgraded or replayed. Inspect the
+original outcome before choosing a new key. New typed receipts replay normally.
+No stored claims are rewritten and no migration is required.
 
 Caller keys have one namespace across actors and nodes that share these claims. Use a fresh,
 globally unique key for each new request; keys are not an authorization boundary. Reusing
@@ -1564,7 +1658,7 @@ paths return an empty 404.
 
 The flake's `packages.st-chatgpt` builds only the adapter executable with the shared locked
 Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
-`nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt` at a published commit.
+`nix build github:compoundingtech/fractal/<commit>#st-chatgpt` at a published commit.
 The shared `checks.st3` suite includes the adapter's Rust tests.
 
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
@@ -1607,7 +1701,7 @@ must distinguish unavailable, ungranted, and unsupported features.
 ## Conversation stream
 
 `GET /v1/client/conversations/{id}/stream` opens one authenticated WebSocket
-with subprotocol `st3.client.conversation.v0`. A client may pass `after=CURSOR` to
+with subprotocol `fractal.client.conversation.v0`. A client may pass `after=CURSOR` to
 resume. `{id}` may be a session ID, an agent peer ID (resolved to its current
 session), or a st message ID with a session peer. A cursor remains tied to the
 resolved session, so a new agent incarnation needs a fresh stream.
@@ -1677,7 +1771,7 @@ lease ends at `expires_at`, at `terminal.detach`, or when the runtime incarnatio
 attachment then reports `state` `expired` or `detached` with no capability and `retry_hint`
 `reattach`: attach again with a new idempotency key. A stream already open is not cut off when its
 lease expires. A client opens the URL on the same Unix or Fabric-loopback gateway with WebSocket
-subprotocol `st3.client.terminal.v0`. Authentication, capability validation, and
+subprotocol `fractal.client.terminal.v0`. Authentication, capability validation, and
 runtime-incarnation validation happen before upgrade.
 
 The WebSocket then stays open. The first message is the current screen. After that the server sends
@@ -1857,12 +1951,12 @@ and consumption. Full admission returns HTTP 429 `rate-limited` rather than evic
 consume an outstanding token or wait for expiry before requesting another.
 
 Open `/v1/client/terminals/{id}/raw-stream?incarnation=...&mode=attach` using WebSocket subprotocol
-`st3.client.pty.v0` and secondary `st3.cap.CAPABILITY`. The credential and capability never appear
+`fractal.client.pty.v0` and secondary `fractal.cap.CAPABILITY`. The credential and capability never appear
 in the URL. Authentication, mode checking, single-use consumption, owner graph fencing and the
 owner's kernel/registry incarnation proof all precede upgrade. Both modes require a concrete
 person and `terminal.read`; `attach` also requires `terminal.control`.
 
-Authenticated native clients can instead open `mode=peek` with only `st3.client.pty.v0`,
+Authenticated native clients can instead open `mode=peek` with only `fractal.client.pty.v0`,
 without a preceding POST or capability. Authentication, the concrete person and `terminal.read`
 scope, live seat/incarnation fencing and revocable lease registration are still checked for every
 open. Browser clients may keep the capability flow above. Who opened which PEEK is recorded in
@@ -2029,7 +2123,7 @@ live quota return `not-found`; a client that saves on a disconnected member may 
 ID disappear from the live view after synchronization. This rule converges independently of
 arrival order and never discards the saved structure.
 
-Subscribe to `collection: "glasses"` on `st3.client.collections.v0`, with `limit: 100`, to
+Subscribe to `collection: "glasses"` on `fractal.client.collections.v0`, with `limit: 100`, to
 follow the person's current glass set. The existing `snapshot` / `changes` frames carry full
 resource upserts and removed IDs, including deletions and quota changes. A reconnect starts
 with an authoritative snapshot. The server applies ownership and read grants to each
@@ -2170,7 +2264,7 @@ rows. List/detail and write validation read these heads, never edit history. Rep
 rebuild them once; projection digests and checkpoint proofs include the same read answers.
 There is **no new checkpoint drop rule**: agent-authored edits are durable too.
 
-Subscribe on `st3.client.collections.v0` with
+Subscribe on `fractal.client.collections.v0` with
 `{kind: "subscribe", id, collection: "arrangements", person: "person/NAME", limit: 100}`.
 Person is required and grants are checked on every read. Bounded authoritative snapshots,
 full resource upserts, removed IDs, complete order, and reconnect snapshots follow the
@@ -2232,6 +2326,61 @@ in `st agents new`. Workspace paths are absolute on the selected host; omission 
 its usual new-agent directory. The host creates missing agent workspaces. OpenCode does not accept
 `effort`. Message text is nonempty, at most 64 KiB, and uses the native harness startup argument.
 An existing active seat requires a different name; a stopped seat may be deliberately recreated.
+
+Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
+emitted exactly once. Short names retain the usual host qualification.
+
+When an agent with runtime evidence creates another agent, the new agent is a
+run-owned helper, regardless of harness. An agent identity with no runtime
+observation retains the ordinary non-inheriting creation flow: no launcher run or
+credential reference is inferred. The server records an owner-local `agent.launcher-bound`
+receipt with the authenticated launcher, its person owner (if known), the selected
+declaration, and the exact launcher runtime incarnation. Claude and Codex helpers
+must match the launcher's credential-bearing harness and inherit only that
+harness's credential-directory reference; cross-provider creation is refused.
+The helper retains its own agent identity. Credential files and secret values are never copied into
+arguments or environment variables. Absolute credential-directory references remain
+host-local; owner-local action receipts carry only non-authoritative attribution
+labels. Peer-replicated binding and action-result claims cannot grant authority.
+An unowned launcher does not confer person ownership.
+Credential-directory references are local to the launcher's host, so helpers must
+launch on that host. Inheritance also requires kernel-authenticated Unix socket
+peer credentials and proof that the peer descends from the launcher's exact
+daemon-recorded harness PID and Linux process-start token. Inheritance requires
+Linux with `SO_PEERPIDFD` (kernel 6.5 or newer). The server retains the original
+connector's kernel pidfd and refuses exited connectors, even when the socket
+remains open or its PID is reused. There is no PID-only or start-token fallback:
+an unavailable socket pidfd refuses inheritance without changing ordinary authentication.
+Every intermediate ancestor's generation and parent edge is checked
+again before granting. `ST_AGENT`, headers and other environment values cannot
+establish this grant. Old launcher runs without process provenance must be
+relaunched. Platforms without verified process ancestry (currently non-Linux),
+missing peer identity, unreadable procfs or unavailable process evidence fail
+closed with a clear refusal; no alternative account or login is selected.
+
+Socket peer credentials and a pidfd identify the original connector, not the
+current writer of each request. A descriptor handed over by the launcher's
+subtree retains that connector's authority while its identity remains live:
+this is delegation. Ancestry trusts the entire launcher subtree; it is not
+isolation between its descendants. Do not pass an authenticated descriptor to
+an untrusted process.
+
+Reconciliation stops a helper when that exact launcher incarnation ends.
+Spawning and restarting refuse an ended binding, including after a daemon
+restart; the credential reference is no longer usable for a new launch.
+Restarting the launcher ends its helpers: the new incarnation must create them
+again. Historical binding receipts remain for attribution.
+Each successful helper launch atomically records a server-only, durable owner-local
+`agent.helper-launched` receipt with its launcher, person owner, credential-home
+label, launcher incarnation, and operation ID. Age and count retention preserve it.
+Client-writable or peer-replicated receipts cannot grant binding authority.
+A declaration edit cannot silently switch the helper to a different login:
+if it no longer matches its credential receipt, stop and recreate the helper.
+
+This is a Fractal lifecycle bound, not native process containment: while the
+daemon is unavailable, a helper can outlive its launcher until reconciliation
+resumes. Agent Policy accepts this explicit exception; native containment is
+tracked in [#3923](https://github.com/compoundingtech/fractal/issues/3923).
 
 `repo` is an existing repository's absolute path on the selected host. It adds the existing
 `checkout` declaration and creates the agent workspace as a worktree. `base` defaults to
@@ -2452,6 +2601,68 @@ ST3_TERMINALS_COMPAT_BIN=/path/to/older/st3 cargo test -p fractal --test integra
 Choose a binary built before these terminal filters. The fake legacy-server refusal
 and escaping test, server filter/paging tests, and TypeScript client checks run in CI.
 
+### Native delivery receipt links
+
+Capability `conversation-delivery-links` version 1 supports the optional top-level
+`TimelineEntry.delivers` message reference. Request it with
+`X-St3-Features: conversation-delivery-links.v1` (alongside any other features).
+A link names the Small Talk message consumed by that native user turn. Use
+`message.read` to retrieve its full body; a clipped native envelope is a preview.
+Without this feature the field is omitted, including on relayed and cached pages.
+The updated Rust owner-relay client negotiates it and preserves it through typed
+serialization; older daemons/clients keep their existing envelope workaround.
+
+The first producer is Claude's current verified transcript binding, explicit
+user-record id and existing consumption predicate. Queue acceptance/removal,
+ordinal-only ids, other unqualified adapters and old receipts supply no link.
+The lookup uses the qualified transcript's driver/native session identity; managed
+route session IDs and cursors remain separate and unchanged. The owner retains
+only native session/record ids beside the newly appended read
+receipt in the same existing writer savepoint. Claim body, signature, receipt
+operation/idempotency digest and ACK timing are unchanged. This local metadata
+is not replicated, a transcript payload or an admission authority. No history
+is backfilled: restore from claim-only backups leaves these links unavailable.
+A normal reopen retains metadata. Acceptance-time corrections keep the binding;
+updates to the receipt's id, subject, kind, actor, origin or body retire it. The
+conditional deletion trigger also clears it with foreign keys disabled. Reads
+never initialize or rebuild it. A private receipt-meaning fingerprint (subject,
+actor, origin and canonical receipt body) refuses changed/reused ids even if a
+fault or unsupported table copy lost its update trigger. It is an equality
+witness, never native authority. The lookup bounds count missing and above-cut
+physical candidates too; its logical cut checks the current claim row position.
+
+The actual production projection replay/rebuild retains claim ids/rows, this
+local table and its triggers. The old migration in store.rs swaps batches only;
+it does not replace claims, and their native receipt bindings survive. The cited
+foreign-keys-off deletion in peer.rs is a test fault on intent.desired claims.
+Actual retention/repair deletions of receipt rows retire the local binding;
+claim-only reinsertion/restoration does not guess or rebuild it. Arbitrary
+claims-table replacement is not a supported migration: a future implementation
+must preserve proof metadata for unchanged claim identities/meaning, reinstall
+guard triggers, and explicitly retire changed ids. Missing or changed receipts
+never produce a link. Earlier unreleased v1 PR-head metadata is not adopted or
+backfilled into v2; the optional link remains unavailable for those old receipts.
+
+The daemon currently validates only the identity's well-formed shape from its
+authenticated Claude delivery peer. Matching that session/record to the verified
+Claude binding and existing envelope-consumption predicate happens in the
+channel, not again in the daemon. A compromised authenticated seat can therefore
+mislabel links in its own timelines; this feature grants no new native authority.
+If the same-savepoint metadata INSERT fails, the read receipt is rolled back and
+no ACK is issued. Existing receipt recovery retains the frozen proof and retries
+with exponential delay capped at 30 seconds. The delay and each request remain
+bounded; there is no new finite retry count, TTL eviction or silent proof loss.
+
+One statement checks at most 200 selected native ids, at most three indexed
+receipts each, and at most 4 KiB of receipt body each. Two eligible receipts for
+one native turn, an exhausted physical bound, repaired/noncanonical claims or
+missing operation proof leave the optional field absent. Newly recorded receipts
+wake the existing follower and cause its ordinary cursor-gap refresh when they
+would change an already delivered native entry. This is receipt provenance,
+not a read-after-send guarantee or proof that the owner's harness has delivered
+any unobserved send. Daemons roll out first. Optional author/recipients fields
+are a separate approved follow-up; existing from/to types are unchanged here.
+
 ### Owner-native conversation blocks
 
 With `X-St3-Features: conversation-blocks.v1`, native timeline entries include
@@ -2531,7 +2742,7 @@ limited to 32 MiB, with explicit errors. Transcript URLs are never fetched by th
 payloads show an 8 KiB UTF-8 prefix labelled as truncated JSON text, and a reference
 recovers the full valid JSON. The existing 1 MB page bound still applies.
 
-Current stui and phone views use these existing references for explicit full-content
+Current Fractal TUI and phone views use these existing references for explicit full-content
 loading. Expansion starts at offset zero and follows `next_offset` until it is null;
 the assembled JSON is the complete original value, not a suffix to splice into the
 clipped preview. A ref may cover a payload, an open metadata/view subtree, or the
@@ -2541,7 +2752,7 @@ typed output adapter without its preview line limit. Identifiable view-only refs
 are reattached to the original block and use that same adapter, including written
 content and compaction summaries. Metadata and unknown values keep a lossless raw
 JSON fallback. Loading non-image content is explicit for that block or through
-stui's expand-all keypress. Expand-all loads only visible
+Fractal TUI's expand-all keypress. Expand-all loads only visible
 clipped tool values, with one owner content read active at a time; newly visible
 rows load next without prefetching offscreen rows. Loaded values remain in memory
 when scrolled away and are released on collapse. Restoring saved expansion state
@@ -2554,9 +2765,9 @@ memory only, scoped to the conversation and reference. Loading does not create a
 temporary file, persistent cache, stored conversation history or outbox.
 
 Native images load automatically when their image box is visible on the phone, or
-their image label is visible in a graphics-capable stui terminal. Phone overscan,
+their image label is visible in a graphics-capable Fractal TUI terminal. Phone overscan,
 inactive screens, offscreen terminal entries and covered panes do not authorize
-automatic reads. stui uses the same one-read-at-a-time queue, and Ctrl+U explicitly
+automatic reads. Fractal TUI uses the same one-read-at-a-time queue, and Ctrl+U explicitly
 hides/shows a tool's images; hidden images stay hidden through redraws and scrolls.
 Unsupported terminals retain explicit loading instead of automatic fetching.
 Phone shows a Load/Retry action only after failure. Its viewport owns one sequential
@@ -2628,6 +2839,8 @@ as waiting records until upgrade; see [rolling upgrades](../replication.md#rolli
 
 `agent.retire` permanently retires the identity at its declaring host. It requires `{ "agent": "agent/example/worker", "reason": "Work finished" }`, a selected desired claim ID in `fence.runtime_desired_revision`, and a stable idempotency key. Optional `runtime_incarnation` fences a selected process. Rust provides `agent_retire`; Swift and TypeScript provide `agentRetire`. See [terminal retirement](../agent-retirement.md) for the coordinated registry rollout and locally known retirement rule. Fresh sends to a known retired agent return 409 `recipient-retired` with `applied: "none"` and a typed `details.refusal.variant: "Retired"`. Exact accepted retries return their receipt; a lost reply remains unconfirmed. `lifecycle-unavailable` concerns incomplete/conflicting local evidence, never an offline owner alone.
 
+`agent.retire.parameters.successor` optionally names an existing eligible agent. It is recorded in the signed retirement claim after the all-member registry gate. The successor's read and close claims carry `acting_for` and the retirement claim as evidence; `Agent.mail_custody` reports `{ successor, state: "pending" }` for OLD. Numeric unread counts and completion are not available in this increment.
+
 ### Exchange carrier observations
 
 `SyncPeer` may include `last_successful_exchange` and `last_failed_exchange`, each
@@ -2645,3 +2858,28 @@ them. Idle receipts outside the sync notice set do not notify client streams;
 repeated same-carrier failures likewise stay quiet when the graph is unchanged. Existing sync notice conditions
 remain the same. Older servers omit these optional fields; older clients ignore
 the additions. No API version, scope, operation or claim shape changes.
+
+## Schedule standby public read change set
+
+Compatibility **changed**: the optional standby declaration adds an optional
+`schedule_standby` local observation to CLI subject show/history. The exact legacy
+status route exposes it inside the existing open JSON `SubjectStatus.actual`
+object as `actual.schedule_standby`; it does not add a required generated-client
+resource or operation. Existing occurrence scheduled/reached claim bodies gain
+optional `standby` detail and `reason`. These additions keep the same claim kinds.
+
+Fields: `primary_host`, `standby_host`, `after_ms`, `eligibility`, `reason`,
+nullable `primary_heartbeat_age_ms`, `heartbeat_basis`, `observed_primary_view`,
+`run_twice_warning` and `cold_standby_limit`. A current local observation is not
+a converged eligibility assertion or exclusive lease. Historical reads label
+eligibility unknown and do not inject a current heartbeat age. History remains
+JSON lines of original claims/events with the optional observation field; an
+empty history still has no claims. Use subject show to read its current warnings.
+
+Jobs must be safe to run twice. The declaration guide, subject show (structured
+and text), history and release note expose the same cold-standby limitation:
+
+If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
+
+Hosted validation must run `cargo run -p fractal-client-codegen -- --check`. Generated
+files remain generated; do not hand-edit clients for open JSON observation detail.

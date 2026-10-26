@@ -25,6 +25,7 @@ import type {
   ConversationSearch,
 } from '@fractal/client/schema'
 import type { ErrorEnvelope } from '@fractal/client'
+import type { Timestamp } from '@fractal/client/schema'
 import type { ConnectionState, DecodedAgent, DecodedUsageSummary, MessageSendInput, Undecodable } from '@fractal/sdk/effect'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
@@ -43,6 +44,7 @@ import type { AlertActionPort } from '../conversation/alerts/alert-action-port.t
 import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
+import type { NativeDetailsSource } from './nativeDetailsSource.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
 /**
  * One followed projection as a feature sees it. Fixtures can produce every case (what `AllStates`
@@ -54,6 +56,10 @@ export type Feed<A> =
       readonly _tag: 'Observed'
       readonly value: A
       readonly freshness: 'live' | 'stale'
+      /** Client epoch milliseconds of the last successful getter read; retained across failed refreshes. */
+      readonly readAt?: number
+      /** Producer snapshot time, not the client's receipt or display clock. */
+      readonly snapshotCreatedAt?: Timestamp
       /** Explicitly bounded published evidence; absence makes no completeness claim. */
       readonly coverage?: { readonly _tag: 'Partial' }
       /** A newer transcript read failed; these are still the last trusted rows, not a repair. */
@@ -135,6 +141,9 @@ export interface Agent {
   readonly description?: string
   /** Known only with a recognized aggregation; dependent figures are never derived otherwise. */
   readonly usage: Known<DecodedUsageSummary>
+  readonly incarnationId?: string
+  /** Only occupancy newer than a retained incarnation transition may claim current context. */
+  readonly contextObservedAfter?: number
   /** Requested checkout, not confirmation of a successful checkout. */
   readonly checkout: Known<AgentCheckout>
   readonly workspace: Known<string>
@@ -187,6 +196,8 @@ export interface ConversationPage {
 export interface Grants {
   readonly actions: 'granted' | 'ungranted'
   readonly messageSend: 'granted' | 'ungranted'
+  /** Image upload for message attachments (`control.messages`); sending them still needs `messageSend`. */
+  readonly attachmentUpload: 'granted' | 'ungranted'
   readonly terminalInput: 'granted' | 'ungranted'
 }
 
@@ -261,6 +272,7 @@ export interface AttachmentPort {
   readonly upload: (request: {
     readonly bytes: Blob | ArrayBuffer | Uint8Array
     readonly mediaType: BlobUpload['media_type']
+    readonly signal?: AbortSignal
   }) => Promise<ConversationPortResult<BlobUpload>>
   readonly chunk: (request: {
     readonly sha256: string
@@ -289,6 +301,8 @@ export interface DataSource {
   readonly attachments?: AttachmentPort
   /** Schema-coupled native family reads; unsupported native producers carry an explicit reason. */
   readonly subjectReads: SubjectReads
+  /** Visible Details uses shared native getter facts; no private harness decoding. */
+  readonly nativeDetails?: NativeDetailsSource
   readonly connection: Atom.Atom<ConnectionState>
   /** Browser reachability is a local signal, not a claim about the gateway's host. */
   readonly network?: Atom.Atom<NetworkReachability>
@@ -309,6 +323,8 @@ export interface DataSource {
   readonly conversationInterest?: (agentRef: string) => Atom.Atom<void>
   /** Explicit pointer/focus intent; live admits it only after a visible thread's first-page frame. */
   readonly prefetchConversation?: (agentRef: string) => void
+  /** Explicit terminal-toggle pointer/focus intent; live retains a read-only viewer. */
+  readonly prefetchTerminal?: (terminalRef: string) => void
   /** Explicit recovery: re-acquire a failed or ended conversation follow; a healthy follow is untouched. */
   readonly retryConversation?: (agentRef: string) => void
   /** Keyed by terminal ref; live attaches a read-only viewer. */
@@ -354,13 +370,16 @@ export interface DataSource {
 export const observed = <A>({
   value,
   freshness = 'live',
+  snapshotCreatedAt,
 }: {
   readonly value: A
   readonly freshness?: 'live' | 'stale'
+  readonly snapshotCreatedAt?: Timestamp
 }): Feed<A> => ({
   _tag: 'Observed',
   value,
   freshness,
+  ...(snapshotCreatedAt === undefined ? {} : { snapshotCreatedAt }),
 })
 /** The feed before the first observation arrives. */
 export const waiting: Feed<never> = { _tag: 'Waiting' }

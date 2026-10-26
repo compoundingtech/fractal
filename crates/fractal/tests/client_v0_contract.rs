@@ -423,7 +423,7 @@ async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
         axum::routing::get(move |upgrade: WebSocketUpgrade| {
             let sender = sender.clone();
             async move {
-                upgrade.protocols(["st3.client.collections.v0"]).on_upgrade(
+                upgrade.protocols(["fractal.client.collections.v0"]).on_upgrade(
                     move |mut socket| async move {
                         while let Some(Ok(message)) = socket.next().await {
                             if let Ok(text) = message.to_text() {
@@ -3073,14 +3073,16 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
         "agent/example/operator"
     );
     let receipts = store
-        .claims_for_kind_at("custom.client.action-result", None, true, 100)
+        .local_observations_tail(100)
         .unwrap()
-        .claims;
+        .into_iter()
+        .filter(|receipt| receipt.kind == "client.action-result")
+        .collect::<Vec<_>>();
     assert!(!receipts.is_empty());
     for receipt in receipts {
-        let actor = receipt.actor.as_deref().unwrap();
+        assert!(receipt.actor.is_none(), "action receipts are server-written");
+        let actor = receipt.body["fields"]["authority_actor"].as_str().unwrap();
         assert!(actor.starts_with("agent/example/"), "{actor}");
-        assert_eq!(receipt.body["fields"]["authority_actor"], actor);
     }
 }
 

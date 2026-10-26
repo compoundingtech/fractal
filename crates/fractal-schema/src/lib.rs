@@ -4,11 +4,15 @@ pub mod arrangements;
 pub mod custom;
 pub mod accountable;
 pub mod directive_notes;
+pub mod deploy;
+pub mod deploy_policy;
+pub mod full_value;
 pub mod glasses;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
 pub mod retention;
+pub mod slo_breaches;
 pub mod review;
 
 use std::collections::BTreeMap;
@@ -642,7 +646,7 @@ impl Registry {
         replicated: bool,
     ) -> Result<&ClaimSpec, ValidationError> {
         let subject_spec = self.validate_subject(subject)?;
-        if is_custom_claim_kind(kind) {
+        if is_custom_claim_kind(kind) && !self.claims.contains_key(kind) {
             if subject_spec.family != "custom" {
                 return Err(error(
                     "invalid-custom-claim-subject",
@@ -651,13 +655,15 @@ impl Registry {
             }
             return Ok(custom_claim_spec());
         }
-        if kind.starts_with("custom.") {
+        if kind.starts_with("custom.") && !self.claims.contains_key(kind) {
             return Err(error(
                 "invalid-custom-claim-kind",
                 "a custom claim must use custom.NAMESPACE.NAME",
             ));
         }
-        if subject_spec.family == "custom" {
+        if subject_spec.family == "custom" && !kind.starts_with("custom.")
+            && !self.claims.get(kind).is_some_and(|spec| spec.subjects.iter().any(|family| family == "custom"))
+        {
             return Err(error(
                 "invalid-custom-subject-claim",
                 "a custom/ subject requires a custom. claim",
@@ -702,6 +708,7 @@ impl Registry {
             }
         }
         review::validate_claim(self, kind, fields)?;
+        deploy::validate_claim(kind, fields)?;
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
         }
@@ -1805,6 +1812,12 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             false,
             &[],
         ),
+        ("deploy.go", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("deploy.go-revoked", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("deploy.go-consumed", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("deploy.stop", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("deploy.stop-lifted", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("deploy.compat-signoff", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         ("gate.head-bound", &["gate-operation"], WritePolicy::SystemOnly, Cardinality::Append, Some("gates"), true, &["gate"]),
         ("gate.review-verdict", &["gate-operation"], WritePolicy::CapabilityHolder, Cardinality::Append, Some("gates"), true, &["gate"]),
         ("gate.review-withdrawn", &["gate-operation"], WritePolicy::SystemOnly, Cardinality::Append, Some("gates"), true, &["gate"]),
@@ -1844,6 +1857,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("files"),
             true,
             &["gate"],
+        ),
+        (
+            slo_breaches::KIND,
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("slo-breaches"),
+            true,
+            &[],
         ),
         (
             "resource.observed",
@@ -2006,6 +2028,22 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("delivery-holds"),
             false,
             &[],
+        ),
+        (
+            "agent.launcher-bound", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("agents"), true, &[],
+        ),
+        (
+            "agent.helper-launched", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("agents"), true, &[],
+        ),
+        (
+            "custom.client.action-result", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Append, None, true, &[],
+        ),
+        (
+            "client.action-result", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Append, None, true, &[],
         ),
         (
             "agent.retired",
@@ -2838,6 +2876,43 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        "deploy.go" => &[
+            ("version", required_integer()),
+            ("host", required_string()),
+            ("actor", required_reference_to(&["agent"])),
+            ("operation", required_enum(&["install", "rollback"])),
+            ("trainId", required_string()),
+            ("old", required_object()),
+            ("new", required_object()),
+            ("issuedAt", required_string()),
+            ("expiresAt", required_string()),
+            ("failureRestore", required_boolean()),
+            ("previewDigest", required_string()),
+            ("combined", object()),
+            ("compatSignoffId", required_string()),
+        ],
+        "deploy.go-revoked" => &[
+            ("version", required_integer()), ("goId", required_string()),
+        ],
+        "deploy.go-consumed" => &[
+            ("version", required_integer()), ("goId", required_string()),
+            ("operation", required_enum(&["install", "rollback"])),
+            ("result", required_string()),
+        ],
+        "deploy.stop" => &[
+            ("version", required_integer()), ("stopId", required_string()),
+            ("scope", required_string()), ("hosts", required_array()),
+            ("liftCondition", required_string()),
+        ],
+        "deploy.stop-lifted" => &[
+            ("version", required_integer()), ("stopId", required_string()),
+            ("releaseGoId", required_string()),
+        ],
+        "deploy.compat-signoff" => &[
+            ("version", required_integer()), ("trainId", required_string()),
+            ("oldCommit", required_string()), ("newCommit", required_string()),
+        ],
+        slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
             ("launch_id", required_string()),
@@ -3293,6 +3368,30 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("preserved_incarnation", string()),
             ("request", FieldSpec { required: true, ..object() }),
         ],
+        "custom.client.action-result" | "client.action-result" => &[
+            ("authority_actor", string()),
+            ("request_digest", required_string()),
+            ("result", FieldSpec { required: true, ..object() }),
+        ],
+        "agent.helper-launched" => &[
+            ("launcher", required_reference_to(&["agent"])),
+            ("person", reference_to(&["person"])),
+            ("harness", required_string()),
+            ("incarnation", required_string()),
+            ("declaration", required_string()),
+            ("credential_home_label", string()),
+            ("operation_id", required_string()),
+            ("helper_incarnation", string()),
+        ],
+        "agent.launcher-bound" => &[
+            ("launcher", required_reference_to(&["agent"])),
+            ("person", reference_to(&["person"])),
+            ("harness", required_string()),
+            ("credential_home", string()),
+            ("incarnation", required_string()),
+            ("creation_key", required_string()),
+            ("desired_digest", required_string()),
+        ],
         "agent.retired" => &[
             ("reason", required_string()),
             ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
@@ -3379,6 +3478,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "fleet.member-admitted" => &[
             ("fleet_id", required_string()),
             ("member_key", required_string()),
+            ("node_id", string()),
             ("via", required_enum(&["anchor", "invite", "migration"])),
             ("sponsor", reference_to(&["host"])),
             ("invite", reference_to(&["fleet-invite"])),
@@ -3480,6 +3580,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("deadline_unix_ms", string()),
             ("signal", string()),
             ("reason", string()),
+            ("fresh_session", boolean()),
         ],
         "runtime.action.succeeded"
         | "runtime.action.failed"
@@ -3491,6 +3592,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("runtime_id", string()),
             ("terminal", boolean()),
             ("incarnation_id", string()),
+            ("runtime_pid", integer()),
+            ("runtime_pid_start_token", string()),
             ("deadline_key", string()),
             ("desired_token", string()),
             ("rollout_operation", string()),
@@ -3500,6 +3603,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("code", string()),
             ("blocking", array()),
             ("harness", string()),
+            ("credential_home", string()),
             ("native_session_id", string()),
         ],
         "runtime.observed" => &[
@@ -3531,6 +3635,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("gate", string()),
             ("key", string()),
             ("input_number", integer()),
+            ("owner_run", string()),
         ],
         "runtime.readiness-deadline-reached" => &[
             ("runtime_id", required_string()),
@@ -3870,8 +3975,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("transport", string()),
             ("runtime_id", string()),
         ],
-        "message.read" => &[("status", required_enum(&["read"]))],
-        "message.closed" => &[("status", required_enum(&["closed"]))],
+        "message.read" => &[("status", required_enum(&["read"])), ("acting_for", reference_to(&["agent"]))],
+        "message.closed" => &[("status", required_enum(&["closed"])), ("acting_for", reference_to(&["agent"]))],
         "planning-session.started" => &[
             ("mission", reference()),
             ("request", reference()),
@@ -3958,12 +4063,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
         ],
         "schedule.occurrence-scheduled" => &[
+            ("standby", object()),
+            ("reason", string()),
             ("occurrence", integer()),
             ("revision", string()),
             ("at_unix_ms", integer()),
             ("scheduled_at_unix_ms", string()),
         ],
         "schedule.occurrence-reached" => &[
+            ("standby", object()),
+            ("reason", string()),
             ("occurrence", integer()),
             ("revision", string()),
             ("at_unix_ms", integer()),
@@ -4099,7 +4208,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         fields.insert("assistant_owner".into(), reference_to(&["person"]));
         fields.insert("assistant_session_actor".into(), string());
     }
-    if matches!(kind, "work.person-done" | "gate.result" | "message.closed") {
+    if matches!(
+        kind,
+        "work.person-done" | "gate.result" | "message.closed" | "harness.diagnostic"
+    ) {
         fields.insert("acted_for".into(), reference_to(&["person"]));
         fields.insert("delegation".into(), object());
     }
@@ -4349,6 +4461,27 @@ fn validate_harness_todo(fields: &BTreeMap<String, Value>) -> Result<(), Validat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_start_process_provenance_fields_are_optional_and_typed() {
+        let mut fields = BTreeMap::from([("action".into(), Value::from("start"))]);
+        registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
+        fields.insert("runtime_pid".into(), Value::from(1234));
+        fields.insert("runtime_pid_start_token".into(), Value::from("987654321"));
+        registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
+        for (name, invalid) in [
+            ("runtime_pid", Value::from("1234")),
+            ("runtime_pid_start_token", Value::from(987654321)),
+        ] {
+            let mut invalid_fields = fields.clone();
+            invalid_fields.insert(name.into(), invalid);
+            assert_eq!(
+                registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &invalid_fields)
+                    .unwrap_err().code,
+                "invalid-claim-field",
+            );
+        }
+    }
 
     #[test]
     fn run_report_stall_policy_is_an_optional_boolean() {
@@ -4897,6 +5030,17 @@ mod tests {
         assert_eq!(
             registry().validate_subject("custom/acme").unwrap_err().code,
             "invalid-custom-subject"
+        );
+    }
+
+    #[test]
+    fn server_action_receipt_namespace_was_not_admissible_as_a_custom_claim() {
+        let mut legacy = registry().clone();
+        legacy.claims.remove("client.action-result");
+        assert_eq!(
+            legacy.validate_claim("custom/client/action-example", "client.action-result", &BTreeMap::new())
+                .unwrap_err().code,
+            "invalid-custom-subject-claim"
         );
     }
 

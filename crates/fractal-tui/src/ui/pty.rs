@@ -6,6 +6,11 @@
 use super::theme;
 #[path = "pty_graphics.rs"]
 mod graphics;
+#[path = "pty_connection.rs"]
+mod connection;
+#[cfg(test)]
+#[path = "pty_geometry_tests.rs"]
+mod geometry_tests;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line as GridLine, Point, Side};
@@ -19,7 +24,7 @@ use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
 };
-use pty_client::connection::{SessionConnection, SessionEvent};
+use pty_client::connection::SessionEvent;
 use pty_terminal::{
     Key as ProtocolKey, KeyAction, Mods, MouseAction, MouseButton as ProtocolButton, TerminalActor,
 };
@@ -38,13 +43,13 @@ const HISTORY: usize = 10_000;
 /// How long the first screen may take to arrive.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// What the program asked of its terminal that stui acts on: a copy for the person's clipboard
+/// What the program asked of its terminal that Fractal TUI acts on: a copy for the person's clipboard
 /// (OSC 52), the window title, the bell. The PTY daemon answers terminal queries itself, so
 /// the emulator's own answers go nowhere.
 #[derive(Clone, Default)]
 struct Requests(Arc<Mutex<Asked>>);
 
-/// What the program asked since stui last looked.
+/// What the program asked since Fractal TUI last looked.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Asked {
     /// Text the program copied, for the person's clipboard.
@@ -96,7 +101,7 @@ struct Screen {
     ended: Option<String>,
     /// Why the stream dropped while the program still ran, until it attaches again.
     lost: Option<String>,
-    /// When stui next tries to attach again; `None` while a try is under way or nothing is lost.
+    /// When Fractal TUI next tries to attach again; `None` while a try is under way or nothing is lost.
     retry_at: Option<Instant>,
     /// Tries to attach again since the stream last stayed attached: each waits twice as long
     /// as the one before, up to `RETRY_MAX`.
@@ -105,7 +110,7 @@ struct Screen {
     attached_at: Option<Instant>,
     /// Whether the first screen has arrived.
     attached: bool,
-    /// When output last arrived, so stui can draw more often while it flows.
+    /// When output last arrived, so Fractal TUI can draw more often while it flows.
     output_at: Option<Instant>,
     /// What the program asks of the terminal, shared with the emulator that hears it.
     requests: Requests,
@@ -121,7 +126,7 @@ impl Screen {
             kitty_keyboard: true,
             // Reads are handled with an empty response, never clipboard access.
             osc52: alacritty_terminal::term::Osc52::CopyPaste,
-            // A shape no program can ask for, so stui can tell when none did.
+            // A shape no program can ask for, so Fractal TUI can tell when none did.
             default_cursor_style: UNASKED,
             ..Config::default()
         };
@@ -536,7 +541,7 @@ impl NativeTerminal {
         (screen.term.screen_lines(), screen.term.columns())
     }
 
-    /// Whether output arrived in the last moment, so stui draws more often.
+    /// Whether output arrived in the last moment, so Fractal TUI draws more often.
     pub(crate) fn flowing(&self) -> bool {
         self.lock()
             .output_at
@@ -667,7 +672,7 @@ fn start(
     let name = name.to_owned();
     std::thread::Builder::new()
         .name(format!("pty {name}"))
-        .spawn(move || run(stream, &name, size, &shared, &inputs))
+        .spawn(move || run(stream, size, &shared, &inputs))
         .ok();
     input
 }
@@ -681,7 +686,7 @@ pub(crate) fn retry_delay(tries: u32) -> Duration {
     Duration::from_secs(1 << tries.min(5)).min(RETRY_MAX)
 }
 
-/// The stream is gone but the program may still run: say so, and let stui attach again.
+/// The stream is gone but the program may still run: say so, and let Fractal TUI attach again.
 fn dropped(screen: &mut Screen, reason: String) {
     if screen.lost.is_none() {
         super::slo::METRICS.add("dead_terminal_tabs", 1);
@@ -698,10 +703,9 @@ fn dropped(screen: &mut Screen, reason: String) {
 }
 
 /// The attach thread: ATTACH at `size`, then feed what the session sends into the screen and
-/// send it what is typed, until stui lets go or the session ends.
+/// send it what is typed, until Fractal TUI lets go or the session ends.
 fn run(
     stream: UnixStream,
-    name: &str,
     size: Size,
     screen: &Mutex<Screen>,
     inputs: &mpsc::Receiver<Input>,
@@ -712,12 +716,12 @@ fn run(
         return;
     }
     let mut control = stream.try_clone();
-    let mut connection = match SessionConnection::attach_over(
+    let mut requested = size;
+    let mut connection = match connection::Connection::attach_over(
         stream,
-        name,
         size.rows,
         size.columns,
-        Some(ATTACH_TIMEOUT),
+        ATTACH_TIMEOUT,
     ) {
         Ok(connection) => connection,
         Err(error) => {
@@ -725,10 +729,16 @@ fn run(
             return;
         }
     };
-    let mut protocol = TerminalActor::new(size.rows, size.columns, HISTORY);
+    // ATTACH consumes the initial GEOMETRY. Its shared size can be smaller than the pane.
+    let effective = Size {
+        rows: connection.effective_rows().max(1),
+        columns: connection.effective_cols().max(1),
+    };
+    let mut protocol = TerminalActor::new(effective.rows, effective.columns, HISTORY);
     protocol.enable_graphics(pty_terminal::GraphicsOptions::default());
     {
         let mut screen = lock();
+        screen.term.resize(effective);
         let replay = connection.screen().to_vec();
         protocol.write(&replay);
         screen.feed(&replay);
@@ -742,8 +752,9 @@ fn run(
                 Ok(Input::Bytes(bytes)) => connection.write(&bytes),
                 Ok(Input::Resize(size)) => {
                     connection.resize(size.rows, size.columns);
-                    lock().term.resize(size);
-                    protocol.resize(size.columns, size.rows);
+                    requested = size;
+                    // Only ordered GEOMETRY may resize the emulators: queued DATA still
+                    // belongs to the previous size, and another client may constrain this one.
                 }
                 Ok(Input::Key(key, keypad)) => {
                     connection.write(&encode_key(&protocol, &key, keypad))
@@ -767,8 +778,8 @@ fn run(
                     protocol.set_cell_size(cell);
                     if let Ok(control) = &mut control {
                         let _ = control.write_all(&pty_core::protocol::encode_resize_with_cell(
-                            protocol.rows(),
-                            protocol.cols(),
+                            requested.rows,
+                            requested.columns,
                             cell.width as u16,
                             cell.height as u16,
                         ));
@@ -1120,7 +1131,7 @@ fn encode_key(actor: &TerminalActor, key: &pty_terminal::KeyEvent, keypad: bool)
     let mut bytes = actor.encode_key(key);
     // The key encoder follows Ghostty's macOS rule that Option composes characters, and
     // pty-terminal does not tell it otherwise. The outer terminal has already decided what
-    // Alt meant by the time stui sees it, so an Alt press that came out as plain text still
+    // Alt meant by the time Fractal TUI sees it, so an Alt press that came out as plain text still
     // carries the Escape prefix a legacy child expects.
     if cfg!(target_os = "macos")
         && key.mods.contains(Mods::ALT)
@@ -1206,6 +1217,76 @@ mod tests {
     }
 
     #[test]
+    fn shared_geometry_orders_replay_and_data_across_a_resize_request() {
+        use pty_core::protocol::{MessageType, PacketReader, encode_geometry, encode_packet};
+        use std::io::{Read as _, Write as _};
+
+        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        daemon.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let terminal = NativeTerminal::spawn(stui, "test", "one".into(), 10, 30);
+        let mut reader = PacketReader::new();
+        let mut pending = std::collections::VecDeque::new();
+        let mut next = |daemon: &mut UnixStream| loop {
+            if let Some(packet) = pending.pop_front() {
+                break packet;
+            }
+            let mut bytes = [0; 256];
+            let count = daemon.read(&mut bytes).unwrap();
+            assert_ne!(count, 0);
+            pending.extend(reader.feed(&bytes[..count]).unwrap());
+        };
+        let wait = |done: &dyn Fn() -> bool| {
+            let start = Instant::now();
+            while !done() {
+                assert!(start.elapsed() < Duration::from_secs(5), "timed out");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        assert_eq!(next(&mut daemon).type_, MessageType::Attach);
+        // Another writable client constrains the shared grid below the pane's request.
+        let mut initial = encode_geometry(8, 20);
+        initial.extend(encode_packet(
+            MessageType::Screen,
+            b"\x1b[?7l\x1b[6;1H\r$1.00\x1b[7;1H\reditor\x1b[8;1H\rBOTTOM",
+        ));
+        daemon.write_all(&initial).unwrap();
+        wait(&|| terminal.attached());
+        assert_eq!(terminal.grid_size(), (8, 20));
+
+        terminal.fit(7, 20);
+        assert_eq!(next(&mut daemon).type_, MessageType::Resize);
+        // Shrinking locally would shift the old status up, then paint the new status
+        // at its old absolute row, leaving two costs even with autowrap disabled.
+        // A title is an ordered barrier proving DATA has reached the emulator.
+        daemon
+            .write_all(&encode_packet(
+                MessageType::Data,
+                b"\x1b[6;1H\r\x1b[K$2.00\x1b[7;1H\reditor\x1b[8;1H\rBOTTOM\x1b]2;old-size-data\x07",
+            ))
+            .unwrap();
+        wait(&|| terminal.title().as_deref() == Some("old-size-data"));
+        assert_eq!(terminal.grid_size(), (8, 20));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 30, 8));
+        let area = buf.area;
+        terminal.draw(&mut buf, area, false);
+        assert_eq!(buf[(0, 5)].symbol(), "$");
+        assert_eq!(buf[(1, 5)].symbol(), "2");
+        assert_eq!(buf[(0, 4)].symbol(), " ", "no stale cost on the preceding row");
+
+        // Only a server GEOMETRY advances the grid, before subsequent SCREEN/DATA.
+        let mut changed = encode_geometry(7, 15);
+        changed.extend(encode_packet(MessageType::Screen, b"\x1b[1;20HX"));
+        changed.extend(encode_packet(MessageType::Data, b"\x1b]2;new-size-data\x07"));
+        daemon.write_all(&changed).unwrap();
+        wait(&|| terminal.title().as_deref() == Some("new-size-data"));
+        assert_eq!(terminal.grid_size(), (7, 15));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 30, 7));
+        let area = buf.area;
+        terminal.draw(&mut buf, area, false);
+        assert_eq!(buf[(14, 0)].symbol(), "X");
+    }
+
+    #[test]
     fn a_dropped_stream_attaches_again_into_the_same_screen() {
         use pty_core::protocol::{MessageType, encode_packet};
         use std::io::{Read as _, Write as _};
@@ -1244,7 +1325,7 @@ mod tests {
         // The stream drops; the program did not exit.
         drop(daemon);
         wait(&|| terminal.lost().is_some());
-        // Lost is not ended: the program still runs, and stui says it is getting back to it.
+        // Lost is not ended: the program still runs, and Fractal TUI says it is getting back to it.
         assert!(terminal.ended().is_none());
         assert_eq!(terminal.reconnecting().unwrap().0, 0);
         assert!(!terminal.take_reattach(), "the first try waits a second");
@@ -1343,7 +1424,7 @@ mod tests {
         terminal.select_to(3, 0);
         terminal.write(b"x".to_vec());
         assert_eq!(terminal.selected(), None);
-        // A program copies through OSC 52 and names its window; stui hears both once.
+        // A program copies through OSC 52 and names its window; Fractal TUI hears both once.
         daemon
             .write_all(&encode_packet(
                 MessageType::Data,

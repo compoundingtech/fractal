@@ -12,30 +12,33 @@ vi.mock('../data/react.tsx', () => ({
   useConversationSync: () => undefined, useFeedInterest: () => {}, useGrants: () => ({ messageSend: 'ungranted' }), useNow: () => 0, useAttention: () => ({ _tag: 'Waiting' }),
   useNowSnapshot: () => 0,
   useConnection: () => ({ _tag: 'Live' }),
+  usePausedNow: () => undefined,
 }))
-vi.mock('./composerSend.ts', () => ({ composerSendBinding: () => ({ runtime: {}, disabledReason: 'Waiting for access' }) }))
-vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx', () => ({ EmbraceRuntimeProvider: ({ children }: { children: React.ReactNode }) => children }))
-vi.mock('../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx', () => ({ Transcript: () => <section>Transcript</section> }))
-vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx', () => ({ EmbraceComposer: () => <textarea aria-label="Message" /> }))
-vi.mock('../conversation/todos/AgentTodos.tsx', () => ({ LiveAgentTodos: () => <details aria-label="Harness todos"><summary>Todos · Example phase 1/2</summary></details> }))
+vi.mock('../conversation/todos/AgentTodos.tsx', () => ({ LiveAgentTodos: () => <details aria-label="To-dos"><summary>To-dos · Example phase 1/2</summary></details> }))
 import { ConversationPane } from './ConversationPane.tsx'
 
-it('pins native Todos and preserves the composer during conversation loading and unavailability', async () => {
+it('keeps Todos out of the pane and preserves the composer during conversation loading and unavailability', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // jsdom has no layout; retain the real kit runtime, composer and transcript
+  // while leaving their viewport observers inert in this identity-only test.
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  vi.stubGlobal('requestAnimationFrame', () => 1)
+  vi.stubGlobal('cancelAnimationFrame', () => {})
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
   try {
     await act(async () => root.render(<ConversationPane agentRef="agent/example" agentName="Example" onOpenTool={() => {}} />))
-    const todos = container.querySelector('[aria-label="Harness todos"]')
     const composer = container.querySelector('textarea')
-    expect(todos?.textContent).toContain('Todos · Example phase 1/2')
+    expect(container.querySelector('[aria-label="To-dos"]')).toBeNull()
     expect(composer).not.toBeNull()
-    expect(todos?.compareDocumentPosition(composer!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(container.querySelector('[aria-label="Loading conversation"]')).not.toBeNull()
     state.tag = 'Unavailable'
     await act(async () => root.render(<ConversationPane agentRef="agent/example" agentName="Example" onOpenTool={() => {}} />))
-    expect(container.querySelector('[aria-label="Harness todos"]')).toBe(todos)
+    expect(container.querySelector('[aria-label="To-dos"]')).toBeNull()
     expect(container.querySelector('textarea')).toBe(composer)
+    expect(container.querySelector('[data-testid="transcript-unavailable"]')).not.toBeNull()
+    expect(container.querySelector('[aria-label="Loading conversation"]')).toBeNull()
   } finally {
     await act(async () => root.unmount())
     container.remove()

@@ -13,6 +13,13 @@ The client uses standard `fetch`, so callers can supply a fetch implementation a
 
 The default transport binds `globalThis.fetch` to `globalThis`, preserving the receiver required by browser implementations. Supplying `fetchImpl` overrides that default without rebinding the custom implementation.
 
+HTTP rejections with a non-JSON body (for example, a middleware body-limit 413) throw
+`ClientError` with code `http-error`, the HTTP status and status text, and
+`retryable: false`. `Retry-After` remains available as `retryAfterMs`. Valid JSON
+error envelopes retain the server's code, message and details regardless of the
+response content type. Malformed JSON in a successful response and response-body
+read failures are not converted to HTTP errors.
+
 Every HTTP method accepts a final optional `RequestOptions` argument (`{ signal?: AbortSignal }`).
 Existing query options and optional defaults keep their positions: for example,
 `runtimesGet(id, { signal })`, `messageSend(input, { signal })`, and
@@ -41,6 +48,39 @@ pnpm --filter @fractal/client typecheck
 The root manifest pins pnpm 12.7.0, provisioned by Corepack. The workspace shares one root `pnpm-lock.yaml` across every package in `pnpm-workspace.yaml`. The client pins TypeScript 6.0.3 and Effect 4.0.0 stable in its development dependencies. `pnpm --filter @fractal/client test` runs the contract and schema tests; `typecheck` runs `typecheck:client` (`tsc -p tsconfig.json`) and `typecheck:schema` (`tsc -p tsconfig.schema.json`) for the raw client, type fixtures and rich schemas.
 
 To verify generated files against the Rust generator, also run `cargo run -p fractal-client-codegen -- --check`. The sibling [`st3-views`](../st3-views/README.md) package shares the phone's view models with other TypeScript clients. After the root frozen install, `bash scripts/ci-typescript-client` checks the generated client, shared views and iOS consumers together. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2.
+
+## Native Fabric transport
+
+Node and Bun callers can use the native subpath without changing browser or React
+Native imports:
+
+```ts
+import { createFabricClient } from '@fractal/client/fabric'
+
+const client = await createFabricClient({
+  endpoint: 'fabric://studio/st3-client-v0',
+  credential: () => credential,
+})
+const capabilities = await client.capabilities()
+```
+
+The native adapter invokes the local `fabric` executable, resolves a unique
+trusted peer name without regard to ASCII case, and sends HTTP and client
+WebSockets through the returned Unix tunnel socket. An explicit NodeID bypasses
+peer-name lookup. It does not start a TCP proxy or forward trusted-local person
+headers. Pairing credentials and signing requirements remain gateway-owned.
+
+The native TypeScript adapter recognizes canonical hex/base32 NodeID syntax and
+leaves Ed25519 key validity to Fabric. Unlike the Rust adapter's exact identity
+parser, it does not fall back to peer-name lookup for a syntactically valid but
+invalid-curve key. Such a target fails closed at the Fabric dial; use an ordinary
+unique trusted name or a valid NodeID instead.
+
+Keep the optional `ws` dependency installed for native WebSocket streams. The
+`@fractal/client` browser/phone entry point does not import Node modules or `ws`;
+those runtimes continue to use the existing authenticated HTTP(S) transport.
+`program` can select an explicit Fabric executable for isolated installations.
+Only `/v1/client/` and `/v1/health` routes are valid over the native adapter.
 
 ## Active span propagation
 

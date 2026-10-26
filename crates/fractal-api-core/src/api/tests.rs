@@ -57,6 +57,72 @@ async fn fleet_leave_state_proxies_live_worker_snapshot_and_rejects_another_inca
 }
 
 #[tokio::test]
+async fn fleet_pairing_admission_pins_the_live_worker_incarnation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("fleet-pairing-test".into());
+    let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+    let public = key.public().to_owned();
+    state.store.set_member_key(Some(Arc::new(key))).unwrap();
+    let directory = state.state_dir.join("fleet");
+    std::fs::create_dir_all(&directory).unwrap();
+    let listener = tokio::net::UnixListener::bind(
+        smallclaims::sync::leave_state_socket(&state.state_dir),
+    )
+    .unwrap();
+    let expected_public = public.clone();
+    let app = Router::new().route(
+        "/v1/internal/fleet/pairing-admission",
+        post(move |Json(body): Json<Value>| {
+            let expected_public = expected_public.clone();
+            async move {
+                assert_eq!(body["expected_fleet_id"], "fleet-pairing-test");
+                assert_eq!(body["expected_sponsor_key"], expected_public);
+                assert_eq!(body["node_id"], "bound-node");
+                assert_eq!(body["request"]["node_id"], "bound-node");
+                // A stale/different worker must not pass even if it returns valid JSON.
+                Json(json!({
+                    "protocol": "st3-join-v1",
+                    "sponsor": "other",
+                    "sponsor_key": "different-key",
+                    "ephemeral": "",
+                    "nonce": "",
+                    "sealed": "",
+                    "signature": ""
+                }))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/internal/fleet/pairing-admission")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "node_id": "bound-node",
+                "request": {
+                    "protocol": "st3-join-v1",
+                    "invite": "invite",
+                    "name": "beacon",
+                    "mode": "listening",
+                    "member_key": "member",
+                    "node_id": "bound-node",
+                    "ephemeral": "",
+                    "build": "test",
+                    "proof": "",
+                    "signature": ""
+                }
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let response = router(state).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    server.abort();
+}
+
+#[tokio::test]
 async fn child_session_detail_resolves_readable_transcript_outside_session_inventory() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("native");
@@ -6677,6 +6743,87 @@ async fn message_lifecycle_requires_the_exact_recipient_actor() {
         .await
         .unwrap();
     assert_eq!(legacy.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn retired_mailbox_successor_lists_reads_and_closes_as_itself() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = parse_intent(source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "custody-api-fixture").unwrap();
+    let sent = state.store.append_claim(&ClaimInput {
+        subject: "message/custody-api".into(), kind: "message.sent".into(),
+        actor: Some("person/avery".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("person/avery")),
+            ("to".into(), json!("agent/example/old")),
+            ("content".into(), json!("A note kept for the new custodian.")),
+            ("status".into(), json!("sent")),
+        ]), evidence: vec![], expected_subject: None,
+        idempotency_key: Some("custody-api-send".into()),
+    }).unwrap();
+    let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    let retirement = state.store.retire_agent_with_successor(
+        "agent/example/old", "person/avery", "Rollover", &token, None,
+        "custody-api-retire", &[], Some("agent/example/new"),
+    ).unwrap().0;
+    let app = router(state.clone());
+    let (status, detail) = get_request(app.clone(), "/v1/client/agents/example/old").await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["mail_custody"], json!({"successor":"agent/example/new","state":"pending"}));
+    let (status, _) = get_request(app.clone(), "/v1/messages/page?acting_as=agent/example/new").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, denied) = get_request(app.clone(),
+        "/v1/messages/page?to=agent/example/old&acting_as=agent/example/wrong&limit=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, denied) = get_request(app.clone(),
+        "/v1/messages/page?to=agent/example/old&acting_as=agent/example/old&limit=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, page) = get_request(app.clone(),
+        "/v1/messages/page?to=agent/example/old&acting_as=agent/example/new&limit=1").await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["subject"], sent.subject);
+    let path = "/v1/messages/custody-api/claims";
+    let (status, denied) = json_request(app.clone(), path,
+        json!({"lifecycle":"read","actor":"agent/example/old","idempotency_key":"old-custody-read"})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, read) = json_request(app.clone(), path,
+        json!({"lifecycle":"read","actor":"agent/example/new","idempotency_key":"new-custody-read"})).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["actor"], "agent/example/new");
+    assert_eq!(read["body"]["fields"]["acting_for"], "agent/example/old");
+    assert!(read["body"]["evidence"].as_array().unwrap().iter().any(|id| id == &retirement.id));
+    let (status, closed) = json_request(app, path,
+        json!({"lifecycle":"closed","actor":"agent/example/new","idempotency_key":"new-custody-close"})).await;
+    assert_eq!(status, StatusCode::OK, "{closed}");
+    assert_eq!(closed["body"]["fields"]["acting_for"], "agent/example/old");
+}
+
+#[test]
+fn retired_agent_cached_card_refolds_custody_once_at_new_cut() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = parse_intent(source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "custody-card-fixture").unwrap();
+    let index = state.store.index().unwrap();
+    let before = client_agent_resources_cached(&state.store, false, index).unwrap();
+    let old = before.iter().find(|card| card["id"] == "agent/example/old").unwrap();
+    assert!(old.get("mail_custody").is_none());
+    let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    state.store.retire_agent_with_successor(
+        "agent/example/old", "person/avery", "Rollover", &token, None,
+        "custody-card-retire", &[], Some("agent/example/new"),
+    ).unwrap();
+    let after_index = state.store.index().unwrap();
+    let after = client_agent_resources_cached(&state.store, false, after_index).unwrap();
+    let old = after.iter().find(|card| card["id"] == "agent/example/old").unwrap();
+    assert_eq!(old["mail_custody"], json!({"successor":"agent/example/new","state":"pending"}));
+    let refolds = state.store.agent_resources_refolded_cards_for_test();
+    let warm = client_agent_resources_cached(&state.store, false, after_index).unwrap();
+    assert_eq!(warm, after);
+    assert_eq!(state.store.agent_resources_refolded_cards_for_test(), refolds);
 }
 
 #[tokio::test]

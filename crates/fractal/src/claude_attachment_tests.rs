@@ -28,6 +28,13 @@ struct Control {
     attachment: AtomicU8,  // 0: absent, 1: admitted, 2: failed check
     publication: AtomicU8, // 0: acknowledged, 1: no commit, 2: commit without acknowledgement
     requests: Mutex<Vec<Value>>,
+    /// The attachment the mailbox stream pushes once the driver offers `attachment_push`;
+    /// `None` models a daemon that never pushes.
+    push: tokio::sync::watch::Sender<Option<bool>>,
+    /// Ends the current mailbox connection.
+    disconnect: Notify,
+    /// Send this many attachment frames, then one mailbox frame, on the next push.
+    attachment_burst: AtomicUsize,
 }
 
 async fn attachment(
@@ -110,13 +117,42 @@ async fn publication(
 
 async fn mailbox_reports(State(control): State<Arc<Control>>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |mut socket| async move {
-        while let Some(Ok(axum::extract::ws::Message::Text(text))) = socket.recv().await {
-            control
-                .reports
-                .lock()
-                .unwrap()
-                .push(serde_json::from_str(&text).unwrap());
-            control.report_changed.notify_one();
+        let mut push = control.push.subscribe();
+        let mut offered = false;
+        loop {
+            tokio::select! {
+                message = socket.recv() => {
+                    let Some(Ok(axum::extract::ws::Message::Text(text))) = message else {
+                        return;
+                    };
+                    let report: Value = serde_json::from_str(&text).unwrap();
+                    offered |= report["attachment_push"] == true;
+                    control.reports.lock().unwrap().push(report);
+                    control.report_changed.notify_one();
+                }
+                changed = push.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                () = control.disconnect.notified() => return,
+            }
+            let pushed = *push.borrow_and_update();
+            if offered && let Some(attached) = pushed {
+                let burst = control.attachment_burst.swap(0, Ordering::SeqCst);
+                let attachment =
+                    json!({"type":"attachment", "attached":attached, "delivery_epoch":null});
+                let mut frames = vec![attachment; burst.max(1)];
+                if burst > 0 {
+                    frames.push(json!({"type":"mailbox", "messages":[]}));
+                }
+                for frame in frames {
+                    let text = axum::extract::ws::Message::Text(frame.to_string().into());
+                    if socket.send(text).await.is_err() {
+                        return;
+                    }
+                }
+            }
         }
     })
 }
@@ -169,6 +205,9 @@ impl Fixture {
             attachment: AtomicU8::new(1),
             publication: AtomicU8::new(0),
             requests: Mutex::new(vec![]),
+            push: tokio::sync::watch::channel(None).0,
+            disconnect: Notify::new(),
+            attachment_burst: AtomicUsize::new(0),
         });
         let app = Router::new()
             .route("/v1/mailbox/attachment", get(attachment))
@@ -312,6 +351,43 @@ impl Fixture {
         assert_eq!(restored.incarnation, resume.incarnation);
         assert_eq!(restored.session, resume.session);
         self.state = restored.loop_state;
+    }
+
+    /// Wait until the subscription holds this pushed value for its current connection.
+    async fn wait_pushed(&self, attached: Option<bool>) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self
+                .mailbox
+                .pushed_attachment()
+                .map(|pushed| pushed.attached)
+                != attached
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Flip the channel: the endpoint and the pushed value agree, as they do in production.
+    async fn set_attached(&self, attached: bool) {
+        self.control
+            .attachment
+            .store(u8::from(attached), Ordering::SeqCst);
+        self.control.push.send_replace(Some(attached));
+        self.wait_pushed(Some(attached)).await;
+    }
+
+    fn gets(&self) -> usize {
+        self.control.attachment_checks.load(Ordering::SeqCst)
+    }
+
+    fn posts(&self) -> usize {
+        self.control.requests.lock().unwrap().len()
+    }
+
+    fn reports(&self) -> usize {
+        self.control.reports.lock().unwrap().len()
     }
 
     fn codes(&self) -> Vec<String> {
@@ -1289,4 +1365,181 @@ async fn hookless_readiness_defers_terminal_state_queued_during_attachment_check
     );
     assert_eq!(pending[0].payload["state"], "ended");
     assert_eq!(pending[0].payload["exit"], "7");
+}
+
+// Planned T1: once its connection pushes attachment, a steadily attached seat makes no
+// attachment GET and resends no unchanged title report. The old driver made one GET per tick.
+#[tokio::test]
+async fn attachment_push_replaces_the_per_tick_poll() {
+    let mut f = Fixture::new().await;
+    f.control.push.send_replace(Some(true));
+    // The first tick has nothing pushed yet: it polls as before, publishes, and offers push.
+    f.check().await.unwrap();
+    f.wait_pushed(Some(true)).await;
+    f.check().await.unwrap();
+    let (gets, posts, reports) = (f.gets(), f.posts(), f.reports());
+    for _ in 0..10 {
+        f.check().await.unwrap();
+    }
+    assert_eq!(f.gets(), gets, "no GET while the pushed phase is unchanged");
+    assert_eq!(f.posts(), posts);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        f.reports(),
+        reports,
+        "an unchanged title report is not resent"
+    );
+    assert_eq!(f.codes(), vec!["claude-channel-attached"]);
+}
+
+// A daemon that never pushes (or a reconnect still waiting for its first frame) no longer gets a
+// GET every one-second tick once the phase is settled: one per ten seconds, and a change is still
+// seen and published at the next recheck.
+#[tokio::test]
+async fn an_unpushed_settled_phase_is_rechecked_every_ten_seconds_not_every_tick() {
+    let mut f = Fixture::new().await;
+    let start = 1_000_000_u64;
+    // A minute of one-second control ticks, as driver_cli runs them.
+    async fn ticks(f: &mut Fixture, from: u64, seconds: u64) {
+        for second in 0..seconds {
+            if claude_attachment_check_due(&f.mailbox, &mut f.state, from + second * 1_000) {
+                f.check().await.unwrap();
+            }
+        }
+    }
+    ticks(&mut f, start, 1).await;
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    let settled = f.gets();
+    ticks(&mut f, start + 1_000, 59).await;
+    // The old loop made 59 more GETs here; now one at 10, 20, 30, 40 and 50 seconds.
+    assert_eq!(f.gets() - settled, 5, "an attached unpushed seat was checked {} times in 59 ticks", f.gets() - settled);
+    assert_eq!(f.codes(), vec!["claude-channel-attached"]);
+
+    // The channel detaches: the next recheck, at most ten seconds later, sees and publishes it.
+    f.control.attachment.store(0, Ordering::SeqCst);
+    let gets = f.gets();
+    ticks(&mut f, start + 60_000, 10).await;
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    assert_eq!(
+        f.codes(),
+        vec!["claude-channel-attached", "claude-channel-unattached"]
+    );
+    // Blocked is settled too.
+    ticks(&mut f, start + 70_000, 60).await;
+    assert!(f.gets() <= gets + 8, "{} checks in 70 blocked ticks", f.gets() - gets);
+
+    // A replacement binding is never held back by its predecessor's poll.
+    let now = start + 125_000;
+    assert!(!claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+    f.state.claude_attachment_polled.as_mut().unwrap().0.2 = "previous-token".into();
+    assert!(claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+    // Nor is a pushed connection: it reads the pushed value and rations its own admissions.
+    f.control.push.send_replace(Some(false));
+    f.check().await.unwrap();
+    f.wait_pushed(Some(false)).await;
+    assert!(claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+}
+
+// Planned T12: a pushed value never authorizes a write. The admission GET before the write can
+// contradict it or refuse it; either way nothing is posted, and the phase never comes from it.
+#[tokio::test]
+async fn a_pushed_value_never_authorizes_a_write() {
+    let mut f = Fixture::new().await;
+    f.control.attachment.store(0, Ordering::SeqCst);
+    f.control.push.send_replace(Some(false));
+    f.check().await.unwrap();
+    f.wait_pushed(Some(false)).await;
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    let posts = f.posts();
+    // The endpoint still answers unattached: the attached push is withdrawn, not posted.
+    f.control.push.send_replace(Some(true));
+    f.wait_pushed(Some(true)).await;
+    f.check().await.unwrap();
+    assert_eq!(f.posts(), posts, "a contradicted push publishes nothing");
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    assert!(f.state.claude_attachment_pending.is_none());
+    assert!(!f.state.claude_attachment_reconciled);
+    // A superseded binding refuses the admission: nothing is posted and publication parks.
+    f.control.attachment.store(1, Ordering::SeqCst);
+    f.control.binding_live.store(false, Ordering::SeqCst);
+    assert!(f.check().await.is_err());
+    assert_eq!(f.posts(), posts);
+    assert!(f.state.claude_attachment_terminal.is_some());
+}
+
+// Planned T15: a channel that flips on every tick cannot turn admissions back into a poll.
+// Each binding gets a burst of two; an empty bucket waits, intermediate phases coalesce, and
+// the next admission publishes the phase current at that moment.
+#[tokio::test]
+async fn a_flapping_channel_cannot_recreate_the_poll() {
+    let mut f = Fixture::new().await;
+    f.control.push.send_replace(Some(true));
+    f.check().await.unwrap();
+    f.wait_pushed(Some(true)).await;
+    let gets = f.gets();
+    let mut attached = true;
+    for _ in 0..61 {
+        attached = !attached;
+        f.set_attached(attached).await;
+        f.check().await.unwrap();
+    }
+    assert!(
+        f.gets() - gets <= 2,
+        "{} admissions within one refill",
+        f.gets() - gets
+    );
+    let latest = if attached { "attached" } else { "blocked" };
+    assert_ne!(
+        f.state.claude_attachment_phase, latest,
+        "the bucket held the last flip back"
+    );
+    f.state.claude_attachment_admissions.refilled_at_ms -= ADMISSION_REFILL_MS;
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, latest);
+    assert!(f.state.claude_attachment_reconciled);
+}
+
+// Planned T16 and T7: the bucket belongs to the binding, so reconnecting while the channel
+// flaps grants no fresh burst; and from the moment a connection ends its pushed value is
+// unknown, until the next connection pushes one.
+#[tokio::test]
+async fn reconnecting_grants_no_fresh_admissions_and_forgets_the_pushed_value() {
+    let mut f = Fixture::new().await;
+    f.control.push.send_replace(Some(true));
+    f.check().await.unwrap();
+    f.wait_pushed(Some(true)).await;
+    let gets = f.gets();
+    let mut attached = true;
+    for _ in 0..5 {
+        f.control.disconnect.notify_one();
+        f.wait_pushed(None).await;
+        f.wait_pushed(Some(attached)).await;
+        attached = !attached;
+        f.set_attached(attached).await;
+        f.check().await.unwrap();
+    }
+    assert!(
+        f.gets() - gets <= 2,
+        "{} admissions across reconnects",
+        f.gets() - gets
+    );
+}
+
+// Planned T10: attachment frames never occupy the frame queue. Fifty of them, sent while
+// nothing drains the queue, leave the mailbox frame behind them first in line.
+#[tokio::test]
+async fn attachment_frames_never_take_mail_queue_slots() {
+    let mut f = Fixture::new().await;
+    f.control.attachment_burst.store(50, Ordering::SeqCst);
+    f.control.push.send_replace(Some(true));
+    f.check().await.unwrap();
+    f.wait_pushed(Some(true)).await;
+    let subscription = f.mailbox.subscription.as_mut().unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(2), subscription.receiver.recv())
+        .await
+        .unwrap();
+    assert!(
+        matches!(frame, Some(fractal_daemon::mailbox::Frame::Mailbox { .. })),
+        "{frame:?}"
+    );
 }

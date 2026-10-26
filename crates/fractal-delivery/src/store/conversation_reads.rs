@@ -1,4 +1,4 @@
-//! The part of `store::conversation_reads` that moved up from st3-store.
+//! The part of `store::conversation_reads` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -38,6 +38,9 @@ const CONVERSATION_CHANGED: &str = "SELECT
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_legacy_from_index
       WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
         AND json_extract(body,'$.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>?2 AND store_index<=?3)
+    OR EXISTS(SELECT 1 FROM main.local_native_delivery_receipts_v2
+      INDEXED BY local_native_delivery_owner_cut_v2
+      WHERE actor IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM local_observations INDEXED BY local_observations_subject_id_index
       WHERE subject=?1 AND id>?4 AND id<=?5)";
 
@@ -215,8 +218,7 @@ impl ConversationReadsStore for Store {
     fn conversation_owners_at(&self, through: u64) -> Result<Arc<Owners>> {
         selected_index(self.index()?, Some(through)).map_err(anyhow::Error::new)?;
         let (generation, previous) = {
-            let cache = self
-                .smalltalk
+            let cache = self.fractal
                 .conversation_owners
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
@@ -229,7 +231,7 @@ impl ConversationReadsStore for Store {
                 .max_by_key(|(at, _)| *at)
                 .map(|(at, owners)| (*at, Arc::clone(owners)));
             (
-                self.smalltalk
+                self.fractal
                     .conversation_owner_generation
                     .load(std::sync::atomic::Ordering::Relaxed),
                 previous,
@@ -295,15 +297,13 @@ impl ConversationReadsStore for Store {
                 pause();
             }
         });
-        let mut cache = self
-            .smalltalk
+        let mut cache = self.fractal
             .conversation_owners
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         // A repair may have cleared the cache while this build released its SQL readers.
         // The generation is changed under this same lock, so an older build cannot republish.
-        if self
-            .smalltalk
+        if self.fractal
             .conversation_owner_generation
             .load(std::sync::atomic::Ordering::Relaxed)
             != generation
@@ -804,7 +804,7 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
                 .query_map(params![owner, after, i64::MAX, 0, i64::MAX], |row| row.get::<_, String>(3))?
                 .collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
             for index in ["claims_subject_index", "claims_message_to_order_index", "claims_message_from_index",
-                "claims_message_legacy_to_index", "claims_message_legacy_from_index", "local_observations_subject_id_index"] {
+                "claims_message_legacy_to_index", "claims_message_legacy_from_index", "local_observations_subject_id_index", "local_native_delivery_owner_cut_v2"] {
                 assert!(plan.contains(index), "{plan}");
             }
             assert!(!plan.contains("SCAN claims"), "{plan}");

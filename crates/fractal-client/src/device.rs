@@ -172,7 +172,7 @@ pub struct Device {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person_root_fingerprint: Option<String>,
     pub session: PersonPairedSession,
-    /// Old observer and legacy stui profiles have no signing key.
+    /// Old observer and legacy Fractal TUI profiles have no signing key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_key: Option<SigningKey>,
 }
@@ -190,9 +190,15 @@ impl std::fmt::Debug for Device {
 
 impl Device {
     pub fn client(&self) -> Result<Client> {
-        let mut client = Client::fabric_loopback(&self.endpoint, &self.session.credential);
-        client.http = transport::client(&self.endpoint, self.allow_public_http)?;
-        client.device_http_policy = Some(self.allow_public_http);
+        let mut client = if self.endpoint.starts_with("fabric:") {
+            Client::fabric(crate::fabric::FabricEndpoint::parse(&self.endpoint)?)
+                .with_credential(&self.session.credential)
+        } else {
+            let mut client = Client::fabric_loopback(&self.endpoint, &self.session.credential);
+            client.http = transport::client(&self.endpoint, self.allow_public_http)?;
+            client.device_http_policy = Some(self.allow_public_http);
+            client
+        };
         if self.signing_key.is_some() {
             client.signing_device = Some(Arc::new(self.clone()));
         }
@@ -322,7 +328,7 @@ impl Profile {
         let person = &self
             .devices
             .first()
-            .context("No paired member; run st devices complete URL PAIRING_ID")?
+            .context("No paired member; run fractal devices complete URL PAIRING_ID")?
             .session
             .person_id;
         ensure!(
@@ -871,9 +877,9 @@ pub async fn complete_with_options(
             suffix.len() == 24 && suffix.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         });
         if safe_id.is_some() {
-            format!("The server consumed the pairing code, but local completion failed. Possible orphaned device {created_device}; inspect it on the trusted member and revoke with `st devices revoke {created_device} --as <your-person-id>` before starting a new pairing. The previous profile was retained")
+            format!("The server consumed the pairing code, but local completion failed. Possible orphaned device {created_device}; inspect it on the trusted member and revoke with `fractal devices revoke {created_device} --as <your-person-id>` before starting a new pairing. The previous profile was retained")
         } else {
-            "The server consumed the pairing code, but local completion failed and returned an unusable device ID. Inspect `st devices ls --as <your-person-id>` on the trusted member and revoke the new device before starting a new pairing. The previous profile was retained".into()
+            "The server consumed the pairing code, but local completion failed and returned an unusable device ID. Inspect `fractal devices ls --as <your-person-id>` on the trusted member and revoke the new device before starting a new pairing. The previous profile was retained".into()
         }
     })
 }
