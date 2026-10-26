@@ -403,8 +403,10 @@ last day, and `--all` every seat's.
 
 Every watch of a repository, from any host, uses one standing observer,
 `observer/github/OWNER/REPO`, which no mission run owns. The first watch of the repository declares
-it on its host, which polls it every 30 seconds; the host stops it once no running subscription
-uses it. No issue or pull request has a poller of its own.
+it on its host, which polls immediately, then every three minutes while active. Unchanged
+observations back off to six then ten minutes; any changed observed fact resets three minutes.
+After a daemon restart the first poll is immediate again. The host stops the observer once no
+running subscription uses it. No issue or pull request has a poller of its own.
 
 The standing observer records into `resource/github/OWNER/REPO`, unless another observer of the
 repository runs: then it records into that observer's resource and keeps that resource from then

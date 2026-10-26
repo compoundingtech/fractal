@@ -450,6 +450,17 @@ pub struct ReplicationExchangeFailure {
     pub code: String,
     pub phase: ReplicationFailurePhase,
     pub elapsed_ms: u64,
+    /// Whole outbound attempt, including exports, dial, earlier requests and polls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_elapsed_ms: Option<u64>,
+    /// Request serialization, hashing, signing, compression and construction before send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_ms: Option<u64>,
+    /// HTTP request body length after optional compression, excluding headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_uncompressed_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
     pub cause: String,
@@ -470,7 +481,6 @@ impl ReplicationExchangeFailure {
     ) -> Self {
         if let Some(failure) = error.downcast_ref::<Self>() {
             let mut failure = failure.clone();
-            failure.elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
             if phase == ReplicationFailurePhase::FollowUpExport
                 && failure.phase == ReplicationFailurePhase::LocalExport
             {
@@ -510,6 +520,10 @@ impl ReplicationExchangeFailure {
             code: code.into(),
             phase,
             elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            attempt_elapsed_ms: None,
+            preparation_ms: None,
+            request_body_bytes: None,
+            request_body_uncompressed_bytes: None,
             http_status,
             cause,
             correlation_id: None,

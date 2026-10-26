@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import * as Option from 'effect/Option'
 import { contextOccupancy } from './contextOccupancy.ts'
 import { createProjections } from './projections.ts'
+import { sidebarRow } from '../web/sidebarRow.ts'
 import { observed, unavailable, type Agent } from './source.ts'
 import { projectNativeDetails } from './nativeDetails.ts'
 
@@ -43,6 +44,22 @@ describe('reported context occupancy', () => {
     expect(contextOccupancy({ usage: usage(reading), now: 10_000, observedAfter: 3000 })).toEqual({ _tag: 'Unknown' })
     expect(contextOccupancy({ usage: usage(reading), now: 10_000, observedAfter: 2999 })).toMatchObject({ _tag: 'Known' })
   })
+  it('clears on an incarnation change, stays cleared on equal readings, and restores only on newer evidence', () => {
+    const project = createProjections()
+    const first = project.fleetFromAgents([native]).agents[0]!
+    expect(sidebarRow({ agent: first, now: 10_000, stale: false }).context?._tag).toBe('Known')
+    const restarted = { ...native, incarnation_id: Option.some('second') }
+    const second = project.fleetFromAgents([restarted]).agents[0]!
+    expect(sidebarRow({ agent: second, now: 10_000, stale: false }).context).toEqual({ _tag: 'Unknown' })
+    // Reusing the same native DTO cannot bypass the transition fence in the WeakMap cache.
+    const repeated = project.fleetFromAgents([restarted]).agents[0]!
+    expect(repeated).toBe(second)
+    expect(sidebarRow({ agent: repeated, now: 10_000, stale: false }).context).toEqual({ _tag: 'Unknown' })
+    const newer = project.fleetFromAgents([{ ...restarted, usage: Option.some(usage({ ...reading, observed_at_unix_ms: 5000 }).value) }]).agents[0]!
+    expect(sidebarRow({ agent: newer, now: 10_000, stale: false }).context).toMatchObject({ _tag: 'Known', observedAt: 5000 })
+    expect(sidebarRow({ agent: newer, now: 10_000, stale: true }).context).toMatchObject({ _tag: 'Known', observedAt: 5000 })
+    expect(() => expect(sidebarRow({ agent: second, now: 10_000, stale: false }).context?._tag).toBe('Known')).toThrow()
+  })
   it('clears context, model and compactions on restart, including cached DTOs, until strictly newer evidence', () => {
     const project = createProjections()
     const first = project.fleetFromAgents([native]).agents[0]!
@@ -68,6 +85,22 @@ describe('reported context occupancy', () => {
     project.fleetFromAgents([previous])
     project.fleetFromAgents([{ ...native, incarnation_id: Option.some('second'), usage: Option.none() }])
     const retained = project.fleetFromAgents([{ ...previous, incarnation_id: Option.some('second') }]).agents[0]!
-    expect(occupancy(retained)).toEqual({ _tag: 'Unknown' })
+    expect(sidebarRow({ agent: retained, now: 10_000, stale: false }).context).toEqual({ _tag: 'Unknown' })
+  })
+  it('keeps the incarnation fence when the ref leaves a bounded roster window and returns', () => {
+    for (const returning of ['same', 'cloned'] as const) {
+      const project = createProjections()
+      project.fleetFromAgents([native])
+      const restarted = { ...native, incarnation_id: Option.some('second') }
+      expect(sidebarRow({ agent: project.fleetFromAgents([restarted]).agents[0]!, now: 10_000, stale: false }).context).toEqual({ _tag: 'Unknown' })
+      // The ref is evicted from the window (e.g. liveSource's 100-row limit), then reappears.
+      project.fleetFromAgents([])
+      const back = project.fleetFromAgents([returning === 'same' ? restarted : { ...restarted }]).agents[0]!
+      expect(back.contextObservedAfter).toBe(4000)
+      expect(sidebarRow({ agent: back, now: 10_000, stale: false }).context).toEqual({ _tag: 'Unknown' })
+      project.fleetFromAgents([])
+      const fresh = project.fleetFromAgents([{ ...restarted, usage: Option.some(usage({ ...reading, observed_at_unix_ms: 5000 }).value) }]).agents[0]!
+      expect(sidebarRow({ agent: fresh, now: 10_000, stale: false }).context).toMatchObject({ _tag: 'Known', observedAt: 5000 })
+    }
   })
 })

@@ -1392,6 +1392,54 @@ async fn attachment_push_replaces_the_per_tick_poll() {
     assert_eq!(f.codes(), vec!["claude-channel-attached"]);
 }
 
+// A daemon that never pushes (or a reconnect still waiting for its first frame) no longer gets a
+// GET every one-second tick once the phase is settled: one per ten seconds, and a change is still
+// seen and published at the next recheck.
+#[tokio::test]
+async fn an_unpushed_settled_phase_is_rechecked_every_ten_seconds_not_every_tick() {
+    let mut f = Fixture::new().await;
+    let start = 1_000_000_u64;
+    // A minute of one-second control ticks, as driver_cli runs them.
+    async fn ticks(f: &mut Fixture, from: u64, seconds: u64) {
+        for second in 0..seconds {
+            if claude_attachment_check_due(&f.mailbox, &mut f.state, from + second * 1_000) {
+                f.check().await.unwrap();
+            }
+        }
+    }
+    ticks(&mut f, start, 1).await;
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    let settled = f.gets();
+    ticks(&mut f, start + 1_000, 59).await;
+    // The old loop made 59 more GETs here; now one at 10, 20, 30, 40 and 50 seconds.
+    assert_eq!(f.gets() - settled, 5, "an attached unpushed seat was checked {} times in 59 ticks", f.gets() - settled);
+    assert_eq!(f.codes(), vec!["claude-channel-attached"]);
+
+    // The channel detaches: the next recheck, at most ten seconds later, sees and publishes it.
+    f.control.attachment.store(0, Ordering::SeqCst);
+    let gets = f.gets();
+    ticks(&mut f, start + 60_000, 10).await;
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    assert_eq!(
+        f.codes(),
+        vec!["claude-channel-attached", "claude-channel-unattached"]
+    );
+    // Blocked is settled too.
+    ticks(&mut f, start + 70_000, 60).await;
+    assert!(f.gets() <= gets + 8, "{} checks in 70 blocked ticks", f.gets() - gets);
+
+    // A replacement binding is never held back by its predecessor's poll.
+    let now = start + 125_000;
+    assert!(!claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+    f.state.claude_attachment_polled.as_mut().unwrap().0.2 = "previous-token".into();
+    assert!(claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+    // Nor is a pushed connection: it reads the pushed value and rations its own admissions.
+    f.control.push.send_replace(Some(false));
+    f.check().await.unwrap();
+    f.wait_pushed(Some(false)).await;
+    assert!(claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+}
+
 // Planned T12: a pushed value never authorizes a write. The admission GET before the write can
 // contradict it or refuse it; either way nothing is posted, and the phase never comes from it.
 #[tokio::test]
