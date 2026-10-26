@@ -15944,8 +15944,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         let continuing = observation.next_check_unix_ms
                             <= observed_at.saturating_add(crate::resource::PROVIDER_CONTINUE_MS);
                         // Standing identity, not the authored interval, selects scheduling.
-                        // Persist the active restart bound; quiet backoff is local scheduling
-                        // state computed from the writer's canonical merge outcome below.
+                        // Quiet backoff and deadlines are local scheduler state. After restart,
+                        // poll once immediately, then use active cadence until quiet backoff.
                         let interval = if standing { Some(180_000) } else { spec.every_ms };
                         // Pagination remains immediate. Provider errors, including rate limits,
                         // never enter this successful-observation scheduling path.
