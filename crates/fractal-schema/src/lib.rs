@@ -5,6 +5,7 @@ pub mod custom;
 pub mod accountable;
 pub mod directive_notes;
 pub mod deploy;
+pub mod deploy_policy;
 pub mod full_value;
 pub mod glasses;
 pub mod harness_questions;
@@ -3451,6 +3452,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "fleet.member-admitted" => &[
             ("fleet_id", required_string()),
             ("member_key", required_string()),
+            ("node_id", string()),
             ("via", required_enum(&["anchor", "invite", "migration"])),
             ("sponsor", reference_to(&["host"])),
             ("invite", reference_to(&["fleet-invite"])),
@@ -3552,6 +3554,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("deadline_unix_ms", string()),
             ("signal", string()),
             ("reason", string()),
+            ("fresh_session", boolean()),
         ],
         "runtime.action.succeeded"
         | "runtime.action.failed"
@@ -3603,6 +3606,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("gate", string()),
             ("key", string()),
             ("input_number", integer()),
+            ("owner_run", string()),
         ],
         "runtime.readiness-deadline-reached" => &[
             ("runtime_id", required_string()),

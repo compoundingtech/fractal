@@ -200,8 +200,10 @@ def policy_rules(text, check, repository):
             lcommand, lrequired, lbind = checked_command_inputs(override, f'{check}/{kind}/{level}')
             # `lane: true` holds this level's notes to the lane definition at the accepted base (.st/required-lanes.json at the policy's
             # commit): the tree must not change the lane's definition paths and the note must carry its lane_definition_sha256.
-            if not isinstance(override.get('lane', False), bool):
-                raise Failure('error', f'skip policy for {check}/{kind}: by_level {level!r} lane must be true or false')
+            # `lane: "tree"` holds them to the lane as the SIGNED tree defines it: the base's argv and paths, the tree's bytes at those
+            # paths. A tree that edits its lane is then covered by a note made with that edited definition, and by no other.
+            if not (override.get('lane', False) in (True, False) and isinstance(override.get('lane', False), bool) or override.get('lane') == 'tree'):
+                raise Failure('error', f'skip policy for {check}/{kind}: by_level {level!r} lane must be true, false or "tree"')
             by_level[level] = {'command': [fill(v) for v in lcommand], 'required_inputs': sorted(set(lrequired) | set(lbind)),
                                'bind_inputs': dict(lbind), 'events': list(events), 'lane': override.get('lane', False)}
         kinds[kind] = {'command': [fill(v) for v in command],
@@ -327,15 +329,19 @@ def lane_definition(repo, base_tree, tree, rules):
         there = definition_entries(repo, base_tree, absent)
         if there:
             raise Failure('error', f'lane absent path {sorted(there, key=lambda e: e[2])[0][2]} exists at the accepted base')
-    lines = ''.join(f'{mode} {oid} {name}\n' for mode, oid, name in sorted(base, key=lambda e: e[2]))
-    text = lines + 'argv:' + json.dumps(rules['argv']) + ('\nabsent:' + json.dumps(sorted(absent)) if absent else '')
-    digest = hashlib.sha256(text.encode('utf-8', 'surrogateescape')).hexdigest()
     other = definition_entries(repo, tree, rules['definition_paths'])
-    changed = {name for _, _, name in base ^ other}
-    if absent:
-        changed |= {name for _, _, name in definition_entries(repo, tree, absent)}
-    changed = sorted(changed)
-    return {'sha256': digest, 'changed': changed}
+    present = definition_entries(repo, tree, absent) if absent else set()
+    changed = sorted({name for _, _, name in base ^ other} | {name for _, _, name in present})
+    # `tree_sha256` is the same digest over the tree's own bytes (and any file it has at an absent path): equal to `sha256` exactly when
+    # nothing changed. It is what a note made on a tree that edits its lane records (by_level lane "tree").
+    return {'sha256': definition_digest(base, rules['argv'], absent), 'changed': changed,
+            'tree_sha256': definition_digest(other | present, rules['argv'], absent)}
+
+
+def definition_digest(entries, argv, absent):
+    lines = ''.join(f'{mode} {oid} {name}\n' for mode, oid, name in sorted(entries, key=lambda e: e[2]))
+    text = lines + 'argv:' + json.dumps(argv) + ('\nabsent:' + json.dumps(sorted(absent)) if absent else '')
+    return hashlib.sha256(text.encode('utf-8', 'surrogateescape')).hexdigest()
 
 
 def declared_paths(value, where):
@@ -795,6 +801,7 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
                       attempts=attempts)
     # A signer level may be held to its own command, required inputs and events (by_level in the kind's rule).
     override = rule['by_level'].get(level) if rule else None
+    lane_mode = override.get('lane') if override else None
     if override:
         command, bind, required_inputs, events = override['command'], list(override['bind_inputs'].items()), override['required_inputs'], override['events']
         if override.get('lane') and lane is None:
@@ -829,13 +836,17 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
     if lane is not None:
         # The scripts that decide what the lane runs must be the accepted base's, byte for byte, in the tree that was signed; and the
         # note must carry the digest of that definition, so a note made against other scripts or another argv is not this lane's.
-        if lane['changed']:
+        # A level held to the tree's own definition (lane "tree") may edit the lane: its note must then carry the edited definition's digest.
+        expected = lane['sha256']
+        if lane['changed'] and lane_mode == 'tree':
+            expected = lane['tree_sha256']
+        elif lane['changed']:
             raise Failure('definition_changed', 'the lane definition differs between the signed tree and the accepted base: '
                           + ', '.join(lane['changed'][:5]) + (' ...' if len(lane['changed']) > 5 else ''), attempts=attempts)
         recorded_definition = observed.get('inputs', {}).get('lane_definition_sha256')
-        if recorded_definition != lane['sha256']:
-            raise Failure('wrong_definition', 'the record does not carry the digest of the lane definition at the accepted base',
-                          attempts=attempts)
+        if recorded_definition != expected:
+            raise Failure('wrong_definition', 'the record does not carry the digest of the lane definition '
+                          + ('this tree defines' if expected != lane['sha256'] else 'at the accepted base'), attempts=attempts)
     inputs = observed.get('inputs', {})
     for key, path in bind:
         actual = blob_sha256(repo, tree, path)

@@ -136,7 +136,8 @@ and a stale pass is reused. Four controls, in order of when they bite:
 - `.st/evidence-skip-policy.json`: `rust-tests` (shadow: `enforce` false, `pull_request` only, `sample_one_in` 5, no `inputs`: the keys are
   per crate). Fleet level: the wrapper command; host and agent levels: `python3 scripts/ci-rust-test-result`, lane-bound, requiring `crate`,
   `source_inputs`, `tests_run`, `tests_ignored`, `test_list_sha256`, `ignored_list_sha256`, `filterset` and `run_command_sha256`.
-- `.st/required-lanes.json`: the `rust-tests` lane (the test-stage scripts through `scripts`, `.config/nextest.toml`, the filterset, the
+- `.st/required-lanes.json` (since narrowed to what the lane's commands execute plus its verdict data, without `.st/rust-test-inputs.json`,
+  which only the base's copy keys a note: docs/st3/gate-evidence.md, "Definition paths are what the lane executes, plus its verdict data"): the `rust-tests` lane (the test-stage scripts through `scripts`, `.config/nextest.toml`, the filterset, the
   flake files, and `.st`, which holds `rust-test-inputs.json`), so a tree that edits how keys are computed never skips on a local note. `Cargo.toml` and `Cargo.lock` are deliberately not definition paths: they are in every crate's key, so a change re-runs every crate, and as definition paths they would make every lockfile change an unsignable lane edit. `tree_inputs` is informational (the policy consistency test and the lane trace read it); nothing indexes or verifies rust-tests notes by it.
 - `scripts/evidence-verify --check rust-tests --members --policy-from BASE --repository R ...`: the member list and each key come from the
   tree's manifests with the `rust-test-keys` that sits next to the verifier and `.st/rust-test-inputs.json` at the base; the check is satisfied
@@ -218,6 +219,15 @@ for the crates that lack one, runs only those crates, and pushes the notes (to `
 exits 0 when every crate is covered or signed, and `--crate NAME` narrows it. Measured: a full seeding of 52 crates is about 12 minutes on this host
 (prep 158 s, nextest 480 s, signing 53 s); after a merge that touched 2 crates it runs only those 2.
 
+For a separate publisher, `scripts/st-test --seed [REF] --out DIR` exports `<record>.pack` and `<record>.json` for every selected
+crate, including crates already covered locally, and does not implicitly push to `origin`. The same `--out DIR` works with
+`--check rust-tests` and with the full suite (including linux-gate's aggregate and per-crate records from its shared nextest report).
+The output directory is resolved against the caller's working directory, not the clean worktree; nested relative directories work.
+`--out` is incompatible with `--push`. Export mode deliberately reruns the selection to produce a complete set rather than copying
+existing notes. It does not import the packs, so success means passing checks and exported packs, not verified coverage: publication
+and verification belong to the publisher. Failures still export failure records and fail the run; lane-edit refusals remain unsigned.
+
+
 ## 12. Verification and push time (measured 2026-10-24)
 
 Two warm full runs on hetz2 took 935 s and 1116 s against the 12-minute budget, with 123 to 270 s outside every check row. Where it went, and what
@@ -264,8 +274,11 @@ stays in shadow (`enforce` false): this only produces notes.
   shards. A re-run of only the failed jobs therefore signs nothing (the other shards' reports are the previous attempt's).
 - **Per crate.** The reports are joined into one, so a crate split across shards is judged once, from all of them. A crate is signed only when
   every one of its test cases passed on the first try: a failure, an error, or a test that passed only on a retry (flaky) gives it no note,
-  and so does a failure or flaky test of that crate in an earlier attempt's report of the same run. This is stricter than
-  `scripts/ci-rust-test-result`, which counts flaky as passed for st-test and is unchanged. A crate that ran no test is signed only when the
+  and so does a failure or flaky test of that crate in an earlier attempt's report of the same run. `scripts/ci-rust-test-result` still
+  counts flaky as passed (its output is the recorded command's), but `scripts/st-test` holds its local per-crate signing to the same rule: a
+  crate with a test that passed only on a retry is left unsigned (exit 4, "left for CI"), so CI runs it. linux-gate's whole-tree note still
+  signs, as the gate counts a retried pass, and records those tests as the input `flaky_tests` (`BINARY TEST` lines from
+  `scripts/ci-nextest-flaky` under `CI_TEST_FLAKY`; `none` when there are none). A crate that ran no test is signed only when the
   base lists it under `no_tests`, the rule the verifier applies to every note. A crate that does not qualify gets no record at all.
 - **The same record as st-test's.** The key is computed by the same code path as `scripts/st-test`'s `crate_keys` (the base's
   `scripts/rust-test-keys` over the tested tree, with the base's inputs file and the base's verifier projection; a test compares both on a

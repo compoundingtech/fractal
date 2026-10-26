@@ -95,6 +95,7 @@ mod attention_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
+mod deploy_cli;
 mod launch_cli;
 mod migrate_cli;
 mod replication_cli;
@@ -178,7 +179,15 @@ fn cli_command() -> clap::Command {
             (old, fractal_drivers::contracts::env(old).map(|_| new))
         })
     });
-    cli_command_with_bindings(Cli::command(), &bindings)
+    let mut command = cli_command_with_bindings(Cli::command(), &bindings);
+    // Materialize inherited globals before hiding only web's copies. They remain
+    // parseable so the explicit refusal below still reports unsupported options.
+    command.build();
+    command.mut_subcommand("web", |web| {
+        web.mut_args(|argument| {
+            if argument.is_global_set() { argument.hide(true) } else { argument }
+        })
+    })
 }
 
 /// The local browser launcher uses its own state directory, not CLI transport,
@@ -278,7 +287,9 @@ enum Command {
     },
     /// Inspect Git-backed changes and their separate ref/index/evidence freshness.
     Changes(change_cli::ChangesArgs),
-    /// Validate and publish KDL files containing seats, missions and schedules.
+    /// Verify a deployment GO against the local replica without changing state.
+    Deploy(deploy_cli::DeployArgs),
+    /// Validate and publish KDL files containing agents, missions and schedules.
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     /// Gate checks run mission and step scripts; loop until scripts run after each round.
     Apply(ApplyArgs),
@@ -424,7 +435,7 @@ enum Command {
         command: SubjectCommand,
     },
     /// Watch GitHub issues and pull requests: each comment, review, required-check result and
-    /// close wakes this seat once.
+    /// close wakes this agent once.
     Gh {
         #[command(subcommand)]
         command: GhCommand,
@@ -460,7 +471,7 @@ enum Command {
         #[command(subcommand)]
         command: RuleCommand,
     },
-    /// Run any CLI with credentials no seat can read, through the sekrets gateway.
+    /// Run any CLI with credentials no agent can read, through the sekrets gateway.
     Sekrets(fractal_daemon::sekrets::cli::SekretsArgs),
     /// Run an agent's tools in its tile: its own Unix user, namespaces and cgroup. Root only.
     Tiles(fractal_daemon::tiles::cli::TilesArgs),
@@ -649,8 +660,8 @@ struct FleetCreateArgs {
 struct FleetInviteArgs {
     /// The name the new machine must use.
     name: Option<String>,
-    /// How long the code stays valid: 10s to 24h.
-    #[arg(long, default_value = "15m")]
+    /// How long the code stays valid: 10s to 24h (Fabric pairing is capped at 10m).
+    #[arg(long, default_value = "10m")]
     expires: String,
     /// Which of this member's endpoints go into the code: auto, tailscale, fabric, loopback.
     #[arg(long, default_value = "auto")]
@@ -737,7 +748,7 @@ struct FleetLeaveArgs {
     /// Leave without reaching any member; another member must then remove this one.
     #[arg(long)]
     offline: bool,
-    /// Leave even while seats run on this machine.
+    /// Leave even while agents run on this machine.
     #[arg(long)]
     force: bool,
     /// Stop a leave that has not written its leave claim yet.
@@ -1226,9 +1237,9 @@ enum MissionViewCommand {
     Outcome(MissionOutcomeArgs),
     /// Retire a mission so it leaves the lists and cannot start; publishing it again brings it back.
     Retire(MissionRetireArgs),
-    /// Show one seat's current claim and its queued mission runs in order; same as `fractal agents queue AGENT`.
+    /// Show one agent's current claim and its queued mission runs in order; same as `fractal agents queue AGENT`.
     Queued {
-        /// Exact seat subject or its identity without the `agent/` prefix.
+        /// Exact agent subject or its identity without the `agent/` prefix.
         #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
         agent: String,
     },
@@ -2308,9 +2319,9 @@ enum ServiceCommand {
 
 #[derive(Subcommand)]
 enum ClaudeChannelCommand {
-    /// Install channel assets and approval policy; activate only in fractal seats.
+    /// Install channel assets and approval policy; activate only in fractal agents.
     Install {
-        /// Install user assets only; seats use development admission without machine policy.
+        /// Install user assets only; agents use development admission without machine policy.
         #[arg(long)]
         no_policy: bool,
     },
@@ -2448,32 +2459,32 @@ enum BlobCommand {
 }
 
 #[derive(Subcommand)]
-#[command(after_help = "A seat keeps one handoff, doc/agents/IDENTITY/handoff, versioned like any document. \
-fractal restarts a seat for an account or model change, a declaration change, or an operator's or agent's \
+#[command(after_help = "An agent keeps one handoff, doc/agents/IDENTITY/handoff, versioned like any document. \
+fractal restarts an agent for an account or model change, a declaration change, or an operator's or agent's \
 request; every session that starts after a restart is given the handoff and the live state of the \
-seat's work as its first message. Write what the graph does not hold: what you were in the middle of, \
+agent's work as its first message. Write what the graph does not hold: what you were in the middle of, \
 the branches and pull requests you own, what you wait on, what to do next, and anything running \
 that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.\n\n\
-Before a planned restart fractal sends the seat a \"Prepare for restart\" message with a deadline. Writing the \
+Before a planned restart fractal sends the agent a \"Prepare for restart\" message with a deadline. Writing the \
 handoff acknowledges it; `ready` acknowledges a handoff that is already current. The restart goes ahead \
 at the acknowledgement or the deadline, whichever comes first.")]
 enum HandoffCommand {
-    /// Replace this seat's handoff with FILE, or with standard input when FILE is `-` or absent.
+    /// Replace this agent's handoff with FILE, or with standard input when FILE is `-` or absent.
     Write {
         file: Option<PathBuf>,
-        /// The seat whose handoff to write; only that seat may write it.
+        /// The agent whose handoff to write; only that agent may write it.
         #[arg(long = "as", value_parser = parse_actor_subject)]
         actor: Option<String>,
     },
-    /// Say this seat's handoff is current, so a restart that is waiting for it can go ahead.
+    /// Say this agent's handoff is current, so a restart that is waiting for it can go ahead.
     Ready {
-        /// The seat that is ready; a readiness claim counts only when it names that seat as its actor.
+        /// The agent that is ready; a readiness claim counts only when it names that agent as its actor.
         #[arg(long = "as", value_parser = parse_actor_subject)]
         actor: Option<String>,
     },
-    /// Print a seat's latest handoff (this seat's by default).
+    /// Print an agent's latest handoff (this agent's by default).
     Show {
-        /// The seat to read, such as agent/garden/worker.
+        /// The agent to read, such as agent/garden/worker.
         #[arg(value_parser = parse_actor_subject)]
         agent: Option<String>,
     },
@@ -2602,17 +2613,17 @@ enum AgentsCommand {
         #[arg(long)]
         all: bool,
     },
-    /// Print one seat's declared workspace directory on its owning host, even when stopped.
+    /// Print one agent's declared workspace directory on its owning host, even when stopped.
     Workspace { subject: String },
-    /// Write or read the handoff a seat leaves for the session that follows it.
+    /// Write or read the handoff an agent leaves for the session that follows it.
     Handoff {
         #[command(subcommand)]
         command: HandoffCommand,
     },
-    /// Declare one new agent seat, start its harness, and wait until it is ready.
+    /// Declare one new agent, start its harness, and wait until it is ready.
     ///
     /// The declaration is the one a person writes by hand, with the harness defaults of the
-    /// fleet's Claude and Codex seats; `--print-kdl` shows it without applying it. With
+    /// fleet's Claude and Codex agents; `--print-kdl` shows it without applying it. With
     /// `--attach`, this terminal attaches once the harness is ready, from any fleet host.
     New(AgentNewArgs),
     /// List repositories already used by a host's agents, from replicated graph evidence.
@@ -2625,37 +2636,37 @@ enum AgentsCommand {
     /// Legacy: use `fractal apply FILE`; preview and apply authored KDL.
     Apply(AgentApplyArgs),
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
-    /// Start a durable seat, patching only explicitly supplied declaration fields. A stopped
-    /// mission seat starts again on its run's own declaration.
+    /// Start a durable agent, patching only explicitly supplied declaration fields. A stopped
+    /// mission agent starts again on its run's own declaration.
     Start(AgentStartArgs),
-    /// Stop one exact durable seat and every process it started.
+    /// Stop one exact durable agent and every process it started.
     ///
-    /// The seat's builds and tests end with it, even those that left its harness's process tree.
+    /// The agent's builds and tests end with it, even those that left its harness's process tree.
     /// A host without a systemd user manager ends only the harness's process tree and process
     /// groups; docs/st3/priority.md says what else keeps running there.
     Stop(AgentStopArgs),
     /// Permanently retire an agent identity; later starts and first sends are refused.
     Retire(AgentRetireArgs),
-    /// Restart a top-level or mission seat, preserving its declaration; wait for a new incarnation.
+    /// Restart a top-level or mission agent, preserving its declaration; wait for a new incarnation.
     /// A self-restart during a turn returns pending until the harness is idle and quiescent.
     Restart(AgentRestartArgs),
     /// Acknowledge an interrupted seed attempt and its warning; never gate launch or rearm seed.
     AcknowledgeSeed(AgentAcknowledgeSeedArgs),
-    /// Retry a published owned-seat cutover with fresh desired and incarnation fences.
+    /// Retry a published owned-agent cutover with fresh desired and incarnation fences.
     Rollout(AgentRolloutArgs),
-    /// Stop a quiet seat at a clean boundary, keeping its native session to resume.
+    /// Stop a quiet agent at a clean boundary, keeping its native session to resume.
     ///
-    /// The seat must be idle, with no pending ask or unsent input, no claimed step and no
-    /// running subagent. A suspended seat stays declared, takes no restarts, and keeps its mail
+    /// The agent must be idle, with no pending ask or unsent input, no claimed step and no
+    /// running subagent. A suspended agent stays declared, takes no restarts, and keeps its mail
     /// until it is resumed.
     Suspend(AgentSuspendArgs),
-    /// Resume a suspended seat on the same native session; wait until its harness proves it.
+    /// Resume a suspended agent on the same native session; wait until its harness proves it.
     Resume(AgentResumeArgs),
-    /// Change only a seat's human label, without restarting its harness.
+    /// Change only an agent's human label, without restarting its harness.
     Rename(AgentRenameArgs),
-    /// Change a seat's canonical ID, preserving its immutable identity and harness.
+    /// Change an agent's canonical ID, preserving its immutable identity and harness.
     RenameId(IdentityRenameArgs),
-    /// Show one seat's current claim and its queued mission runs in order, or move a run.
+    /// Show one agent's current claim and its queued mission runs in order, or move a run.
     /// The show form is also available as `fractal missions queued AGENT`.
     Queue(AgentQueueArgs),
     /// Inspect, set, or release a Codex/OpenCode delivery hold; the provider keeps running.
@@ -2759,7 +2770,7 @@ struct AgentRenameArgs {
 struct AgentQueueArgs {
     #[command(subcommand)]
     command: Option<AgentQueueCommand>,
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(required = true)]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     agent: Option<String>,
@@ -2767,7 +2778,7 @@ struct AgentQueueArgs {
 
 #[derive(Subcommand)]
 enum AgentQueueCommand {
-    /// Move one queued mission run. A step the seat already holds stays held.
+    /// Move one queued mission run. A step the agent already holds stays held.
     Move(AgentQueueMoveArgs),
 }
 
@@ -2778,16 +2789,16 @@ enum AgentQueueCommand {
         .args(["top", "bottom", "before", "after"])
 ))]
 struct AgentQueueMoveArgs {
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     agent: String,
     /// Queued mission run to move.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
     run: String,
-    /// Put the run first in the seat's queue.
+    /// Put the run first in the agent's queue.
     #[arg(long)]
     top: bool,
-    /// Put the run last in the seat's queue.
+    /// Put the run last in the agent's queue.
     #[arg(long)]
     bottom: bool,
     /// Put the run directly before another queued run.
@@ -2802,7 +2813,7 @@ struct AgentQueueMoveArgs {
     #[arg(long)]
     reason: Option<String>,
     /// Person or agent making the move; defaults to `person` in the fractal config. Any agent may move
-    /// any seat's queue, its own included.
+    /// any agent's queue, its own included.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_queue_move_actor)]
     actor: Option<String>,
@@ -2843,7 +2854,7 @@ struct LaneEntryArgs {
     /// Why; recorded with the change.
     #[arg(long)]
     reason: Option<String>,
-    /// Person or agent making the change. A harness acts as its own seat (`ST_AGENT`); otherwise
+    /// Person or agent making the change. A harness acts as its own agent (`ST_AGENT`); otherwise
     /// this defaults to `person` in the fractal config.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_queue_move_actor)]
@@ -2898,7 +2909,7 @@ struct LaneMarkArgs {
     /// The exact head or version the status applies to.
     #[arg(long)]
     head: Option<String>,
-    /// Person or agent recording the status. A harness acts as its own seat (`ST_AGENT`).
+    /// Person or agent recording the status. A harness acts as its own agent (`ST_AGENT`).
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_queue_move_actor)]
     actor: Option<String>,
@@ -2941,7 +2952,7 @@ struct ApplyArgs {
     /// Preview against this exact store index (plain files only).
     #[arg(long, visible_alias = "at", conflicts_with = "set")]
     at_index: Option<u64>,
-    /// Drain changed and retiring seats, then resume their native conversation.
+    /// Drain changed and retiring agents, then resume their native conversation.
     #[arg(long, value_parser = ["when-idle"], requires = "set")]
     rollout: Option<String>,
     #[arg(long, default_value = "30m", requires = "rollout")]
@@ -3139,12 +3150,12 @@ struct AgentApplyArgs {
 
 #[derive(Args)]
 struct AgentStartArgs {
-    /// Seat identity or complete subject, e.g. example/worker or agent/example/worker.
+    /// Agent identity or complete subject, e.g. example/worker or agent/example/worker.
     /// Slash-qualified and dotted identities are exact; a simple name becomes agent/HOST.NAME.
     /// A doubled agent/agent/ prefix is rejected.
     #[arg(value_parser = parse_agent_start_identity)]
     identity: String,
-    /// Override the typed harness; new seats default to claude.
+    /// Override the typed harness; new agents default to claude.
     #[arg(long, value_parser = ["claude", "codex", "pi", "omp", "opencode"])]
     harness: Option<String>,
     #[arg(long)]
@@ -3153,22 +3164,22 @@ struct AgentStartArgs {
     /// Record permission to start this placement before unreachable source hosts acknowledge exit.
     #[arg(long, conflicts_with = "print_kdl")]
     source_offline: bool,
-    /// Override the workspace; new seats default to the current directory.
+    /// Override the workspace; new agents default to the current directory.
     #[arg(long)]
     workspace: Option<PathBuf>,
-    /// Set the typed-harness model; refused for existing command/argv seats.
+    /// Set the typed-harness model; refused for existing command/argv agents.
     #[arg(long)]
     model: Option<String>,
-    /// Set the typed-harness reasoning effort; refused for existing command/argv seats.
+    /// Set the typed-harness reasoning effort; refused for existing command/argv agents.
     #[arg(long)]
     effort: Option<String>,
-    /// Replace typed-harness extra arguments; refused for existing command/argv seats.
+    /// Replace typed-harness extra arguments; refused for existing command/argv agents.
     #[arg(long = "arg")]
     arguments: Vec<String>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
-    /// Read the daemon's declaration and print the effective seat KDL without publishing it.
+    /// Read the daemon's declaration and print the effective agent KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
 }
@@ -3178,7 +3189,7 @@ struct AgentNewArgs {
     /// Start the harness with this first message using its native prompt argument.
     #[arg(long, allow_hyphen_values = true)]
     message: Option<String>,
-    /// Stable seat identity. A slash-qualified identity is kept exactly after `agent/`; a simple
+    /// Stable agent identity. A slash-qualified identity is kept exactly after `agent/`; a simple
     /// name is prefixed with its host, as in `agent/HOST.NAME`.
     name: String,
     /// Fleet host that runs the agent; defaults to this host.
@@ -3206,7 +3217,7 @@ struct AgentNewArgs {
     /// Git branch; defaults to the simple agent name made safe for Git. Reuses an existing branch.
     #[arg(long, requires = "repo")]
     branch: Option<String>,
-    /// Remove a clean worktree after the seat is stopped; keep its branch and unfinished work.
+    /// Remove a clean worktree after the agent is stopped; keep its branch and unfinished work.
     #[arg(long, requires = "repo")]
     remove_at_run_end: bool,
     /// What the agent is for.
@@ -3244,7 +3255,7 @@ struct AgentRetireArgs {
 
 #[derive(Args)]
 struct AgentStopArgs {
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: true })))]
     subject: String,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
@@ -3269,17 +3280,17 @@ struct AgentRolloutArgs {
 
 #[derive(Args)]
 struct AgentSuspendArgs {
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(value_parser = parse_agent_start_identity)]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: true })))]
     subject: String,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
-    /// Why the seat is suspended, recorded with the request.
+    /// Why the agent is suspended, recorded with the request.
     #[arg(long)]
     reason: Option<String>,
-    /// How long to wait for the seat to suspend.
+    /// How long to wait for the agent to suspend.
     #[arg(long, default_value = "5m")]
     timeout: String,
 }
@@ -3289,21 +3300,21 @@ struct AgentResumeArgs {
     /// Resume the suspended conversation on this fleet host.
     #[arg(long)]
     host: Option<String>,
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(value_parser = parse_agent_start_identity)]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     subject: String,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
-    /// How long to wait for the seat to resume its native session.
+    /// How long to wait for the agent to resume its native session.
     #[arg(long, default_value = "10m")]
     timeout: String,
 }
 
 #[derive(Args)]
 struct AgentRestartArgs {
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(value_parser = parse_agent_start_identity)]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     subject: String,
@@ -3313,37 +3324,42 @@ struct AgentRestartArgs {
     /// How long to wait for a new running incarnation.
     #[arg(long, default_value = "10m")]
     timeout: String,
-    /// Restart at once. By default a seat that is up and ready is first asked for its handoff and
-    /// restarted at its acknowledgement or after two minutes; use this for a seat that cannot answer.
+    /// Restart at once. By default an agent that is up and ready is first asked for its handoff and
+    /// restarted at its acknowledgement or after two minutes; use this for an agent that cannot answer.
     /// Also interrupts immediately when restarting yourself during a turn.
     #[arg(long)]
     now: bool,
+    /// Start a new native session instead of continuing the last one. The agent must have a
+    /// handoff written or marked ready (`fractal agents handoff ready`) since its last turn; the new
+    /// session is given it first. Without this the restart continues the last session.
+    #[arg(long)]
+    fresh_session: bool,
 }
 
 #[derive(Subcommand)]
 enum GhCommand {
-    /// Watch an issue or pull request. Each new comment or review that this seat did not post,
+    /// Watch an issue or pull request. Each new comment or review that this agent did not post,
     /// each time the required checks on its current head turn pass or fail, changes to its
-    /// head, draft state or queue membership, and its close or merge wake this seat once;
+    /// head, draft state or queue membership, and its close or merge wake this agent once;
     /// the close or merge, or the deadline, ends the watch. Watching
     /// it again keeps the watch and takes the new deadline.
     #[command(
         after_help = "Examples:\n  fractal gh watch acme/garden#12\n  fractal gh watch https://github.com/acme/garden/pull/12 --until 4h\n  fractal gh watch acme/garden#12 --until none"
     )]
     Watch(GhWatchArgs),
-    /// End this seat's watch on an issue or pull request.
+    /// End this agent's watch on an issue or pull request.
     Unwatch(GhUnwatchArgs),
-    /// List this seat's watches, running and ended in the last day, or every seat's with --all.
+    /// List this agent's watches, running and ended in the last day, or every agent's with --all.
     Ls(GhLsArgs),
-    /// Post a comment, or a pull request review, as this seat. fractal records the new comment's
-    /// GitHub ID as this seat's, so it wakes no watch of this seat and other seats' wakes name
-    /// this seat; it also watches the thread unless --no-watch.
+    /// Post a comment, or a pull request review, as this agent. fractal records the new comment's
+    /// GitHub ID as this agent's, so it wakes no watch of this agent and other agents' wakes name
+    /// this agent; it also watches the thread unless --no-watch.
     #[command(
         after_help = "Examples:\n  fractal gh comment acme/garden#12 --body 'The seed list is ready.'\n  fractal gh comment acme/garden#12 --body-file review.md --review request-changes"
     )]
     Comment(GhCommentArgs),
-    /// Record a comment or review this seat posted some other way, by its URL, as this seat's.
-    /// A watch that already reported it woke the seat once.
+    /// Record a comment or review this agent posted some other way, by its URL, as this agent's.
+    /// A watch that already reported it woke the agent once.
     Own(GhOwnArgs),
 }
 
@@ -3394,7 +3410,7 @@ struct GhWatchArgs {
 struct GhUnwatchArgs {
     /// OWNER/REPO#NUMBER, or the issue or pull request URL.
     thread: String,
-    /// The seat whose watch a person ends; a seat ends its own.
+    /// The agent whose watch a person ends; an agent ends its own.
     #[arg(long)]
     agent: Option<String>,
     #[arg(long = "as", env = "ST_AGENT")]
@@ -3403,7 +3419,7 @@ struct GhUnwatchArgs {
 
 #[derive(Args)]
 struct GhLsArgs {
-    /// Every seat's watches, not only this seat's.
+    /// Every agent's watches, not only this agent's.
     #[arg(long)]
     all: bool,
     #[arg(long = "as", env = "ST_AGENT")]
@@ -3617,13 +3633,13 @@ struct AttentionWithdrawArgs {
 enum WorkCommand {
     /// Replace your allowed delegation list; repeat --action, or omit all to revoke.
     Delegation(DelegationPolicyArgs),
-    /// Open a one-step run for this seat without authoring a mission; then use claim.
+    /// Open a one-step run for this agent without authoring a mission; then use claim.
     ///
     /// For a small independent authorized job: describe the result, use the returned claim
     /// command, perform the work and complete it with durable evidence. Finish or release
     /// other independent claimed work first. See fractal skill for the full workflow.
     Start(WorkStartArgs),
-    /// Release claimed work to another seat or person with a note they acknowledge.
+    /// Release claimed work to another agent or person with a note they acknowledge.
     Handoff(WorkHandoffArgs),
     /// Acknowledge the exact handoff note before claiming or completing its work.
     Acknowledge(WorkAcknowledgeArgs),
@@ -4035,7 +4051,7 @@ enum MessageCommand {
     Reply(MessageReplyArgs),
     /// Wait up to a deadline for a reply from one sender, and print the reply or `no reply`.
     ///
-    /// The reply is marked read for the waiting seat, so native delivery does not hand it over
+    /// The reply is marked read for the waiting agent, so native delivery does not hand it over
     /// again as a separate turn. Without `--after` only messages sent after the wait began count.
     Wait(MessageWaitArgs),
     /// Close exact messages after their related action is complete.
@@ -4238,7 +4254,7 @@ struct MessageReplyArgs {
 
 #[derive(Args)]
 struct MessageWaitArgs {
-    /// The seat waiting for the reply; defaults to the non-empty ST_AGENT value.
+    /// The agent waiting for the reply; defaults to the non-empty ST_AGENT value.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as")]
     actor: Option<String>,
@@ -4406,7 +4422,7 @@ enum AdmissionCommand {
 struct AdmissionBuildArgs {
     #[arg(value_parser = ["omp", "opencode"])]
     harness: String,
-    /// Exact executable used by the affected seat; defaults to the harness on PATH.
+    /// Exact executable used by the affected agent; defaults to the harness on PATH.
     #[arg(long)]
     binary: Option<String>,
     /// This machine's fractal state directory; defaults to the configured state directory.
@@ -5278,6 +5294,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::ActorContract { .. } => unreachable!("the actor contract runs before the CLI runtime"),
         Command::Setup(_) => unreachable!(),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
+        Command::Deploy(args) => deploy_cli::run(&endpoint, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
         Command::Web { .. } => unreachable!("the browser opens before the CLI runtime"),
@@ -14374,6 +14391,10 @@ struct NativeLoopState {
     /// Admissions for attachment-dependent writes, carried across re-exec with the binding.
     #[serde(default)]
     claude_attachment_admissions: AdmissionBucket,
+    /// When this binding last polled attachment without push. Not carried: a replacement
+    /// image polls once at once.
+    #[serde(skip)]
+    claude_attachment_polled: Option<((String, u64, String), u64)>,
     /// This image's own settle. A replacement image draws a new one, so it is never carried.
     #[serde(skip)]
     settle: ResumeSettle,
@@ -14411,6 +14432,7 @@ struct AdmissionBucket {
 
 const ADMISSION_BURST: u32 = 2;
 const ADMISSION_REFILL_MS: u64 = 10_000;
+const UNPUSHED_ATTACHMENT_RECHECK_MS: u64 = 10_000;
 
 impl AdmissionBucket {
     fn take(&mut self, fence: &fractal_daemon::mailbox::Fence, now_ms: u64) -> bool {
@@ -17001,6 +17023,39 @@ async fn publish_claude_readiness_fallback(
     Ok(false)
 }
 
+/// Whether this control tick checks attachment. With push the check reads the pushed value and
+/// rations its own admissions. Without push (an older daemon, or a reconnect waiting for its
+/// first frame) each check is a GET: a starting phase still checks every tick so readiness is
+/// not delayed, but a settled one (attached or blocked) is rechecked every ten seconds, not
+/// every second.
+fn claude_attachment_check_due(
+    mailbox: &NativeMailbox,
+    state: &mut NativeLoopState,
+    now_ms: u64,
+) -> bool {
+    if mailbox.pushed_attachment().is_some() {
+        return true;
+    }
+    let fence = &mailbox.fence;
+    let binding = (fence.incarnation.clone(), fence.epoch, fence.token.clone());
+    let settled = state.claude_attachment_reconciled
+        && state.claude_attachment_phase != "starting"
+        && state.claude_attachment_pending.is_none()
+        && state.claude_attachment_terminal.is_none();
+    // A replacement binding, or a wall clock stepped backwards, checks at once.
+    if settled
+        && state.claude_attachment_polled.as_ref().is_some_and(|(polled_binding, polled)| {
+            *polled_binding == binding
+                && now_ms >= *polled
+                && now_ms - polled < UNPUSHED_ATTACHMENT_RECHECK_MS
+        })
+    {
+        return false;
+    }
+    state.claude_attachment_polled = Some((binding, now_ms));
+    true
+}
+
 async fn check_claude_attachment(
     client: &Client,
     subject: &str,
@@ -17013,8 +17068,8 @@ async fn check_claude_attachment(
     // On a connection that has pushed attachment, the pushed value alone feeds the phase. Until
     // it has (an older daemon, or a new connection), the GET does, as before; never both.
     let pushed = mailbox.pushed_attachment();
-    // Admissions are rationed only where the phase comes from push; without push every tick
-    // already makes its GET, exactly as before.
+    // Admissions are rationed only where the phase comes from push; without push every check
+    // makes its GET (claude_attachment_check_due spaces those checks).
     let mut from_push = pushed.is_some();
     let mut checked = match pushed {
         Some(attachment) => Ok(attachment),

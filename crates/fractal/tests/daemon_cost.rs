@@ -114,8 +114,16 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "POST /v1/deploy/verify-go",
+        "requires an immutable packaged deployment policy and genuinely signed local GO/principal/STOP history, absent from generated cost stores; deploy_verify.rs covers the real CLI/API refusal boundary; successful verification scans eligible-origin and deployment history, whose growth is not measured here",
+    ),
+    (
         "GET /v1/internal/fleet/leave-state",
         "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
+    ),
+    (
+        "POST /v1/internal/fleet/pairing-admission",
+        "explicit one-use fleet admission proxies the bounded signed request to the live worker; uses the existing invite redemption and verified membership fold, not a polling read path",
     ),
     (
         "GET /v1/internal/fleet/admission-residue",
