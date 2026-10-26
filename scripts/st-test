@@ -527,6 +527,13 @@ def target_worktree(base, scratch):
     return directory, commit
 
 
+def needs_tree(checks):
+    """Whether a run of `checks` takes a pool tree: what a tree keeps is a warm cargo target, which only a check that builds (BUILDS) uses. A run
+    of light checks alone (ci-script-tests, typescript-client, genie-freshness) takes a throwaway worktree instead of waiting behind runs that
+    build for a tree it does not need (2026-10-26: a 10-second ci-script-tests rerun waited behind 30-minute runs)."""
+    return any(name in BUILDS for name in checks)
+
+
 def pool_size():
     """How many persistent trees the pool holds: ST_TEST_TREES, else the host's heavy slots plus one; None (off) for fresh worktrees."""
     value = POOL_SETTINGS.get('ST_TEST_TREES', '')
@@ -656,10 +663,11 @@ PRIORITY_AGING_SECONDS, PRIORITY_FLOOR = 120, 5  # the cargo shim's rank aging: 
 
 
 def priority_rank(environment=None):
-    """The caller's rank in the build host's priority file (lines 'RANK GLOB', first glob matching ST_AGENT; lower is served first), as the cargo shim
-    reads it: CARGO_PRIORITY_FILE or ~/.config/cargo-priority; 50 when unlisted or unreadable."""
+    """The caller's rank in the build host's priority file (lines 'RANK GLOB', first glob matching the caller; lower is served first), as the cargo
+    shim reads it: the caller is ST_AGENT, else CARGO_PRIORITY_CALLER (a run that carries only that one ranked 50 here while the shim ranked it
+    right); the file is CARGO_PRIORITY_FILE or ~/.config/cargo-priority; 50 when unlisted or unreadable."""
     environment = os.environ if environment is None else environment
-    caller = environment.get('ST_AGENT', '')
+    caller = environment.get('ST_AGENT') or environment.get('CARGO_PRIORITY_CALLER', '')
     path = environment.get('CARGO_PRIORITY_FILE') or str(Path.home() / '.config/cargo-priority')
     try:
         lines = Path(path).read_text().splitlines()
@@ -672,9 +680,22 @@ def priority_rank(environment=None):
     return 50
 
 
+def process_started_ns(pid):
+    """When process `pid` started, in epoch nanoseconds (the boot time plus /proc/PID/stat's start ticks, to about a second); None where /proc
+    cannot tell."""
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text()
+        ticks = int(stat[stat.rindex(')') + 2:].split()[19])  # field 22, counted after the command name, which may hold spaces
+        boot = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
+        return (boot * 10**9) + ticks * 10**9 // os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
 def tree_queue(queue, now_ns):
     """The live tickets waiting for a pool tree (name RANK.NANOS.PID), best first: the shim's order, effective rank (aged) then arrival. A ticket
-    whose process is gone is removed."""
+    whose process is gone is removed, and so is one whose pid now names a process that started after the ticket was taken (a waiter killed
+    with SIGKILL leaves its ticket; a reused pid must not keep its place)."""
     found = []
     for name in os.listdir(queue):
         try:
@@ -689,6 +710,11 @@ def tree_queue(queue, now_ns):
             continue
         except PermissionError:
             pass
+        started = process_started_ns(pid)
+        if started is not None and started > nanos + 2 * 10**9:  # the pid was reused by a process younger than the ticket: its waiter is gone
+            with contextlib.suppress(OSError):
+                os.unlink(queue / name)
+            continue
         effective = rank if rank < PRIORITY_FLOOR else max(PRIORITY_FLOOR, rank - (now_ns - nanos) // (PRIORITY_AGING_SECONDS * 10**9))
         found.append((effective, nanos, name))
     return sorted(found)
@@ -697,7 +723,9 @@ def tree_queue(queue, now_ns):
 def acquire_tree(root, size, rank=None):
     """(n, lock): the lowest free tree of the pool, held by an flock until the lock is closed; waits while every tree is in use.
     Waiters queue in the build host's order, not by a race to the next free tree (2026-10-26: the CPU P0 builder, rank 3, waited two hours while
-    rank-50 runs took each tree as it came free): each takes a ticket in queue/ and only the best live ticket tries the trees."""
+    rank-50 runs took each tree as it came free): each takes a ticket in queue/ and only the best live ticket tries the trees. `size` is the
+    pool size or a function giving it, read again on every pass: when the host's heavy slots grow while runs wait, the best ticket takes a new
+    tree at once instead of polling only the old ones (with every ticket behind it waiting too)."""
     root.mkdir(parents=True, exist_ok=True)
     queue = root / 'queue'
     queue.mkdir(exist_ok=True)
@@ -708,8 +736,9 @@ def acquire_tree(root, size, rank=None):
         while True:
             order = tree_queue(queue, time.time_ns())
             ahead = next((i for i, (_, _, name) in enumerate(order) if name == ticket.name), 0)
+            trees = size() if callable(size) else size
             if ahead == 0:
-                for n in range(size):
+                for n in range(trees):
                     lock = open(root / f'tree-{n}.lock', 'w')
                     try:
                         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -717,7 +746,7 @@ def acquire_tree(root, size, rank=None):
                     except BlockingIOError:
                         lock.close()
             if not waited:
-                print(f'st-test: all {size} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
+                print(f'st-test: all {trees} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
                 waited = True
             time.sleep(POOL_WAIT_SECONDS)
     finally:
@@ -1196,6 +1225,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         skips = env_skips_file(scratch, RUST_TESTS)
         environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit), CI_TEST_ENV_SKIPS=str(skips))
         environment.setdefault('CARGO_INCREMENTAL', '0')  # as the other checks: no incremental state in a one-shot build
+        environment.pop('BUILD_ADMISSION_CLASS', None)  # it builds: never a light start
         if target:
             environment['CARGO_TARGET_DIR'] = str(target)
         started = time.monotonic()
@@ -1609,11 +1639,13 @@ def main(argv):
         (Path(scratch) / 'pid').write_text(str(os.getpid()))
         directory = Path(scratch) / 'tree'
         pool_trees, tree_lock, tree_target, n = pool_size(), None, None, None
+        if not needs_tree(checks):
+            pool_trees = None  # a throwaway worktree, as with ST_TEST_TREES=off, and no wait for a tree
         try:
             if pool_trees:
                 root = pool_root()
                 target_commit(args.base)  # a branch that does not merge with the base fails now, not after the wait for a tree
-                n, tree_lock = acquire_tree(root, pool_trees)
+                n, tree_lock = acquire_tree(root, lambda: pool_size() or pool_trees)  # the slots can change while the run waits
                 # The wait for a tree can take hours, and main moves meanwhile: the base is fetched again and the commit to sign chosen at
                 # its tip now, so what is signed is only as old as the run itself (2026-10-26: a run that waited 1h50m signed a merge with a
                 # main that had already moved a protected file, and the push was refused).
@@ -1698,6 +1730,12 @@ def main(argv):
                 environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                 if target and name in BUILDS:
                     environment['CARGO_TARGET_DIR'] = str(target)
+                # The nix wrapper admits a `nix develop`/`nix shell` start as heavy unless told the shell compiles no Rust: a check that
+                # builds nothing starts as light (as the pre-sign worker starts .#web and .#genie), and one that builds never does.
+                if name in BUILDS:
+                    environment.pop('BUILD_ADMISSION_CLASS', None)
+                else:
+                    environment['BUILD_ADMISSION_CLASS'] = 'light'
                 if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
                     # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
                     environment['CI_TEST_JUNIT'] = str(gate_report)

@@ -2975,6 +2975,26 @@ fn the_actual_cache_follows_each_subjects_newest_claim() {
         "an unrelated write must not refold this subject's history"
     );
 
+    // A harness report on the subject is not folded, so it does not refold the history either.
+    store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([("state".into(), Value::String("idle".into()))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+    assert_eq!(
+        store.latest_actual_value(subject).unwrap().unwrap()["status"],
+        "stopped"
+    );
+    assert_eq!(ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get), 0);
+    assert_eq!(cached(&store).unwrap(), before);
+
     let running = observe(subject, "running");
     assert_eq!(
         store.latest_actual_value(subject).unwrap().unwrap()["status"],
@@ -11070,4 +11090,91 @@ fn a_claude_trust_prompt_fences_its_incarnation_as_not_ready_with_the_reason() {
     append("runtime.observed", None, running("second"));
     append("harness.observed", Some(subject), ready("second"));
     assert!(store.current_harness(subject).unwrap().unwrap().is_ready());
+}
+
+#[test]
+fn local_seats_busy_reads_each_seats_newest_state_and_every_one_in_the_minute() {
+    const MINUTE: u64 = 60_000;
+    let store = Store::open_memory("node").unwrap();
+    let observe = |subject: &str, state: &str, at: u64, jobs: Option<u64>| {
+        let mut input = harness_state(subject, state, at);
+        if let Some(jobs) = jobs {
+            input.fields.insert("background_jobs".into(), json!(jobs));
+        }
+        store.append_latest_observation(&input, u128::from(at)).unwrap();
+    };
+    // Minutes after now, so the runtime claims appended now are before every span checked.
+    let base = (now_ms() as u64 / MINUTE + 10) * MINUTE;
+    observe("agent/node.a", "working", base - 5_000, None);
+    observe("agent/node.a", "idle", base - 1_000, None);
+    observe("agent/node.b", "ended", base - 30 * MINUTE, None);
+    // Each seat's newest observation before the minute says it is quiet.
+    let (busy, seats) = store.local_seats_busy(base, base + MINUTE, None).unwrap();
+    assert!(!busy);
+    assert_eq!(seats.harness.len(), 2);
+    // A seat that worked inside the minute keeps it from being idle, though idle by its end.
+    observe("agent/node.c", "working", base + MINUTE + 10, None);
+    observe("agent/node.c", "idle", base + MINUTE + 20, None);
+    let (busy, seats) = store.local_seats_busy(base + MINUTE, base + 2 * MINUTE, Some(seats)).unwrap();
+    assert!(busy);
+    let (busy, seats) = store.local_seats_busy(base + 2 * MINUTE, base + 3 * MINUTE, Some(seats)).unwrap();
+    assert!(!busy, "{seats:?}");
+    // Background jobs, and a state that does not say the seat is quiet, are busy, and stay busy
+    // into later minutes until the seat says otherwise.
+    observe("agent/node.a", "idle", base + 3 * MINUTE + 1, Some(2));
+    let (busy, seats) = store.local_seats_busy(base + 3 * MINUTE, base + 4 * MINUTE, Some(seats)).unwrap();
+    assert!(busy);
+    assert!(store.local_seats_busy(base + 4 * MINUTE, base + 5 * MINUTE, Some(seats)).unwrap().0);
+    assert!(store.local_seats_busy(base + 9 * MINUTE, base + 10 * MINUTE, None).unwrap().0, "read afresh");
+    observe("agent/node.a", "idle", base + 10 * MINUTE + 1, None);
+    observe("agent/node.d", "starting", base + 10 * MINUTE + 2, None);
+    assert!(store.local_seats_busy(base + 10 * MINUTE, base + 11 * MINUTE, None).unwrap().0);
+}
+
+#[test]
+fn a_live_seat_without_a_quiet_observation_of_its_incarnation_is_never_quiet() {
+    const MINUTE: u64 = 60_000;
+    let store = Store::open_memory("node").unwrap();
+    let runtime = |status: &str, incarnation: Option<&str>| {
+        let mut fields = BTreeMap::from([("status".to_owned(), json!(status))]);
+        if let Some(incarnation) = incarnation {
+            fields.insert("incarnation_id".into(), json!(incarnation));
+        }
+        store
+            .append_claim(&ClaimInput {
+                subject: "agent/node.e".into(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields,
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    };
+    let check = |minute: u64| {
+        let from = (now_ms() as u64 / MINUTE + minute) * MINUTE;
+        store.local_seats_busy(from, from + MINUTE, None).unwrap().0
+    };
+    // No harness observation reaches the store for a seat this member runs: not quiet.
+    runtime("running", Some("inc-1"));
+    assert!(check(2));
+    // One of another incarnation proves nothing about this one.
+    let at = now_ms() as u64;
+    let mut other = harness_state("agent/node.e", "idle", at);
+    other.fields.insert("incarnation_id".into(), json!("inc-0"));
+    store.append_latest_observation(&other, u128::from(at)).unwrap();
+    assert!(check(2));
+    store.append_latest_observation(&harness_state("agent/node.e", "idle", at + 1), u128::from(at + 1)).unwrap();
+    assert!(!check(2));
+    // A seat that starts inside the minute is busy in it.
+    assert!(check(0));
+    // A later runtime observation that omits the incarnation keeps it.
+    runtime("running", None);
+    assert!(!check(2));
+    // Once this member ended the seat, its last harness state no longer counts.
+    store.append_latest_observation(&harness_state("agent/node.e", "working", at + 2), u128::from(at + 2)).unwrap();
+    assert!(check(2));
+    runtime("exited", None);
+    assert!(!check(2));
 }

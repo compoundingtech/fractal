@@ -61,6 +61,9 @@ def apparent_gb(path):
     return sum(file.stat().st_size for file in path.rglob('*') if file.is_file()) / 1e9
 
 
+NEEDS_TREE = st_test.needs_tree
+
+
 class PoolTreeTest(unittest.TestCase):
     """Pool reuse without a signer or remote: only disposable local worktrees are involved."""
 
@@ -135,6 +138,9 @@ class StTest(unittest.TestCase):
         patcher = mock.patch.dict(st_test.LOCAL, {'demo': ['sh', '-c', 'echo ran']}, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        trees = mock.patch.object(st_test, 'needs_tree', return_value=True)  # demo stands in for a check that builds, so the pool is exercised
+        trees.start()
+        self.addCleanup(trees.stop)
 
     def commit(self, name, content, branch=None):
         if branch:
@@ -755,6 +761,18 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn('all 1 pool trees are in use', err)
 
+    def test_a_run_of_checks_that_build_nothing_takes_no_pool_tree_and_never_waits_for_one(self):
+        self.commit('b.txt', 'two')
+        self.assertTrue(NEEDS_TREE(['ci-script-tests', 'linux-gate']))
+        self.assertFalse(NEEDS_TREE(['ci-script-tests', 'typescript-client', 'genie-freshness']))
+        with mock.patch.object(st_test, 'needs_tree', NEEDS_TREE), \
+                mock.patch.object(st_test, 'acquire_tree', side_effect=AssertionError('a light run waits for no tree')):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertFalse((self.home / '.cache/st-test/pools').exists(), 'no pool tree was made')
+        statement, = self.statements()
+        self.assertIn(git(self.work, 'rev-parse', 'HEAD^{tree}'), json.dumps(statement))
+
     def test_the_pool_holds_the_heavy_slots_plus_one_trees_unless_told_otherwise(self):
         with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True):
             self.assertEqual(st_test.pool_size(), 2)
@@ -1226,6 +1244,16 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'CARGO_INCREMENTAL': '1'})[0], 0)
         self.assertEqual(seen.read_text().split(), ['0', '1'])
 
+    def test_a_check_that_builds_nothing_starts_as_light_and_a_build_never_does(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "${{BUILD_ADMISSION_CLASS:-unset}}" >> {seen}']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+            code, out, err = self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'BUILD_ADMISSION_CLASS': 'light'})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen.read_text().split(), ['light', 'unset'])
+
     def test_a_heavy_run_says_how_big_its_target_ended(self):
         self.commit('b.txt', 'two')
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
@@ -1676,7 +1704,7 @@ if os.environ.get('CI_TEST_FLAKY'):
 
 
 class PoolQueue(unittest.TestCase):
-    """Pool trees go to waiters in the build host's order (cargo-priority rank by ST_AGENT, aged as the shim ages it, then arrival), not by a race."""
+    """Pool trees go to waiters in the build host's order (cargo-priority rank by ST_AGENT or CARGO_PRIORITY_CALLER, aged as the shim ages it, then arrival), not by a race."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -1727,6 +1755,22 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(got[0][0], 0)
         got[0][1].close()
 
+    def test_a_waiter_sees_a_tree_the_pool_gains_while_it_waits(self):
+        self.root.mkdir(parents=True)
+        holder = open(self.root / 'tree-0.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        self.addCleanup(holder.close)
+        size, got = [1], []                                                     # the host's heavy slots go from 1 to 2 while it waits
+        with contextlib.redirect_stderr(io.StringIO()):
+            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, lambda: size[0], rank=50)))
+            waiter.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])                                           # tree-0 is held, and the pool has no other
+            size[0] = 2
+            waiter.join(5)
+        self.assertEqual(got[0][0], 1)                                          # the new tree, while tree-0 is still held
+        got[0][1].close()
+
     def test_the_queue_orders_by_aged_rank_then_arrival_and_drops_dead_tickets(self):
         queue = Path(self.tmp.name) / 'queue'
         queue.mkdir()
@@ -1739,9 +1783,23 @@ class PoolQueue(unittest.TestCase):
                  'dead': f'001.{now:019d}.999999999'}
         for name in names.values():
             (queue / name).touch()
-        order = [name for _, _, name in st_test.tree_queue(queue, now)]
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):  # tickets from 1970 for a live pid: only the order is asked
+            order = [name for _, _, name in st_test.tree_queue(queue, now)]
         self.assertEqual(order, [names['p0'], names['old-50'], names['new-12'], names['young-50']])
         self.assertFalse((queue / names['dead']).exists())
+
+    def test_a_ticket_whose_pid_was_reused_by_a_younger_process_is_dropped(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        started = st_test.process_started_ns(os.getpid())
+        self.assertIsNotNone(started)
+        self.assertLess(abs(started - time.time_ns()), 3600 * 10**9)              # this test process started within the hour
+        stale = queue / f'050.{started - 60 * 10**9:019d}.{os.getpid()}'        # taken a minute before this pid's process existed
+        own = queue / f'050.{started + 10**9:019d}.{os.getpid()}'
+        stale.touch()
+        own.touch()
+        self.assertEqual([name for _, _, name in st_test.tree_queue(queue, time.time_ns())], [own.name])
+        self.assertFalse(stale.exists())
 
     def test_the_rank_is_the_first_matching_line_of_the_priority_file_and_50_otherwise(self):
         priority = Path(self.tmp.name) / 'cargo-priority'
@@ -1751,6 +1809,11 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(rank('agent/crew/leads/lead-2'), 4)
         self.assertEqual(rank('agent/other'), 12)
         self.assertEqual(rank(''), 50)
+        # The shim's caller: ST_AGENT, else CARGO_PRIORITY_CALLER (st-test and ci-local stages run without ST_* variables).
+        by = lambda environment: st_test.priority_rank(dict(environment, CARGO_PRIORITY_FILE=str(priority)))
+        self.assertEqual(by({'CARGO_PRIORITY_CALLER': 'agent/crew/hot/2026-10-26/hot-builder'}), 3)
+        self.assertEqual(by({'ST_AGENT': 'agent/crew/leads/lead-2', 'CARGO_PRIORITY_CALLER': 'agent/crew/hot/x/hot-builder'}), 4)
+        self.assertEqual(by({'ST_AGENT': '', 'CARGO_PRIORITY_CALLER': 'agent/crew/leads/lead-2'}), 4)
         self.assertEqual(st_test.priority_rank({'ST_AGENT': 'agent/x', 'CARGO_PRIORITY_FILE': str(priority) + '.missing'}), 50)
 
     def test_an_interrupted_waiter_leaves_no_ticket(self):
