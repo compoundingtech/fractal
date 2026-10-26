@@ -16,7 +16,7 @@ fn print_timeline_page(
     {
         let _ = writeln!(
             output,
-            "\nOlder entries: st conversations timeline {} --cursor {}",
+            "\nOlder entries: fractal conversations timeline {} --cursor {}",
             response.value.session_id,
             shell_argument(cursor)
         );
@@ -49,7 +49,7 @@ fn print_conversation_page(
         && let Some(cursor) = &response.value.page.next_cursor
     {
         output.push_str(&format!(
-            "\nOlder entries: st conversations timeline {} --cursor {}\n",
+            "\nOlder entries: fractal conversations timeline {} --cursor {}\n",
             response.value.session_id,
             shell_argument(cursor)
         ));
@@ -334,7 +334,7 @@ pub(super) async fn run_message(
                         println!("{text}");
                         for attachment in &message.attachments {
                             println!(
-                                "Attachment: blob/{} ({}, {} bytes{}); read it with `st blobs get blob/{} --message {} -o FILE`",
+                                "Attachment: blob/{} ({}, {} bytes{}); read it with `fractal blobs get blob/{} --message {} -o FILE`",
                                 attachment.sha256,
                                 attachment.media_type,
                                 attachment.size,
@@ -570,7 +570,7 @@ pub(super) async fn run_message(
                 "SESSIONS",
                 &response,
                 json_output,
-                &format!("st conversations sessions{history}"),
+                &format!("fractal conversations sessions{history}"),
             )
         }
         MessageCommand::Timeline {

@@ -700,7 +700,7 @@ fn runtime_publication_error_messages_preserve_retryability() {
         (ErrorCode::RuntimeListNotReady, true,
             "st is still preparing the runtime list; try again shortly"),
         (ErrorCode::RuntimeListEnded, false,
-            "the runtime list stopped updating; restart st"),
+            "the runtime list stopped updating; restart fractal"),
     ] {
         let envelope = serde_json::from_value(serde_json::json!({
             "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
