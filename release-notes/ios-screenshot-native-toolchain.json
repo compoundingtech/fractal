@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Build iOS landing screenshots with Apple's native compiler and SDK rather than inherited Nix compiler overrides",
+  "summary": "Build iOS landing screenshots with Apple's native toolchain and an Xcode 26 hosted runner instead of inherited Nix compiler overrides",
   "replay": {"status": "none", "detail": "Screenshot tooling only; no replay changes."},
   "schema": {"status": "none", "detail": "No schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rule change."},

@@ -12,7 +12,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
   jobs: {
     capture: {
       name: 'Capture the real iOS client',
-      'runs-on': 'macos-15',
+      // The app's native packages require Swift tools 6.2: use the image with Xcode 26 by default.
+      'runs-on': 'macos-26',
       'timeout-minutes': 90,
       defaults: { run: { shell: 'bash' } },
       env: { MAESTRO_CLI_NO_ANALYTICS: 'true' },
