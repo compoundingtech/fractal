@@ -1321,8 +1321,11 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 span(seat.clone(), theme::strong(theme::PERSON)),
             ]));
             card.blank();
-            card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
-            card.blank();
+            // A prompt the form asks in its own words is said once, as the form's question.
+            if !super::alerts::form_asks(world, item, prompt) {
+                card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
+                card.blank();
+            }
             // The same form the band in its conversation expands to, with the call in full.
             super::alerts::prompt_form(
                 &mut card,

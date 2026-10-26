@@ -190,6 +190,11 @@ fn option_lines(marked: bool, keys: bool, number: usize, label: &str, style: Sty
     )
 }
 
+/// Whether `item`'s form asks `text` itself as its question, so a card shows it once.
+pub(super) fn form_asks(world: &World, item: &Attention, text: &str) -> bool {
+    prompt_model(world, item).is_some_and(|model| model.form.question.trim() == text.trim())
+}
+
 /// A prompt's form into `doc` at `width`: what it is about (the call or plan in full, or the
 /// questions to choose from), the harness's question line, its numbered options with one marked,
 /// and the keys. `limit` cuts a call (the band's few lines); a call that is cut withholds the
@@ -1549,7 +1554,7 @@ mod tests {
     /// Every prompt kind in Inbox and in its conversation, folded and expanded, at three widths:
     /// the same form, worded and numbered like the harness's, with its marked option and keys.
     #[test]
-    fn every_prompt_kind_reads_like_its_harness_in_now_and_in_place() {
+    fn every_prompt_kind_reads_like_its_harness_in_inbox_and_in_place() {
         for case in cases() {
             for width in [60u16, 80, 120] {
                 // Inbox: the card carries the prompt's answers.
@@ -1558,6 +1563,10 @@ mod tests {
                 check_form(&case, &shown, width, "Inbox");
                 let flat = words_of(&shown);
                 assert!(flat.contains("a to answer with the keys"), "{}\n{shown}", case.name);
+                // What the prompt says is said once, however the form words its question.
+                let squeezed: String = flat.chars().filter(|c| c.is_alphanumeric()).collect();
+                let said: String = case.text.chars().filter(|c| c.is_alphanumeric()).take(24).collect();
+                assert_eq!(squeezed.matches(&said).count(), 1, "{}\n{shown}", case.name);
 
                 // The conversation, folded: one line, nothing to answer, a way in.
                 let mut ui = in_conversation(world_with(&case));
