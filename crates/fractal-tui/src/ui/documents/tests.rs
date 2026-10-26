@@ -262,7 +262,7 @@ fn a_mission_lists_the_documents_it_and_its_steps_name() {
 #[test]
 fn only_document_references_open_as_documents() {
     assert_eq!(openable(" doc/garden/plan "), Some("doc/garden/plan"));
-    assert_eq!(openable(&format!("doc/garden/plan@{HASH_A}")).is_some(), true);
+    assert!(openable(&format!("doc/garden/plan@{HASH_A}")).is_some());
     for not in ["doc/", "doc/garden/", "doc/garden/plan@abc", "mission/example/orchard", "https://example.com/doc/x"] {
         assert_eq!(openable(not), None, "{not}");
     }
