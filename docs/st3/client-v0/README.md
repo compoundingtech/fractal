@@ -1247,9 +1247,13 @@ or checkpoint authority. Existing canonical claims and checkpoint rules are unch
 
 Asks, attention actions, message sends and held effects are not pinned by this local-response
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.
-Client actions keep their durable, server-only `client.action-result` receipt; normal claim append
-uses its existing operation identity and checkpoint tombstones. Cleanup never deletes these
-claims. Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
+Client actions keep their server-only `client.action-result` receipt in the owner-local
+observation log, with the same durable retention class and ordinary age/count trimming;
+it is not pinned. This does not extend the existing idempotency retention window.
+Replay and receipt compare-and-set read the owner's local receipts, not peer claims.
+Only `agent.launcher-bound` and `agent.helper-launched` are pinned against local age/count
+trimming. Normal claim append uses its existing operation identity and checkpoint tombstones.
+Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
 follow `retryable`, and this new code is terminal. TypeScript/phone `isTransient` and
 `retryTransient` likewise stop on this code; the phone's fresh-fence `notApplied` retry list
 contains only stale-fence/rate-limited. Swift preserves unknown codes and `retryable: false`.
