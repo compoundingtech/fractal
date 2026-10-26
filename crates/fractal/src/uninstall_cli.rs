@@ -17,7 +17,7 @@ fn remove_uninstall_path(path: &Path, binary_aliases: &[&Path]) -> std::io::Resu
     }
 }
 
-pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
+pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json_output: bool) -> Result<()> {
     fractal_daemon::service::preflight(!args.no_service)?;
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
@@ -131,7 +131,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
     }
     anyhow::ensure!(
         args.yes,
-        "st uninstall erases this machine's st3 state, settings, and services; run it again with --yes, or --dry-run to list them"
+        "fractal uninstall erases this machine's st3 state, settings, and services; run it again with --yes, or --dry-run to list them"
     );
     let daemon_running = client.get::<Value>("/v1/health").await.is_ok();
     if let Some(file) = fractal_daemon::config::FleetFile::load(&config.state_dir)?
@@ -142,7 +142,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         } else {
             anyhow::ensure!(
                 daemon_running,
-                "start st3 so this machine can leave its fleet first, or pass --offline"
+                "run fractal up so this machine can leave its fleet first, or pass --offline"
             );
             let person = fleet_person(args.actor.clone(), &config)?;
             fleet_leave(&client, &config, &person, false, false, 600).await?;
@@ -171,7 +171,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         };
         anyhow::ensure!(
             stopped,
-            "stop st3 up and st3 replication-worker, then run st uninstall --yes again"
+            "stop fractal up and fractal replication-worker, then run fractal uninstall --yes again"
         );
         println!("stopped\tthe daemon this instance started without a service");
     }
@@ -223,9 +223,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
     for path in &remaining {
         println!("remains\t{}", path.display());
     }
-    println!(
-        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy"
-    );
+    println!("{}", uninstall_policy_hint(json_output));
     anyhow::ensure!(remaining.is_empty(), "some st3 files remain");
     println!("uninstalled");
     Ok(())
@@ -315,4 +313,19 @@ mod instance_uninstall_tests {
         remove_uninstall_path(&alias, &binary_aliases).unwrap();
         assert!(fs::symlink_metadata(&alias).is_err());
     }
+}
+
+fn uninstall_policy_hint(json_output: bool) -> &'static str {
+    if json_output {
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy"
+    } else {
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: fractal claude-channel uninstall-policy"
+    }
+}
+
+#[test]
+fn uninstall_policy_advice_preserves_json_stdout() {
+    assert_eq!(uninstall_policy_hint(true),
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy");
+    assert!(uninstall_policy_hint(false).ends_with("fractal claude-channel uninstall-policy"));
 }

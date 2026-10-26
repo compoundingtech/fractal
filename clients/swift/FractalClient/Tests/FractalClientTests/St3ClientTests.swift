@@ -391,6 +391,19 @@ final class FractalClientTests: XCTestCase {
         guard case .error = timeline.items[9].body else { return XCTFail("error body lost") }
     }
 
+    func testNativeDeliveryLinksAreOptionalAndSurviveEncoding() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/timeline-delivery-links.json"))
+        let envelope = try JSONDecoder().decode(Envelope<TimelinePage>.self, from: data)
+        XCTAssertEqual(envelope.value.items[0].delivers, "message/fixture-delivery")
+        XCTAssertNil(envelope.value.items[1].delivers)
+        for entry in envelope.value.items {
+            let again = try JSONDecoder().decode(TimelineEntry.self, from: JSONEncoder().encode(entry))
+            XCTAssertEqual(again.delivers, entry.delivers)
+        }
+    }
+
     func testExactAgentCollectionFramesDecodeRowsRemovalsAndRetryability() throws {
         let json = #"{"kind":"snapshot","id":"details","collection":"agents","items":[{"id":"agent/example/worker","kind":"agent","revision":"r1","updated_at":"2026-10-04T08:00:00Z","name":"Worker","state":"idle","reachability":"up","runtime_ids":[],"under":[]}],"order":["agent/example/worker"],"has_more":false}"#
         let frame = try JSONDecoder().decode(AgentCollectionFrame.self, from: Data(json.utf8))

@@ -935,7 +935,7 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::RuntimeListNotReady => {
             "st is still preparing the runtime list; try again shortly".into()
         }
-        ErrorCode::RuntimeListEnded => "the runtime list stopped updating; restart st".into(),
+        ErrorCode::RuntimeListEnded => "the runtime list stopped updating; restart fractal".into(),
         ErrorCode::IdempotencyConflict => {
             "this was already sent once in another form, so it was not sent again".into()
         }
@@ -1104,9 +1104,9 @@ impl Client {
 
     fn features(&self) -> &'static str {
         if self.messages_paging {
-            "custom-subjects.v1, conversation-blocks.v1, messages-paging.v2"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, messages-paging.v2"
         } else {
-            "custom-subjects.v1, conversation-blocks.v1"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1"
         }
     }
 
@@ -4391,7 +4391,7 @@ mod wire_receiver_tests {
             None,
             None,
             None,
-            "custom-subjects.v1, conversation-blocks.v1",
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1",
         )
         .unwrap();
         assert_eq!(
@@ -4948,8 +4948,8 @@ mod tests {
 
     #[test]
     fn messages_paging_is_explicit_for_every_constructor_and_websocket_request() {
-        let legacy = "custom-subjects.v1, conversation-blocks.v1";
-        let negotiated = "custom-subjects.v1, conversation-blocks.v1, messages-paging.v2";
+        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1";
+        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, messages-paging.v2";
         for client in [
             Client::unix("/unused"),
             Client::unix_as("/unused", "person/test"),

@@ -3038,6 +3038,7 @@ export type TimelineEntry = Omit<{
   body: {
 
 };
+  delivers?: string;
   final: boolean;
   id: TimelineEntryId;
   revision: number;

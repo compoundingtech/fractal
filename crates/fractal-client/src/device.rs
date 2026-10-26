@@ -322,7 +322,7 @@ impl Profile {
         let person = &self
             .devices
             .first()
-            .context("No paired member; run st devices complete URL PAIRING_ID")?
+            .context("No paired member; run fractal devices complete URL PAIRING_ID")?
             .session
             .person_id;
         ensure!(
@@ -871,9 +871,9 @@ pub async fn complete_with_options(
             suffix.len() == 24 && suffix.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         });
         if safe_id.is_some() {
-            format!("The server consumed the pairing code, but local completion failed. Possible orphaned device {created_device}; inspect it on the trusted member and revoke with `st devices revoke {created_device} --as <your-person-id>` before starting a new pairing. The previous profile was retained")
+            format!("The server consumed the pairing code, but local completion failed. Possible orphaned device {created_device}; inspect it on the trusted member and revoke with `fractal devices revoke {created_device} --as <your-person-id>` before starting a new pairing. The previous profile was retained")
         } else {
-            "The server consumed the pairing code, but local completion failed and returned an unusable device ID. Inspect `st devices ls --as <your-person-id>` on the trusted member and revoke the new device before starting a new pairing. The previous profile was retained".into()
+            "The server consumed the pairing code, but local completion failed and returned an unusable device ID. Inspect `fractal devices ls --as <your-person-id>` on the trusted member and revoke the new device before starting a new pairing. The previous profile was retained".into()
         }
     })
 }
