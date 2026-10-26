@@ -13787,15 +13787,25 @@ async fn send_message(
         )).await;
         if let Err(error) = detail {
             if fractal_daemon::client::is_not_found(&error) {
-                return Err(fractal_daemon::model::St3Error::new(
-                    "unknown-recipient",
-                    format!(
-                        "recipient `{}` is not known to this daemon; check `fractal agents ls` and fleet replication, or explicitly use --allow-undeclared-recipient if the seat exists on another host. Nothing was sent",
-                        request.to,
-                    ),
-                ).with_detail("recipient", request.to.as_str()).into());
+                // A stopped, undeclared runtime is historical, but still proves this identity
+                // existed. Exact status reads retain that evidence without scanning the fleet.
+                let evidence: fractal_daemon::model::StatusResponse = client.get(&format!(
+                    "/v1/status?subject={}", urlencoding::encode(&request.to),
+                )).await?;
+                if !evidence.subjects.iter().any(|subject| {
+                    subject.desired_token.is_some() || subject.actual_claim.is_some()
+                }) {
+                    return Err(fractal_daemon::model::St3Error::new(
+                        "unknown-recipient",
+                        format!(
+                            "recipient `{}` is not known to this daemon; check `fractal agents ls` and fleet replication, or explicitly use --allow-undeclared-recipient if the seat exists on another host. Nothing was sent",
+                            request.to,
+                        ),
+                    ).with_detail("recipient", request.to.as_str()).into());
+                }
+            } else {
+                return Err(error);
             }
-            return Err(error);
         }
     }
     match client.send_message(&request).await {

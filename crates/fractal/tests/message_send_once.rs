@@ -664,3 +664,26 @@ async fn a_replicated_remote_stopped_agent_is_a_known_recipient() {
     assert_eq!(message_count(&store), 1);
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_evidence_without_a_declaration_keeps_running_and_stopped_recipients_known() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    for (recipient, status) in [("agent/alex/tester", "running"), ("agent/alex/reviewer", "stopped")] {
+        store.append_claim(&fractal_daemon::model::ClaimInput {
+            subject: recipient.into(), kind: "runtime.observed".into(),
+            actor: Some(recipient.into()),
+            fields: serde_json::from_value(serde_json::json!({
+                "status": status, "runtime_id": recipient, "incarnation_id": "fixture",
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let sent = value(&st(&socket, &[], &[
+            "--json", "conversations", "send", recipient,
+            "--from", PERSON, "--body", "Please check.",
+        ]).await);
+        assert_eq!(sent["requested_recipient"], recipient);
+    }
+    assert_eq!(message_count(&store), 2);
+    server.abort();
+}
