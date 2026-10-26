@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Build iOS landing screenshots with Apple's native compiler and SDK rather than inherited Nix compiler overrides",
+  "replay": {"status": "none", "detail": "Screenshot tooling only; no replay changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No app, client protocol, or harness changes."},
+  "downtime": {"status": "none", "detail": "No service restart or deployment."},
+  "manual": {"status": "none", "detail": "No upgrade steps; native screenshot commands isolate their toolchain automatically."},
+  "recovery": {"status": "none", "detail": "No data migration or recovery action."}
+}
