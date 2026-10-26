@@ -1661,6 +1661,95 @@ export const AttentionActor = /*#__PURE__*/ (() => Schema.Struct({
 export type AttentionActor = typeof AttentionActor.Type
 export type AttentionActorEncoded = typeof AttentionActor.Encoded
 
+export const AttentionLaunchAgent = /*#__PURE__*/ (() => Schema.Struct({
+  /** The harness its seat runs, when st knows it. */
+  "harness": Schema.OptionFromNullOr(Schema.String).annotate({ description: "The harness its seat runs, when st knows it." }),
+  /** The host its seat runs on, when st knows it. */
+  "host": Schema.OptionFromNullOr(Schema.String).annotate({ description: "The host its seat runs on, when st knows it." }),
+  "id": Id,
+  "label": Schema.String
+}).annotate({ identifier: "AttentionLaunchAgent" }))()
+export type AttentionLaunchAgent = typeof AttentionLaunchAgent.Type
+export type AttentionLaunchAgentEncoded = typeof AttentionLaunchAgent.Encoded
+
+export const AttentionLaunchAssignee = /*#__PURE__*/ (() => Schema.Struct({
+  /** The agent, for `agent`. */
+  "agent": Schema.OptionFromNullOr(Id).annotate({ description: "The agent, for `agent`." }),
+  /** `agent` (one named agent), `any` (any of several), `st` (no agent) or `none`. A client shows a kind it does not know by its label. */
+  "kind": Schema.String.annotate({ description: "`agent` (one named agent), `any` (any of several), `st` (no agent) or `none`. A client shows a kind it does not know by its label." }),
+  /** The words a person reads. */
+  "label": Schema.String.annotate({ description: "The words a person reads." })
+}).annotate({ identifier: "AttentionLaunchAssignee" }))()
+export type AttentionLaunchAssignee = typeof AttentionLaunchAssignee.Type
+export type AttentionLaunchAssigneeEncoded = typeof AttentionLaunchAssignee.Encoded
+
+export const AttentionLaunchStep = /*#__PURE__*/ (() => Schema.Struct({
+  /** The paths of the steps it waits for. */
+  "after": Schema.Array(Schema.String).annotate({ description: "The paths of the steps it waits for." }),
+  /** Whether the step stops for a person. */
+  "asks_you": Schema.Boolean.annotate({ description: "Whether the step stops for a person." }),
+  "assignee": AttentionLaunchAssignee,
+  "path": Schema.String,
+  "title": Schema.String
+}).annotate({ identifier: "AttentionLaunchStep" }))()
+export type AttentionLaunchStep = typeof AttentionLaunchStep.Type
+export type AttentionLaunchStepEncoded = typeof AttentionLaunchStep.Encoded
+
+/** A launch card's preview of its newest variant's mission. */
+export const AttentionLaunchPreview = /*#__PURE__*/ (() => Schema.Struct({
+  /** The agents its steps name, each once. */
+  "agents": Schema.Array(AttentionLaunchAgent).annotate({ description: "The agents its steps name, each once." }),
+  /** How many steps stop for a person. */
+  "asks_you": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "How many steps stop for a person." }),
+  "goals": Schema.Array(Schema.String),
+  /** In display order, without finally steps. */
+  "steps": Schema.Array(AttentionLaunchStep).annotate({ description: "In display order, without finally steps." }),
+  /** The variant previewed: the launch's newest. */
+  "variant": Schema.String.annotate({ description: "The variant previewed: the launch's newest." })
+}).annotate({ identifier: "AttentionLaunchPreview", description: "A launch card's preview of its newest variant's mission." }))()
+export type AttentionLaunchPreview = typeof AttentionLaunchPreview.Type
+export type AttentionLaunchPreviewEncoded = typeof AttentionLaunchPreview.Encoded
+
+export const AttentionLaunchUnavailableReason = /*#__PURE__*/ (() => Schema.Struct({
+  /** The planner's first diagnostics, at most three. */
+  "diagnostics": Schema.Array(Schema.String).check(Schema.isMaxLength(3)).annotate({ description: "The planner's first diagnostics, at most three." }),
+  /** Why there is no preview, in plain words. */
+  "reason": Schema.String.annotate({ description: "Why there is no preview, in plain words." })
+}).annotate({ identifier: "AttentionLaunchUnavailableReason" }))()
+export type AttentionLaunchUnavailableReason = typeof AttentionLaunchUnavailableReason.Type
+export type AttentionLaunchUnavailableReasonEncoded = typeof AttentionLaunchUnavailableReason.Encoded
+
+/** A launch card with no variant st can preview. */
+export const AttentionLaunchUnavailable = /*#__PURE__*/ (() => Schema.Struct({
+  "unavailable": AttentionLaunchUnavailableReason
+}).annotate({ identifier: "AttentionLaunchUnavailable", description: "A launch card with no variant st can preview." }))()
+export type AttentionLaunchUnavailable = typeof AttentionLaunchUnavailable.Type
+export type AttentionLaunchUnavailableEncoded = typeof AttentionLaunchUnavailable.Encoded
+
+export const AttentionPromptCall = /*#__PURE__*/ (() => Schema.Struct({
+  "call_id": Schema.String,
+  /** The call's arguments as JSON text, cut at 4 KiB. */
+  "input": Schema.String.check(Schema.isMaxLength(4096)).annotate({ description: "The call's arguments as JSON text, cut at 4 KiB." }),
+  /** False when `input` was cut. */
+  "input_complete": Schema.Boolean.annotate({ description: "False when `input` was cut." }),
+  "tool": Schema.String
+}).annotate({ identifier: "AttentionPromptCall" }))()
+export type AttentionPromptCall = typeof AttentionPromptCall.Type
+export type AttentionPromptCallEncoded = typeof AttentionPromptCall.Encoded
+
+export const AttentionPrompt = /*#__PURE__*/ (() => Schema.Struct({
+  /** True only when exactly one call is pending and its input is complete: only then is it certain which call an answer is for. */
+  "allow": Schema.Boolean.annotate({ description: "True only when exactly one call is pending and its input is complete: only then is it certain which call an answer is for." }),
+  /** The answers `prompt.respond` takes, from action_parameters. */
+  "answers": Schema.Array(Schema.String).annotate({ description: "The answers `prompt.respond` takes, from action_parameters." }),
+  /** The tool calls without a result in the seat's conversation at the observation, oldest first; null when st cannot read the timeline (see unknown_reason). */
+  "calls": Schema.OptionFromNullOr(Schema.Array(AttentionPromptCall).check(Schema.isMaxLength(5))).annotate({ description: "The tool calls without a result in the seat's conversation at the observation, oldest first; null when st cannot read the timeline (see unknown_reason)." }),
+  /** Why `calls` is null; the card then says to answer in the terminal. */
+  "unknown_reason": optionalKey(Schema.String).annotate({ description: "Why `calls` is null; the card then says to answer in the terminal." })
+}).annotate({ identifier: "AttentionPrompt" }))()
+export type AttentionPrompt = typeof AttentionPrompt.Type
+export type AttentionPromptEncoded = typeof AttentionPrompt.Encoded
+
 export const AttentionRevisionLine = /*#__PURE__*/ (() => Schema.Struct({
   /** + adds a step, - removes one, ~ changes the mission or a step. */
   "op": Schema.Literals(["+","-","~"]).annotate({ description: "+ adds a step, - removes one, ~ changes the mission or a step." }),
@@ -1707,6 +1796,10 @@ export const AttentionPresentation = /*#__PURE__*/ (() => Schema.Struct({
   "login",
   "fault"
 ])).annotate({ description: "The card; null for a row that is no card (an unread message stays in its conversation)." }),
+  /** On a launch card: the newest variant's mission, or why st cannot preview it. Absent elsewhere. */
+  "launch": optionalKey(Schema.Union([AttentionLaunchPreview, AttentionLaunchUnavailable], { mode: "oneOf" })).annotate({ description: "On a launch card: the newest variant's mission, or why st cannot preview it. Absent elsewhere." }),
+  /** On a harness-prompt card: the tool calls the prompt can be about and the answers it takes. Absent elsewhere. */
+  "prompt": optionalKey(AttentionPrompt),
   /** Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission. */
   "raised_by": Schema.OptionFromNullOr(AttentionActor).annotate({ description: "Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission." }),
   /** On a revision card: what the candidate revision changes. Absent elsewhere, and when st no longer has the proposal or either revision. */

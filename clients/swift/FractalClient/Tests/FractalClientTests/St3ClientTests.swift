@@ -741,4 +741,24 @@ private final class WebSocketCaptureSession: URLSession, @unchecked Sendable {
     override func invalidateAndCancel() {
         backing.invalidateAndCancel()
     }
+
+    func testAttentionPresentationDecodesALaunchPreviewAnUnavailableLaunchAndAPrompt() throws {
+        let decode = { (json: String) in try JSONDecoder().decode(AttentionPresentation.self, from: Data(json.utf8)) }
+        let base = #""tier":"today","kind":"launch","agent":null,"raised_by":null,"waiting":null"#
+        let preview = try decode(#"{\#(base),"launch":{"variant":"variant/default","goals":["Audit."],"asks_you":1,"steps":[{"path":"approve","title":"Approve","assignee":{"kind":"st","agent":null,"label":"st"},"after":["prepare"],"asks_you":true}],"agents":[{"id":"agent/example/oak","label":"Oak","harness":"claude","host":null}]}}"#)
+        XCTAssertEqual(preview.launch?.variant, "variant/default")
+        XCTAssertEqual(preview.launch?.steps?.first?.assignee.kind, "st")
+        XCTAssertEqual(preview.launch?.asksYou, 1)
+        XCTAssertNil(preview.launch?.unavailable)
+        let unavailable = try decode(#"{\#(base),"launch":{"unavailable":{"reason":"No mission yet.","diagnostics":["a blocker"]}}}"#)
+        XCTAssertNil(unavailable.launch?.variant)
+        XCTAssertEqual(unavailable.launch?.unavailable?.diagnostics, ["a blocker"])
+        let prompt = try decode(#"{\#(base),"prompt":{"calls":[{"call_id":"call-1","tool":"Bash","input":"{}","input_complete":true}],"answers":["allow","deny"],"allow":true}}"#)
+        XCTAssertEqual(prompt.prompt?.calls?.first?.callID, "call-1")
+        XCTAssertEqual(prompt.prompt?.allow, true)
+        let unread = try decode(#"{\#(base),"prompt":{"calls":null,"answers":[],"allow":false,"unknown_reason":"the timeline cannot be read"}}"#)
+        XCTAssertNil(unread.prompt?.calls)
+        // A row from a daemon that serves neither still decodes.
+        XCTAssertNil(try decode("{\(base)}").launch)
+    }
 }

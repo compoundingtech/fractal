@@ -1602,7 +1602,9 @@
         "agent": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff." },
         "raised_by": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission." },
         "waiting": { "oneOf": [{ "$ref": "#/$defs/AttentionWaiting" }, { "type": "null" }], "description": "The step it holds." },
-        "revision": { "$ref": "#/$defs/AttentionRevision", "description": "On a revision card: what the candidate revision changes. Absent elsewhere, and when st no longer has the proposal or either revision." }
+        "revision": { "$ref": "#/$defs/AttentionRevision", "description": "On a revision card: what the candidate revision changes. Absent elsewhere, and when st no longer has the proposal or either revision." },
+        "launch": { "oneOf": [{ "$ref": "#/$defs/AttentionLaunchPreview" }, { "$ref": "#/$defs/AttentionLaunchUnavailable" }], "description": "On a launch card: the newest variant's mission, or why st cannot preview it. Absent elsewhere." },
+        "prompt": { "$ref": "#/$defs/AttentionPrompt", "description": "On a harness-prompt card: the tool calls the prompt can be about and the answers it takes. Absent elsewhere." }
       }
     },
     "AttentionRevision": {
@@ -1622,6 +1624,84 @@
       "properties": {
         "op": { "enum": ["+", "-", "~"], "description": "+ adds a step, - removes one, ~ changes the mission or a step." },
         "text": { "type": "string", "description": "In plain words: `step PATH`, or `PATH: fields` and `mission: fields` for a change." }
+      }
+    },
+    "AttentionLaunchPreview": {
+      "type": "object",
+      "description": "A launch card's preview of its newest variant's mission.",
+      "required": ["variant", "goals", "steps", "agents", "asks_you"],
+      "properties": {
+        "variant": { "type": "string", "description": "The variant previewed: the launch's newest." },
+        "goals": { "type": "array", "items": { "type": "string" } },
+        "steps": { "type": "array", "items": { "$ref": "#/$defs/AttentionLaunchStep" }, "description": "In display order, without finally steps." },
+        "agents": { "type": "array", "items": { "$ref": "#/$defs/AttentionLaunchAgent" }, "description": "The agents its steps name, each once." },
+        "asks_you": { "type": "integer", "minimum": 0, "description": "How many steps stop for a person." }
+      }
+    },
+    "AttentionLaunchStep": {
+      "type": "object",
+      "required": ["path", "title", "assignee", "after", "asks_you"],
+      "properties": {
+        "path": { "type": "string" },
+        "title": { "type": "string" },
+        "assignee": { "$ref": "#/$defs/AttentionLaunchAssignee" },
+        "after": { "type": "array", "items": { "type": "string" }, "description": "The paths of the steps it waits for." },
+        "asks_you": { "type": "boolean", "description": "Whether the step stops for a person." }
+      }
+    },
+    "AttentionLaunchAssignee": {
+      "type": "object",
+      "required": ["kind", "agent", "label"],
+      "properties": {
+        "kind": { "type": "string", "description": "`agent` (one named agent), `any` (any of several), `st` (no agent) or `none`. A client shows a kind it does not know by its label." },
+        "agent": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }], "description": "The agent, for `agent`." },
+        "label": { "type": "string", "description": "The words a person reads." }
+      }
+    },
+    "AttentionLaunchAgent": {
+      "type": "object",
+      "required": ["id", "label", "harness", "host"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id" },
+        "label": { "type": "string" },
+        "harness": { "type": ["string", "null"], "description": "The harness its seat runs, when st knows it." },
+        "host": { "type": ["string", "null"], "description": "The host its seat runs on, when st knows it." }
+      }
+    },
+    "AttentionLaunchUnavailable": {
+      "type": "object",
+      "description": "A launch card with no variant st can preview.",
+      "required": ["unavailable"],
+      "properties": {
+        "unavailable": { "$ref": "#/$defs/AttentionLaunchUnavailableReason" }
+      }
+    },
+    "AttentionLaunchUnavailableReason": {
+      "type": "object",
+      "required": ["reason", "diagnostics"],
+      "properties": {
+        "reason": { "type": "string", "description": "Why there is no preview, in plain words." },
+        "diagnostics": { "type": "array", "maxItems": 3, "items": { "type": "string" }, "description": "The planner's first diagnostics, at most three." }
+      }
+    },
+    "AttentionPrompt": {
+      "type": "object",
+      "required": ["calls", "answers", "allow"],
+      "properties": {
+        "calls": { "oneOf": [{ "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/AttentionPromptCall" } }, { "type": "null" }], "description": "The tool calls without a result in the seat's conversation at the observation, oldest first; null when st cannot read the timeline (see unknown_reason)." },
+        "answers": { "type": "array", "items": { "type": "string" }, "description": "The answers `prompt.respond` takes, from action_parameters." },
+        "allow": { "type": "boolean", "description": "True only when exactly one call is pending and its input is complete: only then is it certain which call an answer is for." },
+        "unknown_reason": { "type": "string", "description": "Why `calls` is null; the card then says to answer in the terminal." }
+      }
+    },
+    "AttentionPromptCall": {
+      "type": "object",
+      "required": ["call_id", "tool", "input", "input_complete"],
+      "properties": {
+        "call_id": { "type": "string" },
+        "tool": { "type": "string" },
+        "input": { "type": "string", "maxLength": 4096, "description": "The call's arguments as JSON text, cut at 4 KiB." },
+        "input_complete": { "type": "boolean", "description": "False when `input` was cut." }
       }
     },
     "AttentionActor": {

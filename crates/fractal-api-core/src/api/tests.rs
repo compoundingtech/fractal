@@ -5693,6 +5693,87 @@ mission "planned/direct" state="ready" {
     );
 }
 
+#[tokio::test]
+async fn a_launch_card_previews_its_newest_variant_once_it_has_one() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let request = store
+        .put_document("doc/planning/card/request", b"Inspect the release.", &None, "card-request")
+        .unwrap();
+    let session = "planning/card/one";
+    let source = format!(
+        r#"version 2
+planning-session {session:?} {{
+  mission "planned/card"
+  request {:?}
+  workspace {:?}
+  requester "person/operator"
+  planner "codex" {{ model "gpt-5.6-sol"; effort "medium" }}
+}}
+"#,
+        format!("{}@{}", request.name, request.hash),
+        workspace.display().to_string(),
+    );
+    let intent = parse_intent(&source, "node").unwrap();
+    let applied = store
+        .mission(&intent, crate::model::IntentInput { kdl: source, source_name: None })
+        .unwrap();
+    store
+        .apply_as(&intent, &applied.subject_tokens, "card-session", Some("person/operator"))
+        .unwrap();
+    let card = |store: &Store| {
+        launch_card::launch_card(store, &json!({"launch_id": format!("launch/{session}")}), |_| None)
+            .unwrap()
+            .expect("st has the launch")
+    };
+    // Nothing proposed yet: the card says so.
+    assert_eq!(card(&store)["unavailable"]["reason"], "The planner has not proposed a mission yet.");
+    assert!(
+        launch_card::launch_card(&store, &json!({"launch_id": "launch/planning/card/gone"}), |_| None)
+            .unwrap()
+            .is_none(),
+        "a launch st no longer has names nothing"
+    );
+
+    let planner = crate::graph::planning_planner_subject(&format!("planning-session/{session}"));
+    let app = router(state);
+    let encoded = urlencoding::encode(session);
+    let candidate = br#"version 2
+mission "planned/card" state="ready" {
+  goal "Inspect the release."
+  step "inspect" { goal "Inspect the release input." }
+}
+"#;
+    let (status, submitted) = json_request(
+        app.clone(),
+        &format!("/v1/launches/{encoded}/submit"),
+        serde_json::to_value(PlanningCandidateSubmitRequest {
+            actor: planner,
+            markdown: b"# Mission\n\nInspect the release input.\n".to_vec(),
+            kdl: candidate.to_vec(),
+            idempotency_key: "card-candidate".into(),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{submitted}");
+    let (status, previewed) =
+        json_request(app, &format!("/v1/launches/{encoded}/preview"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{previewed}");
+    // Once previewed, the card shows the newest variant's mission.
+    let launch = card(&store);
+    assert!(launch.get("unavailable").is_none(), "{launch}");
+    assert_eq!(launch["goals"], json!(["Inspect the release."]));
+    assert_eq!(launch["steps"][0]["path"], "inspect");
+    assert_eq!(launch["steps"][0]["assignee"]["kind"], "none");
+    assert_eq!(launch["asks_you"], 0);
+    assert!(launch["variant"].as_str().is_some_and(|variant| !variant.is_empty()));
+    serde_json::from_value::<fractal_client::AttentionLaunch>(launch).unwrap();
+}
+
 #[test]
 fn an_agent_known_only_from_its_own_harness_observations_is_history() {
     let root = tempfile::tempdir().unwrap();
