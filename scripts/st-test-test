@@ -557,7 +557,7 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo', '--status')[0], 3)
 
     def pool(self):
-        return next((self.home / '.cache/st-test').iterdir())
+        return next((self.home / '.cache/st-test/pools').iterdir())
 
     def test_the_light_checks_run_alongside_the_one_that_builds_and_their_output_follows_it(self):
         self.commit('b.txt', 'two')
@@ -769,6 +769,20 @@ class StTest(unittest.TestCase):
         self.assertRegex(err.getvalue(), r'evicted repo-b/tree-0 and target-0 \(0\.\d GB, idle \d+ min\)')
         self.assertIn('evicted repo-a/tree-1', err.getvalue())
 
+    def test_the_cap_evicts_old_layout_units_and_origin_pool_units_alike_oldest_first(self):
+        base = Path(self.tmp.name) / 'pool2'
+        self.fake_unit(base, 'old-clone-key', 0, 200, 1_000)        # the layout before origin pools
+        self.fake_unit(base / 'pools', 'o-shared', 0, 200, 2_000)   # an origin pool
+        self.fake_unit(base / 'pools', 'o-shared', 1, 200, 4_000)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            st_test.evict_to_cap(base, 0.0007, keep=(base / 'pools' / 'o-shared', 1))  # room for about one unit of 400 KB
+        self.assertFalse((base / 'old-clone-key/tree-0').exists())
+        self.assertFalse((base / 'pools/o-shared/tree-0').exists())
+        self.assertTrue((base / 'pools/o-shared/tree-1').exists())
+        self.assertRegex(err.getvalue(), r'evicted old-clone-key/tree-0 and target-0')
+        self.assertRegex(err.getvalue(), r'evicted o-shared/tree-0 and target-0')
+
     def test_a_pool_under_its_cap_loses_nothing_and_the_cap_can_be_turned_off(self):
         base = Path(self.tmp.name) / 'pool'
         self.fake_unit(base, 'repo-a', 0, 100, 1_000)
@@ -794,10 +808,97 @@ class StTest(unittest.TestCase):
         self.assertFalse((base / 'other-repo/tree-0').exists())
         self.assertFalse((base / 'other-repo/target-0').exists())
         self.assertIn('evicted other-repo/tree-0', err)
-        own, = [path for path in base.iterdir() if path.name != 'other-repo']
+        own = self.pool()
         self.assertTrue((own / 'tree-0').is_dir())  # this run's own tree stays, whatever its size
         self.assertEqual(self.run_st_test('--check', 'demo', extra_env={'ST_TEST_POOL_MAX_GB': '0.0001'})[0], 0)
 
+    def clone_of_origin(self, name, remote=None):
+        clone = Path(self.tmp.name) / name
+        git(Path(self.tmp.name), 'clone', '-q', remote or str(Path(self.tmp.name) / 'origin.git'), str(clone))
+        return clone
+
+    def run_in(self, clone, *args, command=None, extra_env=None):
+        saved = self.work
+        self.work = clone
+        try:
+            return self.run_st_test(*args, command=command, extra_env=extra_env)
+        finally:
+            self.work = saved
+
+    def test_origins_are_normalised_so_every_way_of_cloning_one_repository_names_one_pool(self):
+        same = ['https://github.com/Org/Repo.git', 'https://user@github.com/org/repo', 'git@github.com:org/repo.git', 'ssh://git@github.com:22/org/repo.git',
+                'https://GitHub.com/org/repo/']
+        self.assertEqual({st_test.normalise_origin(url) for url in same}, {'github.com/org/repo'})
+        self.assertNotEqual(st_test.normalise_origin('https://github.com/org/other'), 'github.com/org/repo')
+        self.assertEqual(st_test.normalise_origin('/srv/git/repo.git'), '/srv/git/repo')  # a local path stays a path
+
+    def test_a_clone_of_the_same_origin_takes_the_warm_slot_at_the_same_path_with_the_kept_inputs(self):
+        ignored = '/repos/\nnode_modules/\n/target/\nstray.txt\n'  # as the repository's .gitignore: the kept inputs are not untracked files
+        self.commit('.gitignore', ignored)
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'pwd -P >> {seen}']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        tree = (self.pool() / 'tree-0').resolve()
+        for name in ('repos/member/lib.ts', 'apps/web/node_modules/pkg/index.js', 'node_modules/.pnpm/x', 'target/compat-baselines/abc/bin', 'stray.txt'):
+            (tree / name).parent.mkdir(parents=True, exist_ok=True)
+            (tree / name).write_text('x')
+        (self.pool() / 'target-0').mkdir(exist_ok=True)
+        (self.pool() / 'target-0/dep').write_text('warm registry dependency')
+        other = self.clone_of_origin('second-clone')
+        git(other, 'checkout', '-q', '-b', 'topic', 'origin/main')
+        (other / 'c.txt').write_text('three')
+        (other / '.gitignore').write_text(ignored)
+        git(other, 'add', '.')
+        git(other, 'commit', '-q', '-m', 'topic')
+        code, out, err = self.run_in(other, '--check', 'demo', command=command)
+        self.assertEqual(code, 0, out + err)
+        pools = list((self.home / '.cache/st-test/pools').iterdir())
+        self.assertEqual(len(pools), 1, 'the second clone shares the first one\'s pool, it does not start another')
+        self.assertEqual(seen.read_text().split(), [str(tree)] * 2)  # the same path: the workspace crates stay warm
+        self.assertEqual((tree / 'c.txt').read_text(), 'three')  # the second clone's commit
+        self.assertEqual(git(tree, 'rev-parse', '--git-common-dir'), str((other / '.git').resolve()))  # a worktree of THIS clone now
+        for kept in ('repos/member/lib.ts', 'apps/web/node_modules/pkg/index.js', 'node_modules/.pnpm/x', 'target/compat-baselines/abc/bin'):
+            self.assertTrue((tree / kept).exists(), kept)
+        self.assertFalse((tree / 'stray.txt').exists())
+        self.assertEqual((self.pool() / 'target-0/dep').read_text(), 'warm registry dependency')  # the target is shared too
+        self.assertFalse((tree.parent / 'tree-0.adopting').exists())
+        # and back again: the first clone takes it over once more
+        code, out, err = self.run_st_test('--check', 'demo', command=command)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(git(tree, 'rev-parse', '--git-common-dir'), str((self.work / '.git').resolve()))
+        self.assertTrue((tree / 'repos/member/lib.ts').exists())
+
+    def test_two_clones_at_once_take_different_slots_of_the_one_pool(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'pwd -P >> {seen}']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        held = open(self.pool() / 'tree-0.lock', 'a')  # a run of the first clone holds slot 0
+        self.addCleanup(held.close)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        other = self.clone_of_origin('third-clone')
+        git(other, 'checkout', '-q', '-b', 'topic2', 'origin/main')
+        self.assertEqual(self.run_in(other, '--check', 'demo', command=command)[0], 0)
+        self.assertEqual([Path(line).name for line in seen.read_text().split()], ['tree-0', 'tree-1'])
+        self.assertEqual(len(list((self.home / '.cache/st-test/pools').iterdir())), 1)
+
+    def test_a_clone_with_another_origin_or_none_does_not_share_the_pool(self):
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        lonely = Path(self.tmp.name) / 'lonely'
+        git(Path(self.tmp.name), 'clone', '-q', str(self.work), str(lonely))  # its origin is the first clone, a different repository
+        git(lonely, 'checkout', '-q', 'feature')
+        self.assertEqual(self.run_in(lonely, '--check', 'demo')[0], 0)
+        self.assertEqual(len(list((self.home / '.cache/st-test/pools').iterdir())), 2)
+        git(lonely, 'remote', 'remove', 'origin')
+        before = os.getcwd()
+        os.chdir(lonely)
+        try:
+            with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), mock.patch.dict(os.environ, {'HOME': str(self.home)}):
+                self.assertTrue(st_test.pool_root().name.startswith('c-'))  # no origin: its own git common dir
+        finally:
+            os.chdir(before)
     def main_commits(self, name, content):
         """A commit on main after the branch left it (pushed), then back on the feature branch."""
         git(self.work, 'checkout', '-q', 'main')
