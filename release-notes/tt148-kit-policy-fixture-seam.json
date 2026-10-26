@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep strict kit-play case policy source-controlled in production and pass fixture policies explicitly through the test runner function.",
+  "replay": { "status": "none", "detail": "CI test infrastructure only; no replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "The production kit-play entry point rejects KIT_PLAY_CASE_OVERRIDES when set, including an empty value. Production requirements always use the reviewed source policy. Fixture tests use an explicit runner parameter when custom policy is needed; the critical-story rejection fixture includes the policy's aliases and kept base stories." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

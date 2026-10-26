@@ -580,7 +580,7 @@ fn missing_delivery_is_advisory_while_an_invalid_delivery_is_a_catalog_problem()
 
 #[test]
 fn observed_harness_state_arms_are_advisory_except_a_fresh_live_record() {
-    use st2::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
+    use fractal_legacy_runner::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
 
     let tmp = tempfile::tempdir().unwrap();
     let catalog = tmp.path().join("catalog");
@@ -656,7 +656,7 @@ fn observed_harness_state_arms_are_advisory_except_a_fresh_live_record() {
 
 #[test]
 fn native_driver_diagnostic_roster_and_doctor_agree_and_recovery_clears() {
-    use st2::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage, Support};
+    use fractal_legacy_runner::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage, Support};
 
     let tmp = tempfile::tempdir().unwrap();
     let catalog = tmp.path().join("catalog");
@@ -704,8 +704,8 @@ fn native_driver_diagnostic_roster_and_doctor_agree_and_recovery_clears() {
         "{stdout}"
     );
     assert!(
-        stdout.contains(st2::driver_diagnostic::repair_text(
-            &st2::driver_diagnostic::read(&st2::driver_diagnostic::path(agent_dir))
+        stdout.contains(fractal_legacy_runner::driver_diagnostic::repair_text(
+            &fractal_legacy_runner::driver_diagnostic::read(&fractal_legacy_runner::driver_diagnostic::path(agent_dir))
         )),
         "{stdout}"
     );
@@ -720,7 +720,7 @@ fn native_driver_diagnostic_roster_and_doctor_agree_and_recovery_clears() {
     );
     assert!(!stdout.contains("seed/unknownStatus"), "{stdout}");
 
-    fs::write(st2::driver_diagnostic::path(agent_dir), b"{bad").unwrap();
+    fs::write(fractal_legacy_runner::driver_diagnostic::path(agent_dir), b"{bad").unwrap();
     let malformed = doctor(&catalog, &bin, &tmp.path().join("state"));
     let stdout = String::from_utf8_lossy(&malformed.stdout);
     assert!(malformed.status.success(), "{stdout}");
@@ -737,7 +737,7 @@ fn native_driver_diagnostic_roster_and_doctor_agree_and_recovery_clears() {
 /// needs a human.
 #[test]
 fn a_rejected_provider_credential_advises_while_absence_stays_silent() {
-    use st2::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage, Support};
+    use fractal_legacy_runner::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage, Support};
 
     for (block, driver, word) in [
         ("claude", Driver::Claude, "claude"),
@@ -823,7 +823,7 @@ fn a_rejected_provider_credential_advises_while_absence_stays_silent() {
 /// nothing at all. Nothing here can fail a health check on an unfenced, advisory number.
 #[test]
 fn harness_context_doctor_lines_are_advisory_and_never_change_the_exit_status() {
-    use st2::harness_context::{Harness, Reading, Writer, harness_context_path};
+    use fractal_legacy_runner::harness_context::{Harness, Reading, Writer, harness_context_path};
 
     let tmp = tempfile::tempdir().unwrap();
     let catalog = tmp.path().join("catalog");
@@ -893,8 +893,8 @@ fn harness_context_doctor_lines_are_advisory_and_never_change_the_exit_status() 
     // the reading past the horizon exactly as the passage of time would.
     let path = harness_context_path(&agent_dir);
     let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    let aged = st2::message::now_ms()
-        - u64::try_from(st2::harness_context::HARNESS_CONTEXT_STALE.as_millis()).unwrap()
+    let aged = fractal_legacy_runner::message::now_ms()
+        - u64::try_from(fractal_legacy_runner::harness_context::HARNESS_CONTEXT_STALE.as_millis()).unwrap()
         - 60_000;
     record["observedAtMs"] = serde_json::json!(aged);
     record["usedPercent"] = serde_json::json!(12.0);

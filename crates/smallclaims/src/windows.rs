@@ -14,6 +14,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+pub mod holds;
+mod intervals;
+pub mod wal;
+pub use intervals::{IntervalSeries, MinuteSummary, histogram_upper_ms, histogram_lower_ms};
+
 /// The windows every series keeps: name, slot width and slot count.
 const TIERS: [(&str, u64, usize); 3] = [("1m", 5, 12), ("5m", 30, 10), ("1h", 300, 12)];
 
@@ -50,9 +55,10 @@ fn upper(bucket: u16) -> u64 {
 struct Histogram {
     count: u64,
     over: u64,
+    /// Histogram unit: microseconds for Series, integer milliseconds for IntervalSeries.
     max_us: u64,
     /// Sorted by bucket.
-    buckets: Vec<(u16, u32)>,
+    buckets: Vec<(u16, u64)>,
 }
 
 impl Histogram {
@@ -84,7 +90,7 @@ impl Histogram {
         let rank = (self.count * percent).div_ceil(100).max(1);
         let mut seen = 0;
         for &(bucket, count) in &self.buckets {
-            seen += u64::from(count);
+            seen += count;
             if seen >= rank {
                 return upper(bucket).min(self.max_us);
             }
@@ -209,14 +215,23 @@ pub enum StoreWork {
     WriteTransaction,
     /// The single writer held by one batch or one lent write.
     WriterHold,
+    /// Waiting for the replication snapshot's build lock, which one build holds at a time.
+    SnapshotBuildWait,
+    /// Reading the envelope inventory for a replication snapshot.
+    SnapshotInventory,
+    /// Hashing a replication snapshot's inventory, graph and projection digests.
+    SnapshotDigest,
 }
 
 impl StoreWork {
-    pub const ALL: [StoreWork; 4] = [
+    pub const ALL: [StoreWork; 7] = [
         StoreWork::Statement,
         StoreWork::ReadTransaction,
         StoreWork::WriteTransaction,
         StoreWork::WriterHold,
+        StoreWork::SnapshotBuildWait,
+        StoreWork::SnapshotInventory,
+        StoreWork::SnapshotDigest,
     ];
 
     pub fn name(self) -> &'static str {
@@ -225,6 +240,9 @@ impl StoreWork {
             StoreWork::ReadTransaction => "read-transaction",
             StoreWork::WriteTransaction => "write-transaction",
             StoreWork::WriterHold => "writer-hold",
+            StoreWork::SnapshotBuildWait => "snapshot-build-wait",
+            StoreWork::SnapshotInventory => "snapshot-inventory",
+            StoreWork::SnapshotDigest => "snapshot-digest",
         }
     }
 }
@@ -235,14 +253,14 @@ struct StoreSeries {
     series: Series,
 }
 
-static STORE: [Mutex<StoreSeries>; 4] = [const {
+static STORE: [Mutex<StoreSeries>; StoreWork::ALL.len()] = [const {
     Mutex::new(StoreSeries {
         target: None,
         series: Series {
             rings: [Vec::new(), Vec::new(), Vec::new()],
         },
     })
-}; 4];
+}; StoreWork::ALL.len()];
 
 fn store(kind: StoreWork) -> &'static Mutex<StoreSeries> {
     &STORE[StoreWork::ALL.iter().position(|k| *k == kind).unwrap_or(0)]
@@ -256,11 +274,13 @@ pub fn set_store_target(kind: StoreWork, target: Option<Duration>) {
         .target = target;
 }
 
-pub fn record_store(kind: StoreWork, duration: Duration) {
+/// Count one sample of the store's work, and say whether it missed its target.
+pub fn record_store(kind: StoreWork, duration: Duration) -> bool {
     let now = Instant::now();
     let mut store = store(kind).lock().unwrap_or_else(PoisonError::into_inner);
     let over = store.target.is_some_and(|target| duration > target);
     store.series.record(now, duration, over);
+    over
 }
 
 /// A copy of one store series, to read or to merge with another.

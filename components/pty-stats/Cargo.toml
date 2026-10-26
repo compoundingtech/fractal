@@ -1,5 +1,5 @@
 [package]
-name = "st2-pty-stats-component"
+name = "fractal-pty-stats-component"
 version = "0.1.0"
 edition = "2024"
 publish = false

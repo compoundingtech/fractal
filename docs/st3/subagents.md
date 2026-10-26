@@ -1,9 +1,9 @@
 # Subagents
 
 A subagent is a helper that a seat's harness runs inside its own session: a Claude subagent
-started with the Agent tool, or a Codex subagent thread. It is not a seat or a mission. st records
-each subagent as claims on its parent seat, from the harness's hooks and events, and never asks the
-agent about it.
+started with the Agent tool, a Codex subagent thread, or an omp subagent session. It is not a seat
+or a mission. st records each subagent as claims on its parent seat, from the harness's hooks and
+events, and never asks the agent about it.
 
 ## Claims
 
@@ -29,8 +29,11 @@ harness records:
 
 - `PreToolUse` for the Agent tool gives the launch's description and type.
 - `SubagentStart` starts the subagent.
-- `SubagentStop` ends it as `completed`. A stop for an agent that never started is Claude's trailing
-  phantom stop, and it changes nothing.
+- `SubagentStop` reads the child's last assistant transcript record: `isApiErrorMessage` ends it
+  as `failed`, `isAbortedMidStream` as `interrupted`, otherwise `completed`. Retry diagnostics
+  (`system/api_error`) do not count as a failed run. A missing or unreadable transcript retains
+  the stop's ordinary `completed` outcome. A stop for an agent that never started is Claude's
+  trailing phantom stop, and it changes nothing.
 - Each top-level `Stop` lists the background subagents still running. One missing from that list
   for ten seconds ends as `interrupted`.
 - A new session or `SessionEnd` ends the session's subagents.
@@ -43,11 +46,49 @@ current runtime. This guard does not authenticate a delayed predecessor `Session
 
 A running seat keeps the settings it started with, so it records subagents from its next restart.
 
+The [SubagentStop hook contract](https://code.claude.com/docs/en/hooks#subagentstop) carries
+`agent_transcript_path` and final response text, but no outcome or error flag. The transcript's
+typed assistant flags, not that model-authored text, are the outcome evidence. These flags were
+checked in Claude Code 2.1.287: API errors create `isApiErrorMessage` assistant records, aborted
+streams create `isAbortedMidStream` records, and `system/api_error` records describe retries.
+
 **Codex.** The control connection reads the parent thread's `subAgentActivity` items and
 `collabAgentToolCall` results into the same ledger. A subagent thread can take a follow-up task
 after it completes, so each task is one run: `THREAD`, then `THREAD#2`, and so on. A run starts
 when its thread starts or takes a task while idle. It ends when the parent hears it completed or was
 interrupted, or when a collab call reports it errored, shut down or gone.
+
+**omp.** omp loads the seat's extension into each subagent session and names the subagent in
+`ctx.agent` (`id`, `name`). The extension reports that session's runs to the seat's channel, and
+the channel writes them into the same ledger, for the bound native session only. A run starts at
+`agent_start`, and the run ends at the `agent_end` that does not continue or wait for a person:
+`failed` after a provider error, `interrupted` after an abort, otherwise `completed`. A subagent
+session that shuts down first ends its run as `interrupted`. A late `turn_end` never starts a run
+after its end; only a new `agent_start` does. That new run is `ID#2` and so on, as in Codex.
+The type is omp's agent name. IDs longer than 256 UTF-8 bytes are rejected rather than truncated,
+and names longer than 128 UTF-8 bytes are omitted. Both the extension and channel enforce these
+bounds. omp reports no tokens for a subagent, so its end carries none.
+
+Child lifecycle is the start/end authority, not parent `task` tool results: one call can launch
+several children, and an asynchronous result can return while they still run. Each child reports
+its own terminal error or abort. Children never open a channel, consume seat mail, or emit seat
+state/context/timeline frames; only their lifecycle/progress frames use the parent's channel.
+Deploy the updated st3 extension and restart existing omp seats to load it; the legacy st2
+extension continues to suppress all child events.
+
+An omp subagent also reports `progress` at each `turn_end`, at most every ten seconds at its
+messages and tool calls, and every minute while omp says its session is busy, as in a long tool
+call, nested subagent, `ask` answer or tool approval within a foreground run. A matching tool
+result or execution end clears the ask; an approval resolution clears the approval. On every
+heartbeat the extension also checks the subagent's live `ctx.isIdle()`: without a positive busy
+proof it clears cached waits and stops reporting, even if a resolution event was lost. Cached
+events alone never renew a run. Detached waits in an idle session cannot be proven live through
+this API and follow the same silence bound. These waits belong to the subagent, not to its seat
+or siblings. The driver ends a run that has not reported for five minutes as
+`interrupted`, while the seat keeps running. This ends a subagent whose session stopped without
+its end. `ST3_SUBAGENT_SILENCE_MS` can only shorten the five minutes. The ledger forgets the run
+count of a subagent only after all of its runs have ended and been recorded, so a running
+subagent keeps its ID.
 
 The seat's driver reads the ledger every second and records what changed. A subagent leaves the
 ledger only after its end is recorded, so a daemon outage delays these claims without losing any.
@@ -91,14 +132,14 @@ Every agent resource in the client API carries `subagents`: the ones running now
 ended and whose lease runs past the read. The read starts from the leases, through their indexes,
 so it costs what runs rather than all history, and a lease that runs out leaves the list at the
 next read without a claim. `st agents show` prints a `SUBAGENT` line for each, with what it
-does, its type and when it started. `st agents tree` hangs them beneath their agent. stui shows
+does, its type and when it started. `st agents tree` hangs them beneath their agent. The terminal UI shows
 them beneath the agent's row in the agents list and tree and in the details panel. They are part
 of the agent there: they select and click as the agent and have no actions of their own.
 
 ## Tests
 
 `scripts/st3-subagents-eval/run` runs an isolated daemon with stand-in Claude seats that report
-subagents through the real hooks, with no model. `crates/st3/tests/subagents_seat.rs` runs it. It
+subagents through the real hooks, with no model. `crates/fractal/tests/subagents_seat.rs` runs it. It
 covers:
 
 - appear then end, Claude's phantom stop, and many subagents at once;
@@ -115,3 +156,8 @@ covers:
 
 `ST3_SUBAGENT_LEASE_MS` can only shorten the driver's lease, so these tests need not wait out ten
 minutes.
+
+`crates/fractal/tests/subagent_publisher.rs` drives an omp seat's channel observer with the frames the
+extension sends and reads the agents list. A running subagent shows with its ID, type, driver and
+lease, and leaves the list at its end. While the seat's driver ticks and renews, a subagent that
+stops reporting leaves the list after the silence bound, and a sibling that keeps reporting stays.
