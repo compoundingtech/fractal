@@ -1459,9 +1459,14 @@ line per check: result, seconds, and whether the verifier, from the base, now co
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
 Without `--push`, the run keeps its records in this repository's local refs: per record a tag `refs/tags/evidence/<tree>/<record>` and a note
 `refs/notes/evidence/<tree>/<record>` (per-crate test records add `refs/tags/evidence/input/rust-tests/<key>/<record>` and
-`refs/notes/evidence-input/rust-tests/<key>/<record>`). Run `scripts/st-test --status` to see which tree it signed and each check's coverage;
-use that full tree ID, not necessarily `HEAD^{tree}`: when protected files differ from the branch point, it signs the merge with `origin/main`.
-To publish by hand, set `tree=TREE_FROM_STATUS` and push only that tree's refs: `git push origin $(git for-each-ref
+`refs/notes/evidence-input/rust-tests/<key>/<record>`). Run `scripts/st-test --status` to see each check's coverage, not the tree ID.
+The run's summary prints a short tree ID; its JSON run record has the full `tree` in
+`${XDG_STATE_HOME:-$HOME/.local/state}/st-test/runs.jsonl` (`ST_TEST_RUNS` overrides that path; `off` disables recording).
+Use that run's full tree ID, not necessarily `HEAD^{tree}`: when protected files differ from the branch point, it signs the merge with
+`origin/main`. Without a run record, expand the summary's short ID with `tree=$(git for-each-ref --format='%(refname)'
+"refs/notes/evidence/SHORT*" | cut -d/ -f4 | sort -u)`; proceed only if `test "$(printf '%s\n' "$tree" | wc -l)" -eq 1 &&
+test "${#tree}" -eq 40` succeeds (one full tree ID, not an absent or ambiguous prefix).
+To publish by hand, set `tree` to that full ID and push only that tree's refs: `git push origin $(git for-each-ref
 --format='%(refname):%(refname)' "refs/tags/evidence/$tree/" "refs/notes/evidence/$tree/")`. Add the run's
 `refs/tags/evidence/input/...` and `refs/notes/evidence-input/...` refs that the remote lacks as explicit `REF:REF` arguments to that push
 (compare with `git ls-remote --refs origin 'refs/tags/evidence/input/*' 'refs/notes/evidence-input/*'`). Do not push the full evidence globs:
