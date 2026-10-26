@@ -20,6 +20,7 @@ pub mod deploy;
 pub mod evidence;
 pub mod missions;
 pub mod seats;
+pub mod helper_launchers;
 pub mod trace_principal;
 #[cfg(test)]
 pub mod accountable_tests;
@@ -11530,6 +11531,7 @@ pub fn agent_person_at(connection: &Connection, agent: &str) -> Result<Option<St
     agent_person_walk(
         agent,
         |subject| desired_subject_with_writer_at(connection, subject),
+        |subject| helper_launchers::binding_at(connection, subject),
         |run| {
             smallclaims::touched::note_read(|| {
                 format!(
@@ -11554,13 +11556,15 @@ pub fn agent_person_at(connection: &Connection, agent: &str) -> Result<Option<St
 
 /// One bounded ownership precedence/cycle walk. Public reads retain their original
 /// full-view resolver; writer admission supplies its same-transaction resolver.
-fn agent_person_walk<D, R>(
+fn agent_person_walk<D, B, R>(
     agent: &str,
     mut lookup_desired: D,
+    mut lookup_binding: B,
     mut lookup_requester: R,
 ) -> Result<Option<String>>
 where
     D: FnMut(&str) -> Result<Option<(DesiredSubject, Option<String>)>>,
+    B: FnMut(&str) -> Result<Option<helper_launchers::HelperLauncherBinding>>,
     R: FnMut(&str) -> Result<Option<String>>,
 {
     let mut actor = agent.to_owned();
@@ -11571,6 +11575,9 @@ where
         }
         if !seen.insert(actor.clone()) {
             return Ok(None);
+        }
+        if let Some(binding) = lookup_binding(&actor)? {
+            return Ok(binding.person);
         }
         let Some((desired, writer)) = lookup_desired(&actor)? else {
             return Ok(None);

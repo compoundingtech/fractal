@@ -7210,6 +7210,15 @@ async fn publish_creation(
             )));
         }
     }
+    if kind == "agent" && session.authority_actor.starts_with("agent/") {
+        let desired = intent.subjects.values().find(|member| member.subject == subject).unwrap();
+        let harness = desired.member.as_ref().and_then(|member| member.driver.as_deref())
+            .ok_or_else(|| validation("helper creation requires a typed harness"))?;
+        if matches!(harness, "claude" | "codex") {
+            state.store.bind_helper_launcher(desired, &key, &session.authority_actor, harness)
+                .map_err(|error| validation(error.to_string()))?;
+        }
+    }
     let mut scoped = request.clone();
     scoped.idempotency_key = format!("client-create:{key}");
     apply_runtime_control_intent(state, snapshot, &scoped, &session.authority_actor, kdl).await?;
@@ -8839,6 +8848,12 @@ async fn action_inner(
     }
     if let Some(claim) = arrangement_claim {
         result["arrangement_revision"] = json!(claim.id);
+    }
+    if request.action_type == "agent.create"
+        && let Some(subject) = affected.first()
+        && let Some(binding) = state.store.helper_launcher_binding(subject).map_err(ApiError::internal)?
+    {
+        result["launcher_binding"] = serde_json::to_value(binding).map_err(ApiError::internal)?;
     }
     let mut persisted_result = result.clone();
     persisted_result
@@ -13105,6 +13120,58 @@ subscription "watch/source" {
         assert_eq!(gate("watch"), "watch");
         assert_eq!(gate("flag"), "predicate");
         assert_eq!(gate("command"), "command");
+    }
+
+    #[tokio::test]
+    async fn helper_creation_uses_authenticated_launcher_and_persists_binding_in_receipt() {
+        for owner in [Some("person/ada"), None] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "helper-binding");
+            let source = "version 2\nagent \"launcher\" { workspace \"/tmp\"; harness \"codex\"; }";
+            let intent = crate::graph::parse_intent(source, "helper-binding").unwrap();
+            let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
+            state.store.apply_as(&intent, &expected, "declare-launcher", owner).unwrap();
+            let launcher = "agent/helper-binding.launcher";
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running", "incarnation_id":"launcher-1"})),
+                ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":"launcher-1",
+                    "harness":"codex", "credential_homes":{"codex":"/logins/launcher-codex"}})),
+            ] {
+                state.store.append_claim(&ClaimInput {
+                    subject: launcher.into(), kind: kind.into(), actor: Some(launcher.into()),
+                    fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                    expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            let session = ClientSession::local(Some(launcher)).unwrap();
+            let snapshot = new_client_snapshot(&state);
+            let request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id: "action/helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "create-helper".into(),
+                fence: Fence { snapshot_id: snapshot.id.clone(), ..Default::default() },
+                parameters: json!({"name":"helper", "harness":"codex", "workspace":"/tmp"}),
+            };
+            for field in ["launcher", "person", "credential_home", "launcher_binding"] {
+                let mut forged = request.clone();
+                forged.parameters[field] = json!("person/mallory");
+                let before = state.store.index().unwrap();
+                assert!(dispatch_action(&state, &snapshot, &session, &forged).await.is_err());
+                assert_eq!(state.store.index().unwrap(), before);
+            }
+            let result = action(State(state.clone()), Extension(snapshot), Extension(session.clone()), Json(request.clone()))
+                .await.unwrap().0;
+            let subject = result["affected_ids"][0].as_str().unwrap();
+            let binding = state.store.helper_launcher_binding(subject).unwrap().unwrap();
+            assert_eq!(binding.launcher, launcher);
+            assert_eq!(binding.person.as_deref(), owner);
+            assert_eq!(binding.credential_home, "/logins/launcher-codex");
+            assert_eq!(binding.incarnation, "launcher-1");
+            assert_eq!(state.store.agent_person(subject).unwrap().as_deref(), owner);
+            assert_eq!(result["launcher_binding"], serde_json::to_value(&binding).unwrap());
+            let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)), Extension(session), Json(request))
+                .await.unwrap().0;
+            assert_eq!(replay["launcher_binding"], result["launcher_binding"]);
+        }
     }
 
     #[tokio::test]

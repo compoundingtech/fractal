@@ -5659,6 +5659,32 @@ fn agent_new_args(arguments: &[&str]) -> AgentNewArgs {
 }
 
 #[test]
+fn agent_new_cli_normalizes_qualified_ids_without_changing_host_scoping() {
+    for (identity, expected) in [
+        ("worker", "agent/test.worker"),
+        ("team/worker", "agent/team/worker"),
+        ("test.worker", "agent/test.worker"),
+    ] {
+        for name in [identity.to_owned(), format!("agent/{identity}")] {
+            let args = agent_new_args(&[&name, "--harness", "codex"]);
+            let source = agent_new_document(&args, "/work/worker", false);
+            let intent = fractal_daemon::graph::parse_intent(&source, "test").unwrap();
+            assert_eq!(intent.subjects.len(), 1, "{source}");
+            assert!(intent.subjects.contains_key(expected), "{source}");
+        }
+    }
+}
+
+#[test]
+fn agent_lifecycle_subject_normalization_accepts_bare_and_qualified_ids() {
+    for identity in ["worker", "test.worker", "team/worker"] {
+        let subject = format!("agent/{identity}");
+        assert_eq!(normalize_agent_subject(identity), subject);
+        assert_eq!(normalize_agent_subject(&subject), subject);
+    }
+}
+
+#[test]
 fn agent_new_cli_declares_checkout_and_preserves_plain_workspace() {
     let args = agent_new_args(&[
         "parser",
