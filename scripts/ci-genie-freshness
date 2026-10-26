@@ -22,4 +22,6 @@ python3 scripts/check-sqlite-large-values
 # may skip on a note for another tree with the same declared inputs, which a page under apps/ does not change.
 python3 scripts/check-public-repo
 python3 scripts/check-native-names
+# Every lane's definition_paths cover what its commands execute or read (the whole tree; ci-script-tests' copy sees only its inputs).
+python3 scripts/lane-definition-closure --check
 genie --check

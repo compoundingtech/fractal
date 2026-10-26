@@ -86,6 +86,13 @@ scripts/st-test --all --push origin
   check's own definition (for example its script) cannot be pre-signed for that check, so CI runs it. `--status` runs nothing and says
   whether the tree is already covered.
 
+For a separate publisher, replace `--push origin` with `--out DIR`. This exports `<record>.pack` and `<record>.json` to an
+absolute directory resolved from your current directory, without importing or pushing notes. It reruns the whole selected,
+relevant set (including already-covered crates) so the export is complete. `--out` and `--push` cannot be combined.
+An export's success is not verified coverage: the publisher must publish and verify its records. See
+[the evidence guide](docs/st3/gate-evidence.md) for per-crate and `--seed --out` behavior.
+
+
 **Keep it within 12 minutes.** A full warm run of `scripts/st-test` (build, test and sign) has a budget of 12 minutes on a dev box
 today. Keep your changes, and any tests you add, inside it. The table st-test prints at the end gives each check's time in seconds.
 

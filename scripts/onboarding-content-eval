@@ -186,8 +186,8 @@ def evaluate(args,archive,metadata,key,variant):
  try:
   machine.start()
   if not run.install(False): return run
-  machine.send(args.claude.read_bytes(),"/home/ada/smalltalk-install/claude-native")
-  r=run.execute("Install native provider and private fixture directories","mkdir -p ~/.local/bin ~/.local/lib ~/.claude ~/.local/state/onboarding-eval ~/garden-project; install -m755 ~/smalltalk-install/claude-native ~/.local/lib/claude-native; chmod 700 ~/.local/state/onboarding-eval")
+  machine.send(args.claude.read_bytes(),"/home/ada/fractal-install/claude-native")
+  r=run.execute("Install native provider and private fixture directories","mkdir -p ~/.local/bin ~/.local/lib ~/.claude ~/.local/state/onboarding-eval ~/garden-project; install -m755 ~/fractal-install/claude-native ~/.local/lib/claude-native; chmod 700 ~/.local/state/onboarding-eval")
   if r["exit"]: raise RuntimeError("provider installation failed")
   for name in ("claude_eval_broker.py","claude_welcome.py"):
    machine.send((HERE/"onboarding-fixtures"/name).read_bytes(),"/home/ada/.local/state/onboarding-eval/"+name)

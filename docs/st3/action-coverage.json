@@ -413,6 +413,14 @@
   ],
   "cli": [
     {
+      "command": "st deploy verify-go",
+      "description": "Verify an existing deployment GO against the local signed replica and immutable packaged policy without changing state",
+      "tests": [
+        "crates/fractal/tests/deploy_verify.rs::verifier_cli_api_uses_signed_local_replica_and_fixed_policy"
+      ],
+      "verification": "real CLI and API over a private Unix socket; signed replica, missing packaged policy and caller policy-override rejection"
+    },
+    {
       "command": "st schedules ls",
       "description": "Read one explicit page of replicated schedule declarations, then follow its cursor explicitly",
       "tests": [
@@ -663,7 +671,7 @@
     },
     {
       "command": "st alerts discuss",
-      "description": "Chat about an item: send a message to the agent involved, titled after the item, with a reference to what it is about. This is what \"Chat about this\" does in stui",
+      "description": "Chat about an item: send a message to the agent involved, titled after the item, with a reference to what it is about. This is what \"Chat about this\" does in Fractal TUI",
       "tests": [
         "crates/fractal/tests/client_v0_cli.rs::attention_discuss_sends_the_message_stui_chat_about_this_sends"
       ],
@@ -886,7 +894,7 @@
     },
     {
       "command": "st conversations timeline",
-      "description": "Show one conversation as stui shows it: messages, folded tools, Fractal. `--raw` prints every normalized entry (ids, message boundaries, tool JSON); `--json` the page",
+      "description": "Show one conversation as Fractal TUI shows it: messages, folded tools, Fractal. `--raw` prints every normalized entry (ids, message boundaries, tool JSON); `--json` the page",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_devices_and_native_import_survive_restart"
       ],

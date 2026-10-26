@@ -107,7 +107,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='verify and print the notes; publish nothing')
     args = parser.parse_args()
     repo = pathlib.Path(__file__).resolve().parent.parent
-    repository = os.environ.get('GH_REPO', 'compoundingtech/smalltalk')
+    repository = os.environ.get('GH_REPO', 'compoundingtech/fractal')
     if not SHA.fullmatch(args.source):
         raise SystemExit('release-smalltalk-edge: --source must be a full lowercase commit hash')
 
@@ -127,7 +127,7 @@ def main():
         say(f'dry run: would publish {len(names)} assets as {TAG} at {args.source}')
         return 0
 
-    notes_file = pathlib.Path(tempfile.mkdtemp(prefix='smalltalk-edge-')) / 'NOTES.md'
+    notes_file = pathlib.Path(tempfile.mkdtemp(prefix='fractal-edge-')) / 'NOTES.md'
     notes_file.write_text(body)
     files = [str(dist / n) for n in names]
     title = f'Fractal edge ({args.source[:9]})'

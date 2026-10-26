@@ -518,6 +518,20 @@ impl Client {
         self.request("POST", path, Some(body)).await
     }
 
+    /// Verify one GO from the local replica; this request must never use HTTP or sync.
+    pub async fn verify_deploy_go(
+        &self,
+        request: &fractal_schema::deploy::VerifyGoRequest,
+    ) -> Result<fractal_schema::deploy::VerifyGoReceipt> {
+        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+            return Err(crate::model::St3Error::new(
+                "deploy-local-only",
+                "deploy verification requires the local Unix endpoint",
+            ).into());
+        }
+        self.post("/v1/deploy/verify-go", request).await
+    }
+
     /// Send a message, retrying one unanswered request with the same idempotency key and body.
     /// The receipt says whether the key had already sent it. If both attempts go unanswered the
     /// error is a [`MessageSendUnconfirmed`]: keep this request for a later retry, and ask
@@ -1067,10 +1081,10 @@ impl std::error::Error for UnexpectedResponse {}
 fn terminal_request(url: &str) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
     let mut request = url.into_client_request()?;
     fractal_client::propagation::inject_headers(request.headers_mut());
-    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: deploy only after every receiver runs #3430; sunset 2026-11-01.
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
-        "st3.terminal.v1"
+        "fractal.terminal.v1"
             .parse()
             .expect("the protocol header is valid"),
     );
@@ -2398,7 +2412,7 @@ mod tests {
                     ));
                     response
                         .headers_mut()
-                        .insert("Sec-WebSocket-Protocol", "st3.terminal.v1".parse().unwrap());
+                        .insert("Sec-WebSocket-Protocol", "fractal.terminal.v1".parse().unwrap());
                     Ok(response)
                 },
             )
@@ -2416,7 +2430,7 @@ mod tests {
             *observed.lock().unwrap(),
             Some((
                 "/v1/pty/agent%2Fdemo/attach".into(),
-                Some("st3.terminal.v1".into())
+                Some("fractal.terminal.v1".into())
             ))
         );
     }
@@ -2438,7 +2452,7 @@ mod tests {
                 |_request: &Request, mut response: Response| {
                     response
                         .headers_mut()
-                        .insert("Sec-WebSocket-Protocol", "st3.terminal.v1".parse().unwrap());
+                        .insert("Sec-WebSocket-Protocol", "fractal.terminal.v1".parse().unwrap());
                     Ok(response)
                 },
             )
@@ -2552,7 +2566,7 @@ mod tests {
                     ));
                     response
                         .headers_mut()
-                        .insert("Sec-WebSocket-Protocol", "st3.terminal.v1".parse().unwrap());
+                        .insert("Sec-WebSocket-Protocol", "fractal.terminal.v1".parse().unwrap());
                     Ok(response)
                 },
             )
@@ -2570,7 +2584,7 @@ mod tests {
             *observed.lock().unwrap(),
             Some((
                 "/v1/pty/agent%2Fdemo/attach".into(),
-                Some("st3.terminal.v1".into())
+                Some("fractal.terminal.v1".into())
             ))
         );
     }

@@ -1,7 +1,7 @@
 # How long st keeps each claim kind, and which claims a checkpoint may drop.
 #
 # docs/st3/retention.md explains the classes and how to change this file. The daemon reads it when
-# it builds the schema registry (`st3_schema::retention`), so every build carries exactly one
+# it builds the schema registry (`fractal_schema::retention`), so every build carries exactly one
 # policy. The rules below are hashed into the checkpoint rules digest: members agree on a
 # checkpoint only when they run the same rules, so a member with a different policy waits instead
 # of dropping something its peers keep.

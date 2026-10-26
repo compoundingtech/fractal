@@ -1,5 +1,5 @@
 {
-  "name": "smalltalk-workspace",
+  "name": "fractal-workspace",
   "private": true,
   "workspaces": [
     "apps/fractal-web",
