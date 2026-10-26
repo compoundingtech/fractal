@@ -903,6 +903,10 @@ impl Store {
         let verified = first_verifications(&claims, &checkpoint);
         let seals = newest_seals(&claims, &checkpoint);
         if !verified.contains_key(&self.origin) {
+            // Register the cut and seal row with the capture guard, as a capture does, so its
+            // triggers fence the history the seal reads and the next pass reuses the digest
+            // until that history changes. It writes only when a bound grows.
+            self.register_checkpoint_capture(cut, None)?;
             let sealed = self.checkpoint_sealed_identities(cut, None)?;
             let terms = SealTerms {
                 cut_unix_ms: cut,
