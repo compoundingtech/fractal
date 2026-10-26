@@ -298,7 +298,7 @@ pub(super) fn operational_repair_check(
             name: "operational-repair".into(),
             status: "warn".into(),
             message: format!(
-                "{} graph-authorized repairs are available; inspect `st repair dry-run` token {}",
+                "{} graph-authorized repairs are available; inspect `fractal repair dry-run` token {}",
                 plan.items.len(), plan.token
             ),
         }),

@@ -57,7 +57,7 @@ pub(super) async fn run(start: Start) -> Result<PreparedSetup> {
         }
         anyhow::ensure!(
             requested == "none" || form.rows.iter().any(|row| &row.id == requested && row.selected),
-            "{requested} is not installed on the daemon's login PATH; install it and open a new login shell, then run st setup"
+            "{requested} is not installed on the daemon's login PATH; install it and open a new login shell, then run fractal setup"
         );
     }
 
@@ -96,7 +96,7 @@ pub(super) async fn run(start: Start) -> Result<PreparedSetup> {
     }
     anyhow::ensure!(
         outcome.saved,
-        "setup was cancelled; nothing was changed. Run st setup when you are ready"
+        "setup was cancelled; nothing was changed. Run fractal setup when you are ready"
     );
     println!("Your agents run without permission prompts inside their own workspaces.");
     Ok(PreparedSetup {
@@ -117,7 +117,7 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
     let home = home(environment);
     let login_note = if cfg!(target_os = "macos") {
         format!(
-            "Installs a launch agent for st in {}/Library/LaunchAgents. No admin rights. Remove it with st service uninstall.",
+            "Installs a launch agent for st in {}/Library/LaunchAgents. No admin rights. Remove it with fractal service uninstall.",
             home.display()
         )
     } else {
@@ -126,7 +126,7 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"));
         format!(
-            "Installs a systemd user service at {}/systemd/user/st3.service. No admin rights. Remove it with st service uninstall.",
+            "Installs a systemd user service at {}/systemd/user/st3.service. No admin rights. Remove it with fractal service uninstall.",
             config_home.display()
         )
     };
@@ -573,7 +573,7 @@ async fn stages(
                 !start.args.onboarding,
                 "rerunning onboarding needs a running daemon; pass --start true"
             );
-            said("Start the st daemon and run st setup to begin onboarding.");
+            said("Start the st daemon and run fractal setup to begin onboarding.");
         }
     }
     Ok(())

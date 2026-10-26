@@ -1787,8 +1787,8 @@ fn doctor_distinguishes_no_fleet_from_explicitly_leaving_a_fleet() {
     let check = replication_check();
     assert_eq!(check.status, "pass");
     assert!(check.message.contains("no fleet is configured"));
-    assert!(check.message.contains("st fleet create"));
-    assert!(check.message.contains("st fleet join"));
+    assert!(check.message.contains("fractal fleet create"));
+    assert!(check.message.contains("fractal fleet join"));
     assert!(!check.message.contains("intentionally"));
 
     fs::write(

@@ -37,7 +37,7 @@ impl Connection {
     pub fn open(socket: &Path) -> Result<Self> {
         let stream = UnixStream::connect(socket).with_context(|| {
             format!(
-                "sekrets is not set up on this host: no gateway at {} (see `st sekrets setup`)",
+                "sekrets is not set up on this host: no gateway at {} (see `fractal sekrets setup`)",
                 socket.display()
             )
         })?;

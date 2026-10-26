@@ -203,7 +203,7 @@ pub async fn run(args: SekretsArgs, json_output: bool, endpoint: Option<String>)
     let Some(command) = args.command else {
         if args.argv.is_empty() {
             bail!(
-                "name a command after `--`, such as `st sekrets -- gh pr list`, or see `st sekrets --help`"
+                "name a command after `--`, such as `fractal sekrets -- gh pr list`, or see `fractal sekrets --help`"
             );
         }
         let connection = identified_connection(endpoint.as_deref()).await?;
@@ -707,7 +707,7 @@ fn setup_script(setup: &SetupArgs) -> Result<String> {
     Ok(format!(
         r#"#!/bin/sh
 # st sekrets: the gateway, its user and its store. Review, then run as root, for example
-#   st sekrets setup --person {person} > sekrets-setup.sh && sudo sh sekrets-setup.sh
+#   fractal sekrets setup --person {person} > sekrets-setup.sh && sudo sh sekrets-setup.sh
 # Run it again after updating st to give the gateway the new binary.
 set -eu
 command -v bwrap >/dev/null || {{ echo "install bubblewrap first (apt install bubblewrap)" >&2; exit 1; }}
@@ -755,7 +755,7 @@ EOF
 systemctl daemon-reload
 systemctl enable st-sekrets.service
 systemctl restart st-sekrets.service
-echo "sekrets gateway running; next, from a login session: st sekrets enable"
+echo "sekrets gateway running; next, from a login session: fractal sekrets enable"
 "#,
         uids = people
             .iter()

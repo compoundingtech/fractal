@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use fractal in human-facing runtime next-step commands, empty-state guidance and error-remediation hints across the CLI and terminal interface.",
+  "replay": { "status": "none", "detail": "none" },
+  "schema": { "status": "none", "detail": "none" },
+  "rules": { "status": "none", "detail": "none" },
+  "compatibility": { "status": "none", "detail": "Executable aliases, frozen environment variables, paths, wire identifiers and agent-facing st skill instructions remain unchanged." },
+  "downtime": { "status": "none", "detail": "none" },
+  "manual": { "status": "none", "detail": "none" },
+  "recovery": { "status": "none", "detail": "none" }
+}

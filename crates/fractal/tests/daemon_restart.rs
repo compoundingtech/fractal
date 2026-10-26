@@ -1045,7 +1045,7 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
         log.contains("native conversation delivery resumed"),
         "{log}"
     );
-    assert!(!log.contains("st3 up"), "{log}");
+    assert!(!log.contains("fractal up"), "{log}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1139,7 +1139,7 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     assert!(stderr.is_empty(), "the channel wrote to stderr: {stderr}");
     let log = driver_log(root);
     assert!(log.contains("may be restarting"), "{log}");
-    assert!(!log.contains("st3 up"), "{log}");
+    assert!(!log.contains("fractal up"), "{log}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1433,7 +1433,7 @@ fn a_cli_command_says_the_daemon_is_unreachable_and_never_to_start_it() {
     );
     assert!(stderr.contains("was not reachable for 1s"), "{stderr}");
     assert!(stderr.contains("Nothing was sent"), "{stderr}");
-    assert!(!stderr.contains("st3 up"), "{stderr}");
+    assert!(!stderr.contains("fractal up"), "{stderr}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

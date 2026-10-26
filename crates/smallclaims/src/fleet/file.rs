@@ -104,7 +104,7 @@ impl RemovalNotice {
         };
         format!(
             "{what}{detail}, as {} reported{}; it no longer syncs, and writes here stay here. \
-             Run st uninstall, or st fleet leave --offline to keep the local store as a \
+             Run fractal uninstall, or fractal fleet leave --offline to keep the local store as a \
              local-only node that a member can invite again",
             self.reported_by,
             if self.learned_at_unix_ms == 0 {

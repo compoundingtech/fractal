@@ -3259,7 +3259,7 @@ impl Store {
         if name == self.origin {
             return Err(St3Error::new(
                 "cannot-remove-self",
-                "a member cannot remove itself; use st fleet leave",
+                "a member cannot remove itself; use fractal fleet leave",
             ));
         }
         let own_key = self.member_public_key().ok_or_else(|| {

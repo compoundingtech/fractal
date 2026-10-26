@@ -288,7 +288,7 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     assert!(shown.contains("smalltalk-ios 1.0 (42)  person/avery (Pocket)  via gateway  connected now, since 2m ago"), "{shown}");
     assert!(shown.contains("  follows: agents, conversation:agent/example/harbor"), "{shown}");
     assert!(shown.contains("(unnamed client)  person/avery  via local  last seen 3m ago"), "{shown}");
-    let devices = "DEVICES\ndevice/001122  active  person/avery/session/0011  scopes 4\n  action: st devices --as person/avery revoke device/001122\n";
+    let devices = "DEVICES\ndevice/001122  active  person/avery/session/0011  scopes 4\n  action: fractal devices --as person/avery revoke device/001122\n";
     let marked = with_device_presence(devices, Some(&found), now);
     assert!(marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"), "{marked}");
     assert_eq!(with_device_presence(devices, None, now), devices);
@@ -1899,7 +1899,7 @@ fn agent_tree_nests_running_subagents_under_their_agent() {
         "page": {"limit": 50, "has_more": false}
     }))
     .unwrap();
-    let tree = render_client_agents(&page, true, false, "st agents tree");
+    let tree = render_client_agents(&page, true, false, "fractal agents tree");
     assert_eq!(
         tree,
         "AGENT TREE  1\n\
@@ -3072,7 +3072,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
             diverged_since: None,
         }],
     });
-    let output = render_now_page(&page, "st3 now --as person/alex");
+    let output = render_now_page(&page, "fractal now --as person/alex");
     assert!(
         output.starts_with(
             "SYNCING  ExampleMac has 1 envelope this host lacks · estimating time to catch up · \
@@ -3088,7 +3088,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
         render_sync_notice(page.sync.as_ref().unwrap(), 1_000_000),
         "SYNCING  ExampleMac has 1 envelope this host lacks · estimating time to catch up · \
              last exchange 2s ago\n  Until then, items below can be out of date. \
-             Progress: st3 replication status\n\n"
+             Progress: fractal replication status\n\n"
     );
     assert_eq!(catch_up_estimate(Some(0)), "caught up");
     assert_eq!(catch_up_estimate(Some(59)), "caught up in under a minute");
@@ -3104,11 +3104,11 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
         render_sync_notice(page.sync.as_ref().unwrap(), 1_000_000),
         "DIVERGED  ExampleMac projects a different graph from the same envelopes · since 3m ago\n\
              \x20 Exchanges cannot fix this, so items below can be wrong. \
-             Details: st3 replication status\n\n"
+             Details: fractal replication status\n\n"
     );
 
     page.sync = None;
-    assert!(!render_now_page(&page, "st3 now").contains("SYNCING"));
+    assert!(!render_now_page(&page, "fractal now").contains("SYNCING"));
 }
 
 #[test]
@@ -3144,9 +3144,9 @@ fn terminal_list_shows_a_working_peek_target() {
     } else {
         panic!("expected runtime fixture");
     }
-    let rendered = render_product_page("TERMINALS", &page, "st terminals");
+    let rendered = render_product_page("TERMINALS", &page, "fractal terminals");
     assert!(
-        rendered.contains("peek: st terminals peek agent/release"),
+        rendered.contains("peek: fractal terminals peek agent/release"),
         "{rendered}"
     );
 }
@@ -3193,7 +3193,7 @@ fn work_detail_says_when_its_holder_was_nudged() {
 #[test]
 fn attention_from_a_retired_requester_says_who_can_close_it() {
     let mut page = fixture_product_page(&["attention"], false);
-    let before = render_product_page("NOW", &page, "st now");
+    let before = render_product_page("NOW", &page, "fractal now");
     assert!(!before.contains("requester retired"), "{before}");
     let ClientResource::Attention(attention) = &mut page.items[0] else {
         panic!("expected attention fixture");
@@ -3205,7 +3205,7 @@ fn attention_from_a_retired_requester_says_who_can_close_it() {
         owner_generation: None,
         runtime_incarnation: None,
     });
-    let rendered = render_product_page("NOW", &page, "st now");
+    let rendered = render_product_page("NOW", &page, "fractal now");
     assert!(
         rendered.contains("  requester retired: only person/alex can close it\n"),
         "{rendered}"
@@ -3216,25 +3216,25 @@ fn attention_from_a_retired_requester_says_who_can_close_it() {
 fn document_continuation_preserves_prefix_and_history() {
     assert_eq!(
         document_continuation_command(Some("doc/type case"), true, 1, "document/abc"),
-        "st documents ls 'doc/type case' --limit 1 --all --cursor document/abc"
+        "fractal documents ls 'doc/type case' --limit 1 --all --cursor document/abc"
     );
 }
 
 #[test]
 fn product_renderers_have_exact_empty_and_mixed_now_output() {
     assert_eq!(
-        render_product_page("NOW", &fixture_product_page(&[], false), "st now"),
+        render_product_page("NOW", &fixture_product_page(&[], false), "fractal now"),
         "NOW  0\nNo current items.\n"
     );
     let mixed = render_product_page(
         "NOW",
         &fixture_product_page(&["attention", "work", "operation"], false),
-        "st now",
+        "fractal now",
     );
     // An attention item leads with its kind and title, then who it is from and how long ago
     // (which moves with the clock) and its priority when it is not normal.
     let (head, rest) = mixed
-        .split_once("  action: st alerts show")
+        .split_once("  action: fractal alerts show")
         .expect(&mixed);
     assert!(
         head.starts_with("NOW  3\n\nrequest   Review release\n          "),
@@ -3248,9 +3248,9 @@ fn product_renderers_have_exact_empty_and_mixed_now_output() {
             "  id: attention/release-review\n",
             "work/release/1/build  work  claimed  build  attempt 1\n",
             "  assigned: agent/release\n",
-            "  action: st work show work/release/1/build\n",
+            "  action: fractal work show work/release/1/build\n",
             "operation/transport-host-b  operation  warning  degraded  Peer is retrying\n",
-            "  recovery: st doctor\n",
+            "  recovery: fractal doctor\n",
         )
     );
 }
@@ -3307,23 +3307,23 @@ fn an_attention_item_names_its_kind_sender_and_age() {
 fn now_page_without_work_does_not_claim_zero_working() {
     let attention_only = render_now_page(
         &fixture_product_page(&["attention"], false),
-        "st now --as person/alex",
+        "fractal now --as person/alex",
     );
     assert!(attention_only.starts_with("1 alert\n"), "{attention_only}");
     assert!(!attention_only.contains("WORKING"), "{attention_only}");
     assert!(!attention_only.contains("UNHEALTHY"), "{attention_only}");
     assert!(
-        attention_only.ends_with("\nWork: st work ls · Health: st doctor\n"),
+        attention_only.ends_with("\nWork: fractal work ls · Health: fractal doctor\n"),
         "{attention_only}"
     );
 
     let with_work = render_now_page(
         &fixture_product_page(&["attention", "work"], false),
-        "st now --as person/alex --owner-run mission-run/release/1",
+        "fractal now --as person/alex --owner-run mission-run/release/1",
     );
     assert!(with_work.contains("\nWORKING  1\n"), "{with_work}");
     assert!(!with_work.contains("UNHEALTHY"), "{with_work}");
-    assert!(!with_work.contains("Work: st work ls"), "{with_work}");
+    assert!(!with_work.contains("Work: fractal work ls"), "{with_work}");
 }
 
 #[test]
@@ -3332,9 +3332,9 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     let mut alerts = page.clone();
     alerts.items = [page.items.clone(), page.items.clone()].concat();
     assert!(
-        render_now_page(&alerts, "st now").starts_with("2 alerts\n"),
+        render_now_page(&alerts, "fractal now").starts_with("2 alerts\n"),
         "{}",
-        render_now_page(&alerts, "st now")
+        render_now_page(&alerts, "fractal now")
     );
     // An update asks nothing: it is listed apart and never counted as an alert.
     let mut updates = page.clone();
@@ -3349,18 +3349,18 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
         summary: None,
     });
     update.alert = Some(false);
-    let now = render_now_page(&updates, "st now");
+    let now = render_now_page(&updates, "fractal now");
     assert!(now.starts_with("UPDATES  1\n"), "{now}");
     assert!(!now.contains("1 alert\n") && !now.contains("0 alerts"), "{now}");
     // Nothing waits: no line about alerts at all, not even a zero.
     assert_eq!(
-        render_now_page(&fixture_product_page(&[], false), "st now"),
-        "Work: st work ls · Health: st doctor\n"
+        render_now_page(&fixture_product_page(&[], false), "fractal now"),
+        "Work: fractal work ls · Health: fractal doctor\n"
     );
     // `st alerts ls` counts the alerts under its heading, then lists updates apart.
     let mut mixed = page.clone();
     mixed.items.extend(updates.items.clone());
-    let listed = render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "st alerts ls");
+    let listed = render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "fractal alerts ls");
     assert!(listed.starts_with("ALERTS FOR person/alex  1\n"), "{listed}");
     assert!(listed.contains("\nUPDATES  1\n"), "{listed}");
     // A daemon that predates alerts says nothing: an update is still not an alert.
@@ -3369,7 +3369,7 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     };
     update.alert = None;
     assert_eq!(
-        render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "st alerts ls"),
+        render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "fractal alerts ls"),
         listed
     );
 }
@@ -3409,7 +3409,7 @@ fn context_occupancy_alone_is_not_reported_as_zero_tokens() {
         }))
         .unwrap(),
     );
-    let rendered = render_product_page("SESSIONS", &page, "st conversations sessions");
+    let rendered = render_product_page("SESSIONS", &page, "fractal conversations sessions");
     assert!(!rendered.contains("0 tokens"), "{rendered}");
     assert!(
         rendered.contains("  usage not reported · context 319465 tokens\n"),
@@ -3422,7 +3422,7 @@ fn context_occupancy_alone_is_not_reported_as_zero_tokens() {
     let usage = session.usage.as_mut().unwrap();
     usage.incarnation_count = 1;
     usage.total_tokens = 1200;
-    let rendered = render_product_page("SESSIONS", &page, "st conversations sessions");
+    let rendered = render_product_page("SESSIONS", &page, "fractal conversations sessions");
     assert!(rendered.contains("  usage 1200 tokens\n"), "{rendered}");
 }
 
@@ -3671,7 +3671,7 @@ fn machine_and_device_renderers_have_exact_operational_output() {
         render_product_page(
             "MACHINES",
             &fixture_product_page(&["machine"], true),
-            "st machines"
+            "fractal machines"
         ),
         concat!(
             "MACHINES  1\n",
@@ -3680,20 +3680,20 @@ fn machine_and_device_renderers_have_exact_operational_output() {
             "  runtimes 1 running · 1 known\n",
             "  assigned work 1\n",
             "  transport unix local · last success 2026-09-20T11:09:10Z\n",
-            "  inspect: st subject show host/host-a\n",
-            "More items are available: st machines --cursor cursor/next --limit 100\n",
+            "  inspect: fractal subject show host/host-a\n",
+            "More items are available: fractal machines --cursor cursor/next --limit 100\n",
         )
     );
     assert_eq!(
         render_product_page(
             "DEVICES",
             &fixture_product_page(&["device"], false),
-            "st devices --as person/alex"
+            "fractal devices --as person/alex"
         ),
         concat!(
             "DEVICES  1\n",
             "device/ios-release  active  person/alex/session/ios-release  scopes 4\n",
-            "  action: st devices --as person/alex revoke device/ios-release\n",
+            "  action: fractal devices --as person/alex revoke device/ios-release\n",
         )
     );
     let mut assistant = fixture_product_page(&["device"], false);
@@ -3701,8 +3701,8 @@ fn machine_and_device_renderers_have_exact_operational_output() {
     device.person_id = None;
     device.grant_id = Some("assistant-grant/0123456789abcdef01234567".into());
     device.session_actor = "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567".into();
-    let shown = render_product_page("DEVICES", &assistant, "st devices");
-    assert!(shown.contains("action: st devices grant revoke assistant-grant/0123456789abcdef01234567"));
+    let shown = render_product_page("DEVICES", &assistant, "fractal devices");
+    assert!(shown.contains("action: fractal devices grant revoke assistant-grant/0123456789abcdef01234567"));
     assert!(!shown.contains("--as person/"));
 }
 
@@ -3936,7 +3936,7 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let reason = claim.fields["reason"].as_str().unwrap();
         assert!(reason.contains("admissionNativeConsumption") && reason.contains("99.42.7"));
         assert!(reason.contains(driver.as_str()));
-        assert!(reason.contains(&format!("st admission override {} --binary", driver.as_str())));
+        assert!(reason.contains(&format!("fractal admission override {} --binary", driver.as_str())));
         assert_eq!(
             claim.idempotency_key,
             admission_diagnostic("agent/node.fixture", "first", &observed)
@@ -4009,14 +4009,14 @@ fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
     assert_eq!(
         wait_interruption_reason(actor, true, &[], &["message/new".into()]),
         Some(
-            "the wait stopped because agent/worker has a new message: message/new. Run `st conversations ls`"
+            "the wait stopped because agent/worker has a new message: message/new. Run `fractal conversations ls`"
                 .into()
         )
     );
     assert_eq!(
         wait_interruption_reason(actor, true, &["step-run/new".into()], &[]),
         Some(
-            "the wait stopped because agent/worker has ready work: step-run/new. Run `st work ls`"
+            "the wait stopped because agent/worker has ready work: step-run/new. Run `fractal work ls`"
                 .into()
         )
     );
@@ -4028,7 +4028,7 @@ fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
             &["message/new".into()]
         ),
         Some(
-            "the wait stopped because agent/worker has ready work: step-run/new. Run `st work ls`"
+            "the wait stopped because agent/worker has ready work: step-run/new. Run `fractal work ls`"
                 .into()
         )
     );

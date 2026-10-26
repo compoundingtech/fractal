@@ -75,7 +75,7 @@ pub async fn fleet_invite_create(
     let fleet_id = state.fleet_id.clone().ok_or_else(|| {
         ApiError::bad(St3Error::new(
             "not-in-a-fleet",
-            "this node is not in a fleet; run st fleet create first",
+            "this node is not in a fleet; run fractal fleet create first",
         ))
     })?;
     let store = state.store.clone();

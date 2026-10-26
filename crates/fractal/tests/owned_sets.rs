@@ -1613,7 +1613,7 @@ async fn suspended_authored_selection_refuses_start_and_resumes_the_recorded_ses
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("start-suspended"), "{error}");
-    assert!(error.contains("st agents resume"), "{error}");
+    assert!(error.contains("fractal agents resume"), "{error}");
     assert_eq!(d.store.selected_desired_token(subject).unwrap().unwrap(), token);
 
     let runtime = Arc::new(RolloutRuntime::default());

@@ -578,16 +578,11 @@ pub(crate) fn render_attention_list(
         let _ = writeln!(output, "    subject: {}", item.subject);
         let _ = writeln!(
             output,
-            "    inspect: st alerts show {} --as {}",
+            "    inspect: fractal alerts show {} --as {}",
             item.subject, item.person
         );
         for action in &item.actions {
-            let command = action
-                .argv
-                .iter()
-                .map(|argument| shell_argument(argument))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let command = shell_command(&action.argv);
             let _ = writeln!(output, "    {}: {command}", action.label);
         }
     }
@@ -643,12 +638,7 @@ pub(crate) fn render_attention_show(
     if !item.actions.is_empty() {
         let _ = writeln!(output, "\n{}", style.heading("ACTIONS"));
         for action in &item.actions {
-            let command = action
-                .argv
-                .iter()
-                .map(|argument| shell_argument(argument))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let command = shell_command(&action.argv);
             let _ = writeln!(output, "  {}: {command}", action.label);
         }
     }
@@ -759,6 +749,20 @@ fn render_request_subjects(request: &Value, style: OutputStyle) -> String {
         }
     }
     output
+}
+
+fn shell_command(argv: &[String]) -> String {
+    argv.iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            shell_argument(if index == 0 && matches!(argument.as_str(), "st" | "st3") {
+                "fractal"
+            } else {
+                argument
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn shell_argument(value: &str) -> String {
@@ -1687,6 +1691,17 @@ mod tests {
     }
 
     #[test]
+    fn action_commands_only_rename_the_displayed_executable() {
+        for program in ["st", "st3", "fractal", "other"] {
+            let argv = vec![program.into(), "subject".into(), "st".into(), "two words".into()];
+            let expected = if program == "other" { "other" } else { "fractal" };
+            assert_eq!(shell_command(&argv), format!("{expected} subject st 'two words'"));
+            assert_eq!(argv[0], program);
+        }
+        assert_eq!(shell_command(&[]), "");
+    }
+
+    #[test]
     fn attention_list_shows_kind_age_targets_and_safe_commands() {
         let item = AttentionItemView {
             kind: "fault".into(),
@@ -1734,13 +1749,16 @@ mod tests {
         assert!(rendered.contains("--reason 'It is fixed'"));
         assert!(!rendered.contains("The queue did not recover."));
         assert!(
-            rendered.contains("inspect: st alerts show attention/fabric --as person/alex")
+            rendered.contains("inspect: fractal alerts show attention/fabric --as person/alex")
         );
+        assert!(rendered.contains("resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"));
+        assert_eq!(item.actions[0].argv[0], "st3");
 
         let shown = render_attention_show(&item, OutputStyle::plain(), 180_000);
         assert!(shown.contains("ALERT  Fabric needs review"));
         assert!(shown.contains("The queue did not recover."));
         assert!(shown.contains("TARGETS\n  doc/fabric/report@abc"));
+        assert!(shown.contains("resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"));
     }
 
     #[test]

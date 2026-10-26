@@ -131,7 +131,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
     }
     anyhow::ensure!(
         args.yes,
-        "st uninstall erases this machine's st3 state, settings, and services; run it again with --yes, or --dry-run to list them"
+        "fractal uninstall erases this machine's st3 state, settings, and services; run it again with --yes, or --dry-run to list them"
     );
     let daemon_running = client.get::<Value>("/v1/health").await.is_ok();
     if let Some(file) = fractal_daemon::config::FleetFile::load(&config.state_dir)?
@@ -142,7 +142,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         } else {
             anyhow::ensure!(
                 daemon_running,
-                "start st3 so this machine can leave its fleet first, or pass --offline"
+                "run fractal up so this machine can leave its fleet first, or pass --offline"
             );
             let person = fleet_person(args.actor.clone(), &config)?;
             fleet_leave(&client, &config, &person, false, false, 600).await?;
@@ -171,7 +171,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         };
         anyhow::ensure!(
             stopped,
-            "stop st3 up and st3 replication-worker, then run st uninstall --yes again"
+            "stop fractal up and fractal replication-worker, then run fractal uninstall --yes again"
         );
         println!("stopped\tthe daemon this instance started without a service");
     }
@@ -224,7 +224,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         println!("remains\t{}", path.display());
     }
     println!(
-        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy"
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: fractal claude-channel uninstall-policy"
     );
     anyhow::ensure!(remaining.is_empty(), "some st3 files remain");
     println!("uninstalled");

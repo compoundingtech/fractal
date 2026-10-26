@@ -206,7 +206,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             );
             anyhow::ensure!(
                 config.fleet_id.is_none(),
-                "config.toml already configures a fleet with config peers; move it to membership with st fleet migrate"
+                "config.toml already configures a fleet with config peers; move it to membership with fractal fleet migrate"
             );
             fractal_daemon::node_identity::resolve(&mut config)?;
             let node = args.name.unwrap_or_else(|| config.node.clone());
@@ -282,7 +282,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     "fabric send-file to {name} failed; the invite stays open until it expires"
                 );
                 println!(
-                    "Sent invite {} to {name}'s Fabric inbox. On {name}, run:\n  st fleet {command} --fabric-inbox",
+                    "Sent invite {} to {name}'s Fabric inbox. On {name}, run:\n  fractal fleet {command} --fabric-inbox",
                     created.invite
                 );
             } else if args.code_only {
@@ -297,10 +297,10 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     "Invite {} for {target} expires in about {expires_in} minutes.",
                     created.invite
                 );
-                println!("On {target}, run:\n  st fleet {command} {}", created.code);
+                println!("On {target}, run:\n  fractal fleet {command} {}", created.code);
                 println!(
                     "The code is a one-use credential. To avoid shell history, run \
-                     `st fleet {command}` and paste it at the hidden prompt instead."
+                     `fractal fleet {command}` and paste it at the hidden prompt instead."
                 );
             }
             Ok(())
@@ -432,14 +432,14 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                         }
                         None if json_output => {}
                         None => println!(
-                            "This machine is a member and still syncing; st fleet wait waits for \
+                            "This machine is a member and still syncing; fractal fleet wait waits for \
                              the first sync to end and checks it."
                         ),
                     }
                 }
             } else if !json_output {
                 println!(
-                    "Start st3 up and st3 replication-worker to begin syncing; st fleet wait \
+                    "Start fractal up and fractal replication-worker to begin syncing; fractal fleet wait \
                      waits for the first sync to end and checks it."
                 );
             }
@@ -459,7 +459,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 .await?
                 .with_context(|| {
                     format!(
-                        "the first sync has not ended after {} s; st replication status shows \
+                        "the first sync has not ended after {} s; fractal replication status shows \
                          how far it got",
                         timeout.as_secs()
                     )
@@ -479,7 +479,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             let caught_up = match caught_up {
                 Ok(caught_up) => caught_up,
                 Err(waiting) => anyhow::bail!(
-                    "{}\nbut this node has not caught up since this wait began {} s ago: {}; st \
+                    "{}\nbut this node has not caught up since this wait began {} s ago: {}; fractal \
                      replication status shows how far it got",
                     render_first_sync(&first, now_ms()),
                     started.elapsed().as_secs(),
@@ -554,7 +554,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             match confirmed {
                 Some(member) => println!("{member} holds everything this machine wrote."),
                 None => println!(
-                    "Left without reaching a member. On another member run: st fleet remove {} --reason \"left offline\"",
+                    "Left without reaching a member. On another member run: fractal fleet remove {} --reason \"left offline\"",
                     config.node
                 ),
             }
@@ -563,7 +563,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 println!("st3 now runs local-only on this machine.");
             } else {
                 println!(
-                    "Stop st3 replication-worker; st3 up now runs local-only after a restart."
+                    "Stop fractal replication-worker; fractal up now runs local-only after a restart."
                 );
             }
             Ok(())
@@ -650,12 +650,12 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
         println!("revoked\t{invite}");
     }
     println!(
-        "Writes {} made after this node's last exchange with it are not accepted. On {}, if it still runs: st uninstall",
+        "Writes {} made after this node's last exchange with it are not accepted. On {}, if it still runs: fractal uninstall",
         removal.name, removal.name
     );
     if fractal_daemon::config::FleetFile::load(&config.state_dir)?.is_some_and(|file| file.legacy_peers) {
         println!(
-            "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until st fleet migrate --finish."
+            "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until fractal fleet migrate --finish."
         );
     }
     Ok(())
@@ -715,7 +715,7 @@ async fn save_and_publish_fleet_settings(
             },
         )
         .await
-        .context("fleet.toml saved; endpoint publication did not complete; restart st3 daemon and st3 replication-worker to apply saved relay settings and announce the saved endpoints")?;
+        .context("fleet.toml saved; endpoint publication did not complete; restart fractal daemon and fractal replication-worker to apply saved relay settings and announce the saved endpoints")?;
     Ok(())
 }
 
@@ -723,7 +723,7 @@ fn refresh_fleet_services(no_service: bool) -> Result<()> {
     if !no_service && services_installed()? {
         fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
     } else {
-        println!("Restart st3 daemon and st3 replication-worker for the change to take effect.");
+        println!("Restart fractal daemon and fractal replication-worker for the change to take effect.");
         println!(
             "The old worker no longer publishes endpoints after its settings change; restart it to resume publication."
         );
@@ -817,14 +817,14 @@ async fn run_fleet_transports(
         } => {
             anyhow::ensure!(
                 file.mode == fractal_daemon::config::FleetMode::Listening,
-                "adding Fabric requires a listening member; run st fleet mode listening first"
+                "adding Fabric requires a listening member; run fractal fleet mode listening first"
             );
             let port = file
                 .port
                 .context("adding Fabric requires this member's configured replication port")?;
             anyhow::ensure!(
                 port != 0,
-                "adding Fabric requires a fixed nonzero replication port; run st fleet mode listening --port PORT first"
+                "adding Fabric requires a fixed nonzero replication port; run fractal fleet mode listening --port PORT first"
             );
             let protocol = fabric_protocol.unwrap_or(protocol);
             anyhow::ensure!(
@@ -970,7 +970,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         if !args.no_service && services_installed()? {
             fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
         } else {
-            println!("Restart st3 replication-worker for this to take effect.");
+            println!("Restart fractal replication-worker for this to take effect.");
         }
         return Ok(());
     }
@@ -986,7 +986,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
     let fleet_id = config
         .fleet_id
         .clone()
-        .context("this machine has no config-peer fleet to migrate; use st fleet join")?;
+        .context("this machine has no config-peer fleet to migrate; use fractal fleet join")?;
     // Read only while the daemon may still be running; the locked migration rechecks
     // its store before writing. Invalid admission must not stop healthy services.
     {
@@ -994,7 +994,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         let database = config.state_dir.join("claims.sqlite3");
         anyhow::ensure!(
             database.exists(),
-            "this store is not bound to a fleet yet; start st3 once first"
+            "this store is not bound to a fleet yet; run fractal up once first"
         );
         let connection = rusqlite::Connection::open_with_flags(
             database,
@@ -1010,7 +1010,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
                 bound == fleet_id,
                 "this store belongs to fleet {bound}, not the configured {fleet_id}"
             ),
-            None => anyhow::bail!("this store is not bound to a fleet yet; start st3 once first"),
+            None => anyhow::bail!("this store is not bound to a fleet yet; run fractal up once first"),
         }
     }
     // fleet.toml resolves a relative path under STATE/fleet, and --finish removes the
@@ -1075,7 +1075,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         .await?;
         anyhow::ensure!(
             joined.migrate,
-            "that code is a join code; use st fleet join"
+            "that code is a join code; use fractal fleet join"
         );
         state_identity.record_fleet_join(&joined)?;
         if let Some(path) = code_path {
@@ -1094,7 +1094,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         );
     } else {
         println!(
-            "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish."
+            "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish."
         );
     }
     Ok(())
@@ -1127,7 +1127,7 @@ async fn wait_for_first_sync(
                 anyhow::bail!("{}", removed.describe(status.fleet_id.as_deref()));
             }
             let first = status.first_sync.clone().context(
-                "this node has no first sync to wait for: it did not join with st fleet join",
+                "this node has no first sync to wait for: it did not join with fractal fleet join",
             )?;
             match first.state.as_str() {
                 "verified" | "failed" => return Ok(Some(first)),
@@ -1211,7 +1211,7 @@ fn report_first_sync(first: &fractal_daemon::model::ReplicationFirstSync, json_o
     }
     anyhow::ensure!(
         first.state == "verified",
-        "{}\nst replication status shows this node's sync with each peer; report it with st \
+        "{}\nfractal replication status shows this node's sync with each peer; report it with fractal \
          diagnostic.",
         render_first_sync(first, now_ms())
     );

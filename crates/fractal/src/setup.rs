@@ -241,7 +241,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     let initial_subject = if let Some(harness) = &harness {
         if !first_run && !args.onboarding {
             println!(
-                "This setup already existed, so the built-in Fractal Assistant is not started on its own. Run st setup --onboarding to begin."
+                "This setup already existed, so the built-in Fractal Assistant is not started on its own. Run fractal setup --onboarding to begin."
             );
             None
         } else if daemon_ready(&config).await {
@@ -265,7 +265,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
                 !args.onboarding,
                 "rerunning onboarding needs a running daemon; pass --start true"
             );
-            say!("Start the st daemon and run st setup to begin onboarding.");
+            say!("Start the st daemon and run fractal setup to begin onboarding.");
             None
         }
     } else {
@@ -313,12 +313,12 @@ async fn prepare_harness(
     if let Some(requested) = &args.harness {
         anyhow::ensure!(
             found.contains(requested),
-            "{requested} is not installed on the daemon's login PATH; install it and open a new login shell, then run st setup"
+            "{requested} is not installed on the daemon's login PATH; install it and open a new login shell, then run fractal setup"
         );
     }
     if found.is_empty() {
         say!(
-            "No supported harness is installed on the daemon's login PATH. Install Claude Code, Codex, OpenCode, Pi or Omp, then run st setup. No onboarding seat was created."
+            "No supported harness is installed on the daemon's login PATH. Install Claude Code, Codex, OpenCode, Pi or Omp, then run fractal setup. No onboarding seat was created."
         );
         return Ok(None);
     }
@@ -384,7 +384,7 @@ async fn prepare_harness(
             );
         } else {
             say!(
-                "Claude channel uses --dangerously-load-development-channels plugin:st-channel@st. st accepts its local-development dialog when starting a seat. Provider or organization channel restrictions still apply.\nOptional administrator approval policy: sudo st claude-channel install-policy"
+                "Claude channel uses --dangerously-load-development-channels plugin:st-channel@st. st accepts its local-development dialog when starting a seat. Provider or organization channel restrictions still apply.\nOptional administrator approval policy: sudo fractal claude-channel install-policy"
             );
         }
     }
@@ -446,7 +446,7 @@ fn confirm_assistant(config: &Config, harness: &str, args: &SetupArgs) -> Result
         true,
     )?;
     if !start {
-        println!("Not started. Run st setup --onboarding when you want it.");
+        println!("Not started. Run fractal setup --onboarding when you want it.");
     }
     Ok(start)
 }
@@ -458,7 +458,7 @@ fn print_assistant_summary(config: &Config, harness: &str) -> Result<()> {
         .as_deref()
         .context("setup needs a person")?;
     println!(
-        "Created: the agent agent/st/assistant ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: st agents stop agent/st/assistant --as {person}",
+        "Created: the agent agent/st/assistant ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: fractal agents stop agent/st/assistant --as {person}",
         crate::onboarding::workspace(config)?.display()
     );
     Ok(())
@@ -753,7 +753,7 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
     pending.as_file().sync_all()?;
     pending
         .persist(data.join("install.json"))
-        .context("record setup-installed executables for st uninstall")?;
+        .context("record setup-installed executables for fractal uninstall")?;
     File::open(&data)?.sync_all()?;
     Ok(())
 }
@@ -904,7 +904,7 @@ async fn start_daemon(
     loop {
         if daemon_ready(config).await {
             say!(
-                "Started st without a service. It stops when you reboot.\nRun `st service install` to keep it running."
+                "Started st without a service. It stops when you reboot.\nRun `fractal service install` to keep it running."
             );
             return Ok(());
         }

@@ -2056,7 +2056,7 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
     assert!(!refused_start.status.success());
     let error = String::from_utf8_lossy(&refused_start.stderr);
     assert!(error.contains("start-suspended"), "{error}");
-    assert!(error.contains("st agents resume"), "{error}");
+    assert!(error.contains("fractal agents resume"), "{error}");
     assert_eq!(
         fractal_daemon::suspension::current(daemon.store(), WORKER)
             .unwrap()
@@ -2080,7 +2080,7 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
     );
     let message = refused.to_string();
     assert!(
-        message.contains("st agents stop") && message.contains("st agents start"),
+        message.contains("fractal agents stop") && message.contains("fractal agents start"),
         "{message}"
     );
     assert!(

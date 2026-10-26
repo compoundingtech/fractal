@@ -500,10 +500,10 @@ pub fn repair_text(observed: &Observed) -> &'static str {
             }
             Stage::VersionGate => match failure.driver {
                 Driver::Omp => {
-                    "repair the named producer admission check and remove its cache record to remeasure, or explicitly allow this build from a person's terminal with `st admission override omp --binary <installed-executable> --reason <reason>`; then restart the affected seat"
+                    "repair the named producer admission check and remove its cache record to remeasure, or explicitly allow this build from a person's terminal with `fractal admission override omp --binary <installed-executable> --reason <reason>`; then restart the affected seat"
                 }
                 Driver::OpenCode => {
-                    "repair the named producer admission check and remove its cache record to remeasure, or explicitly allow this build from a person's terminal with `st admission override opencode --binary <installed-executable> --reason <reason>`; then restart the affected seat"
+                    "repair the named producer admission check and remove its cache record to remeasure, or explicitly allow this build from a person's terminal with `fractal admission override opencode --binary <installed-executable> --reason <reason>`; then restart the affected seat"
                 }
                 _ => {
                     "repair the named producer admission check, remove its harness-admission cache record to repeat the isolated probe, and restart the seat"

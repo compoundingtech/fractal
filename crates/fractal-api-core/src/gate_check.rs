@@ -101,7 +101,7 @@ pub fn start(
         if item.view.answer == "waiting" && item.view.host != host.node {
             item.view.answer = "unchecked".into();
             item.view.reason = Some(format!(
-                "it runs on host `{}`; run `st missions check` there",
+                "it runs on host `{}`; run `fractal missions check` there",
                 item.view.host
             ));
         }

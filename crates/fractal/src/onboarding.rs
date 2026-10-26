@@ -81,7 +81,7 @@ async fn has_run_on(client: &Client) -> Result<bool> {
         // An older daemon without the overview route cannot say, and guessing "never" would
         // start a second onboarding on an install that already finished one.
         Err(error) if fractal_daemon::client::is_missing_route(&error) => Err(error.context(
-            "the running daemon is older than this st and cannot say whether onboarding already ran; restart it, or run st setup --onboarding to begin explicitly",
+            "the running daemon is older than this st and cannot say whether onboarding already ran; restart it, or run fractal setup --onboarding to begin explicitly",
         )),
         Err(error) => Err(error),
     }
@@ -146,7 +146,7 @@ pub async fn start(
         })
     {
         said(
-            "The built-in Fractal Assistant is stopped; setup leaves it stopped. Use st setup --onboarding to begin again explicitly."
+            "The built-in Fractal Assistant is stopped; setup leaves it stopped. Use fractal setup --onboarding to begin again explicitly."
         );
         return Ok(None);
     }
@@ -297,7 +297,7 @@ fn declaration_changed(rerun: bool) -> Result<Option<String>> {
         "the built-in Fractal Assistant changed during setup; retry setup to inspect its new state"
     );
     said(
-        "The onboarding declarations changed concurrently; ordinary setup preserves their current state. Run st setup again if onboarding has not started."
+        "The onboarding declarations changed concurrently; ordinary setup preserves their current state. Run fractal setup again if onboarding has not started."
     );
     Ok(None)
 }

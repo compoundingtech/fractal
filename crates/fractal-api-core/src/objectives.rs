@@ -238,7 +238,7 @@ pub fn divergence(open: u64) -> Value {
                 "None is open.".to_owned()
             } else {
                 format!(
-                    "{} open; `st subject daemon/NODE` for the member that found one shows it with the projection, the claim range, both digests and both builds.",
+                    "{} open; `fractal subject daemon/NODE` for the member that found one shows it with the projection, the claim range, both digests and both builds.",
                     plural(open, "divergence")
                 )
             }
@@ -454,7 +454,7 @@ pub fn find<'a>(rows: &'a [Value], id: &str) -> Result<&'a Value, String> {
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [one] => Ok(one),
-        [] => Err(format!("no objective or budget is named {id}; `st slo ls` lists them")),
+        [] => Err(format!("no objective or budget is named {id}; `fractal slo ls` lists them")),
         many => Err(format!(
             "{id} matches {}; name one",
             many.iter().filter_map(|row| row["id"].as_str()).collect::<Vec<_>>().join(", ")
@@ -595,7 +595,7 @@ mod tests {
         assert_eq!(find(&rows, "write-ack").unwrap()["id"], "write-ack");
         assert_eq!(find(&rows, "write").unwrap()["id"], "write-ack");
         assert!(find(&rows, "transaction").unwrap_err().contains("transaction/read, transaction/write"));
-        assert!(find(&rows, "nope").unwrap_err().contains("st slo ls"));
+        assert!(find(&rows, "nope").unwrap_err().contains("fractal slo ls"));
     }
 
     #[test]

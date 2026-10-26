@@ -637,7 +637,7 @@ pub fn divergence_line(open: u64) -> (String, &'static str, String) {
         "slo/projection-divergence".into(),
         if open <= max_open { "pass" } else { "info" },
         format!(
-            "open P1 projection bugs ≤ {max_open}: {open} open; `st subject daemon/NODE` for the member that found one shows it with what a reproduction needs"
+            "open P1 projection bugs ≤ {max_open}: {open} open; `fractal subject daemon/NODE` for the member that found one shows it with what a reproduction needs"
         ),
     )
 }

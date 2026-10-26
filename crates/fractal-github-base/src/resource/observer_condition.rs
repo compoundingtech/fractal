@@ -80,13 +80,13 @@ impl ObserverCondition {
                 "{subject} cannot observe its resource: {reason}. Give the daemon account's GitHub token access to the repository, with `gh auth login` or `gh auth refresh -h github.com -s repo` as that account. The observer tries again on its own. {closes}"
             ),
             Self::RateLimited { reason, .. } => format!(
-                "{subject} is still limited after the reset GitHub named: {reason}. Something else spends the GitHub budget that every host shares; `st doctor` on {host} shows how much of it remains, how much that host's observers spent, and each observer's requests. The observer waits for each reset on its own. {closes}"
+                "{subject} is still limited after the reset GitHub named: {reason}. Something else spends the GitHub budget that every host shares; `fractal doctor` on {host} shows how much of it remains, how much that host's observers spent, and each observer's requests. The observer waits for each reset on its own. {closes}"
             ),
             Self::Unreachable(reason) => format!(
-                "{subject} has failed to observe for over an hour: {reason}. Inspect it with `st subject {subject}`. {closes}"
+                "{subject} has failed to observe for over an hour: {reason}. Inspect it with `fractal subject {subject}`. {closes}"
             ),
             Self::Rejected(reason) => format!(
-                "st rejected an observation from {subject}: {reason}. Correct the observer's declaration and apply it again; inspect it with `st subject {subject}`. {closes}"
+                "st rejected an observation from {subject}: {reason}. Correct the observer's declaration and apply it again; inspect it with `fractal subject {subject}`. {closes}"
             ),
         }
     }

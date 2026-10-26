@@ -65,7 +65,7 @@ pub(super) fn human_outage_message(error: &anyhow::Error) -> Option<String> {
         return None;
     }
     Some(format!(
-        "the st daemon at {} is unavailable. Run `st` to open Fractal, or `st setup` to set up or start its background service, then retry this command",
+        "the st daemon at {} is unavailable. Run `fractal` to open Fractal, or `fractal setup` to set up or start its background service, then retry this command",
         outage.endpoint()
     ))
 }

@@ -18,7 +18,7 @@ pub use crate::config::open_token_file;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
-pub const GITHUB_AUTH_REMEDY: &str = "GitHub observers have no token; run `gh auth login` as the daemon account or export GH_TOKEN/GITHUB_TOKEN in that account's login-shell startup files. Check the daemon PATH with `st doctor`. No anonymous request was sent; failed or rejected credentials are checked again after a 30-second refresh backoff. HTTP requests are never retried.";
+pub const GITHUB_AUTH_REMEDY: &str = "GitHub observers have no token; run `gh auth login` as the daemon account or export GH_TOKEN/GITHUB_TOKEN in that account's login-shell startup files. Check the daemon PATH with `fractal doctor`. No anonymous request was sent; failed or rejected credentials are checked again after a 30-second refresh backoff. HTTP requests are never retried.";
 
 tokio::task_local! {
     /// The observer whose observation sends the GitHub requests in this task.

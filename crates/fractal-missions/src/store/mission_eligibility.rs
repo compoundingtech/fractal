@@ -85,7 +85,7 @@ impl MissionEligibilityStore for Store {
                 "episode": episode, "condition": MISSING_AGENT_CONDITION,
                 "reviewer": run.requester, "title": "Mission work has no eligible agent", "severity": "error",
                 "targets": [run.subject, run.generation, step.subject],
-                "reason": format!("Run `{}` generation `{}` step `{}` cannot advance: {}. Declare an assigned or available agent, or revise the mission to use an existing seat. Inspect with `st missions show {}`. This fault closes when eligibility returns, the generation changes, or the run ends.", run.subject, run.generation, step.subject, step.blocked_reason.as_deref().unwrap_or_default(), run.subject)
+                "reason": format!("Run `{}` generation `{}` step `{}` cannot advance: {}. Declare an assigned or available agent, or revise the mission to use an existing seat. Inspect with `fractal missions show {}`. This fault closes when eligibility returns, the generation changes, or the run ends.", run.subject, run.generation, step.subject, step.blocked_reason.as_deref().unwrap_or_default(), run.subject)
             }}),
             &[],
             None,

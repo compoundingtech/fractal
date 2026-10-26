@@ -3,7 +3,7 @@ use crate::CoordinationStore;
 use super::*;
 
 pub const THRESHOLD_MS: u64 = 3_600_000;
-pub const CLEANUP_COMMAND: &str = "st conversations cleanup --all --older-than 1h";
+pub const CLEANUP_COMMAND: &str = "fractal conversations cleanup --all --older-than 1h";
 
 fn overdue(
     store: &Store,

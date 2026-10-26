@@ -456,13 +456,13 @@ fn doctor_outage_advice_is_for_people_and_preserves_json_and_agent_exit_status()
             let stderr = String::from_utf8_lossy(&output.stderr);
             if agent {
                 assert!(
-                    !stderr.contains("Run `st`") && !stderr.contains("st setup"),
+                    !stderr.contains("Run `fractal`") && !stderr.contains("fractal setup"),
                     "{stderr}"
                 );
                 assert!(stderr.contains("may be restarting"), "{stderr}");
             } else {
                 assert!(
-                    stderr.contains("Run `st`") && stderr.contains("st setup"),
+                    stderr.contains("Run `fractal`") && stderr.contains("fractal setup"),
                     "{stderr}"
                 );
                 assert!(!stderr.contains("may be restarting"), "{stderr}");
@@ -472,7 +472,7 @@ fn doctor_outage_advice_is_for_people_and_preserves_json_and_agent_exit_status()
                 assert_eq!(report["status"], "fail");
                 assert_eq!(report["checks"][0]["name"], "daemon");
                 let message = report["checks"][0]["message"].as_str().unwrap();
-                assert_eq!(message.contains("st setup"), !agent, "{report}");
+                assert_eq!(message.contains("fractal setup"), !agent, "{report}");
             }
         }
     }

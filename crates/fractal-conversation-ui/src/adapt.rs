@@ -223,7 +223,7 @@ fn conversation_with_output_mode(
                     body.push('\n');
                 }
                 body.push_str(&format!(
-                    "[the start of a {} message · `st conversations read {}` shows all of it]",
+                    "[the start of a {} message · `fractal conversations read {}` shows all of it]",
                     size_text(bytes),
                     message.message_id
                 ));

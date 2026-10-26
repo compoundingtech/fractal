@@ -3771,7 +3771,7 @@ impl MissionsStore for Store {
             return Err(St3Error::new(
                 "mission-run-not-finished",
                 format!(
-                    "mission run `{}` is {} in its {} phase; only a finished run takes an outcome, so cancel it with `st missions cancel` or let it finish",
+                    "mission run `{}` is {} in its {} phase; only a finished run takes an outcome, so cancel it with `fractal missions cancel` or let it finish",
                     current.subject, current.status, current.phase
                 ),
             ));
@@ -5867,7 +5867,7 @@ impl MissionsStore for Store {
                     return Err(St3Error::new(
                         "seat-queue-order",
                         format!(
-                            "`{subject}` is not the next work for `{actor}`; claim `{next}` first. A person, or an agent with queue authority for this seat, can reorder it with `st agents queue move`"
+                            "`{subject}` is not the next work for `{actor}`; claim `{next}` first. A person, or an agent with queue authority for this seat, can reorder it with `fractal agents queue move`"
                         ),
                     )
                     .with_detail("next_work_id", next));
