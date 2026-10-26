@@ -1,4 +1,4 @@
-//! The part of `store::resource_preparation` that moved up from st3-store.
+//! The part of `store::resource_preparation` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -12,7 +12,7 @@ pub use fractal_delivery::store::resource_preparation::*;
 pub use fractal_store::store::resource_preparation::tests_shared_seats;
 pub use fractal_delivery::store::resource_preparation::{Fence, NativeCut, Prepared};
 #[cfg(test)]
-#[allow(hidden_glob_reexports)] // st3-store's module of the same name is private; this one holds the tests that moved
+#[allow(hidden_glob_reexports)] // fractal-store's module of the same name is private; this one holds the tests that moved
 mod tests;
 
 pub struct Inputs {

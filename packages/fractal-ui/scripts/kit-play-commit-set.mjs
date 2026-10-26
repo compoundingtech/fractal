@@ -22,6 +22,7 @@ export const MERGE_ONLY = [
   'fractal-ui-sidebar-roster--hundred-agent-render',
 ]
 export const BOTH_WIDTHS = [
+  'fractal-app-composer-images--several-images',
   'fractal-ui-composer--footer-width-budget',
   'fractal-ui-composer--kit-label-resize',
   'fractal-ui-composer--layout-shapes',
@@ -29,6 +30,7 @@ export const BOTH_WIDTHS = [
   'fractal-ui-transcript-composer--host-width',
   'fractal-ui-transcript-composer--reading-column',
   'fractal-ui-workbench--all-states',
+  'fractal-narrow-layout--decode-stale-sidebar-hosts',
 ]
 
 const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
@@ -36,11 +38,24 @@ const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
 // Scheme-only aliases remain available in Storybook; the gate already overrides their scheme.
 // The filter benchmark itself renders 240/440 × dark/light probes, so repeat its measurements
 // in only one outer browser case. FilterBehavior retains functional coverage in all four cases.
-export const FULL_CASE_OVERRIDES = new Map([
+export const KIT_CASE_OVERRIDES = new Map([
   ['fractal-ui-transcript--no-green-all-states-light', []],
   ['fractal-ui-composer--footer-width-budget-light', []],
   ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
+  // Portal theme inheritance must run in light as well as dark on every commit.
+  ['fractal-ui-sidebar-milestone-agent-row--native-overlays-themed', FULL],
 ])
+export const APP_CASE_OVERRIDES = new Map([
+  // Collapse removes the production sidebar separator while a drag is held at this measured viewport.
+  ['fractal-narrow-layout--sidebar-drag-unmount-cleanup', [['dark', 1100], ['light', 1100]]],
+  // Drawer density follows pointer input on both sides of the actual dock breakpoint.
+  ['fractal-narrow-layout--breakpoint-density', [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]],
+  ['fractal-narrow-layout--breakpoint-density-coarse', [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]],
+  // Pointer and Escape dismissal restore the opening trigger in tablet and phone drawers.
+  ['fractal-narrow-layout--drawer-focus-return', [['dark', 899], ['light', 440]]],
+])
+// The production build includes both inventories; every named story remains required.
+export const FULL_CASE_OVERRIDES = new Map([...KIT_CASE_OVERRIDES, ...APP_CASE_OVERRIDES])
 
 // Validate against the complete index before selecting tags or shards, so stale policy cannot
 // silently remove coverage. An omitted scheme alias must share its kept base story's source.
@@ -67,7 +82,7 @@ export function commitSetCases(criticalIds, { mergeOnlyIds = MERGE_ONLY, bothWid
   }
   const mergeOnly = new Set(mergeOnlyIds), bothWidths = new Set(bothWidthsIds)
   const ids = criticalIds.filter(id => !mergeOnly.has(id) && overrides.get(id)?.length !== 0)
-  const cases = ids.flatMap(id => (bothWidths.has(id) ? [FULL[0], FULL[1]] : [diagonalCase(id)]).map(([scheme, width]) => ({ id, scheme, width })))
+  const cases = ids.flatMap(id => (overrides.get(id) ?? (bothWidths.has(id) ? [FULL[0], FULL[1]] : [diagonalCase(id)])).map(([scheme, width]) => ({ id, scheme, width })))
   return { ids, cases, omittedStories: criticalIds.filter(id => mergeOnly.has(id) || overrides.get(id)?.length === 0), omittedCases: criticalIds.length * 4 - cases.length }
 }
 

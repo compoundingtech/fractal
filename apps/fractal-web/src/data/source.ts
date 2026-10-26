@@ -196,6 +196,8 @@ export interface ConversationPage {
 export interface Grants {
   readonly actions: 'granted' | 'ungranted'
   readonly messageSend: 'granted' | 'ungranted'
+  /** Image upload for message attachments (`control.messages`); sending them still needs `messageSend`. */
+  readonly attachmentUpload: 'granted' | 'ungranted'
   readonly terminalInput: 'granted' | 'ungranted'
 }
 
@@ -270,6 +272,7 @@ export interface AttachmentPort {
   readonly upload: (request: {
     readonly bytes: Blob | ArrayBuffer | Uint8Array
     readonly mediaType: BlobUpload['media_type']
+    readonly signal?: AbortSignal
   }) => Promise<ConversationPortResult<BlobUpload>>
   readonly chunk: (request: {
     readonly sha256: string
@@ -320,6 +323,8 @@ export interface DataSource {
   readonly conversationInterest?: (agentRef: string) => Atom.Atom<void>
   /** Explicit pointer/focus intent; live admits it only after a visible thread's first-page frame. */
   readonly prefetchConversation?: (agentRef: string) => void
+  /** Explicit terminal-toggle pointer/focus intent; live retains a read-only viewer. */
+  readonly prefetchTerminal?: (terminalRef: string) => void
   /** Explicit recovery: re-acquire a failed or ended conversation follow; a healthy follow is untouched. */
   readonly retryConversation?: (agentRef: string) => void
   /** Keyed by terminal ref; live attaches a read-only viewer. */

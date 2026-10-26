@@ -423,7 +423,7 @@ async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
         axum::routing::get(move |upgrade: WebSocketUpgrade| {
             let sender = sender.clone();
             async move {
-                upgrade.protocols(["st3.client.collections.v0"]).on_upgrade(
+                upgrade.protocols(["fractal.client.collections.v0"]).on_upgrade(
                     move |mut socket| async move {
                         while let Some(Ok(message)) = socket.next().await {
                             if let Ok(text) = message.to_text() {

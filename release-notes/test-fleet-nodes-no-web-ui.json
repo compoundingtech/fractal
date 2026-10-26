@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The fleet test nodes start with --web-listen off. The previous-release node in the fleet compatibility test bound the browser UI's fixed default address 127.0.0.1:7410 and exited with \"Address already in use\" on a host where something else listened there (a developer's web server on hetz2), so linux-gate could not be signed on that host.",
+  "replay": {"status": "none", "detail": "Test-only change; no claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit; the nodes then bind the default web address again."}
+}

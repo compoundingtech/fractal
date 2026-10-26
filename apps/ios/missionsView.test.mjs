@@ -43,7 +43,7 @@ assert.equal(missionTitle({ id: 'mission/fleet/stui/client-api', title: 'fleet/s
 const missions = [
   served(mission('fleet/b/idle', 'standing'), 'idle'),
   served(mission('fleet/a/work', 'running', [step('x', 'running'), step('y', 'completed')]), 'working', { progress: { done: 1, total: 2 } }),
-  served(mission('fleet/smalltalk/ci/run', 'running', [step('z', 'running')], { system: true }), 'working'),
+  served(mission('fleet/fractal/ci/run', 'running', [step('z', 'running')], { system: true }), 'working'),
 ];
 const { rows, hidden } = missionRows(missions, false, Date.parse('2026-09-30T12:00:00Z'));
 assert.deepEqual(rows.map(row => [row.word, row.title, row.done, row.total]), [['working', 'fleet/a · Work', 1, 2], ['idle', 'fleet/b · Idle', 0, 0]]);

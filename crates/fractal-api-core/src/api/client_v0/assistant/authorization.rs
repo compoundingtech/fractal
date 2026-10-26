@@ -242,7 +242,7 @@ pub fn verify(state: &AppState, session: &ClientSession, path: &str, parameters:
 /// The future of one assistant projection.
 pub type ProjectFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(ClientSnapshot, Value), ApiError>> + Send + 'a>>;
 
-/// Serves one named projection. st3-api serves its own; the client-v0 layer above it passes one
+/// Serves one named projection. fractal-api-core serves its own; the client-v0 layer above it passes one
 /// that also serves the projections which need the layer's search and conversation readers.
 pub type Projector = for<'a> fn(&'a AppState, &'a ClientSnapshot, &'a str, &'a BTreeMap<String, String>, usize, &'a str, &'a response_body::Context) -> ProjectFuture<'a>;
 

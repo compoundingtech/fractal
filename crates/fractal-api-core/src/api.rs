@@ -98,6 +98,8 @@ pub mod published_attention;
 pub mod attention_history;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
+pub use revision_changes::revision_card;
+#[cfg(any(test, feature = "test-support"))]
 pub use published_attention::{
     attention_fleet, present_attention, published_attention_rows, refresh_attention_list,
     refresh_attention_list_with,
@@ -115,6 +117,7 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
 #[cfg(target_os = "linux")]
@@ -124,6 +127,7 @@ pub use tile_endpoint::{
 };
 pub use published_lists::{start_published_lists, wait_published_lists_at_least};
 mod changes;
+mod deploy;
 
 #[cfg(test)]
 mod legacy_handler_guard_tests;
@@ -496,7 +500,7 @@ pub fn router(state: AppState) -> Router {
     router_with(state, &[])
 }
 
-/// Routes a crate above this one serves (st3-api-mailbox's mailbox stream): each family is added to
+/// Routes a crate above this one serves (fractal-api-mailbox's mailbox stream): each family is added to
 /// the route table before the envelope and leave layers wrap it, so it is served exactly as the
 /// routes listed here. `router` without them is the route table this crate alone answers.
 pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
@@ -523,6 +527,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route(
+            "/v1/deploy/verify-go",
+            post(deploy::verify_go).layer(Extension(transport)),
+        )
         .route("/v1/harnesses", get(operations::available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
         .route(
@@ -748,6 +756,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
         .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
+        .route(
+            "/v1/internal/fleet/pairing-admission",
+            post(fleet::fleet_pairing_admission),
+        )
         .route(
             "/v1/internal/fleet/admission-residue",
             get(fleet::fleet_admission_residue),
@@ -6352,7 +6364,7 @@ fn harness_ancestor(mut pid: u32) -> Option<String> {
     let mut seen = BTreeSet::new();
     while pid > 1 && pid != std::process::id() && seen.insert(pid) {
         let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
             let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
             (key == name).then(|| value.to_owned())
@@ -6412,7 +6424,7 @@ fn native_delivery_identity(
             _ => None,
         }
     })?;
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     let agent = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
         env.iter().find_map(|entry| {
             let (key, value) = entry.split_once('=')?;

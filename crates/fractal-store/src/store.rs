@@ -16,9 +16,9 @@ macro_rules! message_desired_recipient_match {
 // Store methods by domain (the crate plan's domain rules); core stays in this file.
 pub mod attention;
 pub mod delivery;
+pub mod deploy;
 pub mod evidence;
 pub mod missions;
-mod mission_projection_upgrade;
 pub mod seats;
 pub mod trace_principal;
 #[cfg(test)]
@@ -272,16 +272,16 @@ pub mod tombstones_tests;
 pub mod step_wait_tests;
 #[cfg(test)]
 pub mod work_renew_tests;
-pub use runtime::SmalltalkRuntime;
+pub use runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 
-/// The graph's checkpoints with smalltalk's checkpoint rules beside them.
+/// The graph's checkpoints with Fractal's checkpoint rules beside them.
 pub mod checkpoint {
     pub use super::checkpoint_rules::*;
     pub use smallclaims::store::checkpoint::*;
 
-    /// Prove a drop plan on a copy of the store with smalltalk's projections and readers.
+    /// Prove a drop plan on a copy of the store with Fractal's projections and readers.
     #[cfg(any(test, feature = "test-support"))]
     pub fn prove_on_copy(
         copy: &std::path::Path,
@@ -289,7 +289,7 @@ pub mod checkpoint {
         plan: &DropPlan,
     ) -> anyhow::Result<CheckpointProof> {
         smallclaims::store::checkpoint::prove_on_copy(
-            &super::SmalltalkRuntime::default(),
+            &super::FractalRuntime::default(),
             copy,
             sealed,
             plan,
@@ -297,7 +297,7 @@ pub mod checkpoint {
     }
 }
 
-/// The graph's projection digests over smalltalk's shared tables.
+/// The graph's projection digests over Fractal's shared tables.
 pub mod projection_digest {
     pub use smallclaims::store::projection_digest::*;
 
@@ -669,7 +669,7 @@ pub struct AgentWorkQueue {
     pub queued_work_count: u64,
 }
 
-/// smalltalk's projection tables, and the indexes its folds read the claim log through. The
+/// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
 const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6a0f08109ee2 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
@@ -1977,12 +1977,12 @@ pub type AgentStatusEntry = (u64, u64, bool, ClaimsReduction, Arc<StatusResponse
 /// The claims of one idempotency key used for different requests, each as `(subject, writer)`.
 pub type IdempotencyConflict = Vec<(String, String)>;
 
-/// smalltalk's store: the graph store, which it derefs to, and smalltalk's runtime, which
+/// Fractal's store: the graph store, which it derefs to, and Fractal's runtime, which
 /// keeps the caches of its projections and plugs its claim kinds into the graph.
 pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
-    pub smalltalk: Arc<SmalltalkRuntime>,
+    pub fractal: Arc<FractalRuntime>,
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2324,9 +2324,9 @@ fn backfill_message_index(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The runtime smalltalk opens the graph with, for code that opens the graph store itself.
+/// The runtime Fractal opens the graph with, for code that opens the graph store itself.
 pub fn runtime() -> Arc<dyn smallclaims::Runtime> {
-    Arc::new(SmalltalkRuntime::default())
+    Arc::new(FractalRuntime::default())
 }
 
 /// The runs that wait on a person, and the open human gates among them.
@@ -2336,50 +2336,50 @@ impl Store {
     /// The explicitly registered keyed views for this graph. This getter performs no reads
     /// or installation; availability and source coverage must be checked in a snapshot.
     pub fn ivm_views(&self) -> Option<Arc<smallclaims::ivm::Views>> {
-        self.smalltalk.ivm_views.clone()
+        self.fractal.ivm_views.clone()
     }
 
     pub fn open(path: &Path, origin: impl Into<String>) -> Result<Self> {
-        let smalltalk = Arc::new(SmalltalkRuntime::default());
-        let graph = GraphStore::open(path, origin, smalltalk.clone())?;
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
-        publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk, standby_observations: Default::default() })
+        publication_facts::install_cache_observer(&graph, &fractal);
+        Ok(Self { graph, fractal, standby_observations: Default::default() })
     }
 
-    /// Open explicitly registered shadow views beside Smalltalk's production admission and
+    /// Open explicitly registered shadow views beside Fractal's production admission and
     /// projections. Source adapters own installation and certification before any read switch.
     pub fn open_with_ivm_views(
         path: &Path,
         origin: impl Into<String>,
         views: Arc<smallclaims::ivm::Views>,
     ) -> Result<Self> {
-        let smalltalk = Arc::new(SmalltalkRuntime::with_ivm_views(views));
-        let graph = GraphStore::open(path, origin, smalltalk.clone())?;
+        let fractal = Arc::new(FractalRuntime::with_ivm_views(views));
+        let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
-        publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk, standby_observations: Default::default() })
+        publication_facts::install_cache_observer(&graph, &fractal);
+        Ok(Self { graph, fractal, standby_observations: Default::default() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
     /// Concurrent server tests should use [`Self::open`]: shared-cache read/write
     /// contention returns `SQLITE_LOCKED` immediately instead of waiting.
     pub fn open_memory(origin: impl Into<String>) -> Result<Self> {
-        let smalltalk = Arc::new(SmalltalkRuntime::default());
-        let graph = GraphStore::open_memory(origin, smalltalk.clone())?;
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
-        publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk, standby_observations: Default::default() })
+        publication_facts::install_cache_observer(&graph, &fractal);
+        Ok(Self { graph, fractal, standby_observations: Default::default() })
     }
 
     /// Simulate a different build's registry on this node.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_claim_registry(&self, registry: fractal_schema::Registry) {
         assert!(
-            self.smalltalk.claim_registry.set(registry).is_ok(),
+            self.fractal.claim_registry.set(registry).is_ok(),
             "the registry is set once"
         );
     }
@@ -4439,8 +4439,7 @@ impl Store {
     /// answers read at `store_index` may be kept: only those at the newest applied snapshot are
     /// known to hold afterwards.
     fn advance_subject_cache(&self, connection: &Connection, store_index: u64) -> Result<bool> {
-        let mut cache = self
-            .smalltalk
+        let mut cache = self.fractal
             .subject_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -4531,8 +4530,7 @@ impl Store {
     fn kept_subject_status(
         &self, subject: &str, store_index: u64, claims: ClaimsReduction,
     ) -> Option<(SubjectStatus, Option<PlannedAction>)> {
-        let cache = self
-            .smalltalk
+        let cache = self.fractal
             .subject_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -4558,8 +4556,7 @@ impl Store {
         &self, subject: &str, store_index: u64, claims: ClaimsReduction,
         status: &SubjectStatus, action: &Option<PlannedAction>,
     ) {
-        let mut cache = self
-            .smalltalk
+        let mut cache = self.fractal
             .subject_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -4628,8 +4625,7 @@ impl Store {
         let mut candidates = BTreeSet::new();
         let mut unknown = Vec::new();
         {
-            let cache = self
-                .smalltalk
+            let cache = self.fractal
                 .subject_cache
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
@@ -4661,8 +4657,7 @@ impl Store {
                 .expect("every runtime read has a view entry");
             let history = entry.history;
             if newest && owners {
-                let mut cache = self
-                    .smalltalk
+                let mut cache = self.fractal
                     .subject_cache
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
@@ -4681,7 +4676,7 @@ impl Store {
     /// graph without arriving anew.
     #[cfg(any(test, feature = "test-support"))]
     pub fn forget_current_views(&self) {
-        self.smalltalk.forget_views();
+        self.fractal.forget_views();
     }
 
     /// Append a claim in a write transaction that then rolls back, as a failed write does.
@@ -5808,8 +5803,7 @@ impl Store {
         let newest: u64 = connection
             .prepare_cached("SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1")?
             .query_row(/* sqlite-large-value: allow-for-now lv-h2b7668e3f927 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?;
-        if let Some((_, value)) = self
-            .smalltalk
+        if let Some((_, value)) = self.fractal
             .actual_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -5821,8 +5815,7 @@ impl Store {
         // A claim committed after `newest` can only make this value newer than its key, and the
         // next read then misses and folds again.
         let value = latest_actual(&connection, subject)?;
-        let mut cache = self
-            .smalltalk
+        let mut cache = self.fractal
             .actual_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -13843,7 +13836,7 @@ pub fn validate_replicated_claim(
         transaction,
         batch,
         claim,
-        &SmalltalkRuntime::default(),
+        &FractalRuntime::default(),
     )
 }
 
@@ -15785,12 +15778,8 @@ fn reconcile_carried_step_tx(
     // observation for this successor step.
     let later_step_claim = transaction
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-hfdfe47383131 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!("SELECT 1 FROM claims JOIN claims carried ON carried.id=?2
-                 WHERE claims.subject=?1 AND claims.kind IN
-                 ('step-run.state','step-run.retried','work.claimed','work.renewed',
-                  'work.progress','work.submitted','work.failed','work.released','work.extended')
-                 AND {} LIMIT 1", canonical::after_sql("claims", "carried")),
-            params![claim.subject, claim.id],
+            "SELECT 1 FROM claims WHERE subject=?1 AND kind<>'step-run.carried' LIMIT 1",
+            [&claim.subject],
             |_| Ok(()),
         )
         .optional()
@@ -15817,17 +15806,14 @@ fn reconcile_carried_step_tx(
             .get(name)
             .filter(|_| matches!(status, "claimed" | "working" | "verifying" | "blocked"))
     };
-    let reason = mission_projection_upgrade::carried_reason(transaction, &claim.id)?;
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h3bfc21a711de owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, attempt=?3, worker_reported=?4,
-                    blocked_reason=?9,
+            /* sqlite-large-value: allow-for-now lv-h49652782434a owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, attempt=?3, worker_reported=?4,
+                    blocked_reason=CASE WHEN status=?2 THEN blocked_reason ELSE NULL END,
                     not_before_unix_ms=CASE WHEN status=?2 THEN not_before_unix_ms ELSE NULL END,
-                    lease_owner=CASE WHEN status<>?2 THEN ?6 ELSE lease_owner END,
-                    lease_incarnation=CASE WHEN status<>?2 THEN ?7 ELSE lease_incarnation END,
-                    lease_expires_at_unix_ms=CASE WHEN status<>?2 THEN ?8 ELSE lease_expires_at_unix_ms END,
-                    updated_at_unix_ms=CASE WHEN status<>?2 THEN ?5 ELSE updated_at_unix_ms END
-                 WHERE subject=?1 AND (status<>?2 OR blocked_reason IS NOT ?9)",
+                    lease_owner=?6, lease_incarnation=?7, lease_expires_at_unix_ms=?8,
+                    updated_at_unix_ms=?5
+                 WHERE subject=?1 AND status<>?2",
             params![
                 claim.subject,
                 status,
@@ -15839,7 +15825,6 @@ fn reconcile_carried_step_tx(
                 lease("claim_expires_at_unix_ms")
                     .and_then(Value::as_u64)
                     .map(|expiry| expiry.to_string()),
-                reason,
             ],
         )
         .map_err(internal)?;
@@ -16054,9 +16039,6 @@ pub fn project_mission_run_update(
         return Ok(());
     }
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
-    if claim.kind == "step-run.carried" {
-        return reconcile_carried_step_tx(transaction, claim);
-    }
     if person_work::project(transaction, claim)? {
         return Ok(());
     }

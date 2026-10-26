@@ -789,12 +789,7 @@ fn deadline_definition_versions_skip_only_incompatible_tables() {
         .unwrap();
     assert_eq!(
         status.peers[0].incompatible_projection_tables,
-        [
-            "mission_run_deadlines",
-            "mission_runs",
-            "run_generations",
-            "step_runs"
-        ]
+        ["mission_run_deadlines"]
     );
     assert!(!status.peers[0].projection_comparison_waiting);
     assert!(
@@ -803,12 +798,6 @@ fn deadline_definition_versions_skip_only_incompatible_tables() {
             .contains_key("mission_run_deadlines")
     );
     assert!(status.peers[0].differing_tables.is_empty());
-    // Isolate the old deadline definition while the mission projections match.
-    legacy.projection_versions = source
-        .export_replication_summary(TEST_FLEET)
-        .unwrap()
-        .projection_versions;
-    legacy.projection_versions.remove("mission_run_deadlines");
     // Comparable tables still report real differences, while claims sync never repairs them.
     legacy
         .projection_digests
@@ -819,10 +808,6 @@ fn deadline_definition_versions_skip_only_incompatible_tables() {
     let status = target
         .replication_status(true, Some(TEST_FLEET), &["source".into()])
         .unwrap();
-    assert_eq!(
-        status.peers[0].incompatible_projection_tables,
-        ["mission_run_deadlines"]
-    );
     assert_eq!(status.peers[0].differing_tables, ["mission_runs"]);
     // Once the definitions match, a bad deadline digest is itself a real difference.
     legacy.projection_digests.insert(

@@ -711,7 +711,7 @@ assert.ok(sessionMessages.some(({ message }) => message.content === "late seat c
 fs.rmSync(delayedHelloPath, { force: true });
 
 // omp loads this extension into every in-process subagent, as a second instance sharing the
-// process-wide stash (compoundingtech/smalltalk#852). A subagent's lifecycle must leave the seat's
+// process-wide stash (compoundingtech/fractal#852). A subagent's lifecycle must leave the seat's
 // channel alone: no channel of its own, and its shutdown does not close the seat's channel. Mail
 // that arrives afterwards still reaches the top-level session. st's asset reports the subagent's
 // runs on the seat's channel and nothing else of it; the legacy asset sends no frame at all.

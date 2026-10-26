@@ -1,4 +1,4 @@
-# Sourced helper. Aggregate the reviewer report and the supervisor verdict from Small Talk.
+# Sourced helper. Aggregate the reviewer report and the supervisor verdict from Fractal.
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 : "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
 ROOT="${CATALOG:-$PWD}"
