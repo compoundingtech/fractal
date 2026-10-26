@@ -304,10 +304,10 @@ mod tests {
         let client = crate::Client::fabric(endpoint).with_credential("paired-test");
         let server = tokio::spawn(async move {
             let expected = [
-                ("/v1/client/collections/stream", "st3.client.collections.v0"),
-                ("/v1/client/conversations/test/stream", "st3.client.conversation.v0"),
-                ("/v1/client/terminals/test/stream", "st3.client.terminal.v0"),
-                ("/v1/client/terminals/test/raw-stream", "st3.client.pty.v0"),
+                ("/v1/client/collections/stream", "fractal.client.collections.v0"),
+                ("/v1/client/conversations/test/stream", "fractal.client.conversation.v0"),
+                ("/v1/client/terminals/test/stream", "fractal.client.terminal.v0"),
+                ("/v1/client/terminals/test/raw-stream", "fractal.client.pty.v0"),
             ];
             for (path, protocol) in expected {
                 let (stream, _) = listener.accept().await.unwrap();
