@@ -2,6 +2,10 @@
 
 The four-tab Expo app uses the generated `st3.client.v0` TypeScript client. Its tabs are Now, Resources, Fleet and Spaces. It connects only to a paired gateway: over HTTPS; over plain HTTP to a Tailscale IPv4 address (100.64.0.0/10), which Tailscale encrypts; or over plain HTTP on the local network to a `*.local` name or an RFC1918 address (10/8, 172.16/12, 192.168/16). LAN HTTP is not encrypted: anyone on that network can read the paired credential and data, and the app says so. App Transport Security allows HTTP only for those ranges and `.local`; any other HTTP gateway URL is rejected. The gateway URL and tab order stay in local app preferences; the paired bearer credential stays in iOS Keychain through `expo-secure-store`. No private endpoint or credential is built into the app.
 
+Status, compatibility and connection notices call the daemon Fractal. An “older Fractal” label means the paired host does not serve the current presentation fields; its reported state is shown without inferring a newer state. These human labels do not rename protocol actor kinds, error codes or stored conversation events.
+
+The TypeScript human error helpers match Rust's explicit `human()` / `human_message()` renderers through `fixtures/clients/plain-errors-v1.json`. Rust's legacy `plain()` / `plain_message()` wording is retained for gate reports, because those report strings also enter durable claims and gate-check JSON. The CLI resolves one presentation mode per process: native drivers and exec-gate subprocesses keep stable error and stream-resync wording; other CLI output uses human wording. Neither human path mutates the original error envelope.
+
 ## Connect
 
 1. On a trusted st3 machine, begin device pairing for the intended person with `st devices pair --as person/ada --full-control "iPhone"` if this trusted device should send messages and use mission/work, runtime, and terminal controls. Without `--full-control`, pairing intentionally grants the limited default projection, glasses, arrangement, terminal-output, attention, and launch scopes; an existing limited device must be re-paired to gain controls.

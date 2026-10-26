@@ -1271,6 +1271,25 @@ class StTest(unittest.TestCase):
         for name in ('ST_AGENT', 'ST_SKIP_EVIDENCE', 'ST_EVIDENCE_TIME_LIMIT'):
             self.assertIn(name, seen)
 
+    def test_a_check_sees_no_pty_session_of_the_seat(self):
+        self.commit('b.txt', 'two')
+        seat = {'PTY_ROOT': '/seat/pty', 'PTY_SESSION': 'fleet.seat', 'PTY_SESSION_GENERATION': 'g'}
+        out = Path(self.tmp.name) / 'seen'
+        code, _, err = self.run_st_test('--check', 'demo', extra_env=seat, command=['sh', '-c', f'env > {out}'])
+        self.assertEqual(code, 0, err)
+        seen = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
+        for name in seat:
+            self.assertNotIn(name, seen)
+
+    def test_a_check_sees_no_fractal_variable_of_the_seat(self):
+        self.commit('b.txt', 'two')
+        seat = {'FRACTAL_ENDPOINT': '/seat/st3.sock', 'FRACTAL_AGENT': 'agent/x', 'FRACTAL_BIN': '/seat/st3'}
+        out = Path(self.tmp.name) / 'seen'
+        code, _, err = self.run_st_test('--check', 'demo', extra_env=seat, command=['sh', '-c', f'env > {out}'])
+        self.assertEqual(code, 0, err)
+        seen = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
+        self.assertEqual([name for name in seen if name.startswith('FRACTAL_')], [])
+
     def test_a_base_that_looks_like_a_git_option_is_refused(self):
         self.commit('b.txt', 'two')
         for bad in ('--upload-pack=x', '-x', 'a b', ''):

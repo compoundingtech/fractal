@@ -87,7 +87,7 @@ export function label(id: string, names: Names, rows: readonly UsageRow[]): stri
   }
   if (id.startsWith('usage/no-')) {
     const what = id.slice('usage/no-'.length);
-    return what === 'account' ? 'no account recorded (before st kept accounts)'
+    return what === 'account' ? 'no account recorded (before Fractal kept accounts)'
       : what === 'mission' ? 'no mission (standing seats)'
       : what === 'step' ? 'no step (standing seats)' : `unknown ${what}`;
   }

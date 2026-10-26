@@ -1263,7 +1263,7 @@ mod tests {
                 "line one",
                 "line two",
                 "line",
-                "… st kept only the start of this output"
+                "… Fractal kept only the start of this output"
             ]
         );
     }
@@ -1554,7 +1554,7 @@ mod tests {
             [
                 "delivery paused, then resumed ×3",
                 "assistant: Still here.",
-                "delivery paused · st unreachable",
+                "delivery paused · Fractal unreachable",
                 "error: the harness exited",
             ]
         );

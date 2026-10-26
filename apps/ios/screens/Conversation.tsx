@@ -478,7 +478,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
       </View>
       <Button label="send" disabled={!canSend || sizeInfo.over || (!draft.trim() && !images.length)} onPress={() => void send()} style={styles.send} />
     </View>
-    </View> : session ? <View style={[styles.composer, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by st · read only' : 'this session has ended · read only'}</T></View> : null}
+    </View> : session ? <View style={[styles.composer, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by Fractal · read only' : 'this session has ended · read only'}</T></View> : null}
   </KeyboardAvoidingView>;
 }
 
@@ -504,7 +504,7 @@ const PendingView = memo(function PendingView({ pending, canSend, onSendAgain }:
   const rule = RULES.pending;
   const tone = pending.failed ? rule.failed : pending.unconfirmed ? rule.unconfirmed : null;
   const label = pending.failed ? `you · not sent: ${pending.failed}`
-    : pending.unconfirmed ? (pending.resending ? 'you · sending again…' : 'you · st may have taken it and has not confirmed yet')
+    : pending.unconfirmed ? (pending.resending ? 'you · sending again…' : 'you · Fractal may have taken it and has not confirmed yet')
     : rule.sending.text;
   return <View style={[styles.entry, styles.barred, { borderLeftColor: c(tone ?? rule.sending_edge) }]}>
     <T color={c(tone ?? rule.sending.color)}>{label}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
