@@ -14,7 +14,7 @@
 
 [[latency]]
 name = "person-read"
-about = "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, documents"
+about = "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, what a run waits on, documents"
 p99_ms = 300
 # The same reads through this daemon from another machine that owns them.
 remote_p99_ms = 300
@@ -40,6 +40,8 @@ paths = [
   "GET /v1/client/now",
   "GET /v1/client/attention",
   "stream attention",
+  # Why a run is stuck
+  "GET /v1/mission-runs/{run}/waiting-on",
   # Documents
   "GET /v1/client/documents/content",
   "GET /v1/documents",

@@ -2588,7 +2588,7 @@
         { "if": { "properties": { "type": { "const": "truncation" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/TimelineTruncationBody" } } } }
       ]
     },
-    "TimelineMessageBody": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string"}, "reply_to": {"type": ["string", "null"]}, "from": {"$ref": "#/$defs/SenderRef"}, "to": {"$ref": "#/$defs/TimelineRecipientRef"}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}}, "body_bytes": {"type": "integer", "minimum": 0}, "provenance": {"$ref": "#/$defs/MessageProvenance"}, "sender_class": {"type": "string", "enum": ["external-assistant"], "description": "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text."}, "assistant_grant_id": {"type": "string", "description": "The assistant grant that authorized the send, with sender_class."}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
+    "TimelineMessageBody": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string"}, "author": {"$ref": "#/$defs/ActorRef"}, "recipients": {"type": "array", "items": {"$ref": "#/$defs/ParticipantRef"}}, "reply_to": {"type": ["string", "null"]}, "from": {"$ref": "#/$defs/SenderRef"}, "to": {"$ref": "#/$defs/TimelineRecipientRef"}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}}, "body_bytes": {"type": "integer", "minimum": 0}, "provenance": {"$ref": "#/$defs/MessageProvenance"}, "sender_class": {"type": "string", "enum": ["external-assistant"], "description": "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text."}, "assistant_grant_id": {"type": "string", "description": "The assistant grant that authorized the send, with sender_class."}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "MessageProvenance": {
       "type": "object", "additionalProperties": false, "required": ["verdict"],
       "description": "Who signed a message a person wrote, and whether the signature checks. Only messages whose sender is a person carry it; an agent's message does not.",
@@ -3776,6 +3776,12 @@
         "details": { "type": "object", "additionalProperties": {}, "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
       }
     },
+    "SubscribeTraceContext": {
+      "description": "Proposed in #1910; pending decision. {traceparent: string, tracestate?: string}. Any JSON value is accepted; absent, null, non-object, missing/non-string traceparent or invalid W3C traceparent is ignored. The daemon validates with the W3C propagator, not this schema.",
+      "examples": [
+        { "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "tracestate": "vendor=value" }
+      ]
+    },
     "CollectionName": { "enum": [
       "missions",
       "attention",
@@ -3793,7 +3799,7 @@
     ] },
     "CollectionCommand": {
       "oneOf": [
-        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
           "type": "object",
           "additionalProperties": false,
@@ -3801,6 +3807,7 @@
           "properties": {
             "kind": { "const": "subscribe" },
             "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "trace": { "$ref": "#/$defs/SubscribeTraceContext" },
             "collection": { "enum": ["missions", "attention", "work", "glasses", "summary"] },
             "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
             "person": { "type": ["string", "null"] },
@@ -3815,6 +3822,7 @@
           "properties": {
             "kind": { "const": "subscribe" },
             "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "trace": { "$ref": "#/$defs/SubscribeTraceContext" },
             "collection": { "const": "agents" },
             "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
             "person": { "type": ["string", "null"] },
@@ -3831,6 +3839,7 @@
             "kind": { "const": "subscribe" },
             "id": { "type": "string", "minLength": 1, "maxLength": 128 },
             "collection": { "const": "arrangements" },
+            "trace": { "$ref": "#/$defs/SubscribeTraceContext" },
             "person": { "$ref": "#/$defs/ArrangementPerson" },
             "subject": { "$ref": "#/$defs/ArrangementId", "description": "Follow only this arrangement; its owner must equal person." },
             "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
@@ -3844,6 +3853,7 @@
             "kind": { "const": "subscribe" },
             "id": { "type": "string", "minLength": 1, "maxLength": 128 },
             "collection": { "const": "terminal" },
+            "trace": { "$ref": "#/$defs/SubscribeTraceContext" },
             "terminal": { "$ref": "#/$defs/Id" },
             "incarnation": { "type": ["string", "null"] },
             "capability": { "type": "string" }
@@ -3857,6 +3867,7 @@
             "kind": { "const": "subscribe" },
             "id": { "type": "string", "minLength": 1, "maxLength": 128 },
             "collection": { "const": "conversation" },
+            "trace": { "$ref": "#/$defs/SubscribeTraceContext" },
             "conversation": { "$ref": "#/$defs/Id" }
           }
         },
