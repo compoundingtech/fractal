@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Regenerate the fleet workflow's embedded kit change detector after adding NativeTranscript.stories.tsx as a covered Storybook input.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "Rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Generated CI workflow freshness only; transcript behavior is unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}
