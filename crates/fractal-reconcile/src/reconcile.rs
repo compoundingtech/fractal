@@ -42085,9 +42085,17 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         assert!(alert.detail.starts_with("Claude asks you to approve its plan;"));
         reconciler.reconcile_once().unwrap();
         assert!(runtime.keys.lock().unwrap().is_empty(), "nobody approved it yet");
+        let plan_alert = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+        };
         store
             .answer_native_prompt("agent/node.seat", &asked.id, "approve", "person/avery")
             .unwrap();
+        assert!(plan_alert().is_none(), "an approved plan is no longer an alert");
         // The dialog is not on screen yet: nothing is typed into whatever is.
         reconciler.reconcile_once().unwrap();
         assert!(runtime.keys.lock().unwrap().is_empty());
@@ -42096,6 +42104,30 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         assert_eq!(runtime.keys.lock().unwrap().as_slice(), ["return"]);
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.keys.lock().unwrap().len(), 1, "approved once");
+
+        // A later plan answered in the terminal clears once Claude says it is no longer blocked.
+        let observe = |fields: serde_json::Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: "agent/node.seat".into(),
+                    kind: "harness.observed".into(),
+                    actor: Some("agent/node.seat".into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        observe(serde_json::json!({
+            "state": "working", "driver": "claude", "incarnation_id": "one",
+            "blocked_on": "human", "ask": "permission", "reason": "ExitPlanMode",
+            "ownership_sequence": 1, "transition_sequence": 5}));
+        assert!(plan_alert().is_some(), "a later plan is its own alert");
+        observe(serde_json::json!({
+            "state": "working", "driver": "claude", "incarnation_id": "one",
+            "blocked_on": null, "ask": null, "ownership_sequence": 1, "transition_sequence": 6}));
+        assert!(plan_alert().is_none(), "a plan answered in the terminal clears");
     }
 
     #[test]
@@ -42580,6 +42612,86 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             "Claude keeps stopping at its workspace trust prompt"
         );
         assert_eq!(attention[0].targets, ["agent/node.seat"]);
+    }
+
+    /// Once st has given up replacing a seat stuck at Claude's workspace trust prompt, the prompt
+    /// is its person's alert: it clears when it is answered in the terminal, and an answer from a
+    /// client is pressed into the dialog with its own keys, once.
+    #[test]
+    fn a_trust_prompt_st_gave_up_recovering_is_its_persons_alert_answered_with_its_keys() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let mission = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.clone(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &mission.subject_tokens, "trust-alert", Some("person/avery"))
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        *runtime.screen.lock().unwrap() = CLAUDE_TRUST_SCREEN.into();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        let alert = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+        };
+
+        for attempt in 1..=CLAUDE_TRUST_RECOVERY_ATTEMPTS + 1 {
+            let incarnation = format!("seat-{attempt}");
+            *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("seat", "running", &incarnation)];
+            reconciler.reconcile_once().unwrap();
+            if attempt <= CLAUDE_TRUST_RECOVERY_ATTEMPTS {
+                assert!(alert().is_none(), "st recovers it first: attempt {attempt}");
+                *runtime.ptys.lock().unwrap() =
+                    vec![claude_seat_pty("seat", "exited", &incarnation)];
+                reconciler.reconcile_once().unwrap();
+            }
+        }
+        reconciler.reconcile_once().unwrap();
+        let cwd = runtime.started_members.lock().unwrap()[0].cwd.clone();
+        let shown = alert().expect("once recovery gives up, the trust prompt is an alert");
+        assert_eq!(shown.answers, vec!["trust", "exit"]);
+        assert!(shown.detail.contains(&cwd), "it names the folder: {}", shown.detail);
+
+        // Answered in the terminal: Claude moves on and the alert clears.
+        *runtime.screen.lock().unwrap() = "Claude is working".into();
+        reconciler.reconcile_once().unwrap();
+        assert!(alert().is_none(), "an answer in the terminal clears it");
+
+        // Shown again and answered from a client: pressed into the dialog once.
+        *runtime.screen.lock().unwrap() = CLAUDE_TRUST_SCREEN.into();
+        reconciler.reconcile_once().unwrap();
+        let again = alert().expect("a later trust prompt is its own alert");
+        assert_ne!(again.episode, shown.episode);
+        assert!(runtime.keys.lock().unwrap().is_empty(), "nobody answered yet");
+        store
+            .answer_native_prompt("agent/node.seat", &again.episode, "trust", "person/avery")
+            .unwrap();
+        assert!(alert().is_none(), "an answered prompt is no longer an alert");
+        reconciler.reconcile_once().unwrap();
+        // From "No, exit" (selected) down to "Yes, I trust this folder", then Return.
+        assert_eq!(runtime.keys.lock().unwrap().as_slice(), ["down", "return"]);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.keys.lock().unwrap().len(), 2, "pressed once");
     }
 
     fn harness_claim(subject: &str, state: &str, incarnation: &str) -> ClaimInput {

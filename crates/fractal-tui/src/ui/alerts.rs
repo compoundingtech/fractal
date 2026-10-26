@@ -1151,6 +1151,41 @@ mod tests {
         assert!(texts(&rows).contains(" use all "), "{}", texts(&rows));
     }
 
+    /// A call auto mode denied is allowed once or for its kind, or dismissed, with one tap each.
+    #[test]
+    fn a_denied_call_is_allowed_once_or_for_its_kind_or_dismissed() {
+        let mut ui = with_alerts(vec![prompt(
+            "attention/one",
+            &["approve-once", "approve-kind", "dismiss"],
+        )]);
+        let rows = ui.expanded_band("agent/example/atlas", 80);
+        let shown = texts(&rows);
+        assert!(
+            shown.contains(" allow once ") && shown.contains(" allow this kind "),
+            "{shown}"
+        );
+        let taps = taps(&rows);
+        for answer in ["approve-once", "approve-kind", "dismiss"] {
+            assert!(
+                taps.contains(&Hit::Alert(
+                    "attention/one".into(),
+                    AlertTap::Answer(answer.into())
+                )),
+                "{answer}"
+            );
+        }
+        ui.live = true;
+        ui.click(Hit::Alert(
+            "attention/one".into(),
+            AlertTap::Answer("approve-once".into()),
+        ));
+        assert!(matches!(
+            ui.effects.as_slice(),
+            [Effect::Attention { id, action, answer: Some(answer), .. }]
+                if id == "attention/one" && action == "prompt.respond" && answer == "approve-once"
+        ));
+    }
+
     #[test]
     fn a_tap_on_a_gone_alert_sends_nothing() {
         let mut ui = with_alerts(vec![]);
