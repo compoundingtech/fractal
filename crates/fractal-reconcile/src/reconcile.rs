@@ -8168,11 +8168,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.store.append_claim(&ClaimInput {
             subject: subject.subject.clone(),
             kind: "runtime.reconcile-decision".into(),
-            actor: Some(RECONCILER_ACTOR.into()),
+            actor: None,
             fields: BTreeMap::from([
                 ("decision".into(), Value::from("restart-retired-obsolete-request")),
                 ("reason".into(), Value::from(reason)),
-                ("operation".into(), Value::from(pending.id)),
+                ("key".into(), Value::from(format!("restart-retired-obsolete-request:{}", request.id))),
             ]),
             evidence: vec![request.id.clone()],
             expected_subject: None,
