@@ -60,6 +60,17 @@ nix develop .#web -c nix shell nixpkgs#cocoapods -c apps/ios/scripts/landing-scr
             'retention-days': 7,
           },
         },
+        {
+          name: 'Retain Maestro screenshots and UI hierarchy',
+          if: 'always()',
+          uses: 'actions/upload-artifact@v4',
+          with: {
+            name: 'ios-landing-screenshots-maestro-${{ github.run_id }}',
+            path: '~/.maestro/tests',
+            'if-no-files-found': 'ignore',
+            'retention-days': 7,
+          },
+        },
       ],
     },
   },
