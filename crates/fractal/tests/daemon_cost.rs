@@ -2417,7 +2417,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 })).unwrap(),
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
-            store.observe_harness_question(&fractal_daemon::store::QuestionObservation {
+            store.observe_harness_question(&fractal_daemon::store::harness_questions::QuestionObservation {
                 agent: "agent/ada".into(),
                 session: "cost-question-session".into(),
                 native_id: "cost-question-call".into(),
