@@ -231,6 +231,15 @@ OAuth is a front door to the existing assistant grant, not a separate identity
 or permission system. This section builds on A–D and the caller-bound grant
 contract; it does not relax their disclosure, write, or activation gates.
 
+**Guiding principle — operator-owned public access.** Fractal operates no
+centralized hosted authorization service. Early adopters configure their own
+public ingress using Tailscale, Cloudflare or another provider. This avoids
+project obligations to preserve a hosted service through breaking changes or
+infrastructure migrations, and does not require users to entrust sensitive
+hosted data to the project. Fractal supplies composable local serving and
+explicit URL configuration primitives, independent of the ingress provider.
+Authority: Johannes, Q45 (on3kc3), via Compounding Manager.
+
 ### Components and boundaries
 
 ```text
@@ -259,6 +268,44 @@ caller's bearer to the daemon. `--credential-file` remains a stdio/loopback
 mode, never a fallback when remote authentication fails. Tunnel possession,
 including an API key in the same OpenAI organization, is not authorization.
 
+### Operator-owned ingress
+
+The daemon/adapter serves `/authorize`, `/token`,
+`/.well-known/oauth-authorization-server` and
+`/.well-known/oauth-protected-resource` on a local listener. The operator
+configures two independent values: the public HTTPS issuer URL for that
+listener's ingress, and the canonical MCP resource URI on the OpenAI tunnel.
+The authorization-server metadata and authorization-response `iss` derive
+only from the configured issuer; resource metadata and token audience binding
+derive only from the configured resource URI. Verification compares those
+configured identities, never values inferred from request `Host` or forwarded
+headers. Ingress forwards traffic; it is not the grant or identity authority.
+
+Only the authorization/token endpoints and both metadata documents are
+published through this ingress. The daemon client API and `/mcp` are excluded;
+the latter remains on the OpenAI tunnel. The local serving boundary, configured
+issuer and configured resource URI are the same primitives for every provider.
+
+Example recipes, subject to the activation gates below:
+
+- **Tailscale Funnel:** enable HTTPS/Funnel for the operator's chosen node and
+  publish the local authorization listener through Funnel. Configure the
+  resulting public HTTPS origin as the issuer URL and the existing tunnel MCP
+  URI as the resource URI. Forward the four authorization/discovery paths only;
+  keep other daemon routes off that listener. No Tailscale identity replaces
+  the owning-person approval step.
+- **Cloudflare Tunnel:** create an operator-owned tunnel and public DNS route
+  for the chosen authorization hostname. Route the four authorization/discovery
+  paths to the local listener and reject unmatched paths. Configure that public
+  HTTPS origin as the issuer URL and the existing tunnel MCP URI as the resource
+  URI. Browser authorization and public-client token exchange must remain
+  reachable without a separate interactive ingress login.
+
+Neither provider is required; any HTTPS ingress preserving these boundaries
+can use the same primitives. The owner dogfoods this composition in their
+dotfiles, using operator-owned ingress configuration rather than a hosted
+project service.
+
 ### Discovery and authorization-code flow
 
 Use OAuth authorization code with PKCE `S256` (RFC 6749 and
@@ -276,8 +323,8 @@ The OAuth 2.1 profile excludes implicit and password grants.
 | Authorization response | After owner approval, redirect to the validated client URI with a short-lived, single-use code, client state and the authorization-server `iss` | [RFC 9207](https://www.rfc-editor.org/rfc/rfc9207) |
 | Token exchange / refresh | Public `/token` binds code redemption to the client, redirect URI, resource and PKCE verifier; refresh remains bound to the same grant | RFC 6749, RFC 7636, RFC 8707 |
 
-The RFC 8414 authorization-server metadata advertises this complete contract;
-the issuer's public HTTPS hostname remains DQ-E1:
+The RFC 8414 authorization-server metadata advertises this complete contract,
+using the operator-configured public HTTPS issuer:
 
 | Field | Value |
 | --- | --- |
@@ -428,9 +475,6 @@ does not authorize live issuance, writes or public deployment.
 
 ### Open questions
 
-- **DQ-E1 Public hostname:** which public HTTPS hostname and ingress carry
-  `/authorize`, `/token` and metadata? Resolution must preserve the agreed split:
-  `/mcp` on the OpenAI tunnel, authorization server in the daemon/adapter.
 - **DQ-E2 CIMD pinning:** what exact ChatGPT metadata URL is allowlisted, and
   how are URL/content changes and redirect-URI updates pinned and reviewed?
 - **DQ-E3 Source admission:** does the R1 keyed-writer requirement also apply
