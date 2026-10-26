@@ -23,10 +23,10 @@ export default defineConfig({
         server.watcher.add([new URL('./src', import.meta.url).pathname, new URL('../../packages/fractal-ui/src', import.meta.url).pathname])
       },
     },
-    createBuildIdentityPlugin({ baseVersion: '0.1.0', buildStamp: '__CLI_BUILD_STAMP__' }),
+    createBuildIdentityPlugin({ baseVersion: '0.1.0', buildStamp: process.env.CLI_BUILD_STAMP ?? '__CLI_BUILD_STAMP__' }),
     extensionBuild({ entry: '../src/extensions/app-public.ts', privateBuild: false }),
     ...createStylexVitePlugins({
-      externalPackages: ['@smalltalk/fractal-ui', '@overeng/devbar', '@overeng/meters', '@overeng/stylex-tokens'],
+      externalPackages: ['@fractal/ui', '@overeng/devbar', '@overeng/meters', '@overeng/stylex-tokens'],
       entries: [new URL('./src/web/main.tsx', import.meta.url).pathname],
     }),
     deferBuiltStylesheets(),

@@ -10,9 +10,9 @@
  * A complete read is finite: it stops at fixed page and item budgets, and closing or refreshing
  * the follow aborts it between pages and cancels its in-flight request.
  */
-import { SIDEBAR_ARRANGEMENT_UUID, St3Client } from '@smalltalk/st3-client'
-import type { Arrangement, CollectionSocketFactory, CollectionStream, Snapshot } from '@smalltalk/st3-client'
-import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@smalltalk/st3-client/schema'
+import { SIDEBAR_ARRANGEMENT_UUID, FractalClient } from '@fractal/client'
+import type { Arrangement, CollectionSocketFactory, CollectionStream, Snapshot } from '@fractal/client'
+import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@fractal/client/schema'
 import { Schema } from 'effect'
 
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))
@@ -28,16 +28,16 @@ const isFrameHeader = Schema.is(Schema.Struct({
 
 export interface ArrangementInventoryGateway {
   /** One list page; `requestOptions.signal` cancels the request when the read is abandoned. */
-  readonly arrangementsList: St3Client['arrangementsList']
-  readonly collectionStream: St3Client['collectionStream']
+  readonly arrangementsList: FractalClient['arrangementsList']
+  readonly collectionStream: FractalClient['collectionStream']
 }
 
 /** The generated client cancels each request through its own `requestOptions.signal`; discovery stays shared. */
 export const st3InventoryGateway = ({ baseUrl, fetchImpl }: {
   readonly baseUrl: string
   readonly fetchImpl: typeof globalThis.fetch
-}): ArrangementInventoryGateway & Pick<St3Client, 'discover'> => {
-  const client = new St3Client({ baseUrl, fetchImpl })
+}): ArrangementInventoryGateway & Pick<FractalClient, 'discover'> => {
+  const client = new FractalClient({ baseUrl, fetchImpl })
   return {
     discover: () => client.discover(),
     collectionStream: (options) => client.collectionStream(options),

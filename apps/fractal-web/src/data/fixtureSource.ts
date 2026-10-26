@@ -1,6 +1,6 @@
 /** Constant generated rows over the deterministic fixture world. */
-import type { Agent, Attention, Mission, TerminalScreen } from '@smalltalk/st3-client/schema'
-import { openAgent, type ConnectionState, type DecodedAgent } from '@st3/sdk/effect'
+import type { Agent, Attention, Mission, TerminalScreen } from '@fractal/client/schema'
+import { openAgent, type ConnectionState, type DecodedAgent } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 
 import type { ProposedMissionFields } from '../missions/model.ts'
@@ -79,7 +79,7 @@ export const fixtureSource = ({
   ...(world.proposed === undefined ? {} : { proposed: world.proposed }),
   now: Atom.make(world.now),
   grants: Atom.make(
-    overrides.grants ?? { actions: 'granted', messageSend: 'ungranted', terminalInput: 'granted' },
+    overrides.grants ?? { actions: 'granted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'granted' },
   ),
   connection: Atom.make<ConnectionState>(overrides.connection ?? { _tag: 'Live' }),
   agents: Atom.make<Feed<readonly DecodedAgent[]>>(

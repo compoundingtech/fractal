@@ -1,4 +1,4 @@
-import type { Arrangement, ArrangementPage, CollectionStream, CollectionStreamOptions, EnvelopeOf, Snapshot } from '@smalltalk/st3-client'
+import type { Arrangement, ArrangementPage, CollectionStream, CollectionStreamOptions, EnvelopeOf, Snapshot } from '@fractal/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { ClientError, appliedAnswer, isTransient, isTransientCode, notApplied, outcomeUnknown, plainError, plainMessage, promptGone, retryTransient } from '../../clients/typescript/st3-client/index.ts';
+import { ClientError, appliedAnswer, isTransient, isTransientCode, notApplied, outcomeUnknown, plainError, plainMessage, promptGone, retryTransient } from '../../clients/typescript/fractal-client/index.ts';
 
 // st's errors read as sentences, as in the Rust client: no codes reach a person.
 assert.equal(plainMessage('stale-fence', 'the client snapshot changed before the action was submitted'), 'st changed while this was on its way, so it was not applied');

@@ -1,5 +1,5 @@
 import { requireOptionalNativeModule } from 'expo';
-import type { ClientDiagnosticEvent } from '../../../../clients/typescript/st3-client';
+import type { ClientDiagnosticEvent } from '../../../../clients/typescript/fractal-client';
 
 export type NativeReport = ClientDiagnosticEvent;
 

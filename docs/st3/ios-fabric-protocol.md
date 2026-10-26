@@ -28,7 +28,7 @@ as a compatibility surface frozen by its test
 The frame bytes are those of v0.2.30. A version banner alone is not an artifact
 checksum; record the built adapter and tested member binary hashes when testing.
 
-Smalltalk references were inspected at commit
+Fractal references were inspected at commit
 `0c6b10d044f6a8a3b051639b55f53522cc9a9b11`. Relative links describe that checkout;
 recheck them when implementing against a newer main.
 
@@ -76,7 +76,7 @@ source inspection alone does not establish iOS viability.
 ## Member exposure and authorization
 
 Expose exactly the **paired-only** gateway socket, whose router is
-[`fabric_router`](../../crates/st3-api-core/src/api.rs) and whose configured path is
+[`fabric_router`](../../crates/fractal-api-core/src/api.rs) and whose configured path is
 `client_gateway_socket` (normally `st3-client.sock`). Do not expose `st3.sock`:
 that is the privileged local API. A generic socket exposure is sufficient; no
 new server-side Rust service is needed.
@@ -405,7 +405,7 @@ concurrent connections (ordinary requests, uploads, the collections socket) and
 keep bounded buffers. Do not bind a LAN address or let request URLs choose an
 arbitrary fabric service.
 
-[`store.tsx`](../../apps/ios/store.tsx) already constructs `St3Client` with a
+[`store.tsx`](../../apps/ios/store.tsx) already constructs `FractalClient` with a
 `baseUrl`, a secure-store credential callback, and `gatewayFetch()`. It also has
 an upload client using Expo fetch. When the development fabric setting is enabled,
 wait for native start and give **both** clients the returned loopback URL. Keep
@@ -413,7 +413,7 @@ the saved paired member route and its credential association separate from the
 ephemeral port. Disabling the setting restores the saved Tailscale/HTTPS route;
 never send one member’s credential to a different member.
 
-[`Client.generated.ts`](../../clients/typescript/st3-client/Client.generated.ts)
+[`Client.generated.ts`](../../clients/typescript/fractal-client/Client.generated.ts)
 sends `Authorization: Bearer …` on fetch and React Native WebSocket handshakes,
 converts `http:` to `ws:`, and retains protocol headers. Forward all these bytes,
 including idempotency keys, attachment content, upgrade headers, and terminal

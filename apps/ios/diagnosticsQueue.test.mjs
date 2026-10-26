@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { BATCH_BYTES, DIAGNOSTICS_KEY, DiagnosticsQueue, MAX_AGE_MS, QUEUE_BYTES, QUEUE_REPORTS, boundQueue, decodeQueue, diagnosticBatch, retryDelay } from './diagnosticsQueue.ts';
-import { ClientError } from '../../clients/typescript/st3-client/Client.generated.ts';
+import { ClientError } from '../../clients/typescript/fractal-client/Client.generated.ts';
 
 const now = 1_800_000_000_000;
 const report = (i, captured = now) => ({

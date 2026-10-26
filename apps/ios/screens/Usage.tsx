@@ -2,8 +2,8 @@ import { useFocusEffect, useNavigation, useRoute, type RouteProp } from '@react-
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
-import type { UsagePeriod } from '../../../clients/typescript/st3-client';
-import { plainError } from '../../../clients/typescript/st3-client';
+import type { UsagePeriod } from '../../../clients/typescript/fractal-client';
+import { plainError } from '../../../clients/typescript/fractal-client';
 import { agentName } from '../agentsView';
 import { Banners, StatusLine, useMissionsOnFocus } from '../chrome';
 import type { StackParams } from '../navigation';

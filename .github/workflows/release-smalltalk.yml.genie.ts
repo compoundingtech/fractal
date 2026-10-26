@@ -15,7 +15,7 @@ const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-vers
 // the tag trigger above, and a tag made with the workflow token starts no workflow in any case.
 export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
-  "name": "Smalltalk tag release",
+  "name": "Fractal tag release",
   "on": {
     "push": {
       "branches": [
@@ -35,8 +35,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         ".github/workflows/release-smalltalk.yml",
         ".github/workflows/release-smalltalk.yml.genie.ts",
         ".gitignore",
-        "crates/st-build-stamp/**",
-        "crates/st-drivers/src/version.rs",
+        "crates/fractal-build-stamp/**",
+        "crates/fractal-drivers/src/version.rs",
         "install.sh",
         "scripts/download-install-test",
         "scripts/linux-release-cc",
@@ -66,7 +66,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
     "actions": "read"
   },
   "concurrency": {
-    "group": "smalltalk-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
+    "group": "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
   },
   "jobs": {
@@ -92,7 +92,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
           }
         },
         {
-          "name": "Test install entry points and isolated app transactions",
+          "name": "Test release names, install entry points and isolated app transactions",
           "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-smalltalk-edge-test\npython3 scripts/compat-baseline-release-test\n"
         },
         {
@@ -165,7 +165,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
           }
         },
         buildSnapshotPrepare,
-        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }).map(step => ({ ...step, if: "runner.os == 'Linux'" })),
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         {
           name: 'Provide the pinned Linux host C compiler',
           if: "runner.os == 'Linux'",
@@ -242,7 +242,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       "timeout-minutes": 15,
       // One edge at a time; a superseded pending run is dropped, and the script never moves edge backwards.
       "concurrency": {
-        "group": "smalltalk-edge-publish",
+        "group": "fractal-edge-publish",
         "cancel-in-progress": false
       },
       "permissions": {

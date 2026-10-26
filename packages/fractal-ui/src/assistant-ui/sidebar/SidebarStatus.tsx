@@ -18,6 +18,15 @@ export interface SidebarStatusProps {
   readonly now?: number
   readonly freshness?: 'live' | 'stale' | 'unobserved'
   readonly iconOnly?: boolean
+  /** Stale is an observation gap, never an alarm: `muted` (default, every variant). `danger` exists only for taste comparison. */
+  readonly staleTone?: 'muted' | 'danger'
+  /**
+   * Part of a last-observed snapshot: every tone goes muted, nothing spins, and SG-1 draws the shape cue for every state
+   * (working and idle included), so states stay apart by shape alone. Independent of `freshness` and `status`.
+   */
+  readonly frozen?: boolean
+  /** Beside text that already says the status: hidden from assistive tech. */
+  readonly decorative?: boolean
 }
 const paths: Record<AgentStatus, React.ReactNode> = {
   working: <><circle cx="10" cy="10" r="7" opacity=".4" /><path d="M10 3a7 7 0 0 1 7 7" /></>,
@@ -31,23 +40,19 @@ const paths: Record<AgentStatus, React.ReactNode> = {
   retired: <><rect x="3" y="4" width="14" height="3" rx="1" /><path d="M4 7v9h12V7M8 10h4" /></>,
   unobserved: <><circle cx="10" cy="10" r="7" strokeDasharray="2 3" /><path d="M10 7v4M10 14h.01" /></>,
 }
-/**
- * Shapes never collapse distinct states into an attention or completion fixture state. A stale observation is frozen:
- * every tone goes muted (never the danger red, nothing reads as live), nothing spins, and an SG-1 working disc keeps a
- * static ring so a last-seen working agent still differs from an idle one without color.
- */
-export function SidebarStatus({ status, statusLabel = statuses[status].label, variant = 'SG-1', discRefinement = 'G1', statusSince, now, freshness = 'unobserved', iconOnly = false }: SidebarStatusProps) {
+/** Shapes never collapse distinct states into an attention or completion fixture state. */
+export function SidebarStatus({ status, statusLabel = statuses[status].label, variant = 'SG-1', discRefinement = 'G1', statusSince, now, freshness = 'unobserved', iconOnly = false, staleTone = 'muted', frozen: snapshotFrozen = false, decorative = false }: SidebarStatusProps) {
+  const frozen = snapshotFrozen || freshness === 'stale'
   const boundary = statusSince === undefined ? 'Status boundary unavailable' : `Observed status since ${new Date(statusSince).toISOString()}`
   const elapsed = useClockLabel(now => statusSince === undefined || statusSince > now || iconOnly ? '' : compactTime({ at: statusSince, now }), statusSince === undefined || iconOnly ? 0 : now)
-  const frozen = freshness === 'stale'
-  const runningRing = variant === 'SG-1' && status === 'working' && (discRefinement === 'G2' || frozen)
-  const spinning = !frozen && (runningRing || (status === 'working' && variant === 'SG-3'))
-  const shapeCue = variant === 'SG-1' && discRefinement === 'G3' && status !== 'working' && status !== 'idle'
+  const runningRing = variant === 'SG-1' && discRefinement === 'G2' && status === 'working' && !frozen
+  const shapeCue = variant === 'SG-1' && (frozen || (discRefinement === 'G3' && status !== 'working' && status !== 'idle'))
+  const snapshot = frozen ? '; last-observed snapshot' : ''
   // The former native title text stays exact as the glyph's description; hosts own the only hover disclosure.
   const descriptionId = React.useId()
-  return <span data-status={status} data-frozen={frozen || undefined} {...stylex.props(styles.root, status === 'working' && styles.working, status === 'waiting' && styles.waiting, status === 'stale' && styles.stale, frozen && styles.frozen)}>
-    <svg data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation`} aria-describedby={descriptionId} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon, runningRing && styles.iconRing, spinning && styles.spin)}>{variant === 'SG-2' ? <circle cx="10" cy="10" r="4" fill="currentColor" stroke="none" /> : variant === 'SG-3' ? paths[status] : <><circle cx="10" cy="10" r="5" fill="currentColor" stroke="none" opacity={shapeCue ? '.25' : undefined} />{runningRing && <><circle cx="10" cy="10" r="7.5" opacity=".3" /><path d="M10 2.5a7.5 7.5 0 0 1 7.5 7.5" /></>}{shapeCue && paths[status]}</>}</svg>
-    <VisuallyHidden elementType="span"><span id={descriptionId}>{`${statusLabel}. ${boundary}. Observation ${freshness}.`}</span></VisuallyHidden>
+  return <span aria-hidden={decorative || undefined} data-status={status} data-frozen={frozen || undefined} data-status-frozen={frozen || undefined} {...stylex.props(styles.root, status === 'working' && styles.working, status === 'waiting' && styles.waiting, status === 'stale' && (staleTone === 'danger' ? styles.staleDanger : styles.staleMuted), frozen && styles.frozen)}>
+    <svg data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation${snapshot}`} aria-describedby={descriptionId} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon, runningRing && styles.iconRing, (runningRing || (status === 'working' && variant === 'SG-3' && !frozen)) && styles.spin)}>{variant === 'SG-2' ? <circle cx="10" cy="10" r="4" fill="currentColor" stroke="none" /> : variant === 'SG-3' ? paths[status] : <><circle cx="10" cy="10" r="5" fill="currentColor" stroke="none" opacity={shapeCue ? '.25' : undefined} />{runningRing && <><circle cx="10" cy="10" r="7.5" opacity=".3" /><path d="M10 2.5a7.5 7.5 0 0 1 7.5 7.5" /></>}{shapeCue && paths[status]}</>}</svg>
+    <VisuallyHidden elementType="span"><span id={descriptionId}>{`${statusLabel}. ${boundary}. Observation ${freshness}.${frozen ? ' Last-observed snapshot.' : ''}`}</span></VisuallyHidden>
     {variant === 'SG-2' && !iconOnly && <span>{statusLabel}</span>}
     {/* Icon-only glyphs sit in a fixed icon column; visible text there would overrun the next column. */}
     {elapsed !== '' && !iconOnly && <time dateTime={new Date(statusSince!).toISOString()} aria-label={`Elapsed in ${statusLabel}: ${elapsed}`}>{elapsed}</time>}
@@ -56,8 +61,8 @@ export function SidebarStatus({ status, statusLabel = statuses[status].label, va
 const styles = stylex.create({
   root: { display: 'inline-flex', alignItems: 'center', gap: s.xs, color: ink.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', flexShrink: 0 },
   icon: { width: g.icon, height: g.icon, flexShrink: 0 }, iconRing: { width: g.glyphRing, height: g.glyphRing },
-  working: { color: tone.runningFg }, waiting: { color: tone.attention }, stale: { color: tone.dangerFg },
-  // Last-observed: one muted tone for every status; the shape alone tells states apart.
+  working: { color: tone.runningFg }, waiting: { color: tone.attention }, staleDanger: { color: tone.dangerFg }, staleMuted: { color: ink.fgMuted },
+  // Last observed: one muted tone for every state, so nothing reads as live; the SG-1 shape cue carries the state.
   frozen: { color: ink.fgMuted },
   spin: { animationName: stylex.keyframes({ to: { transform: 'rotate(360deg)' } }), animationDuration: m.spin, animationTimingFunction: m.linear, animationIterationCount: 'infinite', '@media (prefers-reduced-motion: reduce)': { animationName: 'none' } },
 })

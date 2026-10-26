@@ -19,7 +19,7 @@ class DisplayStringsTest(unittest.TestCase):
         self.assertEqual(len(paths), len(set(paths)))
         self.assertTrue(set(paths).isdisjoint(RENAME['DISPLAY_EXCEPTIONS']))
         exceptions = RENAME['DISPLAY_EXCEPTIONS']
-        self.assertEqual(exceptions['crates/st3-schema/src/lib.rs'], exceptions['docs/st3/schema.md'])
+        self.assertEqual(exceptions['crates/fractal-schema/src/lib.rs'], exceptions['docs/st3/schema.md'])
 
     def test_durable_identities_and_stored_names_are_not_rules(self):
         preserved = '''smalltalk com.compoundingtech.smalltalk SmalltalkRuntime
@@ -29,7 +29,7 @@ ST_SMALLTALK Smalltalk tag release Smalltalk daily release A Small Talk message.
             self.assertEqual(RENAME['rewrite_display'](preserved, literals), (preserved, 0), path)
         paths = {path for _, path, _ in RENAME['DISPLAY_RULES']}
         self.assertNotIn('apps/ios/agentsView.test.mjs', paths)
-        self.assertNotIn('crates/st3/src/config.rs', paths)
+        self.assertNotIn('crates/fractal/src/config.rs', paths)
         self.assertNotIn('fixtures/clients/transcripts/claude.json', paths)
 
     def test_display_name_does_not_rename_bundle_name(self):

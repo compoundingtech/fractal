@@ -1,5 +1,5 @@
-import { Agent, AgentId, Revision, RuntimeId, decodeUnknownSync, type AgentEncoded } from '@smalltalk/st3-client/schema'
-import { decodeResourceRow, openAgent, type DecodedAgent } from '@st3/sdk/effect'
+import { Agent, AgentId, Revision, RuntimeId, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema'
+import { decodeResourceRow, openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import { expect, test } from 'vitest'
 
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
@@ -73,6 +73,30 @@ const row = openAgent(decodeUnknownSync(
   revision: '1',
   updated_at: '2026-10-04T12:00:00.000Z',
 } satisfies AgentEncoded))
+
+test('projects authoritative native subagents, distinguishes absence and retains equivalent row identity', () => {
+  const decode = decodeUnknownSync(Agent)
+  const encoded = {
+    kind: 'agent', id: 'agent/example-parent', name: 'Parent', host_id: 'host/example',
+    runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working',
+    blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-18T12:00:00Z',
+    subagents: [{
+      id: 'reviewer', driver: 'omp', description: 'Review changes', session_id: 'session/review',
+      started_at: '2026-10-18T12:00:00Z', lease_expires_at: '2026-10-18T12:01:00Z',
+    }],
+  } satisfies AgentEncoded
+  const projections = createProjections()
+  const first = projections.fleetFromAgents([openAgent(decode(encoded))]).agents[0]!
+  expect(first.subagents?.[0]).toMatchObject({
+    id: 'reviewer', driver: 'omp', description: 'Review changes', session_id: 'session/review',
+    started_at: '2026-10-18T12:00:00.000Z', lease_expires_at: '2026-10-18T12:01:00.000Z',
+  })
+  expect(first.subagents?.[0]).not.toHaveProperty('activity')
+  expect(first.subagents?.[0]).not.toHaveProperty('usage')
+  expect(projections.fleetFromAgents([openAgent(decode(encoded))]).agents[0]).toBe(first)
+  expect(projections.fleetFromAgents([openAgent(decode({ ...encoded, subagents: [] }))]).agents[0]).not.toBe(first)
+  expect(fleetFromAgents([row]).agents[0]?.subagents).toBeUndefined()
+})
 
 test.each([
   ['agent/example', 'terminal/example'],
@@ -303,4 +327,37 @@ test('roster fact changes update the row while structurally equal usage and chec
   expect(project.fleetFromAgents([decodeOpen({
     ...wire, checkout: { ...wire.checkout, branch: 'changed' },
   })]).agents[0]?.checkout).toEqual({ _tag: 'Known', value: { ...wire.checkout, branch: 'changed' } })
+})
+
+test('retains current and bounded upcoming work and invalidates every sidebar work field', () => {
+  const work = {
+    id: 'work/example/review', mission_id: 'mission/example/ship',
+    mission_run_id: 'mission-run/example/ship', path: 'review', title: null,
+    state: 'claimed' as const, since: '2026-10-20T12:00:00Z',
+  }
+  const wire = {
+    kind: 'agent' as const, id: 'agent/example-worker', name: 'Worker', host_id: 'host/example-worker',
+    runtime_ids: [], reachability: 'reachable' as const, state: 'running' as const,
+    revision: '1', updated_at: '2026-10-20T12:00:00Z', current_work: [work],
+    upcoming_work: [{ ...work, id: 'work/example/next', mission_id: 'mission/example/next' }],
+  } satisfies AgentEncoded
+  const project = createProjections()
+  const decode = (encoded: AgentEncoded) => openAgent(decodeUnknownSync(Agent, 'strict')(encoded))
+  const first = project.fleetFromAgents([decode(wire)])
+  expect(first.agents[0]).toMatchObject({
+    mission: work.mission_id,
+    currentWork: [{ id: work.id, missionId: work.mission_id, runId: work.mission_run_id, path: 'review', state: 'claimed' }],
+    upcomingWork: [{ missionId: 'mission/example/next' }],
+  })
+  expect(first.agents[0]?.currentWork?.[0]?.title).toBeUndefined()
+  expect(project.fleetFromAgents([decode({ ...wire, revision: '2' })])).toBe(first)
+  for (const change of [
+    { title: 'Review changes' }, { path: 'approve' }, { state: 'waiting-person' as const },
+    { mission_run_id: 'mission-run/example/new' }, { id: 'work/example/new' },
+  ]) {
+    expect(project.fleetFromAgents([decode({ ...wire, current_work: [{ ...work, ...change }] })]).agents[0])
+      .not.toBe(first.agents[0])
+  }
+  expect(project.fleetFromAgents([decode({ ...wire, upcoming_work: [] })]).agents[0]?.upcomingWork).toEqual([])
+  expect(project.fleetFromAgents([decode({ ...wire, current_work: [] })]).agents[0]?.mission).toBeUndefined()
 })

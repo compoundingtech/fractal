@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client'
-import { Agent, decodeUnknownSync, type TerminalScreen } from '@smalltalk/st3-client/schema'
+import { Agent, decodeUnknownSync, type TerminalScreen } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as Atom from 'effect/reactivity/Atom'
 import { initialFeedSync, type FeedSync } from '../data/feedSync.ts'

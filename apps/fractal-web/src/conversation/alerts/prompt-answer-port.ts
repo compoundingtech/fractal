@@ -1,5 +1,5 @@
-import { ClientError, plainError, type St3Client } from '@smalltalk/st3-client'
-import type * as Native from '@smalltalk/st3-client/schema'
+import { ClientError, plainError, type FractalClient } from '@fractal/client'
+import type * as Native from '@fractal/client/schema'
 
 /** One answer to a native prompt: sent, or refused in words a person reads. */
 export type PromptAnswerResult =
@@ -29,7 +29,7 @@ export interface PromptAnswerPort {
  * gone or answered only in its terminal is never sent again, and neither is any other refusal: the
  * person sees why and answers again if it still waits.
  */
-export const gatewayPromptAnswers = (client: St3Client): PromptAnswerPort => ({
+export const gatewayPromptAnswers = (client: FractalClient): PromptAnswerPort => ({
   respond: async ({ alert, answer }) => {
     try {
       const observed = await client.capabilities()

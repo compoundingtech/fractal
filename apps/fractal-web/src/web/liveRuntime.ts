@@ -2,7 +2,7 @@ import { Effect, Layer } from 'effect'
 import { buildIdentity, deploymentId } from 'virtual:build-identity'
 import { liveSource } from '../data/liveSource.ts'
 import { makeTelemetry } from '../telemetry/browser.ts'
-import type { Replay } from '@smalltalk/st3-scenarios/replay'
+import type { Replay } from '@fractal/scenarios/replay'
 
 /** Page-owned scopes survive React Fast Refresh; a full navigation owns teardown. */
 export const createPageRuntime = (replay?: Replay) => {
@@ -30,9 +30,9 @@ export const createPageRuntime = (replay?: Replay) => {
   
   // The page owns one source for its lifetime; Storybook never imports this live root.
   const live = liveSource({
+    adoptEarlyCollections: replay === undefined,
     options: {
       baseUrl: window.location.origin, maxFollows: 8, conversationSlots: 'advertised',
-      adoptEarlyCollections: replay === undefined,
       ...(replay === undefined ? {} : { socket: replay.socket, fetch: replay.fetch }),
       parentSpan: ux.activeSpan,
       traceContext: ux.traceContext,

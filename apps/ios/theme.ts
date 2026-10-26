@@ -1,4 +1,4 @@
-// One palette, named by meaning, the same one stui uses (crates/stui/src/ui/theme.rs): Catppuccin
+// One palette, named by meaning, the same one stui uses (crates/fractal-tui/src/ui/theme.rs): Catppuccin
 // Mocha. Mauve is reserved for "a person is needed" and nothing else uses it.
 export const palette = {
   base: '#1e1e2e',

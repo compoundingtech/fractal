@@ -1,4 +1,4 @@
-import type { ClientDiagnosticEvent } from '../../clients/typescript/st3-client';
+import type { ClientDiagnosticEvent } from '../../clients/typescript/fractal-client';
 import { redactJsError, redactReactNativeException } from './diagnosticsRedaction';
 
 export type DiagnosticErrorHandler = (error: unknown, fatal?: boolean) => void;

@@ -16,12 +16,15 @@ The five required queue checks and complete test partitions are retained.
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
-on `main` are `linux-gate`, `isolation-vm`, `genie-freshness`,
-`typescript-client` and `mail-redelivery-canaries`,
-and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)).
+on `main` are `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (`ci-script-tests`, the CI scripts' own tests on their
+declared inputs, runs beside `genie-freshness` and is not a required context of its own: the `linux-gate` job, which every head reports,
+needs it and fails when it failed or was cancelled; a head from before it existed has no run of it and is not blocked),
+and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)). The VM tests
+(`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
+requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
 
-Every **ready** pull request, including a fork, gets the Linux gate, the isolation VM, the
-freshness check, the TypeScript client check and the mail redelivery canaries. Draft PRs allocate no CI runners: every job in Workspace CI, Performance, Public repository check,
+Every **ready** pull request, including a fork, gets the Linux gate, the freshness check, the
+TypeScript client check and the web lane. Draft PRs allocate no CI runners: every job in Workspace CI, Performance, Public repository check,
 release validation, Nix validation and optional macOS CI has a draft guard. This includes metadata
 jobs and `always()` collectors. `ready_for_review` starts checks; `converted_to_draft` enters the
 existing PR concurrency group and cancels obsolete ready-head work while skipping every new job.
@@ -185,7 +188,7 @@ real Cargo and benign stand-in commands; it compiles no Rust.
   selects the gate scope (see [gate scope](#gate-scope));
 - `linux-clippy`: `cargo clippy --workspace --all-targets --locked`, the standalone conversation
   model check, the [warning ratchet](#clippy-warning-ratchet), then
-  `cargo run --locked -p st3-client-codegen -- --check`;
+  `cargo run --locked -p fractal-client-codegen -- --check`;
 - `linux-fleet-compat`: the fleet compatibility test against `.github/fleet-compat-baseline.json`'s
   previous-release native archive. CI verifies its pinned SHA-256 and embedded source/target
   metadata before running it; it does not rebuild the baseline or its PTY dependency.
@@ -263,7 +266,7 @@ not billed cost or a claim of lower wall time. Cold seeds and evicted entries st
 downloads. A valid warm archive supplies the entire shell without the public NAR fetch that failed
 in run 38922273766/job 117046015044.
 
-The [original trial measurements](https://github.com/compoundingtech/smalltalk/pull/849#issuecomment-5936374396)
+The [original trial measurements](https://github.com/compoundingtech/fractal/pull/849#issuecomment-5936374396)
 recorded a warm run of 6m59s with this design, versus 8m49s to 9m30s with only the Cargo cache.
 That trial excluded the messaging matrix; current CI includes it. Caching the entire Nix store
 instead took 90–105 seconds to restore 4.4 GB, which cost more than it saved. The selected
@@ -294,7 +297,13 @@ CI exports `ST3_MESSAGING_COMPAT_BIN`. Without that variable each case, a separa
 safe and later ones reuse it, so nothing is built.
 Each run isolates test `HOME` and XDG state. The summary records the tested SHA,
 each stage's elapsed time, result and exit code; each stage job uploads `<job>-logs` with its log and `.time` file.
-Nextest's final summary retains flaky outcomes.
+Nextest's final summary retains flaky outcomes. The four test lanes (`linux-tests` and
+`linux-tests-shard-2`, `-3`, `-4`) also count them: `scripts/ci-linux tests` reads the `N flaky` of
+nextest's `Summary` line (`scripts/ci-nextest-flaky`, tested by `scripts/ci-nextest-flaky-test` in
+`genie-freshness`), prints `nextest flaky: N` and sets the `nextest` step's `flaky` output. When it is
+not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, holding the final `FLAKY`
+lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
+upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
 st3 integration fixtures use the separate `st3-fixture` executable, built automatically by
 the test-only `test-support` dev dependency. It captures an isolated Bash environment,
@@ -304,16 +313,16 @@ environment variable that enables this behavior, even if the executable is renam
 Fixture command helpers clear inherited `ST_AGENT`/`ST3_*`; temporary-repository Git helpers
 isolate global/system config, hooks, signing and author identity on each command. Real
 repository commits keep the host's Git policy. Run the same suite from an agent seat with
-`nix develop --command cargo nextest run -p st3 -p st3-daemon --locked --profile ci --retries 0`.
+`nix develop --command cargo nextest run -p fractal -p fractal-daemon --locked --profile ci --retries 0`.
 Provider fixtures that load st3 extensions publish their isolated hook set with
-`st3::hooks::ensure_installed`, preserving every declared asset and relative import.
+`fractal_daemon::hooks::ensure_installed`, preserving every declared asset and relative import.
 
 Boot, delivery-probe and messaging-fault fixtures put large executable copies in Cargo's target scratch
 directory, keeping their Unix sockets in short temporary paths. This avoids exhausting a
 host's temporary-filesystem quota when debug binaries are copied by parallel cases.
 
 On Linux, tests that launch isolated daemons, drivers, PTYs or long-lived CLI children call
-`st3::test_support::supervise_test()` before creating their fixtures. It runs that exact test
+`fractal_daemon::test_support::supervise_test()` before creating their fixtures. It runs that exact test
 under `scripts/st3_test_process.py`, a detached subreaper watching pidfds for the Rust runner
 and its launcher. Success, failure, panic, timeout, SIGTERM and SIGKILL of the runner all
 end the owned process tree. Each test has its own process group; detached children are
@@ -426,13 +435,13 @@ short socket/runtime roots with that guardian; failures keep diagnostics in
 `target/boot-canaries/` before the roots are removed. Capture errors are explicit artifacts.
 
 The Codex stand-in's schema files are generated from the protocol gate's own fixture; when the
-required Codex methods change, `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p st-drivers
+required Codex methods change, `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p fractal-drivers
 the_boot_canary_codex_stub_schemas` rewrites them.
 
 ### Clippy warning ratchet
 
 `linux-clippy` reuses JSON diagnostics from its existing workspace and standalone
-`st3-conversation-ui` Clippy runs. `.github/clippy-baseline.json` records warning counts per
+`fractal-conversation-ui` Clippy runs. `.github/clippy-baseline.json` records warning counts per
 workspace crate and lint, with sorted keys and the compiler/Clippy versions supplied by the
 `flake.lock`-pinned devShell. It includes Rust warnings as well as Clippy warnings, ignores
 dependencies outside the workspace, and counts each source diagnostic once when Cargo repeats
@@ -445,9 +454,12 @@ Removing warnings also requires lowering the baseline in the same pull request, 
 change cannot spend the removed warnings. CI checks that the committed counts do not increase
 relative to the event's immutable base SHA (PR base, merge-group base, or preceding main commit).
 When a crate is split out of another one, the new crate's warnings are the origin's: list it in
-`.github/clippy-splits.json` (`{"st3-daemon": "st3"}`), and against a base that lacks the new crate the
+`.github/clippy-splits.json` (`{"fractal-daemon": "st3"}`), and against a base that lacks the new crate the
 two are compared together, so the split can move warnings between them and never add any. Once the base has the
 new crate it is an ordinary crate and the entry has no effect; `--update` applies the same rule.
+A source package rename uses the same one-to-one ancestry rule, for example
+`{"fractal-daemon": "st3-daemon"}`. Historical edges retain the names stored in
+older Git baselines. They are not Cargo aliases, and they do not permit extra warnings.
 The first rollout permits a base without the file. There is no new required check:
 `linux-gate` already requires `linux-clippy`.
 
@@ -475,13 +487,13 @@ still cannot increase. Run the ratchet's focused regression proofs with
 The gate covers st3 and the code st3 uses. The `ci` profile's `default-filter` in
 `.config/nextest.toml` selects it on every event, with no path filter or scheduled full run:
 
-- every test of the other workspace crates: st3, st3-client, st3-client-codegen, st3-schema,
-  st3-migrate, stui (the terminal UI library), st-runtime, st-drivers (the harness drivers, channels, hooks, messages,
+- every test of the other workspace crates: st3, fractal-client, fractal-client-codegen, fractal-schema,
+  fractal-migrate, Fractal TUI (the terminal UI library), fractal-runtime, fractal-drivers (the harness drivers, channels, hooks, messages,
   harness state and sessions st3 and st2 share) and the shared and resource-provider crates;
 - st2's integration test files, apart from those below.
 
 It leaves out st2-only tests: st2's own unit tests (none of its remaining modules is used by
-st3), the st-drivers `catalog*`, `resync` and `resource_profile_supervisor` modules, and st2's
+st3), the fractal-drivers `catalog*`, `resync` and `resource_profile_supervisor` modules, and st2's
 `catalog_*`, `nomad_survival`, `event_e2e`, `eval_run_e2e`, `resync*`, `supervisor_auto_archive`
 and `resource_profile_supervisor_e2e` tests. No CI job runs these. Clippy still checks the whole
 workspace. List the selection with `bash scripts/ci-nextest list`.
@@ -517,8 +529,8 @@ existing scope.
 ### Current-product boundary
 
 Every required Linux stage runs `scripts/check-st-boundary-test` and
-`scripts/check-st-boundary`. The source guard rejects `st2::` imports and `extern crate st2`
-in st3/stui, plus direct, renamed or indirect workspace dependencies on st2 (including
+`scripts/check-st-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
+in st3/Fractal TUI, plus direct, renamed or indirect workspace dependencies on st2 (including
 optional and target-specific dependencies). st2 remains independently buildable/testable.
 
 The Claude no-st2 seat eval and all five harness boot canaries inspect fresh seat processes
@@ -539,23 +551,43 @@ both generations continue to coordinate with Claude's own config lock.
 `tests/transport_isolation.rs` proves that a task st2 starts in its own systemd user scope
 survives a SIGKILL of its supervisor's cgroup, for both exec and pty tasks. The managed-agent
 color contract also checks environment propagation through a real user scope, including a
-PTY restart. These three tests need a real systemd user manager, which Namespace's runner
-image does not boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the required
-`isolation-vm` job:
+PTY restart. The current runtime adds three ignored tests in the `fractal-runtime` package's
+`scope_cascade` binary:
+
+| Test | Guarantee |
+| --- | --- |
+| `exec_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | An exec scope survives its parent service's cgroup SIGKILL, keeps its incarnation and cgroup, then stops cleanly. |
+| `pty_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | A PTY scope survives the same cascade with its incarnation and cgroup intact, then stops cleanly. |
+| `literal_environment_is_preserved_across_a_work_scope` | Literal environment values cross a real user scope unchanged. |
+
+The landed `fractal-runtime` library test
+`isolate::retirement::native_tests::a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor`
+adds the fourth current-runtime control. It checks that a changed original request cannot
+signal either workload, then retires an escaped descendant while its neighboring scope
+survives. The test remains ignored in ordinary CI; the VM explicitly selects it by package,
+`fractal_runtime` binary, `lib` kind and full name. This execution does not authorize production
+activation of the retirement primitive.
+
+All seven controls need a real systemd user manager, which Namespace's runner image does not
+boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily `daily-isolation-vm`
+job (`daily-long.yml`):
 
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
    `systemd-detect-virt` reports `kvm`, so it never falls back to emulation.
 2. The producer prebuilds the preserved workspace selection into one archive, including the
-   existing st2 integration test binary and its executable for these three VM tests.
+   existing st2 integration binary and executable plus the fractal-runtime `scope_cascade` and
+   library binaries.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
    NixOS with a lingering user, copies in the archive, extracts it at the checkout's path (the
-   test binary has st2's path compiled in) and runs both cascade tests and
-   `nomad_survival::managed_agent_color_contract_crosses_systemd_scope` with nextest as a
-   transient service of that user's systemd manager. The VM compiles nothing.
+   st2 test binary has its executable's path compiled in) and runs the seven controls with
+   nextest as a transient service of that user's systemd manager. The VM compiles nothing.
 
-The VM requires all three tests to run and pass, with no isolation opt-out. The job summary
-records the KVM probe and each phase's elapsed time.
+The archive inventory must match the seven exact package, binary, kind and test identities.
+Both listing and execution use `--run-ignored all`, and execution sets retries to zero.
+The JUnit report must contain exactly those seven distinct successful results, with no missing,
+extra, skipped, rerun or flaky result. All seven tests must run and pass, with no isolation
+opt-out. The job summary records the KVM probe and each phase's elapsed time.
 
 ### TypeScript client
 
@@ -576,6 +608,32 @@ contract/schema tests and both compiler projects, the views' tests and typecheck
 6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
 for generated-client consumers. The main ruleset requires `typescript-client`.
 
+### Storybook deployment
+
+The separate [Storybook deployment workflow](../.github/workflows/storybook-deploy.yml),
+authored with `githubWorkflow` in `storybook-deploy.yml.genie.ts`, is not a required
+check and does not change Workspace CI or its gates. It builds
+`packages/fractal-ui/storybook-static` and deploys the Alchemy v2 stack
+`@fractal/storybook-deploy` with Cloudflare remote state in stage `main` for the
+canonical [Storybook](https://storybook.compounding.tech). Every push to `main`
+deploys; there is no change-detection job, pull-request trigger, per-PR stage or
+close-cleanup job. The checkout is the push's immutable `github.sha`.
+Deployment credentials are exposed only to code merged into `main`, never to
+PR-head infrastructure code. This is outside the PR admission path, so it needs
+no draft-policy exception and is not a draft-transition cancellation target.
+Infrastructure updates to the canonical site are serialized without cancellation.
+
+The deployment URL is written to the GitHub Actions job summary; the workflow
+does not need repository write permissions or post PR comments. An administrator
+must configure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` before deployment.
+If either secret is absent, a credential preflight writes a skip summary and all
+checkout, setup, build and deploy steps are skipped successfully.
+The `STORYBOOK_DOMAIN` repository variable overrides the canonical custom domain;
+unset uses `storybook.compounding.tech`, while an explicitly empty value disables
+the custom domain in favor of `workers.dev`. The workflow preserves this
+unset-versus-empty distinction. See [Storybook deployment setup](development.md#storybook-deployment)
+for account permissions, state bootstrap and manual deployment commands.
+
 ### Fractal web
 
 The non-required Fractal web jobs run on GitHub-hosted `ubuntu-latest` without
@@ -594,8 +652,8 @@ their sandbox flags and declared-input boundary remain unchanged.
   SHAs, failed fetches and failed diffs conservatively select every web lane, including
   kit plays, with a warning; `workflow_dispatch` also forces all lanes.
   Relevant paths are `apps/fractal-web/**`, `packages/fractal-ui/**`,
-  `clients/typescript/st3-views/**`, `clients/typescript/st3-scenarios/**` and `fixtures/**`.
-  Within `clients/typescript/st3-client`, only the consumed export graph (`index.ts`,
+  `clients/typescript/fractal-views/**`, `clients/typescript/fractal-scenarios/**` and `fixtures/**`.
+  Within `clients/typescript/fractal-client`, only the consumed export graph (`index.ts`,
   `Models.generated.ts`, `Client.generated.ts`, `Schema.generated.ts`, `errors.ts`),
   `package.json`, `tsconfig.json`, `tsconfig.schema.json`, `types.test.ts` and `BUCK*`
   trigger web execution. Rust generators and their schema/docs inputs do not trigger it
@@ -608,7 +666,10 @@ their sandbox flags and declared-input boundary remain unchanged.
   `nix/fractal-web*.nix`, `nix/web-shell*`, `scripts/ci-fractal-web*`, `scripts/ci-web-shell*`,
   `scripts/ci-typescript-client*`,
   `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
-  and `.github/repo-settings.json*`.
+  `.github/repo-settings.json*`, and what the lane reads although no web source names it:
+  `apps/ios/package.json` (a workspace member of the frozen install), `docs/st3/client-v0/fixtures/**`
+  (an SDK unit test's fixture), `pnpm-source-inputs.json*` (published by the web shell hook) and
+  `scripts/check-public-repo` (run by the scenario privacy lane).
 - `fractal-web-execution` runs only for relevant changes after successful detection
   and `genie-freshness`, with a 25-minute timeout and no retries. It runs
   `scripts/ci-web-shell run bash scripts/ci-fractal-web`, which is
@@ -720,10 +781,12 @@ reason=…`): `fractal-web` (the lane, the detector's relevant paths) and `fract
 (the kit plays, its kit paths). The key is `evidence-verify --project` over the check's
 inputs; a skip is only a trusted signed passing record with the same key, found by
 `evidence-verify` under the base skip policy. Inputs, detector, verifier and keys come
-from the base. Until the base policy declares a web check (and something signs it with
-input keys), every web decision is `run` with `reason=no-record`. `claims PATH…` and
+from the base. A matching record skips only when the base policy turns skipping on for
+the check (`enforce: true`); under a shadow entry the line reads `decision=run reason=shadow`
+and names the record. `fractal-web` has such a shadow entry; `fractal-web-kit` has none, so
+its decision is `run` with `reason=no-record`. `claims PATH…` and
 `inputs CHECK` print the plugin's path ownership and declared inputs.
-`scripts/web-skip-proof-test` (in `genie-freshness`) covers key stability, the app/kit
+`scripts/web-skip-proof-test` (in `ci-script-tests`) covers key stability, the app/kit
 split, base-pinned rules and the policy path.
 
 The strict kit play lane runs every indexed story at both 440/1440 widths and
@@ -739,6 +802,18 @@ user agent), as Storybook's own runner does: after each play the preview pauses
 animations at their end state for the a11y check instead of a fixed 100 ms sleep
 before waiting for them. A play that leaves UI opening after it returns (a hover
 card under the pointer) waits for that state itself rather than relying on the sleep.
+Each case must have exactly one completed strict story record for its requested story.
+The guard follows the iframe document's identity, not its current URL: `pushState` and
+`replaceState` keep collecting lifecycle and axe evidence at the final in-app URL.
+A replacement document fails closed: Node observes main-frame document navigation
+requests before the initial `goto`, rejecting a second request even for a same-URL
+reload before DOMContentLoaded. History API changes do not request another document.
+Receipts record both the initial Storybook URL and the final evidence URL; empty
+records or missing/duplicate completions cannot pass. This detects accidental
+navigation, not an application deliberately forging evidence.
+Play-driven component transitions use local React state: Storybook's `updateArgs`
+starts another story render, which emits another completion and accessibility report.
+SyncLine's transition demo keeps its full play assertions without updating story args.
 
 The gate takes three options. Pull requests run the per-commit set (`KIT_PLAY_SET=commit`)
 with a11y off and a 100-second budget; merge groups (observed and signed by Evidence
@@ -804,7 +879,7 @@ fall back to an older success; duplicate attempts, future attempts, mixed heads,
 mixed runs and missing shards fail closed. A new head/run cannot reuse old receipts.
 
 Storybook builds once per shard rather than introducing a third, serialized build job
-and transferring the full static asset tree. In [the #2901 baseline web job](https://github.com/compoundingtech/smalltalk/actions/runs/38651083493/job/116150585943),
+and transferring the full static asset tree. In [the #2901 baseline web job](https://github.com/compoundingtech/fractal/actions/runs/38651083493/job/116150585943),
 Storybook took 9.878 seconds (0.165 runner-minutes); runner initialization through the
 frozen install took 142.457 seconds (2.374 runner-minutes). Duplicating the small build
 is cheaper than another similarly prepared build job, even before artifact transfer.
@@ -820,7 +895,7 @@ negative step attempts are rejected, while person assignees are valid actor refe
 
 The SDK unit lane uses an injected clock to guard task yielding and bounded decode/order
 work deterministically, including the >150KB roster burst. `SDK frame CPU budgets`
-runs separately with `apps/fractal-web/packages/st3-sdk/vitest.perf.config.ts`: after
+runs separately with `packages/fractal-sdk/vitest.perf.config.ts`: after
 warming, seven fixed observations guard the median worst task below 16ms of calling-thread
 CPU, total burst CPU below 50ms, and a one-row delta below 16ms. These are not retries.
 Calling-thread CPU excludes host descheduling and unrelated Node worker-thread CPU.
@@ -830,7 +905,7 @@ changes its thresholds.
 The web shell supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
 effect-utils input; the Rust shells are unchanged. An empty `.buckroot` marks the Buck
 root; Genie generates `.buckconfig`, root `BUCK` and `buck2/toolchains/BUCK` from `buck2/root.ts`,
-mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `smalltalk`. Remote caching
+mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `fractal`. Remote caching
 and uploads are disabled, with no remote endpoints. The shell links `rules` and
 `capabilities` cells into ignored `.buck2/`; CI fails if checked-in root files drift
 from the Nix rendering. `buck2/dependencies/BUCK` and its SHA-256 sidecar project the
@@ -975,7 +1050,7 @@ To build and test with the assertions (what the daily run does), set both lines:
 What only exists or only means something with them:
 
 - The `ST2_TEST_*` fault and pause seams of the st2 catalog, event, message and agent publish code
-  (`crates/st-drivers`, `src/`) are compiled under `cfg(debug_assertions)`. The st2 tests that drive
+  (`crates/fractal-drivers`, `src/`) are compiled under `cfg(debug_assertions)`. The st2 tests that drive
   them carry `#[cfg_attr(not(debug_assertions), ignore = "...")]`: they are listed as ignored in the
   default profile and run in the assertions profile (`tests/agent_presentation.rs`,
   `tests/agent_publish.rs`, `tests/agent_resource.rs`, `tests/message_cli.rs`,
@@ -983,7 +1058,7 @@ What only exists or only means something with them:
   `tests/event_e2e.rs`).
 - The daemon benchmark and load tests (`daemon_bench`, `first_sync`, `daemon_load`) skipped in any
   build that was not optimized by testing `cfg!(debug_assertions)`; they now ask
-  `st3::test_support::optimized_build()` (the executable is under `target/release/`).
+  `fractal_daemon::test_support::optimized_build()` (the executable is under `target/release/`).
 - Tests already behind `#[cfg(debug_assertions)]` (`ding/tests.rs`, `empty_authority_guard.rs`)
   run only in the assertions profile.
 
@@ -1012,6 +1087,15 @@ archive, with `ST_TEST_SCALE=full`. A test that keeps a smaller population, fewe
 fixed seed on pull requests reads that variable and runs its original size here. Each one says in a
 comment why its invariant holds at the smaller size. Run one locally at full scale with
 `ST_TEST_SCALE=full cargo nextest run ...`.
+
+Some test groups run only here. `.config/daily-only.filterset` lists them, one nextest filterset
+per line. `scripts/ci-nextest` leaves them out of every selection, so pull requests, merge groups
+and local runs skip them, unless `CI_TEST_LANE=daily` is set. Only the two `daily-tests` shards set
+it, so the shard inventory proof still covers exactly what each lane runs. Run a moved group locally with
+`CI_TEST_LANE=daily bash scripts/ci-nextest run -E '<its filter>'`. A group moves only after its
+per-pull-request contract tests run on every pull request and this run has been green three days,
+one pull request per group, with the measured time it saves; `scripts/ci-nextest-test` checks the
+selection.
 
 The `daily-report` job (`scripts/ci-daily-long-report`) writes each lane's result, time, longest
 step and failed steps to the run summary. On red, it opens or comments on the one open issue
@@ -1079,7 +1163,7 @@ The existing `perf-cost-logs` upload (`daily-perf-cost-logs` in the daily run) r
 its oracle, one-attempt policy and exit status are unchanged. Interrupted runs may
 leave partial evidence; an uploaded directory is not a completed-test verdict.
 
-`perf-cost` runs `daemon_cost::` (`crates/st3/tests/daemon_cost.rs`) on every `main` push (Main
+`perf-cost` runs `daemon_cost::` (`crates/fractal/tests/daemon_cost.rs`) on every `main` push (Main
 upkeep) and once a day as `daily-perf-cost` in the [daily long lanes](#daily-long-lanes), whose
 report shows its time and failures. It does not run on pull requests or merge-queue entries. On
 pull requests it took a 15.3-minute median on Namespace; on a quiet 24-thread machine it takes
@@ -1118,6 +1202,23 @@ renewals, status and work reads, and a person's reads), with the reconciler runn
 concurrent seat event long-polls. Quiet polls have a 31-second budget for their intentional
 30-second wait; mailbox WebSockets require authenticated native drivers and are excluded.
 The client usage endpoint has a dedicated 0.5-request/second scenario with a 300 ms p99 budget.
+
+Each regime of the budgeted run lasts 400 s, so every budgeted p99 rests on at least 300 samples;
+over fewer, a p99 is one of the run's slowest few (the replication exchange's, over 97 samples at
+120 s, was the second slowest). A kind keeps the busy host's rate where that is enough (the
+replication exchange's 0.8 a second gives 320) and is otherwise sampled just often enough: 0.75 a
+second, or 6.75 across the nine person-read paths. The 22 roster and window first snapshots are not
+a p99: each one must meet its budget. Every report also records `runner_reference_ms`, the fastest
+of three single-core sorts of 2^21 values timed before the daemon starts: runners of one Namespace
+machine type differ by about 2x, and the 1.6 to 2.1 s replication-exchange p99s of 10-16 to 10-20
+all came from the slower ones.
+
+At those rates the run also sees reads refused while a published list is withdrawn: a retryable 503
+"still being prepared", or a window's resync before its first snapshot. The store keeps serving
+each list while it projects a replication backlog in chunks and refolds it once the backlog is in
+([#3553](https://github.com/compoundingtech/fractal/issues/3553)), so none is expected. The
+report keeps them apart from failed requests, under `unavailable` with the seconds they spanned,
+the step summary shows them, and any fails the run (`AVAILABILITY_GATED`).
 Generated usage history contains cumulative response rollups for long-lived standing sessions
 with stable attribution, so this scenario exercises many observations per series and period
 baselines and totals rather than an empty report or one series per observation.
@@ -1170,7 +1271,7 @@ only for the exact saved Git SHA with a clean checkout, so a retry does not rebu
 unchanged sources merely because checkout refreshed their timestamps. Changed or dirty sources
 still take Cargo's normal validation path; the embedded source revision remains real.
 For a clean checkout Performance passes its actual full SHA as `AGENT_SPEC_REVISION`.
-The build-identity script (crates/st-build-stamp, which only the st2 and st3 binaries depend on,
+The build-identity script (crates/fractal-build-stamp, which only the st2 and st3 binaries depend on,
 so no library rebuilds for a new commit) tracks that explicit value instead of unrelated Git
 index/ref timestamps. The CLI stamp still derives its real revision and commit time from Git.
 Dirty checkouts continue to derive their identity from Git.
@@ -1192,8 +1293,8 @@ continues using the Actions cache with the same generator/schema keys.
 Run either locally with `TMPDIR=/var/tmp`; `ST_BENCH_DIR` keeps the generated stores between runs:
 
 ```sh
-cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads 1
-ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p st3 --features perf-load --test perf_load daemon_load:: -- --nocapture
+cargo test -p fractal --test integration daemon_cost:: -- --nocapture --test-threads 1
+ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p fractal --features perf-load --test perf_load daemon_load:: -- --nocapture
 ```
 
 #### The daemon beside a seat-priority hog
@@ -1218,7 +1319,7 @@ not, until `ST_LOAD_HOG_STRICT=1`.
 
 ```sh
 ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo test --release \
-  -p st3 --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
+  -p fractal --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
 nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
 ```
 
@@ -1320,9 +1421,9 @@ The macOS workflow was manually disabled when this audit ran. Its cache configur
 maintained without changing that repository setting. Portable publishing permissions and
 accepted-source verification remain in place.
 
-## Required mail redelivery canaries
+## Daily mail redelivery canaries
 
-Alongside the two Linux test shards, `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
+Once a day (`daily-mail-redelivery-canaries` in `daily-long.yml`), `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
 unignored regressions: boot/reconnect mailbox suppression and recent unoffered recovery for
 Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with hour-old
 mail held and recent unoffered mail consumed exactly once; legacy polling recovery through the
@@ -1335,13 +1436,10 @@ The mailbox cases seed hour-old sent mail and recent staged and delivered-but-un
 mail, prove zero historical offers, preserve explicit mailbox access, and recover an in-flight
 send after a daemon restart with exactly one receipt pair. Every selected test runs with zero retries.
 
-The script fails if any required test is missing, ignored, or filtered out. The named
-`mail-redelivery-canaries` check executes the script on its own Namespace 8x16 runner; a skipped
-or failed job cannot pass.
-`linux-gate` requires it, so this protection applies to pull requests and merge groups. It
-restores the main-seeded Linux test Cargo and Nix caches, prepares the same fixtures and rendered
-hooks, and retains its own logs, timing and failure evidence. It never uses the native priority
-or merge lanes, and neither test shard waits for it before starting its own suite.
+The script fails if any required test is missing, ignored, or filtered out. It ran per pull request
+and in the merge queue as a required check, a member of `linux-gate`, until 2026-10-23; since then it
+runs only in the daily run, and the canary tests are in `.config/daily-only.filterset`, so the
+per-PR test shards leave them out too. A red daily run comments on the run's one open issue.
 Apply the fifth live ruleset check after this workflow has passed on main.
 
 ## Generated files and existing workflows
@@ -1388,15 +1486,15 @@ gh pr merge NUMBER --auto
 ```
 
 The queue tests the pull request on top of the current `main` and the entries ahead of it with
-`linux-gate`, `isolation-vm`, `genie-freshness`, `typescript-client`, and
-`mail-redelivery-canaries` (these run on the `merge_group` event; see the
+`linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (these run on the
+`merge_group` event; see the
 trigger in `fleet.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
 request does not need to be rebased onto the latest `main` first. A draft cannot be queued. If a
 queued check fails, the entry leaves the queue and the pull request page says why: fix it and
 queue it again. The merge train (`st lanes join smalltalk`) is retired.
 
 The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
-by an administrator and never by CI) requires the five checks from GitHub Actions with an empty
+by an administrator and never by CI) requires the four checks from GitHub Actions with an empty
 bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
 merge method MERGE, a proposed three entries build at once (see [Merge overflow and daily Namespace minutes](#merge-overflow-and-daily-namespace-minutes)),
 up to five merge together, and a check that
@@ -1404,19 +1502,25 @@ never reports fails its entry after 60 minutes. Repository settings enable nativ
 branch deletion after merge. Check the live settings against the file with `gh-check-settings`:
 
 ```sh
-nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/smalltalk --file .github/repo-settings.json
+nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/fractal --file .github/repo-settings.json
 ```
+
+A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no deletion, no update and
+no force push, an empty bypass list, creation open (CI and agents create records). Its enforcement is turned off only by
+`scripts/evidence-gc --lock-config`, around its own tag deletions, logged and relocked in a `finally`; see
+[gate evidence](st3/gate-evidence.md#garbage-collection-and-the-size-of-the-namespace). `gh-check-settings` reports it
+as drifted during that window.
 
 `st/ci` is no longer required. Its producer on the fleet's machines is retired after the first
 pull request has merged through the queue.
 
 To roll back, restore the previous ruleset (the JSON is in the body of pull request #916) with
-`gh api --method PUT repos/compoundingtech/smalltalk/rulesets/20563764 --input old-main-ruleset.json`,
+`gh api --method PUT repos/compoundingtech/fractal/rulesets/20563764 --input old-main-ruleset.json`,
 then start the train again with `st missions start` on its mission.
 
 ## Measured concurrency
 
-The [manual capacity run](https://github.com/compoundingtech/smalltalk/actions/runs/36931429222)
+The [manual capacity run](https://github.com/compoundingtech/fractal/actions/runs/36931429222)
 on 2026-10-01 recorded the workspace limits with `nsc workspace concurrency --output json`:
 
 | Platform | Concurrent vCPUs | Concurrent memory |
@@ -1441,13 +1545,13 @@ runs executing 19 Namespace jobs together. Including the manual capacity run, th
 eight runs and 24 jobs. These are observed overlaps of runs at different stages, rather than
 eight fully parallel Workspace CI groups. The runs were:
 
-- main: [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36930646852)
-  and [macOS CI](https://github.com/compoundingtech/smalltalk/actions/runs/36930646948) for one commit,
-  with [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931186016)
-  and [macOS CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931186029) for the next;
-- merge group: [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36930644645);
-- PRs: [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931199367)
-  and [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931346163).
+- main: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36930646852)
+  and [macOS CI](https://github.com/compoundingtech/fractal/actions/runs/36930646948) for one commit,
+  with [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931186016)
+  and [macOS CI](https://github.com/compoundingtech/fractal/actions/runs/36931186029) for the next;
+- merge group: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36930644645);
+- PRs: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931199367)
+  and [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931346163).
 
 The initial jobs in 13 observed CI runs created from 21:30 UTC had a median startup delay of
 18 seconds, a 95th percentile of 187 seconds (nearest rank) and a maximum of 305 seconds (57 jobs). Startup
@@ -1497,7 +1601,7 @@ job stayed `queued` with no runner (13 minutes and counting). A plain `gh run ca
 to it. Recover with the force-cancel endpoint and a rerun:
 
 ```sh
-gh api --method POST repos/compoundingtech/smalltalk/actions/runs/RUN_ID/force-cancel
+gh api --method POST repos/compoundingtech/fractal/actions/runs/RUN_ID/force-cancel
 gh run rerun RUN_ID
 ```
 

@@ -327,7 +327,7 @@ jobs:
           start=$SECONDS
           nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
           printf '| VM driver build | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
-      - name: Run all three systemd-scope tests in the VM
+      - name: Run all seven selected systemd-scope tests in the VM
         id: vmtest
         env:
           FRACTAL_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
@@ -564,6 +564,7 @@ jobs:
       CI_TEST_PARTITION: "hash:1/2"
       CI_TEST_THREADS: "8"
       ST_TEST_SCALE: full
+      CI_TEST_LANE: daily
       CI_CACHE_DEV_SHELL: default
     steps:
       - name: Require the shared test producer to succeed
@@ -733,6 +734,7 @@ jobs:
       CI_TEST_PARTITION: "hash:2/2"
       CI_TEST_THREADS: "8"
       ST_TEST_SCALE: full
+      CI_TEST_LANE: daily
       CI_CACHE_DEV_SHELL: default
     steps:
       - name: Require the shared test producer to succeed
@@ -1139,7 +1141,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: "${{ runner.temp }}/st-bench"
-          key: "perf-cost-stores-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
+          key: "perf-cost-stores-${{ hashFiles('crates/fractal/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
         id: cache-12
       - name: Run the cost check
         shell: bash
@@ -1244,8 +1246,8 @@ jobs:
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Name compatible snapshot recipes
         env:
-          PERF_BUILD_SNAPSHOT: "perf-load-build-v1-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'Cargo.toml', 'crates/st3/Cargo.toml', 'crates/st3-daemon/Cargo.toml', '.cargo/config.toml') }}"
-          PERF_STORES_SNAPSHOT: "perf-load-stores-v1-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
+          PERF_BUILD_SNAPSHOT: "perf-load-build-v1-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'Cargo.toml', 'crates/fractal/Cargo.toml', 'crates/fractal-daemon/Cargo.toml', '.cargo/config.toml') }}"
+          PERF_STORES_SNAPSHOT: "perf-load-stores-v1-${{ hashFiles('crates/fractal/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
         run: printf "PERF_BUILD_SNAPSHOT=%s\nPERF_STORES_SNAPSHOT=%s\n" "$PERF_BUILD_SNAPSHOT" "$PERF_STORES_SNAPSHOT" >> "$GITHUB_ENV"
       - name: Restore compatible build, Nix, stores and main baseline snapshots
         env:
@@ -1367,8 +1369,8 @@ jobs:
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Name compatible snapshot recipes
         env:
-          PERF_BUILD_SNAPSHOT: "perf-load-build-v1-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'Cargo.toml', 'crates/st3/Cargo.toml', 'crates/st3-daemon/Cargo.toml', '.cargo/config.toml') }}"
-          PERF_STORES_SNAPSHOT: "perf-load-stores-v1-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
+          PERF_BUILD_SNAPSHOT: "perf-load-build-v1-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'Cargo.toml', 'crates/fractal/Cargo.toml', 'crates/fractal-daemon/Cargo.toml', '.cargo/config.toml') }}"
+          PERF_STORES_SNAPSHOT: "perf-load-stores-v1-${{ hashFiles('crates/fractal/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
         run: printf "PERF_BUILD_SNAPSHOT=%s\nPERF_STORES_SNAPSHOT=%s\n" "$PERF_BUILD_SNAPSHOT" "$PERF_STORES_SNAPSHOT" >> "$GITHUB_ENV"
       - name: Restore compatible build, Nix, stores and main baseline snapshots
         env:

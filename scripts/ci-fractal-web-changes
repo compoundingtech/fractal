@@ -2,9 +2,10 @@
 """Decide whether a Workspace CI event must run the fractal-web execution lane.
 
 Pull requests diff the immutable base and head SHAs from their merge base; merge groups diff the
-queued group's base_sha..head_sha and pushes diff before..after, including every pushed commit.
-Both commits are fetched explicitly. Renames are split into a deletion and an addition, so both
-paths are matched. If the diff cannot be determined, all web lanes run. Manual runs always execute.
+head from its merge base with the current target branch tip, covering every entry still queued.
+Pushes diff before..after, including every pushed commit. History is fetched explicitly. Renames
+are split into a deletion and an addition. If the diff cannot be determined, all web lanes run.
+Manual runs always execute.
 """
 
 import os
@@ -17,20 +18,21 @@ import tempfile
 PATTERNS = (
     "apps/fractal-web/**",
     "packages/fractal-ui/**",
+    "packages/fractal-sdk/**",
     # Export graph consumed by the app/SDK and Buck's client typecheck inputs.
-    "clients/typescript/st3-client/index.ts",
-    "clients/typescript/st3-client/Models.generated.ts",
-    "clients/typescript/st3-client/Client.generated.ts",
-    "clients/typescript/st3-client/Schema.generated.ts",
-    "clients/typescript/st3-client/errors.ts",
-    "clients/typescript/st3-client/package.json",
-    "clients/typescript/st3-client/tsconfig.json",
-    "clients/typescript/st3-client/tsconfig.schema.json",
-    "clients/typescript/st3-client/types.test.ts",
-    "clients/typescript/st3-client/BUCK*",
-    "clients/typescript/st3-views/**",
-    "clients/typescript/st3-scenarios/**",
-    # The st3-scenarios recording import reads the client wire schema at runtime.
+    "clients/typescript/fractal-client/index.ts",
+    "clients/typescript/fractal-client/Models.generated.ts",
+    "clients/typescript/fractal-client/Client.generated.ts",
+    "clients/typescript/fractal-client/Schema.generated.ts",
+    "clients/typescript/fractal-client/errors.ts",
+    "clients/typescript/fractal-client/package.json",
+    "clients/typescript/fractal-client/tsconfig.json",
+    "clients/typescript/fractal-client/tsconfig.schema.json",
+    "clients/typescript/fractal-client/types.test.ts",
+    "clients/typescript/fractal-client/BUCK*",
+    "clients/typescript/fractal-views/**",
+    "clients/typescript/fractal-scenarios/**",
+    # The fractal-scenarios recording import reads the client wire schema at runtime.
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     # Views tests and scenario lanes read committed client/scenario fixtures.
     "fixtures/**",
@@ -60,6 +62,13 @@ PATTERNS = (
     ".github/workflows/main-upkeep.yml*",
     ".github/workflows/cache-audit.ts",
     ".github/repo-settings.json*",
+    # Read by the lane although no web source names them: a workspace member's manifest (the frozen install reads every
+    # member), the client fixtures an SDK unit test opens (timeline-conformance.json), the pnpm source-input list the web
+    # shell hook publishes, and the public-repository lint the scenario privacy lane runs.
+    "apps/ios/package.json",
+    "docs/st3/client-v0/fixtures/**",
+    "pnpm-source-inputs.json*",
+    "scripts/check-public-repo",
 )
 # Keep workspace dependency coverage in sync with the guarded package graph in ci-fractal-web-test.
 # scripts/ci-fractal-web-kit-graph fails the kit lane when the built Storybook bundles a file outside these.
@@ -69,10 +78,12 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/changelog/**",
     "apps/fractal-web/src/web/ColdOpen.stories.tsx",
     "apps/fractal-web/src/web/coldOpen.fixtures.ts",
+    # The image composer integration story exercises the app's live imageUploadAdapter in kit Storybook.
+    "apps/fractal-web/src/web/ComposerImages.stories.tsx",
     # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
     "apps/fractal-web/.changelog/**",
-    "apps/fractal-web/packages/st3-sdk/src/**",
-    "clients/typescript/st3-views/**",
+    "packages/fractal-sdk/src/**",
+    "clients/typescript/fractal-views/**",
     # The rest of its module closure inside the app, named file by file so other app-only changes still skip kit plays.
     "apps/fractal-web/src/command-palette/fuzzy.ts",
     "apps/fractal-web/src/conversation/alerts/AgentAlerts.tsx",
@@ -88,7 +99,12 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/data/arrangements.ts",
     "apps/fractal-web/src/data/asking.ts",
     "apps/fractal-web/src/data/attention.ts",
+    "apps/fractal-web/src/data/contextOccupancy.ts",
     "apps/fractal-web/src/data/fixtureSource.ts",
+    "apps/fractal-web/src/data/nativeDeclarations.ts",
+    "apps/fractal-web/src/data/nativeDetails.ts",
+    "apps/fractal-web/src/data/nativeDetailsSource.ts",
+    "apps/fractal-web/src/data/observedClock.ts",
     "apps/fractal-web/src/data/projections.ts",
     "apps/fractal-web/src/data/react.tsx",
     "apps/fractal-web/src/data/source.ts",
@@ -130,6 +146,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/shell/sidebar/Toolbar.tsx",
     "apps/fractal-web/src/shell/threadHeaderSlot.tsx",
     "apps/fractal-web/src/state/persistence.ts",
+    # ConversationPane registers composer/tail commit regions even when no telemetry producer is installed.
+    "apps/fractal-web/src/telemetry/inputPaint.ts",
     "apps/fractal-web/src/telemetry/measurement/counters.ts",
     "apps/fractal-web/src/telemetry/measurement/developer.ts",
     "apps/fractal-web/src/telemetry/measurement/engine.ts",
@@ -161,6 +179,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/ui-compat/live-theme.stylex.ts",
     "apps/fractal-web/src/ui-compat/tokens.stylex.ts",
     "apps/fractal-web/src/web/AgentActions.tsx",
+    "apps/fractal-web/src/web/AgentDetailsPanel.tsx",
+    "apps/fractal-web/src/web/AlertsPopover.tsx",
     "apps/fractal-web/src/web/AttentionControls.tsx",
     "apps/fractal-web/src/web/capturedChanges.ts",
     "apps/fractal-web/src/web/ChangesInspector.tsx",
@@ -172,25 +192,32 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/ConversationStates.tsx",
     "apps/fractal-web/src/web/conversationTranscript.ts",
     "apps/fractal-web/src/web/DeclarationDialog.tsx",
+    "apps/fractal-web/src/web/detailsSupplement.ts",
     "apps/fractal-web/src/web/lastObserved.tsx",
     "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
     "apps/fractal-web/src/web/liveSidebarTree.ts",
     "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
     "apps/fractal-web/src/web/perfMarks.ts",
+    "apps/fractal-web/src/web/ResponsiveAgentSidebar.stories.tsx",
+    "apps/fractal-web/src/web/ResponsiveAgentSidebar.tsx",
     "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
     "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
     "apps/fractal-web/src/web/sidebarAttention.ts",
+    "apps/fractal-web/src/web/SidebarChrome.stories.tsx",
+    "apps/fractal-web/src/web/SidebarChromeFooter.tsx",
     "apps/fractal-web/src/web/SidebarEmptyState.tsx",
+    "apps/fractal-web/src/web/SidebarTreeBinding.stories.tsx",
     "apps/fractal-web/src/web/sidebarRow.ts",
+    "apps/fractal-web/src/web/useNativeDetails.ts",
     "apps/fractal-web/src/web/workspaceView.ts",
     "apps/fractal-web/src/workbench-kit/brand-icons.tsx",
     "apps/fractal-web/src/workbench-kit/IconButton.tsx",
     "apps/fractal-web/src/workbench-kit/icons.tsx",
     "fixtures/clients/words.json",
     "apps/fractal-web/src/web/index.html",
-    "clients/typescript/st3-scenarios/**",
-    "clients/typescript/st3-client/**",
-    # The st3-scenarios recording import reads the client wire schema at runtime.
+    "clients/typescript/fractal-scenarios/**",
+    "clients/typescript/fractal-client/**",
+    # The fractal-scenarios recording import reads the client wire schema at runtime.
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "package.json*",
     "pnpm-workspace.yaml*",
@@ -205,7 +232,7 @@ KIT_PATTERNS = (
     ".github/workflows/fleet.yml*",
     ".github/workflows/workspace-ci.ts",
     # The roster decode story replays captured daemon payloads through the SDK decode and the roster projection.
-    "apps/fractal-web/packages/st3-sdk/src/**",
+    "packages/fractal-sdk/src/**",
     "apps/fractal-web/src/data/attention.ts",
     "apps/fractal-web/src/data/projections.ts",
     "apps/fractal-web/src/data/source.ts",
@@ -238,7 +265,7 @@ def git(directory, *args):
     return subprocess.run(["git", "-C", directory, *args], check=True, capture_output=True, text=True, timeout=45).stdout
 
 
-def changed_paths(remote, event, base, head):
+def changed_paths(remote, event, base, head, base_ref="refs/heads/main"):
     for name, value in (("base", base), ("head", head)):
         if not SHA.fullmatch(value):
             raise ValueError(f"{event} {name} SHA is missing or malformed: {value!r}")
@@ -246,7 +273,16 @@ def changed_paths(remote, event, base, head):
         git(directory, "init", "--quiet")
         # Commit history without blobs: enough for the merge base and a name-only tree diff.
         git(directory, "fetch", "--quiet", "--no-tags", "--filter=blob:none", remote, base, head)
-        start = git(directory, "merge-base", base, head).strip() if event == "pull_request" else base
+        if event == "merge_group":
+            # base_sha can be the preceding queue entry, not the branch receiving the queue.
+            # Resolve the live target ref in this isolated repo; never fall back to a stale tip.
+            if not base_ref.startswith("refs/heads/"):
+                raise ValueError(f"invalid merge group base ref: {base_ref!r}")
+            git(directory, "fetch", "--quiet", "--no-tags", "--filter=blob:none", remote, base_ref)
+            target = git(directory, "rev-parse", "FETCH_HEAD").strip()
+            start = git(directory, "merge-base", target, head).strip()
+        else:
+            start = git(directory, "merge-base", base, head).strip() if event == "pull_request" else base
         if not SHA.fullmatch(start):
             raise ValueError(f"no merge base for {base} and {head}")
         output = git(directory, "diff", "--name-only", "--no-renames", "-z", start, head)
@@ -260,7 +296,8 @@ def main():
         relevant, kit_inputs, summary = True, True, ["Manual run: web execution and kit plays are forced."]
     elif event in ("pull_request", "merge_group", "push"):
         try:
-            paths = changed_paths(os.environ["REMOTE"], event, os.environ.get("BASE_SHA", ""), os.environ.get("HEAD_SHA", ""))
+            paths = changed_paths(os.environ["REMOTE"], event, os.environ.get("BASE_SHA", ""), os.environ.get("HEAD_SHA", ""),
+                                  os.environ.get("BASE_REF", "refs/heads/main"))
         except (ValueError, subprocess.SubprocessError, OSError) as error:
             detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
             print(f"::warning::fractal-web diff unknown; running all lanes: {detail}", file=sys.stderr)

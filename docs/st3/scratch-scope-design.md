@@ -1,7 +1,7 @@
 # Disposable scratch scopes for agent preflight
 
-Status: proposed design for [#832](https://github.com/compoundingtech/smalltalk/issues/832)
-and [#841](https://github.com/compoundingtech/smalltalk/issues/841). This note grants no
+Status: proposed design for [#832](https://github.com/compoundingtech/fractal/issues/832)
+and [#841](https://github.com/compoundingtech/fractal/issues/841). This note grants no
 authority and implements no command. Nathan's 2026-10-14 disposition cancels Slice 0
 and the scratch-pair proof on our machines. Johannes's agent runs that replication proof
 on Johannes's machines; requests for needed st changes go to #832. No Docker or container
@@ -18,16 +18,16 @@ membership change, document write, credential use or service operation.
 This read uses main `2bc2ed54a900d884c99781b2a0ebc531e531d2e5` on 2026-10-14. It is source
 evidence, not an installed-build or runtime test receipt.
 
-* [main.rs](../../crates/st3/src/main.rs) and [fleet_cli.rs](../../crates/st3/src/fleet_cli.rs): `fleet_person`
+* [main.rs](../../crates/fractal/src/main.rs) and [fleet_cli.rs](../../crates/fractal/src/fleet_cli.rs): `fleet_person`
   requires a person path for invite; `run_fleet` can found a fleet without that helper. Create and join already lock the state
   admission boundary. A separate state directory alone supplies no agent bootstrap authority.
-* [api.rs](../../crates/st3-api-core/src/api.rs): `harness_ancestor` and `guard_bound_request` bind Linux
+* [api.rs](../../crates/fractal-api-core/src/api.rs): `harness_ancestor` and `guard_bound_request` bind Linux
   harness requests to their agent. Invite creation and revocation require `concrete_person`.
   The non-Linux ancestry helper returns `None`; it cannot authenticate a Mac scratch owner.
-* [setup.rs](../../crates/st3/src/setup.rs): setup refuses an agent process. Do not remove
+* [setup.rs](../../crates/fractal/src/setup.rs): setup refuses an agent process. Do not remove
   `ST_AGENT` or send a person actor to evade this check.
-* [fixture.rs](../../crates/st3/src/fixture.rs), [test_support.rs](../../crates/st3-store/src/test_support.rs)
-  and [Cargo.toml](../../crates/st3/Cargo.toml) provide a separate, non-installed
+* [fixture.rs](../../crates/fractal/src/fixture.rs), [test_support.rs](../../crates/fractal-store/src/test_support.rs)
+  and [Cargo.toml](../../crates/fractal/Cargo.toml) provide a separate, non-installed
   `st3-fixture` executable requiring `test-support`. It initializes test state that disables
   ancestry binding in its server and clears seat environment in fixture subprocess helpers.
   That mechanism is for repository tests. Its existence does not certify an isolated fleet,
@@ -195,7 +195,7 @@ is not evidence that hostile code cannot access production credentials.
 
 ## Relation to delegated grants
 
-[#882](https://github.com/compoundingtech/smalltalk/issues/882) describes scoped, expiring,
+[#882](https://github.com/compoundingtech/fractal/issues/882) describes scoped, expiring,
 person-issued grants with the agent remaining the actor. Its original proposal explicitly
 does not solve fresh scratch bootstrap; later comments place grants in the coherent principals
 system and retain free mode meanwhile. Do not revive its earlier permission checks or build
@@ -326,7 +326,7 @@ first-run dates are void. Completed source and security reviews remain historica
 not execution authority or evidence of replication, isolation or cleanup.
 
 Johannes's agent performs the replication proof on Johannes's machines. Factory watches
-[#832](https://github.com/compoundingtech/smalltalk/issues/832) for requests for needed st
+[#832](https://github.com/compoundingtech/fractal/issues/832) for requests for needed st
 changes. Our machines run our work; a machine request from Johannes's side stays on his
 machines unless Nathan explicitly directs otherwise.
 

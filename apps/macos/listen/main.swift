@@ -15,7 +15,7 @@ import Speech
 //
 // The microphone prompt belongs to the process macOS holds responsible, which for a program run
 // from a terminal is the terminal app. So st-listen first starts itself again disclaimed, which
-// makes it responsible for itself: the prompt then names Small Talk, from this bundle's
+// makes it responsible for itself: the prompt then names Fractal, from this bundle's
 // Info.plist, whatever terminal st runs in.
 
 setvbuf(stdout, nil, _IOLBF, 0)

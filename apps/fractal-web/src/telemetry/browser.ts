@@ -1,5 +1,5 @@
 /**
- * wf browser telemetry (`service.name = webfractal-web`).
+ * wf browser telemetry (`service.name = fractal-web`).
  *
  * One Effect `Tracer` serves both kinds of spans:
  * - Effect spans (SDK `st3.*`, app `wf.*` effects) flow through it as usual.
@@ -12,8 +12,8 @@
  * The tracer is teed into an in-memory `SpanRing` for the dev perf panel and, when an OTLP URL is
  * given, exported as OTLP/JSON via `fetch` directly to that explicitly configured endpoint.
  */
-import { CollectionName } from '@smalltalk/st3-client/schema'
-import { normalizeDecodePath } from '@st3/sdk/effect'
+import { CollectionName } from '@fractal/client/schema'
+import { normalizeDecodePath } from '@fractal/sdk/effect'
 import { Context, Deferred, Effect, Exit, FiberSet, Layer, Option, Schema, Scope, Tracer } from 'effect'
 import * as FetchHttpClient from 'effect/http/FetchHttpClient'
 import * as OtlpExporter from 'effect/observability/OtlpExporter'
@@ -24,9 +24,10 @@ import { buildIdentity, deploymentId } from 'virtual:build-identity'
 
 import { makeSpanRing, type SpanRing } from './spanRing.ts'
 import { afterNextPaint, makeUxTelemetry, uxAttributeNames, uxSpanNames, type UxTelemetry } from './ux.ts'
+import { inputPaintAttributeNames, inputPaintSpanName, installInputPaint } from './inputPaint.ts'
 
 /** OpenTelemetry resource identity for browser spans emitted by wf. */
-export const serviceName = 'webfractal-web'
+export const serviceName = 'fractal-web'
 
 /**
  * Event types that start a user interaction. React Aria selects on press start (pointerdown) for
@@ -57,6 +58,10 @@ export interface Telemetry {
   readonly onCommit: React.ProfilerOnRenderCallback
   /** Installs event listeners and PerformanceObservers; returns the uninstaller. */
   readonly install: () => () => void
+  /** Call immediately after createRoot, before rendering; removes the completion root on cleanup. */
+  readonly registerReactRoot: (root: Element) => () => void
+  /** Portal hosts are completion roots and cheap child-list commit signals, never whole-page roots. */
+  readonly registerPortalHost: (host: Element) => () => void
 }
 
 interface PendingInteraction {
@@ -105,6 +110,7 @@ const interactionTarget = (target: EventTarget | null): string => {
 
 const exportedSpanNames: Readonly<Record<string, true>> = {
   ...Object.fromEntries(uxSpanNames.map((name) => [name, true as const])),
+  [inputPaintSpanName]: true,
   'st3.follow.subscribe': true,
   'st3.capabilities': true,
   'st3.socket.probe': true,
@@ -118,6 +124,7 @@ const exportedSpanNames: Readonly<Record<string, true>> = {
 }
 const exportedAttributes: Readonly<Record<string, true>> = {
   ...Object.fromEntries(uxAttributeNames.map((name) => [name, true as const])),
+  ...Object.fromEntries(inputPaintAttributeNames.map((name) => [name, true as const])),
   'span.label': true,
   'wf.ux.early': true,
   'wf.interaction.type': true,
@@ -190,6 +197,9 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
   let flushRequested = false
   let shutdownRequested = false
   let closeExporter: (() => void) | undefined
+  let uninstallInputPaint: (() => void) | undefined
+  const reactRoots = new Map<Element, number>()
+  const overlayHosts = new Map<Element, number>()
 
   /** Replay only pre-exporter spans, retaining the IDs already propagated to the SDK/gateway. */
   const exportEarlySpan = ({ span, events }: EarlySpanCapture, target: Tracer.Tracer) => {
@@ -378,6 +388,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
               Effect.forkIn(scope),
             )
             yield* Effect.addFinalizer(() => {
+              uninstallInputPaint?.()
               ux?.dispose()
               disposed = true
               shutdownRequested = true
@@ -508,6 +519,10 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
 
   const install = () => {
     if (uninstall !== undefined) return uninstall
+    uninstallInputPaint = otlpTracesUrl === undefined ? undefined : installInputPaint({
+      emit, reactRoots: { [Symbol.iterator]: () => reactRoots.keys() },
+      overlayHosts: { [Symbol.iterator]: () => overlayHosts.keys() },
+    })
     for (const type of interactionEvents)
       window.addEventListener(type, onInteraction, { capture: true })
 
@@ -623,6 +638,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
 
     uninstall = () => {
       uninstall = undefined
+      uninstallInputPaint?.()
       for (const timer of timers.values()) clearTimeout(timer)
       ux?.dispose()
       disposed = true
@@ -644,5 +660,25 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
     return uninstall
   }
 
-  return { ring, layer, onCommit, install, get ux() { return getUx() } }
+  const register = (roots: Map<Element, number>, root: Element): (() => void) => {
+    if (otlpTracesUrl === undefined) return () => {}
+    roots.set(root, (roots.get(root) ?? 0) + 1)
+    let registered = true
+    return () => {
+      if (!registered) return
+      registered = false
+      const count = roots.get(root)
+      if (count === 1) roots.delete(root)
+      else if (count !== undefined) roots.set(root, count - 1)
+    }
+  }
+  return {
+    ring, layer, onCommit, install, get ux() { return getUx() },
+    registerReactRoot: (root) => register(reactRoots, root),
+    registerPortalHost: (host) => {
+      const unregisterRoot = register(reactRoots, host)
+      const unregisterHost = register(overlayHosts, host)
+      return () => { unregisterRoot(); unregisterHost() }
+    },
+  }
 }

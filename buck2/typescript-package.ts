@@ -70,6 +70,6 @@ export const typescriptPackageBuck = ({
 
 /** Every typecheck target in the Buck graph, for the root aggregate and CI. */
 export const typecheckTargets = {
-  'clients/typescript/st3-client': { typecheck: 'tsconfig.json', typecheck_schema: 'tsconfig.schema.json' },
-  'clients/typescript/st3-views': { typecheck: 'tsconfig.json' },
+  'clients/typescript/fractal-client': { typecheck: 'tsconfig.json', typecheck_schema: 'tsconfig.schema.json' },
+  'clients/typescript/fractal-views': { typecheck: 'tsconfig.json' },
 } as const satisfies Record<(typeof buckImporters)[number], Record<string, string>>

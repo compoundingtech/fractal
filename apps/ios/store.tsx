@@ -5,14 +5,15 @@ import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
 import { resendMessage, sendMessage, type SendOutcome } from './messageSend';
-import { API_VERSION, ClientError, St3Client, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
-import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
+import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
 import { REPAIR_WARNING, validatePairingTrust, verifyPairing } from './pairingProof';
 import { emptyData, encodeProjectionCache, hydrateProjectionForPairedDevice, PROJECTION_CACHE_KEY, type Data } from './projectionCache';
 import { listCollectionPages, mergedRows } from './collectionPages';
 import { rememberBounded } from './boundedCache';
+import { IMAGES, imageKey } from './imageView';
 import { wantsScreenSequence, withFreshTerminalFence, type TerminalFence } from './terminalControls';
 import { sendFences } from './sendFence';
 import { Feed } from './feed';
@@ -46,7 +47,7 @@ export type OnDemand = 'launches' | 'machines' | 'devices' | 'sessions';
 export type Status = 'setup' | 'connecting' | 'online' | 'offline';
 export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
 /** A message.send request as sent, kept whole so an unconfirmed one can be sent again unchanged. */
-export type MessageRequest = Parameters<St3Client['messageSend']>[0];
+export type MessageRequest = Parameters<FractalClient['messageSend']>[0];
 /** What became of a message: sent, unconfirmed (with the exact request to send again), or failed as a person reads it. */
 export type Sent = { how: 'sent' } | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
 
@@ -138,7 +139,7 @@ function useAppStore(proof?: FabricProfile) {
   const [feed, setFeed] = useState<Feed | null>(null), [connectionIssue, setConnectionIssue] = useState('');
   const [cachedHostId, setCachedHostId] = useState('');
   const [caps, setCaps] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const capsClient = useRef<St3Client | null>(null);
+  const capsClient = useRef<FractalClient | null>(null);
   const capsRef = useRef(caps);
   capsRef.current = caps;
   const [status, setStatus] = useState<Status>('setup');
@@ -182,8 +183,6 @@ function useAppStore(proof?: FabricProfile) {
     return () => { current = false; };
   }, [proof, caps?.session_actor]);
   useEffect(() => foreground.current.subscribe(active => { if (!active && !proofRef.current) void localDrafts.save(draftsOwner.current, draftCache.current); }), []);
-  // Images messages carry, as data URIs, so a conversation scrolled back to does not read them again.
-  const imageCache = useRef(new Map<string, Promise<string>>());
   // The request of a send st never confirmed, so sending the same message again repeats it instead of making a second.
   // Attention the person acted on from here: st closing it is their doing, not a vanishing.
   const acted = useRef(new Set<string>());
@@ -289,7 +288,7 @@ function useAppStore(proof?: FabricProfile) {
   // faster than every thirty seconds: a retry that failed waits for the next measurement to ask again.
   const reporting = useRef<{ busy: boolean; last: number; send: () => void }>({ busy: false, last: 0, send: () => {} });
   // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — literal lookups are required by Expo.
-  const client = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  const client = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
   const pushRef = useRef<PushRegistrationLifecycle | null>(null);
   if (!pushRef.current) pushRef.current = new PushRegistrationLifecycle(nativePushPorts({
     readEnabled: async () => (await AsyncStorage.getItem(PUSH_KEY)) === '1',
@@ -311,7 +310,7 @@ function useAppStore(proof?: FabricProfile) {
     const remotes = new Map<string, PushRemote | undefined>();
     const remoteFor = (baseUrl: string, bearer: string): PushRemote => {
       // Capture each issuer's own credential, never a mutable selected-route credential.
-      const remote = (signal: AbortSignal) => new St3Client({ baseUrl, credential: () => bearer, fetchImpl: gatewayFetch((input, init) => fetch(input, { ...init, signal })), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
+      const remote = (signal: AbortSignal) => new FractalClient({ baseUrl, credential: () => bearer, fetchImpl: gatewayFetch((input, init) => fetch(input, { ...init, signal })), client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
       return {
         register: request => pushWrite(async signal => (await remote(signal).pushRegister(request)).value),
         unregister: () => pushWrite(async signal => (await remote(signal).pushUnregister()).value),
@@ -368,7 +367,7 @@ function useAppStore(proof?: FabricProfile) {
     return () => { if (observations.ready === state.send) observations.ready = undefined; };
   }, [proof, client, observations]);
   // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  const uploader = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  const uploader = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
 
   // Settings: read once. A build that carries a fabric target (EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT, set in an
   // ignored env file on the build host) opens on fabric until the person chooses otherwise.
@@ -706,7 +705,7 @@ function useAppStore(proof?: FabricProfile) {
     try {
       if (old && !await push.forgetIssuer(profileKey)) throw new Error('Notification cleanup is incomplete. Reconnect to the paired member before replacing its pairing.');
       // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-      const gatewayClient = new St3Client({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
+      const gatewayClient = new FractalClient({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
       const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage });
       consumed = true; deviceId = result.value.device_id;
       if (result.value.kind !== 'paired-session') throw new Error('A phone profile cannot enroll an external assistant.');
@@ -960,14 +959,10 @@ function useAppStore(proof?: FabricProfile) {
     },
     /** An image a message carries, as a data URI; st reads it from the member that has it. */
     image(image: { sha256: string; message: string; mediaType: string }): Promise<string> {
-      const known = imageCache.current.get(image.sha256);
-      if (known) return known;
-      if (!client || status !== 'online') return Promise.reject(new Error(status === 'online' ? 'not connected' : 'offline'));
-      const reading = client.blob(image.sha256, image.message).then(bytes => `data:${image.mediaType};base64,${encodeBase64(bytes)}`);
-      // A failed read is tried again next time it is shown.
-      reading.catch(() => { if (imageCache.current.get(image.sha256) === reading) imageCache.current.delete(image.sha256); });
-      rememberBounded(imageCache.current, image.sha256, reading, 24);
-      return reading;
+      return IMAGES.read(imageKey(image), () => {
+        if (!client || status !== 'online') return Promise.reject(new Error(status === 'online' ? 'not connected' : 'offline'));
+        return client.blob(image.sha256, image.message).then(bytes => `data:${image.mediaType};base64,${encodeBase64(bytes)}`);
+      });
     },
     /** The whole text of a long message (a conversation shows only its start), read from the member that took it. */
     async messageBody(message: string): Promise<{ text: string; complete?: boolean }> {
@@ -975,7 +970,7 @@ function useAppStore(proof?: FabricProfile) {
       const answer = (await client.messageBodyGet(message)).value;
       return { text: answer.text, complete: answer.complete };
     },
-    /** Send Small Talk to an agent, as stui does: fenced to a fresh snapshot, once more if it moved. */
+    /** Send Fractal to an agent, as stui does: fenced to a fresh snapshot, once more if it moved. */
     async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<Sent> {
       if (!client || !uploader) return { how: 'failed', error: 'not connected' };
       if (status !== 'online' || (proof && !proof.ready)) return { how: 'failed', error: 'offline' };

@@ -1,6 +1,7 @@
 {
   "name": "fractal-web",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "test": "vitest run",
@@ -18,11 +19,11 @@
     "@overeng/devbar": "workspace:^",
     "@overeng/meters": "workspace:^",
     "@overeng/utils": "workspace:^",
-    "@smalltalk/st3-client": "file:../../clients/typescript/st3-client",
+    "@fractal/client": "file:../../clients/typescript/fractal-client",
     "effect": "4.0.0",
     "fractional-indexing": "3.2.0",
-    "@smalltalk/fractal-ui": "workspace:*",
-    "@st3/sdk": "workspace:*",
+    "@fractal/ui": "workspace:*",
+    "@fractal/sdk": "workspace:*",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-aria": "3.52.1",
@@ -33,7 +34,7 @@
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",
-    "@smalltalk/st3-scenarios": "workspace:*",
+    "@fractal/scenarios": "workspace:*",
     "@types/node": "24.10.0",
     "typescript": "6.0.3",
     "vitest": "4.1.9",

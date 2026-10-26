@@ -1,19 +1,20 @@
 import { RegistryContext, useAtomValue } from '@effect/atom-react'
 /** Shared derivations over SDK-decoded and generated rows, installed once per data source. */
-import type { Attention, Mission } from '@smalltalk/st3-client/schema'
-import type { DecodedAgent as AgentRow } from '@st3/sdk/effect'
+import type { Attention, Mission } from '@fractal/client/schema'
+import type { DecodedAgent as AgentRow } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { createContext, type ReactNode, useContext } from 'react'
 import * as React from 'react'
 
-import { HumanClockProvider } from '../../../../packages/fractal-ui/src/time/clock.tsx'
+import { HumanClockProvider, useClockLabel } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 import type { MissionView } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import { createProjections } from './projections.ts'
 import { askingAgentRefs, attentionAboutAgent, currentMissionIds } from './asking.ts'
 import { type Agent, type DataSource, type Feed, type Fleet, type RosterDecode, decodedRoster, observed } from './source.ts'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
+import { createObservedClock, type ObservedClock } from './observedClock.ts'
 
 /** Navigable observations plus the actual availability of each independently followed family. */
 export interface SubjectIndex {
@@ -29,6 +30,7 @@ export interface SubjectIndex {
 
 interface DerivedData {
   readonly source: DataSource
+  readonly observedClock: Atom.Atom<ObservedClock>
   readonly fleet: Atom.Atom<Feed<Fleet>>
   readonly missions: Atom.Atom<Feed<readonly MissionView[]>>
   readonly subjects: Atom.Atom<readonly SubjectSummary[]>
@@ -149,6 +151,7 @@ const derive = (source: DataSource) => {
   )
   return {
     source,
+    observedClock: createObservedClock(source),
     fleet,
     missions,
     subjects,
@@ -355,3 +358,17 @@ export const useEvents = () => useAtomValue(useDataSource().events)
 export const useNow = (): number => useAtomValue(useDataSource().now)
 /** Capture fallback observation timestamps without subscribing the containing content tree. */
 export const useNowSnapshot = (): number => useContext(RegistryContext).get(useDataSource().now)
+/**
+ * Re-render once the source clock reaches `at`. Ticks before it only re-check a leaf clock label,
+ * so a panel pairing this with useNowSnapshot renders at its next visible change, not every tick.
+ * The pending label names its deadline: React keeps a re-render only when a hook's value changed.
+ */
+export const useClockDeadline = (at: number | undefined): void => {
+  useClockLabel(now => at === undefined ? '' : now >= at ? 'due' : String(at))
+}
+const pausedAt = (clock: ObservedClock): number | undefined => clock._tag === 'Paused' ? clock.now : undefined
+/** Frozen presentation time on transport loss, without substituting it for data freshness; undefined while live. */
+export const usePausedNow = (): number | undefined => useAtomValue(useData().observedClock, pausedAt)
+const clockState = (clock: ObservedClock): ObservedClock['_tag'] => clock._tag
+export const useObservedClockState = (): ObservedClock['_tag'] =>
+  useAtomValue(useData().observedClock, clockState)

@@ -5,8 +5,8 @@ import {
   Revision,
   decodeUnknownSync,
   type AgentEncoded,
-} from '@smalltalk/st3-client/schema'
-import { openAgent, type DecodedAgent } from '@st3/sdk/effect'
+} from '@fractal/client/schema'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'

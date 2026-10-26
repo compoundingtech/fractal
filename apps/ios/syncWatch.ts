@@ -1,5 +1,5 @@
-import type { SyncNotice } from '../../clients/typescript/st3-client';
-import { syncLine, syncView } from '@smalltalk/st3-views';
+import type { SyncNotice } from '../../clients/typescript/fractal-client';
+import { syncLine, syncView } from '@fractal/views';
 
 /** `undefined`: no notice has been read; `null`: read, and this host is level with its peers. */
 export type SyncRead = SyncNotice | null | undefined;

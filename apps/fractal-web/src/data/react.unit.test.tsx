@@ -4,8 +4,8 @@ import {
   type AgentEncoded,
   type ResourceObservationEncoded,
   type TerminalScreen,
-} from '@smalltalk/st3-client/schema'
-import type { DecodedAgent } from '@st3/sdk/effect'
+} from '@fractal/client/schema'
+import type { DecodedAgent } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -17,6 +17,11 @@ import { fixtureSource, type FixtureProjections } from './fixtureSource.ts'
 import { DataSourceProvider, type SubjectIndex, useSubjectIndex, useSubjectList, useGatewaySync, useAgentsSync, useMissionsSync, useAttentionSync, useConversationSync, useTerminalSync } from './react.tsx'
 import { type ConversationPage, type DataSource, observed, unavailable, waiting } from './source.ts'
 import { initialFeedSync, transitionFeedSync, type FeedSyncObservation } from './feedSync.ts'
+import { useAtomValue } from '@effect/atom-react'
+import { useAgent, useAgentAttention, useDataSource } from './react.tsx'
+import { sidebarRow } from '../web/sidebarRow.ts'
+import type { SidebarMissionContext } from '@fractal/ui/assistant-ui'
+import type { Feed } from './source.ts'
 
 const blocked = unavailable({ reason: 'unsupported', detail: 'This family is not served.' })
 const agent = decodeUnknownSync(
@@ -236,6 +241,68 @@ describe('SDK sync observation hooks', () => {
     try {
       renderToStaticMarkup(<DataSourceProvider source={fixtureSource({ world })} registry={registry}><Consumer /></DataSourceProvider>)
       expect(observations).toEqual(Array.from({ length: 6 }, () => undefined))
+    } finally {
+      registry.dispose()
+    }
+  })
+})
+
+describe('sidebar retained mission feed plumbing', () => {
+  it('updates mission and waiting context independently of an unchanged agent roster', () => {
+    const registry = AtomRegistry.make()
+    const native = decodeUnknownSync(Agent, 'strict')({
+      kind: 'agent', id: 'agent/example-worker', name: 'Worker', host_id: 'host/example-worker',
+      runtime_ids: [], reachability: 'reachable', state: 'running', revision: '1',
+      updated_at: '2026-10-20T12:00:00Z',
+      current_work: [{
+        id: 'work/example/review', mission_id: mission.id, mission_run_id: 'mission-run/example/run',
+        path: 'review', title: 'Review changes', state: 'claimed', since: '2026-10-20T12:00:00Z',
+      }],
+    } satisfies AgentEncoded)
+    const missions = Atom.make<Feed<typeof world.missions>>(waiting)
+    const cards = Atom.make<Feed<typeof world.attention>>(observed({ value: [] }))
+    const base = fixtureSource({ world: { ...world, agents: [native], attention: [] } })
+    const source: DataSource = { ...base, missions, attention: cards }
+    let context: SidebarMissionContext | undefined
+    const Consumer = () => {
+      const feed = useAgent(native.id)
+      const missionFeed = useAtomValue(useDataSource().missions)
+      const attentionFeed = useAgentAttention(native.id)
+      context = feed._tag === 'Observed' && feed.value !== undefined ? sidebarRow({
+        agent: feed.value, stale: false,
+        missions: missionFeed._tag === 'Observed' ? missionFeed.value : undefined,
+        attention: attentionFeed._tag === 'Observed' ? attentionFeed.value : undefined,
+      }).missionContext : undefined
+      return null
+    }
+    const render = () => renderToStaticMarkup(<DataSourceProvider source={source} registry={registry}><Consumer /></DataSourceProvider>)
+    try {
+      render()
+      expect(context).toMatchObject({ progress: { _tag: 'Unknown' }, step: { _tag: 'Step', name: 'Review changes' } })
+      registry.set(missions, observed({ value: [{ ...mission, title: 'Actual published title' }] }))
+      render()
+      expect(context).toMatchObject({ slug: mission.id.split('/').at(-1) })
+      const run = { ...mission.run_details![0]!, id: 'mission-run/example/run' as const, generation_id: undefined,
+        progress: { done: 1, total: 4 } }
+      const hydrated = { ...mission, run_generations: {}, run_details: [run] }
+      registry.set(missions, observed({ value: [hydrated] }))
+      render()
+      expect(context).toMatchObject({ progress: { _tag: 'Known', done: 1, total: 4 } })
+      registry.set(missions, observed({ value: [{ ...hydrated, run_details: [{ ...run, progress: { done: 2, total: 4 } }] }] }))
+      render()
+      expect(context).toMatchObject({ progress: { _tag: 'Known', done: 2, total: 4 } })
+      const card = { ...attention, attention_kind: 'agent-request' as const, state: 'open' as const,
+        actions: ['work.done' as const], conversation_id: native.id, detail: 'Approve the plan?', update: undefined }
+      registry.set(cards, observed({ value: [card] }))
+      render()
+      expect(context).toMatchObject({ step: { _tag: 'Waiting', question: 'Approve the plan?' } })
+      registry.set(cards, observed({ value: [{ ...card, detail: 'Approve the revised plan?' }] }))
+      render()
+      expect(context).toMatchObject({ step: { _tag: 'Waiting', question: 'Approve the revised plan?' } })
+      registry.set(cards, observed({ value: [] }))
+      render()
+      expect(context).toMatchObject({ step: { _tag: 'Step', name: 'Review changes' } })
+      expect(registry.get(source.agents)).toMatchObject({ value: [native] })
     } finally {
       registry.dispose()
     }

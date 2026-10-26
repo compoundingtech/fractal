@@ -1,5 +1,5 @@
-import type * as St3 from '@smalltalk/st3-client/schema'
-import type { DecodedAgent } from '@st3/sdk/effect'
+import type * as St3 from '@fractal/client/schema'
+import type { DecodedAgent } from '@fractal/sdk/effect'
 import { DateTime, Option } from 'effect'
 
 import words from '../../../../fixtures/clients/words.json' with { type: 'json' }
@@ -8,7 +8,7 @@ import { leafText } from '../data/projections.ts'
 // The mission presentation of docs/clients/ui-contract.md ("Presentation projections",
 // "Mission"), derived in the app until st serves it on the missions collection (#2646). The
 // fields and words are the contract's, so reading st's projection replaces only this file. The
-// precedence is `st3-ui-model::missions::adapt`'s, first match wins.
+// precedence is `fractal-ui-model::missions::adapt`'s, first match wins.
 
 export type MissionWord = (typeof words.mission)[number]['id']
 export type StepWord = 'needs_you' | 'done' | 'working' | 'ready' | 'waiting' | 'cancelled' | 'failed' | 'pending'

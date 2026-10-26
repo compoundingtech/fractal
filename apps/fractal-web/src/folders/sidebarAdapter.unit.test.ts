@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest'
-import { ArrangementEditParameters, ArrangementKey } from '@smalltalk/st3-client/schema'
+import { ArrangementEditParameters, ArrangementKey } from '@fractal/client/schema'
 import { Effect, Schema } from 'effect'
 import * as fc from 'fast-check'
 import { generateNKeysBetween } from 'fractional-indexing'
@@ -51,6 +51,29 @@ const expectCanonicalKey = (key: string) => {
   expect(key.length === integerLength || !key.endsWith('0')).toBe(true)
   expect(key[0] === 'A' && /^0+$/.test(key.slice(1, integerLength))).toBe(false)
 }
+
+it('groups unfiled agents by reported project without moving explicitly filed agents', () => {
+  const doc = setup()
+  const rows = doc.roster.map(row => ({ ...row, host: 'build-1', project: 'example/product' }))
+  const tree = sidebarTree(sidebarProjection({ ...doc, roster: rows }), rows, new Map())
+  expect(tree[0]).toMatchObject({ _tag: 'Folder', id: a })
+  expect(tree.at(-1)).toMatchObject({ _tag: 'Group', id: 'wf/project/example%2Fproduct', label: 'example/product', children: [{ id: 'alpha.new' }] })
+  expect(doc.placements['agent/new']).toBeUndefined()
+})
+
+it('keeps native children under their canonical parent seat without independent arrangement membership', () => {
+  const doc = setup()
+  const nested = { _tag: 'Agent' as const, id: 'wf/subagent/reviewer', subject: 'agent/one', parent: 'beta.one', childId: 'reviewer', label: 'Review changes' }
+  const rows = doc.roster.map(seat => seat.id === 'beta.one' ? { ...seat, children: [nested] } : seat)
+  const state = { ...doc, roster: rows }
+  const tree = sidebarTree(sidebarProjection(state), rows, new Map())
+  const filtered = filterSidebarTree(tree, 'Review')
+  expect(filtered).toMatchObject([{ id: a, collapsed: false, children: [{ id: 'beta.one', collapsed: false, children: [{ id: nested.id }] }] }])
+  expect(canDrop(state, move(nested.id, { _tag: 'Into', folder: b }))).toHaveProperty('refused')
+  expect(operationsForMove(state, move('beta.one', { _tag: 'Into', folder: b }))).toMatchObject([{ op: 'subject.place', subject: 'agent/one', folder: b }])
+  const parentFolder = tree[0]!
+  expect(parentFolder.children?.find(node => node.id === 'beta.one')).toMatchObject({ collapsed: true, children: [nested] })
+})
 
 describe('sidebar matrix operations', () => {
   it('Create folder appends, normalizes blank names and falls back from a missing parent', () => {

@@ -1,5 +1,5 @@
 {
-  description = "Small Talk claims-graph runtime and terminal UI, with a separate legacy st2 runner";
+  description = "Fractal claims-graph runtime and terminal UI, with a separate legacy st2 runner";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -7,12 +7,15 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/e237afa8587fb953cc589c35e0c9a252f7192444";
+    pty.url = "github:compoundingtech/pty/6336c376fe3d1657d825f4278465b6192b770b40";
     pty.inputs.nixpkgs.follows = "nixpkgs";
+    # Merged pairing stack, including the daemon-identity restricted client.
+    fabric.url = "github:compoundingtech/fabric/1e6e93e9a662a40749f91d63eeecc4e98de114bd";
+    fabric.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/8cb2135bd4a852b99ca3f677c0815d0268766ff5";
+      "github:overengineeringstudio/effect-utils/fd39f4ff0c7db982aabd138e12489c05fd990541";
   };
 
   outputs =
@@ -22,6 +25,7 @@
       flake-utils,
       fenix,
       pty,
+      fabric,
       effect-utils,
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -99,7 +103,7 @@
               config.services.smalltalk = {
                 enable = true;
                 person = "person/ada";
-                socket = "/tmp/smalltalk-test.sock";
+                socket = "/tmp/fractal-test.sock";
                 ptyPackage = ptyPackage;
                 declarations.seats = [ ./examples/st3/seats/claude.kdl ];
               } // builtins.removeAttrs extraConfig [ "fractalBinary" "forceLegacyConfig" "homeFiles" "configFiles" ];
@@ -125,7 +129,7 @@
         # pure input, so baking it lets a hermetic build know its own identity
         # without an impure `.git` read. Same env var + JSON shape as the rest of
         # the fleet (TS `@overeng/utils/node/cli-version`; the otel-scrape Rust
-        # reader) — `crates/st-build-stamp` reads it via `option_env!("CLI_BUILD_STAMP")` for the binaries.
+        # reader) — `crates/fractal-build-stamp` reads it via `option_env!("CLI_BUILD_STAMP")` for the binaries.
         # `self.shortRev`/`lastModified` are absent only for a dirty tree, where
         # `dirtyShortRev` and the working-tree mtime stand in and `dirty` is true.
         sourceRev = self.shortRev or self.dirtyShortRev or "unknown";
@@ -158,7 +162,7 @@
         });
         libghosttyVT =
           let
-            bindings = (builtins.fromTOML (builtins.readFile ./crates/st3/Cargo.toml)).dependencies;
+            bindings = (builtins.fromTOML (builtins.readFile ./crates/fractal/Cargo.toml)).dependencies;
           in
           assert bindings.libghostty-vt == "=${pty.lib.libghosttyContract.rustBindingsVersion}";
           assert bindings.libghostty-vt-sys.version == "=${pty.lib.libghosttyContract.rustBindingsVersion}";
@@ -210,7 +214,7 @@
             prefixes,
             # These prefixes belong to st2's integration binary. Without an explicit package,
             # Cargo also builds workspace default members and their native test dependencies.
-            flags ? [ "-p" "st2" ],
+            flags ? [ "-p" "fractal-legacy-runner" ],
             testFlags ? [ ],
           }:
           ''
@@ -240,78 +244,80 @@
         st2WorkspaceTestFlags = [
           "--workspace"
           "--exclude"
-          "st2-resource-providers"
+          "fractal-resource-providers"
           "--exclude"
-          "st2-github-issue-component"
+          "fractal-github-issue-component"
           "--exclude"
-          "st2-github-pr-component"
+          "fractal-github-pr-component"
           "--exclude"
-          "st2-pty-stats-component"
+          "fractal-pty-stats-component"
           "--exclude"
-          "st2-vista-component"
+          "fractal-vista-component"
           # `checks.st3` gates these crates with the runtime inputs their tests need.
           "--exclude"
           "smallclaims"
           "--exclude"
-          "st-runtime"
+          "fractal-runtime"
           "--exclude"
-          "st3"
+          "fractal"
           "--exclude"
-          "st3-daemon"
+          "fractal-daemon"
           "--exclude"
-          "st3-e2e"
+          "fractal-e2e"
           "--exclude"
-          "st3-kernel"
+          "fractal-kernel"
           "--exclude"
-          "st3-telemetry"
+          "fractal-telemetry"
           "--exclude"
-          "st3-secrets"
+          "fractal-secrets"
           "--exclude"
-          "st3-seats-base"
+          "fractal-seats-base"
           "--exclude"
-          "st3-delivery-base"
+          "fractal-delivery-base"
           "--exclude"
-          "st3-missions-base"
+          "fractal-missions-base"
           "--exclude"
-          "st3-github-base"
+          "fractal-github-base"
           "--exclude"
-          "st3-store"
+          "fractal-store"
           "--exclude"
-          "st3-delivery"
+          "fractal-delivery"
           "--exclude"
-          "st3-missions"
+          "fractal-missions"
           "--exclude"
-          "st3-seats"
+          "fractal-seats"
           "--exclude"
-          "st3-attention"
+          "fractal-attention"
           "--exclude"
-          "st3-evidence"
+          "fractal-evidence"
           "--exclude"
-          "st3-github"
+          "fractal-github"
           "--exclude"
-          "st3-peer"
+          "fractal-peer"
           "--exclude"
-          "st3-reconcile"
+          "fractal-reconcile"
           "--exclude"
-          "st3-api-core"
+          "fractal-api-core"
           "--exclude"
-          "st3-api-client-v0"
+          "fractal-api-client-v0"
           "--exclude"
-          "st3-api-mailbox"
+          "fractal-api-mailbox"
           "--exclude"
-          "st3-client"
+          "fractal-client"
           "--exclude"
-          "st3-client-codegen"
+          "fractal-client-codegen"
           "--exclude"
-          "st3-feed"
+          "fractal-feed"
           "--exclude"
-          "st3-client-tui"
+          "fractal-client-tui"
           "--exclude"
-          "st3-migrate"
+          "fractal-migrate"
           "--exclude"
-          "st3-schema"
+          "fractal-schema"
           "--exclude"
-          "stui"
+          "fractal-tiles-registry"
+          "--exclude"
+          "fractal-tui"
         ];
 
         st2 = pkgs.rustPlatform.buildRustPackage {
@@ -322,10 +328,10 @@
           inherit cargoDeps;
 
           # The workspace default members include the st3 crates. This package ships only st2;
-          # st3, `st`, and st3-migrate come from the st3 package, so each has one build.
+          # st3, `st`, and st3-migrate come from the fractal package, so each has one build.
           cargoBuildFlags = [
             "-p"
-            "st2"
+            "fractal-legacy-runner"
           ];
 
           # This NixStamp is the binary's authoritative build identity; it wins
@@ -456,14 +462,21 @@
           e: "(package(=${e.package}) & binary(=${e.binary}) & test(=${e.test}))"
         ) st3Exclusions;
 
-        st3Check = pkgs.rustPlatform.buildRustPackage {
+        fractalWeb = import ./nix/fractal-web.nix {
+          inherit effect-utils system version buildStamp;
+          source = self;
+        };
+
+        st3Check = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
+          assert deployPolicyFile == null || pkgs.lib.hasPrefix "${builtins.storeDir}/" "${deployPolicyFile}";
+          pkgs.rustPlatform.buildRustPackage {
           pname = "st3";
           inherit version;
           src = self;
           # Embedded hooks are published into immutable runtime hook sets. The
           # sandbox has no /usr/bin/env; patch before compilation for package/check.
           postPatch = ''
-            for hook in crates/st3-daemon/hooks/claude-observe.sh crates/st3-daemon/hooks/claude-statusline.sh; do
+            for hook in crates/fractal-daemon/hooks/claude-observe.sh crates/fractal-daemon/hooks/claude-statusline.sh; do
               if [ ! -f "$hook" ]; then
                 echo "Missing embedded Claude hook: $hook" >&2
                 exit 1
@@ -479,12 +492,15 @@
           '';
           # Stamp st3 from this declared flake source; it hands the stamp to its libraries at startup.
           CLI_BUILD_STAMP = buildStamp;
+          # A declared immutable input, captured by option_env! in fractal-schema.
+          # Empty means no packaged policy: verification refuses all requests.
+          ST3_DEPLOY_POLICY_FILE = if deployPolicyFile == null then "" else "${deployPolicyFile}";
           inherit cargoDeps;
           cargoBuildFlags = [
             "-p"
-            "st3"
+            "fractal"
             "-p"
-            "st3-migrate"
+            "fractal-migrate"
           ];
           # `--no-fail-fast` reports every failing test target in one run.
           cargoTestFlags = [
@@ -492,69 +508,71 @@
             "-p"
             "smallclaims"
             "-p"
-            "st-runtime"
+            "fractal-runtime"
             "-p"
-            "st3"
+            "fractal"
             "-p"
-            "st3-daemon"
+            "fractal-daemon"
             "-p"
-            "st3-e2e"
+            "fractal-e2e"
             "-p"
-            "st3-kernel"
+            "fractal-kernel"
             "-p"
-            "st3-telemetry"
+            "fractal-telemetry"
             "-p"
-            "st3-secrets"
+            "fractal-secrets"
             "-p"
-            "st3-seats-base"
+            "fractal-seats-base"
             "-p"
-            "st3-delivery-base"
+            "fractal-delivery-base"
             "-p"
-            "st3-missions-base"
+            "fractal-missions-base"
             "-p"
-            "st3-github-base"
+            "fractal-github-base"
             "-p"
-            "st3-store"
+            "fractal-store"
             "-p"
-            "st3-delivery"
+            "fractal-delivery"
             "-p"
-            "st3-missions"
+            "fractal-missions"
             "-p"
-            "st3-seats"
+            "fractal-seats"
             "-p"
-            "st3-attention"
+            "fractal-attention"
             "-p"
-            "st3-evidence"
+            "fractal-evidence"
             "-p"
-            "st3-github"
+            "fractal-github"
             "-p"
-            "st3-peer"
+            "fractal-peer"
             "-p"
-            "st3-reconcile"
+            "fractal-reconcile"
             "-p"
-            "st3-api-core"
+            "fractal-api-core"
             "-p"
-            "st3-api-client-v0"
+            "fractal-api-client-v0"
             "-p"
-            "st3-api-mailbox"
+            "fractal-api-mailbox"
             "-p"
-            "st3-client"
+            "fractal-client"
             "-p"
-            "st3-client-codegen"
+            "fractal-client-codegen"
             "-p"
-            "st3-feed"
+            "fractal-feed"
             "-p"
-            "st3-client-tui"
+            "fractal-client-tui"
             "-p"
-            "st3-migrate"
+            "fractal-migrate"
             "-p"
-            "st3-schema"
+            "fractal-schema"
             "-p"
-            "stui"
+            "fractal-tiles-registry"
             "-p"
-            "st-chatgpt"
+            "fractal-tui"
             "-p"
-            "st-fabric-adapter"
+            "fractal-chatgpt"
+            "-p"
+            "fractal-fabric-adapter"
           ];
           # Every test gets its own process, as in the native gate. Shared-process Cargo tests
           # pollute CPU measurements and outlive the daemon delivery-presence startup grace.
@@ -618,6 +636,8 @@
           # generator formats the Rust client it checks with rustfmt.
           nativeCheckInputs = [
             pkgs.bashInteractive
+            # Fleet pairing integration drives the external helper over local HTTP.
+            pkgs.curl
             # The completion tests drive the stub in each supported shell.
             pkgs.fish
             pkgs.zsh
@@ -643,7 +663,9 @@
             pkgs.lsof
           ];
           postInstall = ''
-            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+            mkdir -p "$out/share"
+            cp -r ${fractalWeb}/share/fractal-web "$out/share/fractal-web"
+            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
             ln -s st3 $out/bin/st
             # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
             ln -s ${ptyPackage}/bin/pty $out/bin/pty
@@ -653,25 +675,50 @@
             installShellCompletion --cmd st --bash st.bash --zsh _st --fish st.fish
           '';
           meta = {
-            description = "Small Talk claims-graph runtime, terminal UI, and KDL migration tool";
-            homepage = "https://github.com/compoundingtech/smalltalk";
+            description = "Fractal claims-graph runtime, terminal UI, and KDL migration tool";
+            homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
             mainProgram = "st3";
           };
-        };
+        }) { };
 
         # Installing the current tools must not depend on running the full runtime suite.
         # Keep that suite as checks.st3; st/ci also runs it in the native test environment.
-        st3 = st3Check.overrideAttrs (_: {
-          doCheck = false;
+        st3 = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
+          (st3Check.override { inherit deployPolicyFile; }).overrideAttrs (_: {
+            doCheck = false;
+          })
+        ) { };
+
+        # Policy-only checks exercise absent, readable and unreadable compiled inputs.
+        # No test introduces a runtime selector, including in development builds.
+        deployPolicyFixture = pkgs.writeText "example-deploy-policy.json" (builtins.toJSON {
+          version = 1;
+          refusedVerifierHosts = [ "host-b" ];
+          consumptionSigners = [ "agent/example-executor" ];
+          goSigners = [ "agent/example-manager" ];
+          stopSigners = [ "agent/example-manager" ];
+          compatSignoffSigners = [ "agent/example-reviewer" ];
         });
+        unreadableDeployPolicy = pkgs.runCommand "unreadable-deploy-policy" { } ''mkdir "$out"'';
+        mkDeployPolicyCheck = name: deployPolicyFile: pkgs.rustPlatform.buildRustPackage {
+          pname = "st3-deploy-policy-${name}";
+          inherit version cargoDeps;
+          src = self;
+          ST3_DEPLOY_POLICY_TEST_MODE = name;
+          ST3_DEPLOY_POLICY_FILE = if deployPolicyFile == null then "" else "${deployPolicyFile}";
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          cargoBuildFlags = [ "-p" "fractal-schema" ];
+          cargoTestFlags = [ "-p" "fractal-schema" "--lib" "deploy_policy::tests" ];
+          installPhase = ''touch "$out"'';
+        };
 
         # Explicit opt-in: the default st3 package never gains bin/fractal.
         fractal = pkgs.runCommand "fractal-${version}" {
           meta = st3.meta // { mainProgram = "fractal"; };
         } ''
           mkdir -p $out/bin
-          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
           ln -s ${st3}/bin/st3 $out/bin/fractal
           # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
         '';
@@ -680,14 +727,14 @@
           pname = "st-chatgpt";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "st-chatgpt" "--bin" "st-chatgpt" ];
+          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "st-chatgpt" ];
           # .cargo/config.toml links Linux targets with mold.
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
           meta = {
-            description = "Standalone Small Talk ChatGPT MCP adapter";
-            homepage = "https://github.com/compoundingtech/smalltalk";
+            description = "Standalone Fractal ChatGPT MCP adapter";
+            homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
             mainProgram = "st-chatgpt";
           };
@@ -697,13 +744,13 @@
           pname = "st-fabric-adapter";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "st-fabric-adapter" "--bin" "st-fabric-adapter" ];
+          cargoBuildFlags = [ "-p" "fractal-fabric-adapter" "--bin" "st-fabric-adapter" ];
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
           meta = {
-            description = "External Smalltalk fleet to Fabric runtime-peers adapter";
-            homepage = "https://github.com/compoundingtech/smalltalk";
+            description = "External Fractal fleet to Fabric runtime-peers adapter";
+            homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
             mainProgram = "st-fabric-adapter";
           };
@@ -726,7 +773,7 @@
           ${st3}/bin/st3 --help > st3.help
           ${st3}/bin/st --help > st.help
           cmp st3.help st.help
-          grep -F "Usage: st [" st.help
+          grep -F "Usage: fractal [" st.help
           test -s ${st3}/share/bash-completion/completions/st.bash
           test -s ${st3}/share/zsh/site-functions/_st
           test -s ${st3}/share/fish/vendor_completions.d/st.fish
@@ -815,19 +862,60 @@
         });
 
         providerComponentPackages = {
-          "st2-github-issue-component" = "st2_github_issue_component";
-          "st2-github-pr-component" = "st2_github_pr_component";
-          "st2-pty-stats-component" = "st2_pty_stats_component";
-          "st2-vista-component" = "st2_vista_component";
+          "fractal-github-issue-component" = "st2_github_issue_component";
+          "fractal-github-pr-component" = "st2_github_pr_component";
+          "fractal-pty-stats-component" = "st2_pty_stats_component";
+          "fractal-vista-component" = "st2_vista_component";
         };
 
         # One cargo invocation builds all four guest crates: they share the same wasm32 dependency
         # graph, so a derivation per component compiled it four times. Install paths are unchanged
         # and every component package attr points at this single output.
+        # The workspace manifest with only the four guest crates as members: the root's workspace-wide tables (workspace settings,
+        # profiles, patches), so the same build, without the root package or the other members, which cargo would otherwise load.
+        providerComponentDirs = map (name: "components/${name}") [ "github-issue" "github-pr" "pty-stats" "vista" ];
+        providerWorkspaceManifest =
+          let
+            root = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+          in
+          (pkgs.formats.toml { }).generate "Cargo.toml" (
+            pkgs.lib.filterAttrs (name: _: builtins.elem name [ "profile" "patch" "replace" ]) root
+            // {
+              workspace = builtins.removeAttrs root.workspace [ "default-members" ] // {
+                members = providerComponentDirs;
+              };
+            }
+          );
+
         st2ProviderComponents = providerRustPlatform.buildRustPackage {
           pname = "st2-provider-components";
           inherit version;
-          src = self;
+          # Only what the guest crates build from (their manifests' and the root's settings, the lock, the cargo config, the crates and
+          # their WIT worlds). With `self` every commit was a new input, so a warm local run (scripts/ci-local) rebuilt them each time; a
+          # change elsewhere now reuses the store path. Any change to these inputs, the root manifest included, still rebuilds.
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions (
+              [
+                ./Cargo.toml
+                ./Cargo.lock
+                ./.cargo
+                ./components
+                ./wit
+                # wit/*/provider-api.wit link here: a link whose target is missing fails the build, it never builds something else.
+                ./crates/fractal-resource-wasip2/wit
+              ]
+              # Every [patch] the root declares stays (cargo loads each one), so its source must be there too.
+              ++ map (path: ./. + "/${path}") (
+                pkgs.lib.concatMap (registry: map (patch: patch.path) (builtins.filter (patch: patch ? path) (builtins.attrValues registry)))
+                  (builtins.attrValues ((builtins.fromTOML (builtins.readFile ./Cargo.toml)).patch or { }))
+              )
+            );
+          };
+          postPatch = ''
+            cp ${providerWorkspaceManifest} Cargo.toml
+            chmod u+w Cargo.toml
+          '';
           inherit cargoDeps;
           buildPhase = ''
             runHook preBuild
@@ -847,11 +935,15 @@
           installPhase = ''
             runHook preInstall
             mkdir -p "$out/share/st2/providers"
-            ${pkgs.lib.concatMapStringsSep "\n" (wasmName: ''
+            ${pkgs.lib.concatMapStringsSep "\n" (package:
+              let
+                wasmName = builtins.replaceStrings [ "-" ] [ "_" ] package;
+                installedName = providerComponentPackages.${package};
+              in ''
               wasm-tools component new \
                 "target/wasm32-unknown-unknown/release/${wasmName}.wasm" \
-                -o "$out/share/st2/providers/${wasmName}.component.wasm"
-            '') (pkgs.lib.attrValues providerComponentPackages)}
+                -o "$out/share/st2/providers/${installedName}.component.wasm"
+            '') (pkgs.lib.attrNames providerComponentPackages)}
             runHook postInstall
           '';
         };
@@ -878,7 +970,7 @@
           ST2_VISTA_COMPONENT = providerComponentPath "st2_vista_component";
           cargoTestFlags = [
             "-p"
-            "st2-resource-providers"
+            "fractal-resource-providers"
             "--lib"
             "--test"
             "integration"
@@ -888,7 +980,7 @@
               label = "wasip2 supervisor integration";
               flags = [
                 "-p"
-                "st2"
+                "fractal-legacy-runner"
                 "--features"
                 "wasip2-provider-runtime"
                 "--test"
@@ -900,7 +992,7 @@
               prefixes = [ "resource_provider_e2e::" ];
               flags = [
                 "-p"
-                "st2"
+                "fractal-legacy-runner"
                 "--features"
                 "wasip2-provider-runtime"
               ];
@@ -909,7 +1001,7 @@
               label = "wasip2 resource executor";
               flags = [
                 "-p"
-                "st2-resource-wasip2"
+                "fractal-resource-wasip2"
                 "--features"
                 "runtime"
                 "--lib"
@@ -980,7 +1072,7 @@
         hookSuccessorSource = pkgs.runCommand "st2-hook-successor-source" { } ''
           cp -R ${self} $out
           chmod -R u+w $out
-          printf '\n# Nix hook replacement acceptance probe.\n' >> $out/crates/st-drivers/hooks/codex-stop.sh
+          printf '\n# Nix hook replacement acceptance probe.\n' >> $out/crates/fractal-drivers/hooks/codex-stop.sh
         '';
 
         st2HookSuccessor = st2.overrideAttrs (_: {
@@ -1005,9 +1097,12 @@
         # The release target still links through the pinned Zig/glibc-baseline wrapper.
         packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
+        packages.fractal-web = fractalWeb;
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
         packages.st-fabric-adapter = stFabricAdapter;
+        # Isolated bootstrap/live proofs use the exact pairing API revision.
+        packages.fabric-pairing = fabric.packages.${system}.default;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         packages.st2-wasm-resolver = st2WasmResolver;
@@ -1030,19 +1125,26 @@
         # wants them.
         checks.st2 = st2;
         checks.st3 = st3Check;
-        checks.st3-runtime-inputs =
+        checks.st3-deploy-policy-absent = mkDeployPolicyCheck "absent" null;
+        checks.st3-deploy-policy-packaged = mkDeployPolicyCheck "packaged" deployPolicyFixture;
+        checks.st3-deploy-policy-unreadable = mkDeployPolicyCheck "unreadable" unreadableDeployPolicy;
+        # Keep derivation-path assertions lazy until the check's builder is evaluated:
+        # flake discovery must not force package inputs (including the installation hash guard).
+        checks.st3-runtime-inputs = pkgs.runCommand "st3-runtime-inputs" { } (
           assert import ./nix/st3-runtime-input-tests.nix {
             inherit self system;
             baseline = messagingCompat;
             inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
           };
-          pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
+          ''touch $out''
+        );
         checks.st3-help = st3Help;
-        checks.st3-check-input-isolation =
+        checks.st3-check-input-isolation = pkgs.runCommand "st3-check-input-isolation" { } (
           assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
           # Native check inputs must not contribute to the installed package identity.
           assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
-          pkgs.runCommand "st3-check-input-isolation" { } ''touch $out'';
+          ''touch $out''
+        );
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
@@ -1068,8 +1170,21 @@
               builtins.concatStringsSep " " rendered.launchd.agents.smalltalk.config.ProgramArguments;
           in
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
-          assert pkgs.lib.hasInfix "/tmp/smalltalk-test.sock" args;
+          assert pkgs.lib.hasInfix "/tmp/fractal-test.sock" args;
           assert pkgs.lib.hasInfix "--pty-binary" args;
+          assert rendered.services.smalltalk.webListen == "127.0.0.1:7410";
+          assert pkgs.lib.hasInfix "127.0.0.1:7410" args;
+          assert pkgs.lib.hasInfix "--web-dist" args;
+          assert pkgs.lib.hasInfix "${package}/share/fractal-web" args;
+          assert (
+            let
+              disabled = (mkHmModuleEval { webListen = null; }).config;
+              disabledArgs = if pkgs.stdenv.hostPlatform.isLinux then
+                disabled.systemd.user.services.smalltalk.Service.ExecStart
+              else
+                builtins.concatStringsSep " " disabled.launchd.agents.smalltalk.config.ProgramArguments;
+            in pkgs.lib.hasInfix (if pkgs.stdenv.hostPlatform.isLinux then ''"--web-listen" "off"'' else "--web-listen off") disabledArgs
+          );
           # service.rs passes the shared runtime gateway explicitly, even with --state-dir.
           # Assert the rendered command: %%t would be a literal path, not a systemd specifier.
           assert (if pkgs.stdenv.hostPlatform.isLinux then
@@ -1101,7 +1216,7 @@
             rendered.launchd.agents.smalltalk-apply.config.ProgramArguments) true;
           assert (!pkgs.stdenv.hostPlatform.isLinux)
             || rendered.systemd.user.services.smalltalk.Service.MemoryMax == "8G";
-          pkgs.runCommand "smalltalk-hm-module-eval" { } "touch $out";
+          pkgs.runCommand "fractal-hm-module-eval" { } "touch $out";
         checks.hm-module-fractal-prestage-eval =
           let
             rendered = (mkHmModuleEval { fractalMigration.phase = "stage"; }).config;
@@ -1276,7 +1391,7 @@
             && completed.launchd.agents.fractal.config.RunAtLoad
             && completed.launchd.agents.fractal.config.KeepAlive.SuccessfulExit == false
             && !(noApply.home.file ? "Library/LaunchAgents/com.compoundingtech.fractal-apply.plist"));
-          pkgs.runCommand "smalltalk-hm-module-fractal-prestage-eval" { } (''
+          pkgs.runCommand "fractal-hm-module-fractal-prestage-eval" { } (''
             mkdir -p config/fractal state/fractal generation/.config/st3
             # Exercise the emitted legacy/stage preflight before any write boundary.
             substitute ${pkgs.writeText "legacy-preflight" legacyPreflight.data} preflight \
@@ -1351,7 +1466,7 @@
             rendered = (mkHmModuleEval { fractalBinary = true; }).config;
             external = (mkHmModuleEval {
               fractalBinary = true;
-              binary.path = "/opt/smalltalk/bin/st3";
+              binary.path = "/opt/fractal/bin/st3";
             }).config;
             activation = rendered.home.activation.smalltalkBinary.data;
           in
@@ -1370,7 +1485,7 @@
           '';
         checks.hm-module-external-binary-eval =
           let
-            executable = "/opt/smalltalk/bin/st3";
+            executable = "/opt/fractal/bin/st3";
             externalConfig = { binary.path = executable; };
             rendered = (mkHmModuleEval externalConfig).config;
             successor = (mkHmModuleEval (externalConfig // {
@@ -1406,7 +1521,7 @@
           # Includes the declaration wrapper's store path: neither it nor a unit
           # may change when the unused st3 or PTY package changes.
           assert unitText == units successor;
-          pkgs.runCommand "smalltalk-hm-module-external-binary-eval" { } ''
+          pkgs.runCommand "fractal-hm-module-external-binary-eval" { } ''
             ${pkgs.gnugrep}/bin/grep -F -- ${pkgs.lib.escapeShellArg executable} ${applyScript}
             for package in ${pkgs.lib.escapeShellArgs forbiddenPaths}; do
               if ${pkgs.gnugrep}/bin/grep -F -- "$package" ${applyScript}; then
@@ -1483,10 +1598,10 @@
               pkgs.typescript
             ];
           } ''
-            cp -R ${self}/crates/st-drivers/hooks hooks
+            cp -R ${self}/crates/fractal-drivers/hooks hooks
             chmod -R u+w hooks
-            cp ${self}/crates/st3-daemon/hooks/pi-channel.ts hooks/st-pi-channel.ts
-            cp ${self}/crates/st3-daemon/hooks/omp-channel.ts hooks/st-omp-channel.ts
+            cp ${self}/crates/fractal-daemon/hooks/pi-channel.ts hooks/st-pi-channel.ts
+            cp ${self}/crates/fractal-daemon/hooks/omp-channel.ts hooks/st-omp-channel.ts
 
             modules=hooks/typecheck/node_modules
             mkdir -p "$modules/@earendil-works/pi-coding-agent" "$modules/@types/node"
@@ -1512,7 +1627,7 @@
             # every telemetry pull throws — because a bare context takes the fail-open branch and
             # never executes the harness-context producer's body at all, which is the same blind
             # spot in a new place. The channel is a recorder rather than `true`, so the smoke reads
-            # the frames back and asserts the wire `crates/st-drivers/src/pi_channel.rs` decodes: with a pipe nobody
+            # the frames back and asserts the wire `crates/fractal-drivers/src/pi_channel.rs` decodes: with a pipe nobody
             # reads, a producer that silently emits nothing is indistinguishable from a working
             # one, and that failure looks exactly like the pre-producer state where every
             # declaration's context reads null. Nothing else couples the two halves of that wire —
@@ -1794,7 +1909,7 @@
         };
         # Configuration generation must not realize the Rust/PTY/collector shell.
         devShells.genie = pkgs.mkShell {
-          packages = [ effect-utils.packages.${system}.genie pkgs.nodejs ];
+          packages = [ effect-utils.packages.${system}.genie pkgs.nodejs pkgs.python3 ];
           shellHook = ''
             [ -e repos/effect-utils ] || echo 'repos/effect-utils is missing: run `mr apply` first' >&2
           '';

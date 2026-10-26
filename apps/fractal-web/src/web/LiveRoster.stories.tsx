@@ -1,8 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
 import * as stylex from '@stylexjs/stylex'
-import { decodeResourceRows, type DecodedAgent } from '@st3/sdk/effect'
-import oldLiteral from '../../packages/st3-sdk/src/effect/agentSnapshot.oldLiteral.json' with { type: 'json' }
+import { decodeResourceRows, type DecodedAgent } from '@fractal/sdk/effect'
+import oldLiteral from '../../../../packages/fractal-sdk/src/effect/agentSnapshot.oldLiteral.json' with { type: 'json' }
 import { colorVars as c, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { lightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import { fleetFromAgents } from '../data/projections.ts'

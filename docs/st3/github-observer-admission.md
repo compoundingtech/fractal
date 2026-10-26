@@ -68,3 +68,105 @@ module parses with rustfmt and the diff passes whitespace checks. Existing
 resource tests cover shared lists and200/304/head-change behavior. Exact-head
 Intake review, ordinary hosted qualification and later deployment evidence are
 required; no live admission or savings claim is made here.
+
+## Repository aliases and response accounting
+
+Standing repository observers with the same observed numeric `repository_id`
+share one poll across the fleet declaration union. The lexicographically first
+observer supplies the poll. An observed rename target with the same numeric ID
+supplies the shared locator and resource; otherwise the elected observer's
+resource is shared. That target remains shared when its directly named watches
+end, preserving the surviving aliases' item history. A pending explicit refresh
+temporarily selects the addressed alias to complete that refresh on the same
+resource. Each alias keeps its existing watch subjects, deadlines and recipients.
+The elected observation reads the union of their fields and fans out to every
+subscription, including those on a different spelling of the repository.
+Custom non-standing observers are not coalesced. An unknown identity must first
+be observed, so startup discovery can still read both aliases before their IDs
+are known and replicated. Deduplication is not a distributed admission lock.
+
+`st.github.responses` is a monotonic OpenTelemetry counter with
+`github.repository`, `github.resource` (`core`, `graphql` or the provider's
+reported resource) and `github.response.kind` (`charged`, `not_modified`).
+The daemon's `host.name` resource attribute supplies the host dimension.
+`charged` means a completed non-304 response, including refused responses; it
+is not proof of an exact provider debit and never represents GraphQL points.
+`not_modified` counts completed conditional 304 responses. Failed sends appear
+only in admission reservations, not this response counter. Requests satisfied
+entirely by the local cache appear in neither counter. Compare rates of the
+two response kinds with the account's provider rate-limit observations rather
+than treating `github-admission.json` reservations as charged requests.
+
+The existing conditional cache retains JSON and pagination links on a 304 and
+authenticates every revalidation. Standing observers with no live watch or
+mission subscription stop; stopping a seat's runtime alone does not end its
+watches. These behaviors have dedicated regression coverage.
+
+## Stable inclusive listing boundaries
+
+Repository item and comment cursors advance only to returned `updated_at`
+timestamps, not the polling clock, so idle polls keep stable request URLs.
+GitHub documents `since` as exclusive: requests subtract one second from the
+stored watermark and deduplicate overlap by identity, update time and content
+digest, so a second edit within one timestamp second is not dropped. The cursor
+retains boundary versions during ordinary polls. When a read exceeds ten pages,
+it freezes the starting watermark, retains sweep versions and saves exact Link
+continuations. Before advancing the watermark it revalidates from that starting
+point until two complete ordered page-version sequences agree. This recovers
+rows shifted into already-read pages; repeated shifts require further sweeps.
+Each poll still reads at most ten pages per listing. After two nonmatching completed
+sweeps, immediate reconciliation is exhausted: preserve both scan states and frozen
+watermarks, return the ordinary provider deadline, and let the observer use normal
+cadence instead of one-second continuation. Further pagination also remains at
+normal cadence until the backed-off scan converges. Thus continuous churn cannot
+keep reconciliation one-second-hot or force an unsafe watermark commit. Continuous
+churn can defer watermark advancement: REST offset pagination cannot give an atomic
+snapshot. Sweep bookkeeping uses fixed-size digests/counters; deduplication keeps
+the active sweep identities and prunes only after commit.
+Optional cursor fields default on old records; no storage version change,
+migration or backfill is required.
+
+Cold caches, changed URLs and endpoints without ETags still need ordinary
+responses. Authenticated idle revalidations return 304 and preserve full bodies
+and pagination links. Cache warmup after restart is not quota-free.
+
+## Bounded admission attribution
+
+`STATE/github-admission.json` keeps the original strict reservation shape:
+`at`, `caller`, `resource`, `observer`, and `count`. Closed endpoint and response
+classes live only in the separate, bounded
+`STATE/github-admission.json.attribution.json` diagnostic sidecar, never in the
+admission ledger and never as raw URLs or query strings. Repository, issues and
+issue-comments are separate classes. Responses distinguish 200, conditional 304,
+other success, redirect, client/server errors and transport errors. Reservations
+without sidecar attribution remain unknown without losing spent admission.
+Doctor reports endpoint/status counts, conditional 304 hits and conservatively
+possible quota-bearing reservations. The local cap still includes 304s: provider
+quota and local admission are not the same meter. Only the original ledger
+controls admission safety. Pending and completed sends publish attribution
+separately; sidecar read/write failures expose a diagnostic gap without blocking
+HTTP or replacing its response. Rollback binaries never read the sidecar and can
+still decode every reservation written by this version; no ledger migration or
+deletion is needed, and requests admitted by older binaries appear as unknown
+attribution after upgrading again.
+
+## Shared-token fleet budget: design only
+
+Two complementary options remain outside this local change:
+
+* **Single observer owner per repository across the fleet:** use a lease/election
+  and replicated observations, defining failover/freshness before suppressing
+  duplicate owners. Alias grouping uses the existing ownership model; it is not
+  a shared-token reservation service.
+* **Backoff from `X-RateLimit-Remaining` and `X-RateLimit-Reset`:** defer observer
+  reads below an agreed shared reserve while foreground merges and agent `gh`
+  calls retain headroom. Scope metadata to credential and quota resource, handle
+  concurrent out-of-order responses conservatively, and spread reset wakeups.
+  Headers observe shared quota; they do not atomically reserve it.
+
+No header backoff is implemented: reserve sizing and starvation/freshness policy
+need fleet ownership and operational evidence. Desired-stop watches remain a
+follow-up: suppressing them without catch-up can permanently miss a terminal
+transition if another subscription advances the shared repository facts. Retired
+seat declarations already end their watches in normal reconciliation. No stored
+watch backfill or live-daemon change is part of this patch.

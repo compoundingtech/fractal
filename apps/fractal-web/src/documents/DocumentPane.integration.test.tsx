@@ -3,7 +3,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { ClientError, type St3Client } from '@smalltalk/st3-client'
+import { ClientError, type FractalClient } from '@fractal/client'
 
 // One source object, as the app's data source is: the pane reads again only when it changes.
 const data = vi.hoisted(() => { const read = vi.fn(); return { read, source: { documents: { read } } } })
@@ -50,7 +50,7 @@ describe('gatewayDocuments', () => {
       .mockResolvedValueOnce({ value: { reference: `doc/photo@${hash}`, bytes: [0xff, 0xd8, 0xff] } })
       .mockRejectedValueOnce(new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'not-found', message: 'no document', retryable: false, details: {} }, 404))
       .mockRejectedValueOnce(new TypeError('network down'))
-    const port = gatewayDocuments({ documentGet } as unknown as St3Client)
+    const port = gatewayDocuments({ documentGet } as unknown as FractalClient)
     expect(await port.read('doc/garden-notes')).toEqual({ _tag: 'Text', reference: `doc/garden-notes@${hash}`, text: '# Garden\n' })
     expect(documentGet).toHaveBeenCalledWith('doc/garden-notes')
     expect(await port.read('doc/photo')).toEqual({ _tag: 'Binary', reference: `doc/photo@${hash}`, size: 3 })

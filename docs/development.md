@@ -56,7 +56,7 @@ the checked-in contract:
 
 ```sh
 st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
-cargo nextest run -p st3 -E 'test(actor_contract)'
+cargo nextest run -p fractal -E 'test(actor_contract)'
 ```
 
 Use the binary built from the changed source. Resolve any rebase conflict in
@@ -128,8 +128,42 @@ source instead, which needs Zig 0.15.2 on `PATH`. On macOS, the vendored
 [`libghostty-vt-sys`](../vendor/libghostty-vt-sys/README.md) build script lets Zig 0.15.2 link against
 the macOS 26.5 and 27 SDKs.
 
-The script builds and installs `st3` and `st3-migrate`, and makes `st` a symlink to
+The script builds and installs `st3` and `fractal-migrate`, and makes `st` a symlink to
 the installed `st3`. `st` is never a separate build. On macOS, st3 lives in a fixed app bundle; see [macOS installation and signing](st3/macos-installation.md). A source install also needs [`pty`](https://github.com/compoundingtech/pty-rust) on `PATH`.
+
+## Shared TypeScript SDK
+
+`packages/fractal-sdk` owns the app-independent `@fractal/sdk` package. Its
+`@fractal/sdk/effect` entry point provides transport, follow state, decoding, and
+trace-context propagation without browser startup or UI dependencies.
+`St3Live(options)` works without an application platform layer; callers can supply
+an explicit socket in options for custom transports and tests.
+
+Browser behavior stays in `apps/fractal-web/src/data`: early collection socket
+adoption, traced browser fetch/WebSocket wrappers, and visibility/LRU admission
+policy. The app supplies those through `St3Platform`; the neutral SDK does not
+adopt a browser bootstrap socket or install browser visibility policy by default.
+`@fractal/sdk/admission` exposes the admission primitives used by that adapter.
+
+`St3.watch` accepts a typed `FollowDescriptor<TResource>`: `spec` selects an
+existing window collection and the descriptor's `decodeRow` decodes its rows.
+Optional `spec.descriptor` is a stable local decoder ID for independent decoder
+and admission identity; it is never sent on the wire. The watch shares the scoped
+follow lifecycle and multiplexed socket; it does not introduce another wire format.
+
+`St3Options.credential` resolves a bearer credential for each HTTP request and
+socket open. It is not an actor selector. The `client` option is only a reported
+client/build label, never authenticated identity or authority. An explicit
+credential bypasses browser bootstrap socket adoption; non-browser socket
+factories must honor the provided credential headers.
+
+The SDK is a root workspace member, not a nested app package. Its standalone
+Node suite and typecheck run with:
+
+```sh
+pnpm --filter @fractal/sdk test
+pnpm --filter @fractal/sdk typecheck
+```
 
 ## Fractal web diagnostics member
 
@@ -200,11 +234,96 @@ inventory's read-only permissions (Git does not preserve them).
 [Fractal web implementation](fractal-web.md) documents the app’s security policy, transcript paint,
 captured changes, composer, arrangements, roster and terminal attachment.
 
+### Storybook deployment
+
+The UI component reference targets [storybook.compounding.tech](https://storybook.compounding.tech).
+Its Alchemy v2 stack lives in `infra/storybook` (`@fractal/storybook-deploy`).
+The separate [deployment workflow](ci.md#storybook-deployment) is not a required
+check: every push to `main` deploys stage `main` to the one canonical site.
+There are no pull-request deployments or close-cleanup jobs. CI checks out the
+push's immutable commit, so deployment credentials are available only to code
+merged into `main`, not PR-head infrastructure code. No draft-policy exception
+is needed. Deployment URLs appear in the Actions job summary, not PR comments;
+the workflow needs no repository write permissions.
+If either Cloudflare secret is absent, the workflow succeeds with a skip summary
+without installing, building or deploying resources.
+
+#### Account and domain setup
+
+Use the **compounding.tech** Cloudflare account. Alchemy creates a new static-asset
+Worker, not a Pages project. An administrator must add the repository
+Actions secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`; keep the token
+out of source control, logs and command arguments. Local commands use the same
+environment variables.
+
+Scope the token to that account with **Workers Scripts: Edit**,
+**Account Settings: Read**, and **Secrets Store: Read**. The one-time bootstrap
+also needs **Secrets Store: Edit** and an account/plan that supports Durable
+Objects. For a custom domain, grant **Zone: Read** and **Workers Routes: Edit**
+for its zone; Cloudflare's [custom-domain authorization](https://developers.cloudflare.com/workers/authorization/workers/)
+uses Workers Routes permissions, not just DNS permissions. An administrator
+also needs **DNS: Edit** if changing existing DNS records during domain setup;
+it does not replace Workers Routes access. No zone permissions are needed for
+`workers.dev`-only deployment.
+
+Before the first deployment, bootstrap remote state once from the web shell,
+after installing the isolated infrastructure dependencies, with the same account
+environment:
+
+```sh
+pnpm --dir infra/storybook exec alchemy provider cloudflare bootstrap
+```
+
+Alchemy v2's `Cloudflare.state()` uses the account-wide `alchemy-state-store`
+Worker and its Durable Object, with its encryption key and bearer token held
+in Cloudflare Secrets Store, not Workers KV. CI retrieves state credentials via
+a temporary edge-preview Worker bound to Secrets Store; no additional
+`ALCHEMY_PASSWORD` or state-token GitHub secret is required. Preserve the state
+Worker, Durable Object and Secrets Store across deployments. They are shared
+bootstrap infrastructure, not resources to remove when redeploying the site.
+
+`STORYBOOK_DOMAIN` controls the canonical domain. Unset defaults
+to `storybook.compounding.tech`; a hostname selects another custom domain, and
+an empty string disables the custom domain and uses the Worker's `workers.dev`
+URL. Set the repository Actions variable `STORYBOOK_DOMAIN` to override CI;
+the workflow distinguishes an absent variable from an explicitly empty one.
+For local commands, `export STORYBOOK_DOMAIN=''` selects `workers.dev`.
+Enable the account's Workers subdomain before using the fallback URL. A custom
+domain must belong to a zone in the configured Cloudflare account.
+
+#### Build and deploy
+
+Materialize the pinned `effect-utils` member before installing dependencies,
+as described in [Fractal web diagnostics member](#fractal-web-diagnostics-member).
+Use the web shell's pnpm 12.7.0, not a separate global install:
+
+```sh
+mr apply --worktree-mode commit
+nix develop .#web
+pnpm install --frozen-lockfile
+pnpm --dir infra/storybook install --frozen-lockfile
+node apps/fractal-web/scripts/changelog-registry.mjs
+pnpm --filter @fractal/ui build-storybook
+pnpm --dir infra/storybook run deploy --stage main
+```
+
+The build writes `packages/fractal-ui/storybook-static`; deployment consumes that
+directory. The infrastructure package has an isolated pnpm dependency root so
+Alchemy dependencies are not installed by the existing required checks.
+Alchemy is pinned exactly to `2.0.0-beta.83` with Effect `4.0.5`; `beta.72` is
+incompatible with Effect 4. The isolated package keeps this deployment-only
+version boundary out of the UI toolchain.
+
+To restore earlier Storybook content, build the desired revision and redeploy
+stage `main` using the same Cloudflare account and remote state.
+These instructions describe the deployment configuration, not evidence of a
+successful live deployment or a recorded approval for public hosting.
+
 ## Continuous integration
 
-Workspace CI runs on pull requests and merge groups. The five required checks are `linux-gate`,
-`isolation-vm`, `genie-freshness`, `typescript-client`, and `mail-redelivery-canaries`.
-A ready pull request lands through GitHub’s merge queue after review and all five required checks
+Workspace CI runs on pull requests and merge groups. The four required checks are `linux-gate`,
+`genie-freshness`, `typescript-client` and `fractal-web`; the VM tests and the mail redelivery canaries
+run once a day (`daily-long.yml`). A ready pull request lands through GitHub’s merge queue after review and all four required checks
 pass. Keep the approved head fixed; a new head requires review of its own changes before queueing.
 
 The queue checks the exact commit that lands. Main upkeep verifies those checks, runs `perf-cost`,
@@ -214,17 +333,17 @@ Namespace as overflow for ordinary PRs. The second test shard and supporting job
 macOS CI is currently disabled; its retained workflow is not a required check.
 See [CI operations](ci.md) for stage scope, routing, caches, and failure inspection.
 
-The standalone Rust client's generated `crates/st3-client/src/lib.rs` must be
-regenerated with `cargo run -p st3-client-codegen`, including after changes to
+The standalone Rust client's generated `crates/fractal-client/src/lib.rs` must be
+regenerated with `cargo run -p fractal-client-codegen`, including after changes to
 directory discovery. Commit the generator's exact output rather than hand-formatting
-it; `cargo run -p st3-client-codegen -- --check` checks freshness.
+it; `cargo run -p fractal-client-codegen -- --check` checks freshness.
 
 ## Shared UI models
 
 [Build your own client](clients/build-your-own.md) maps the Rust and TypeScript pieces
 and includes a small [example TUI](../examples/client-tui/) built and tested in CI.
 
-`crates/st3-ui-model` provides renderer-independent UI semantics without a ratatui dependency.
+`crates/fractal-ui-model` provides renderer-independent UI semantics without a ratatui dependency.
 Its broad name is intentional; initially it contains only the terminal UI's mission model (`Word`,
 `StepState`, `Mission`, `Step`) and mission derivation. The terminal UI consumes that same model.
 `missions::adapt` borrows typed mission and agent projections plus unresolved, actor-filtered
@@ -237,13 +356,21 @@ the actual execution seat without reconstructing identity from display labels.
 `Mission.step_metadata` retains each selected step's raw `blocked_reason` and `last_progress`,
 keyed by its step-run ID. These facts survive state changes independently of a step's waiting
 blocker or derived queue `note`, and are not normalized by display text policies.
-Shared widgets and other UI models are separate follow-up work, not part of this mission extraction.
+`crates/fractal-mission-ui` composes mission step rows and their progress meter without
+owning a shell or choosing a default renderer. Enable its optional `ratatui` feature
+and call `steps` with a borrowed mission, expansion keys, spinner, `Palette`,
+`Glyphs`, and the caller's shared conversation `Theme` for inline markdown.
+The returned shared `Doc<Intent>` contains styled lines and
+`Intent::ToggleStep` click targets using `step:{mission}:{name}` keys. The embedding
+application owns expansion state and the surrounding card. Token defaults reproduce
+the terminal UI; progress counts every described step, not only runnable steps.
+Header and agent-work composition remain outside this crate.
 
 ## Embedding native conversations
 
-`crates/st3-conversation-ui` provides the same native conversation presentation used by
+`crates/fractal-conversation-ui` provides the same native conversation presentation used by
 `st`’s terminal interface, without terminal acquisition, application tabs or daemon connections. Feed
-`st3-client` conversation frames into `Timeline::apply(Frame { replace, has_more, items })`,
+`fractal-client` conversation frames into `Timeline::apply(Frame { replace, has_more, items })`,
 adapt the timeline with caller-owned display names, and render it with `Cache::render`
 and caller-supplied `Theme` tokens. The returned document contains styled lines and typed
 `PaneIntent` targets. `State` retains scrolling, tool expansion, display-column selection
@@ -253,11 +380,11 @@ by ID. Frame `has_more` is `Option<bool>`: an absent delta leaves the timeline's
 unchanged, while an explicit value updates it. A replacement or changed session starts fresh.
 The timeline keeps a boolean for the current window, and older pages track their own start.
 
-The shared crate and the `stui` library use workspace Ratatui 0.30. An embedding application must align its
+The shared crate and the `fractal-tui` library use workspace Ratatui 0.30. An embedding application must align its
 rendering dependency before passing buffers or lines across this boundary. Native conversations are not a terminal emulator: harness menus and arbitrary
 permission prompts still require access to the harness terminal.
 
-See the [conversation crate](../crates/st3-conversation-ui/README.md) for model-only and
+See the [conversation crate](../crates/fractal-conversation-ui/README.md) for model-only and
 Ratatui builds, and [build your own client](clients/build-your-own.md) for the client contract.
 
 ## Fractal web changelog
@@ -309,19 +436,19 @@ wording consistent when both describe the same change.
 
 | Path | Contents |
 | --- | --- |
-| `crates/st3` | Current daemon and CLI. |
-| `crates/stui` | Terminal UI library used by `st`. |
-| `crates/st-drivers`, `crates/st-runtime` | Harness drivers and shared runtime. |
-| `crates/st3-client`, `crates/st3-feed`, `crates/st3-schema`, `crates/st3-client-codegen` | Client API, feeds, schema, and code generation. |
-| `crates/st3-ui-model`, `crates/st3-conversation-ui` | Shared mission and conversation presentation. |
+| `crates/fractal` | Current daemon and CLI. |
+| `crates/fractal-tui` | Terminal UI library used by `st`. |
+| `crates/fractal-drivers`, `crates/fractal-runtime` | Harness drivers and shared runtime. |
+| `crates/fractal-client`, `crates/fractal-feed`, `crates/fractal-schema`, `crates/fractal-client-codegen` | Client API, feeds, schema, and code generation. |
+| `crates/fractal-ui-model`, `crates/fractal-conversation-ui` | Shared mission and conversation presentation. |
 | `clients`, `apps/ios` | TypeScript/Swift clients and the iOS app. |
-| `crates/st3-migrate` | Migration tooling. |
+| `crates/fractal-migrate` | Migration tooling. |
 | `src`, `tests` | Legacy st2 package and its integration tests. |
 | `components`, `evals`, `fixtures` | Provider components, evals, and proof fixtures. |
 | `examples/st3`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |
 
-The `stui` package is a library embedded in `st`; it has no standalone executable. Its existing
-Clippy baseline allowances remain under the `stui` package key because the library still owns
+The `fractal-tui` package is a library embedded in `st`; it has no standalone executable. Its existing
+Clippy baseline allowances remain under the `fractal-tui` package key because the library still owns
 the renderer and its existing lint baseline.
 Removing the binary does not rename the library or the protocol client identity.

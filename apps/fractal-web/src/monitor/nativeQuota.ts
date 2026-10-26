@@ -1,6 +1,6 @@
 /** Explicit presentation adapter for the canonical st3.client.v0 usage.period projection. */
-import { UsagePeriod } from '@smalltalk/st3-client/schema'
-import type { UsageLimit } from '@smalltalk/st3-client/schema'
+import { UsagePeriod } from '@fractal/client/schema'
+import type { UsageLimit } from '@fractal/client/schema'
 import { Result, Schema } from 'effect'
 
 import type { QuotaFailure } from './model.ts'

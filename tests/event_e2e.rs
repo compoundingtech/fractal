@@ -9,8 +9,8 @@ use std::sync::{Arc, Barrier, Mutex, mpsc};
 use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
-use st2::event::{self, EventReceiptStatus, RING_CAPACITY};
-use st2::message;
+use fractal_legacy_runner::event::{self, EventReceiptStatus, RING_CAPACITY};
+use fractal_legacy_runner::message;
 
 static EVENT_FAIL_ENV: Mutex<()> = Mutex::new(());
 
@@ -765,11 +765,11 @@ fn predecessor_replacement_after_validation_cannot_forge_archive_receipt() {
 fn catalog_authoring_and_emit_linearize_without_deadlock() {
     let catalog = tempfile::tempdir().unwrap();
     declare_agent(catalog.path(), "\"running\"", "  stream \"gh-ci\" {}\n");
-    let admission = st2::CatalogLock::shared(catalog.path()).unwrap();
+    let admission = fractal_legacy_runner::CatalogLock::shared(catalog.path()).unwrap();
     let root = catalog.path().to_path_buf();
     let (done_tx, done_rx) = mpsc::channel();
     let author = std::thread::spawn(move || {
-        let result = st2::agent_author::remove_stream(&root, "example-linux.worker", "example-linux", None, "gh-ci");
+        let result = fractal_legacy_runner::agent_author::remove_stream(&root, "example-linux.worker", "example-linux", None, "gh-ci");
         done_tx.send(result).unwrap();
     });
     assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
@@ -805,16 +805,16 @@ fn catalog_authoring_and_emit_linearize_without_deadlock() {
 fn desired_state_authoring_and_emit_linearize_without_deadlock() {
     let catalog = tempfile::tempdir().unwrap();
     declare_agent(catalog.path(), "\"running\"", "  stream \"gh-ci\" {}\n");
-    let admission = st2::CatalogLock::shared(catalog.path()).unwrap();
+    let admission = fractal_legacy_runner::CatalogLock::shared(catalog.path()).unwrap();
     let root = catalog.path().to_path_buf();
     let (done_tx, done_rx) = mpsc::channel();
     let author = std::thread::spawn(move || {
-        let result = st2::agent_author::set_desired_state(
+        let result = fractal_legacy_runner::agent_author::set_desired_state(
             &root,
             "example-linux.worker",
             "example-linux",
             None,
-            st2::agent_author::DesiredStateValue::Suspended,
+            fractal_legacy_runner::agent_author::DesiredStateValue::Suspended,
             Some("maintenance"),
             None,
         );
@@ -1571,7 +1571,7 @@ fn event_emit_cli_returns_a_stable_json_receipt_and_ding_marks_the_record() {
     let message = message::list_inbox(&message::inbox_dir(&agent))
         .unwrap()
         .remove(0);
-    let ding = st2::ding::poke_text(catalog.path(), "example-linux", "example-linux.worker", &message);
+    let ding = fractal_legacy_runner::ding::poke_text(catalog.path(), "example-linux", "example-linux.worker", &message);
     assert!(
         ding.starts_with("[PING] » example-linux.worker/gh-ci: CLI proof"),
         "{ding}"
