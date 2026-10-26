@@ -417,6 +417,40 @@ export const KeyboardUnauthorizedPhone: Story = { tags: ['critical'], args: { fi
 export const KeyboardNavigateAway: Story = { tags: ['critical'], args: { fixture: 'loaded', gated: true }, play: async ({ canvasElement }) => keyboardNavigateAway(canvasElement, 'Enter') }
 export const KeyboardNavigateAwayPhone: Story = { tags: ['critical'], args: { fixture: 'loaded', gated: true, width: 'phone' }, play: async ({ canvasElement }) => keyboardNavigateAway(canvasElement, 'Space') }
 
+/**
+ * The commit lane checks the complete attachment contract with one Storybook bootstrap, remounting a fresh viewer
+ * cache between probes. Individual stories keep the full scheme/width/key-depth matrix in the merge lane.
+ * Loaded remains a separate two-width commit case because its thumbnail geometry is a width-specific contract.
+ */
+export const Contract: Story = {
+  tags: ['critical'],
+  play: async ({ mount, args }) => {
+    const probes: readonly {
+      readonly fixture: Fixture
+      readonly row?: Row
+      readonly gated?: boolean
+      readonly run: (root: HTMLElement) => Promise<void>
+    }[] = [
+      { fixture: 'loading', run: showLoading },
+      { fixture: 'loaded', run: async root => { await showLoaded(root); await openAndCloseViewer(root) } },
+      { fixture: 'unauthorized', run: showUnauthorized },
+      { fixture: 'failed', run: showFailed },
+      { fixture: 'unavailable', run: showUnavailable },
+      { fixture: 'decode-failed', run: showDecodeFailed },
+      { fixture: 'loaded', row: 'assistant', run: showReceived },
+      { fixture: 'loaded', row: 'mailbox', run: showReceived },
+      { fixture: 'loaded', gated: true, run: root => keyboardLoaded(root, 'Enter') },
+      { fixture: 'failed', gated: true, run: root => keyboardFailed(root, 'Enter', 'Space') },
+      { fixture: 'unauthorized', gated: true, run: root => keyboardUnauthorized(root, 'Space') },
+      { fixture: 'loaded', gated: true, run: root => keyboardNavigateAway(root, 'Enter') },
+    ]
+    for (const [index, probe] of probes.entries()) {
+      const canvas = await mount(<TranscriptImages key={index} {...args} fixture={probe.fixture} row={probe.row} gated={probe.gated} />)
+      await probe.run(canvas.getByRole('region', { name: /^Transcript image / }))
+    }
+  },
+}
+
 const fixtures: readonly Fixture[] = ['loading', 'loaded', 'unauthorized', 'failed', 'unavailable', 'decode-failed']
 const show: Readonly<Record<Fixture, (root: HTMLElement) => Promise<void>>> = { loading: showLoading, loaded: showLoaded, unauthorized: showUnauthorized, failed: showFailed, unavailable: showUnavailable, 'decode-failed': showDecodeFailed }
 /** Every state at the desktop and phone widths, each over its own cache and transport. */

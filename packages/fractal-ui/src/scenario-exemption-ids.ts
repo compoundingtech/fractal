@@ -45,6 +45,7 @@ export const scenarioExemptionIds: readonly string[] = [
   './../../../apps/fractal-web/src/web/TranscriptImages.stories.tsx#AllStates:contract-fixture',
   './../../../apps/fractal-web/src/web/TranscriptImages.stories.tsx#AssistantImage:contract-fixture',
   './../../../apps/fractal-web/src/web/TranscriptImages.stories.tsx#AssistantImagePhone:contract-fixture',
+  './../../../apps/fractal-web/src/web/TranscriptImages.stories.tsx#Contract:contract-fixture',
   './../../../apps/fractal-web/src/web/TranscriptImages.stories.tsx#DecodeFailed:contract-fixture',
   './../../../apps/fractal-web/src/web/TranscriptImages.stories.tsx#DecodeFailedPhone:contract-fixture',
   './../../../apps/fractal-web/src/web/TranscriptImages.stories.tsx#Failed:contract-fixture',

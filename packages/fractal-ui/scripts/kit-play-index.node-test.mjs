@@ -110,6 +110,20 @@ test('the per-commit set rejects a listed story that is not critical, so a renam
   assert.equal(new Set([...MERGE_ONLY, ...BOTH_WIDTHS]).size, MERGE_ONLY.length + BOTH_WIDTHS.length, 'a story is merge-only or both-widths, not both')
 })
 
+test('transcript image contracts batch per commit without dropping the individual merge matrix', () => {
+  const prefix = 'fractal-app-transcript-images--'
+  const individualDepth = MERGE_ONLY.filter(id => id.startsWith(prefix))
+  const contract = `${prefix}contract`
+  const loaded = `${prefix}loaded`
+  const ids = [contract, loaded, ...individualDepth]
+  const selected = commitSetCases(ids, { mergeOnlyIds: individualDepth, bothWidthsIds: [loaded] })
+  assert.equal(individualDepth.length, 23)
+  assert.deepEqual(selected.ids, [contract, loaded])
+  assert.equal(selected.cases.length, 3, 'one batched behavioral contract and two thumbnail geometry widths')
+  assert.equal(fullCases(ids).length, 100, 'all 25 critical stories retain four merge cases')
+  for (const id of individualDepth) assert.equal(fullCases([id]).length, 4, `${id} keeps its full matrix`)
+})
+
 const benchmarkId = 'fractal-ui-sidebar-tree--filter-keystroke-to-paint'
 const functionalId = 'fractal-ui-sidebar-tree--filter-behavior'
 const freezeId = 'fractal-narrow-layout--sidebar-drag-unmount-cleanup'
