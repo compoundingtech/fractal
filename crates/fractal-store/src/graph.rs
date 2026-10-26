@@ -1880,8 +1880,18 @@ fn validate_account_binding(
 
 fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
     ensure_no_properties(node)?;
-    ensure_no_children(node)?;
-    let subject = one_string(node)?;
+    let subject = one_string_with_children(node)?;
+    // Why the seat stops, as its author gave it: the card shows it beside who stopped it.
+    let reason = match node.children() {
+        Some(children) => {
+            reject_unknown_children(children, &["reason"], "stop", &subject)?;
+            child_string(children, "reason")?
+        }
+        None => None,
+    };
+    if reason.as_deref().is_some_and(|reason| reason.trim().is_empty()) {
+        return Err(St3Error::new("empty-stop-reason", "a stop reason cannot be blank"));
+    }
     if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty")) {
         return Err(St3Error::new(
             "invalid-stop-subject",
@@ -1906,7 +1916,11 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
             accountable: None,
             subject: subject.clone(),
             kind: "stop".into(),
-            desired: json!({ "stop": subject }),
+            // A stop without a reason keeps the exact declaration, and revision, it always had.
+            desired: match reason {
+                Some(reason) => json!({ "stop": subject, "reason": reason }),
+                None => json!({ "stop": subject }),
+            },
             member: None,
             owner_run: context.owner_run.clone(),
             owner_generation: None,

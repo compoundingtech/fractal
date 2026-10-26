@@ -3343,6 +3343,10 @@ struct AgentStopArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
+    /// Why the agent stops. `agents show` and `agents ls` print it beside who stopped it and
+    /// when.
+    #[arg(long)]
+    reason: Option<String>,
     /// Print the exact stop KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
@@ -13031,6 +13035,39 @@ fn push_todo_terminal_text(output: &mut String, text: &str) {
     }
 }
 
+/// Why a seat that is not running stopped, who or what stopped it and when, from the card's end
+/// reason. A stopped seat without one says so rather than printing nothing.
+fn agent_stop_line(agent: &fractal_client::Agent) -> Option<String> {
+    let Some(end) = &agent.end_reason else {
+        return (agent.state == "stopped").then(|| "stopped, with no recorded reason".to_owned());
+    };
+    let actor = end.actor.as_deref().unwrap_or("unknown");
+    let mut line = match end.kind.as_str() {
+        "parked" => "parked by st after it failed to start".to_owned(),
+        "stopped-by-person" | "stopped-by-agent" => format!("stopped by {actor}"),
+        "stopped-by-mission" => format!("stopped by {actor} as its run ended"),
+        "retired" => match &end.actor {
+            Some(actor) => format!("retired by {actor}"),
+            None => "retired".to_owned(),
+        },
+        "crashed" => match (&end.exit_signal, end.exit_code) {
+            (Some(signal), _) => format!("crashed on signal {signal}"),
+            (None, Some(code)) => format!("crashed with exit code {code}"),
+            (None, None) => "crashed".to_owned(),
+        },
+        "harness-exited" => "its harness exited".to_owned(),
+        "host-lost" => "its host is unreachable".to_owned(),
+        "completed" => "exited cleanly".to_owned(),
+        other => other.to_owned(),
+    };
+    line.push_str(&format!(" at {}", end.ended_at));
+    if let Some(reason) = end.reason.as_deref().or(end.diagnostic.as_deref()) {
+        line.push_str(": ");
+        push_todo_terminal_text(&mut line, reason);
+    }
+    Some(line)
+}
+
 fn render_client_agent(
     agent: &fractal_client::Agent,
     current_steps: &[StepRunView],
@@ -13048,6 +13085,11 @@ fn render_client_agent(
         None => {
             let _ = writeln!(output, "STATE        {}", agent.state);
         }
+    }
+    if agent.state != "running"
+        && let Some(line) = agent_stop_line(agent)
+    {
+        let _ = writeln!(output, "WHY          {line}");
     }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
     if let Some(custody) = &agent.mail_custody {
@@ -13346,6 +13388,11 @@ fn render_client_agents(
                     "{}\t{}\t{}",
                     agent.header.id, agent.name, agent.state
                 );
+            }
+            if agent.state != "running"
+                && let Some(line) = agent_stop_line(agent)
+            {
+                let _ = writeln!(output, "  {line}");
             }
             for relationship in &agent.under {
                 match relationship.reason.as_deref() {

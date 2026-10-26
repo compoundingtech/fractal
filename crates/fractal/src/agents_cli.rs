@@ -684,7 +684,13 @@ pub(super) async fn run_agents(
                 completion::Matching::Exact,
             )
             .await?;
-            let kdl = publication_document(kdl_node("stop", [subject.as_str()]));
+            let mut stop = kdl_node("stop", [subject.as_str()]);
+            if let Some(reason) = &args.reason {
+                let mut children = KdlDocument::new();
+                children.nodes_mut().push(kdl_node("reason", [reason.as_str()]));
+                stop.set_children(children);
+            }
+            let kdl = publication_document(stop);
             if args.print_kdl {
                 print!("{kdl}");
                 return Ok(());

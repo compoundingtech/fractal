@@ -187,7 +187,17 @@ export type AgentEndReason = {
   ended_at: Timestamp;
   exit_code?: number;
   exit_signal?: string;
-  kind: "completed" | "stopped-by-person" | "stopped-by-agent" | "crashed" | "harness-exited" | "host-lost" | "retired";
+  kind: (
+  "completed"
+  | "stopped-by-person"
+  | "stopped-by-agent"
+  | "stopped-by-mission"
+  | "parked"
+  | "crashed"
+  | "harness-exited"
+  | "host-lost"
+  | "retired"
+ | string);
   reason?: string;
 };
 

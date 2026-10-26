@@ -2164,6 +2164,59 @@ fn agent_card_shows_the_member_reconcile_fault() {
     ));
 }
 
+fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
+    serde_json::from_value(serde_json::json!({
+        "kind": "agent", "id": "agent/garden/worker", "revision": "one",
+        "updated_at": "2026-10-21T04:37:42Z", "name": "garden/worker",
+        "state": "stopped", "reachability": "unreachable", "runtime_ids": [],
+        "end_reason": end_reason
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
+    let parked = stopped_agent(serde_json::json!({
+        "kind": "parked", "actor": "daemon/runtime", "ended_at": "2026-10-21T04:37:42.469Z",
+        "reason": "the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)"
+    }));
+    let card = render_client_agent(&parked, &[], 0);
+    assert!(card.contains(
+        "STATE        stopped\nWHY          parked by st after it failed to start at 2026-10-21T04:37:42.469Z: the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)\n"
+    ), "{card}");
+    let by_person = stopped_agent(serde_json::json!({
+        "kind": "stopped-by-person", "actor": "person/ada", "ended_at": "2026-10-22T09:00:00.000Z",
+        "reason": "Done for the week.\n\u{1b}[31mspoof"
+    }));
+    assert!(render_client_agent(&by_person, &[], 0).contains(
+        "WHY          stopped by person/ada at 2026-10-22T09:00:00.000Z: Done for the week. spoof\n"
+    ));
+    let by_run = stopped_agent(serde_json::json!({
+        "kind": "stopped-by-mission", "actor": "mission-run/garden/one", "ended_at": "2026-10-22T09:00:00.000Z"
+    }));
+    let unknown = stopped_agent(serde_json::Value::Null);
+    let page: ClientPage = serde_json::from_value(serde_json::json!({
+        "kind": "page", "collection": "agents",
+        "items": [by_run, unknown],
+        "page": {"limit": 50, "has_more": false}
+    }))
+    .unwrap();
+    assert_eq!(
+        render_client_agents(&page, false, false, "st agents ls"),
+        "AGENTS  2\n\
+         agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 stopped by mission-run/garden/one as its run ended at 2026-10-22T09:00:00.000Z\n\
+         agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 stopped, with no recorded reason\n"
+    );
+    // A running agent prints no stop line, even with an end reason from an earlier incarnation.
+    let mut running = stopped_agent(serde_json::json!({
+        "kind": "crashed", "exit_code": 1, "ended_at": "2026-10-22T09:00:00.000Z"
+    }));
+    running.state = "running".into();
+    assert!(!render_client_agent(&running, &[], 0).contains("WHY"));
+}
+
 #[test]
 fn agent_card_names_a_pending_codex_approval() {
     let agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
