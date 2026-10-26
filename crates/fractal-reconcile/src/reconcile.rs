@@ -19285,7 +19285,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             let root = tempfile::tempdir().unwrap();
             let store = Arc::new(Store::open_memory("node").unwrap());
             apply_source(&store, &format!(
-                "version 2\nagent \"worker\" {{ workspace {:?}; command \"sleep\" \"600\"; }}",
+                "version 2\nagent \"worker\" {{ workspace {:?}; command \"sleep 600\"; }}",
                 root.path().display().to_string(),
             ), "process-provenance");
             let subject = store.desired_subjects().unwrap().remove(0);
