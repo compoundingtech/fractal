@@ -23,6 +23,7 @@ use crate::SeatsStoreCore;
 use crate::EvidenceStore;
 use crate::PublishedViewsStore;
 use super::*;
+use crate::HarnessQuestionsStore;
 use crate::model::DesiredSubject;
 use axum::http::HeaderMap;
 use axum::http::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
@@ -40,6 +41,7 @@ pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
 pub mod harness_inventory;
+pub mod harness_questions;
 pub mod inventory;
 pub mod raw_terminal;
 mod runtime_start_diagnostics;
@@ -113,6 +115,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/agent-queues/{*id}", get(agent_queue))
         .route("/v1/client/status-history/{*id}", get(status_history))
         .route("/v1/client/harness-inventory/{*id}", get(harness_inventory::read))
+        .route("/v1/client/harness-questions", get(harness_questions::list))
+        .route("/v1/client/harness-questions/{*id}", get(harness_questions::get))
         .route("/v1/client/lanes", get(lanes))
         .route("/v1/client/lanes/{*id}", get(lane_detail))
         .route(
@@ -6891,17 +6895,33 @@ async fn import_external_session_action(
     Ok(vec![external.id, import.subject])
 }
 
+fn is_identity_selector(key: &str) -> bool {
+    matches!(key, "actor" | "credential" | "fleet_secret" | "shared_secret")
+}
+
 fn contains_identity_selector(value: &Value) -> bool {
     match value {
         Value::Object(object) => object.iter().any(|(key, value)| {
-            matches!(
-                key.as_str(),
-                "actor" | "credential" | "fleet_secret" | "shared_secret"
-            ) || contains_identity_selector(value)
+            is_identity_selector(key) || contains_identity_selector(value)
         }),
         Value::Array(values) => values.iter().any(contains_identity_selector),
         _ => false,
     }
+}
+
+fn action_parameters_select_identity(request: &ActionRequest) -> bool {
+    if request.action_type == "harness.answer"
+        && let Some(parameters) = request.parameters.as_object()
+    {
+        return parameters.iter().any(|(key, value)| {
+            if key == "answers" && let Some(answers) = value.as_object() {
+                // Canonical question ids are data keys, never authority selectors.
+                return answers.values().any(contains_identity_selector);
+            }
+            is_identity_selector(key) || contains_identity_selector(value)
+        });
+    }
+    contains_identity_selector(&request.parameters)
 }
 
 fn validate_work_fence(state: &AppState, target: &str, fence: &Fence) -> Result<(), ApiError> {
@@ -7065,6 +7085,10 @@ fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
             crate::external_sessions::find_fresh(state.native_session_home.as_deref(), subject)
                 .map_err(import_lookup_error)?
                 .map(|session| session.revision)
+        } else if subject.starts_with("harness-question/") {
+            state.store.harness_question(subject, client_now_ms())
+                .map_err(ApiError::internal)?
+                .map(|question| question.revision)
         } else {
             // The newest claim's id, by a seek: reading and sorting every claim of the subject
             // was 0.4 s for a busy seat (4.4 s cold) on every fenced action.
@@ -8428,6 +8452,51 @@ fn action_request_digest(request: &ActionRequest) -> Result<String, ApiError> {
     )))
 }
 
+/// Inspect both retained receipt families under the shared actor/key gate.
+/// Harness receipts remain solely in indefinitely retained compact resolutions.
+fn retained_action_receipt(
+    state: &AppState,
+    session: &ClientSession,
+    request: &ActionRequest,
+    request_digest: &str,
+    actor_key: &str,
+) -> Result<(String, Option<ClaimRecord>), ApiError> {
+    let receipt_digest = hex::encode(Sha256::digest(
+        format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
+    ));
+    let subject = format!("custom/client/action-{}", &receipt_digest[..32]);
+    let receipt = state.store.claims_for(&subject, Some("custom.client.action-result"))
+        .map_err(ApiError::internal)?.pop();
+    if receipt.as_ref().is_some_and(|receipt| {
+        receipt.body.pointer("/fields/request_digest").and_then(Value::as_str) != Some(request_digest)
+    }) {
+        return Err(action_idempotency_conflict());
+    }
+    let resolved = state.store.status_for_claim_kind_at(
+        fractal_schema::harness_questions::RESOLVED, None, false,
+    ).map_err(ApiError::internal)?;
+    let now = client_now_ms();
+    for subject in resolved.subjects {
+        if let Some(question) = state.store.harness_question(&subject.subject, now).map_err(ApiError::internal)?
+            && let Some(receipt) = question.resolution.as_ref().and_then(|resolution| resolution.receipt.as_ref())
+            && receipt.actor_key == actor_key
+            && receipt.request_digest != request_digest
+        {
+            return Err(action_idempotency_conflict());
+        }
+    }
+    Ok((subject, receipt))
+}
+
+fn action_idempotency_conflict() -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "idempotency-conflict".into(),
+        message: "the idempotency key was already used for a different action".into(),
+        details: Box::default(),
+    }
+}
+
 fn validate_action_admission(
     session: &ClientSession,
     request: &ActionRequest,
@@ -8435,12 +8504,15 @@ fn validate_action_admission(
     if !super::wire_names::api_version(&request.api_version)
         || !request.id.starts_with("action/")
         || !(16..=256).contains(&request.idempotency_key.len())
+        || (request.action_type == "harness.answer"
+            && (request.id.len() > 256 || request.id == "action/"
+                || request.id.chars().any(char::is_whitespace)))
     {
         return Err(validation(
             "the action version, ID, or idempotency key is invalid",
         ));
     }
-    if contains_identity_selector(&request.parameters) {
+    if action_parameters_select_identity(request) {
         return Err(validation(
             "client actions cannot select an actor, credential, or fleet secret",
         ));
@@ -8581,6 +8653,9 @@ async fn action_inner(
     Json(request): Json<ActionRequest>,
     reserved_gate: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Json<Value>, ApiError> {
+    if request.action_type == "harness.answer" {
+        return harness_questions::answer(&state, &session, &request).await;
+    }
     // The message-send wrapper validates before reserving its gate and capacity.
     // Other actions retain their original admission order here.
     if reserved_gate.is_none() {
@@ -8592,28 +8667,10 @@ async fn action_inner(
         None => gate.lock_owned().await,
     };
     let request_digest = action_request_digest(&request)?;
-    let receipt_digest = hex::encode(Sha256::digest(
-        format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
-    ));
-    let receipt_subject = format!("custom/client/action-{}", &receipt_digest[..32]);
-    if let Some(receipt) = state
-        .store
-        .claims_for(&receipt_subject, Some("custom.client.action-result"))
-        .map_err(ApiError::internal)?
-        .last()
-    {
-        let old_digest = receipt
-            .body
-            .pointer("/fields/request_digest")
-            .and_then(Value::as_str);
-        if old_digest != Some(request_digest.as_str()) {
-            return Err(ApiError {
-                status: StatusCode::CONFLICT,
-                code: "idempotency-conflict".into(),
-                message: "the idempotency key was already used for a different action".into(),
-                details: Box::default(),
-            });
-        }
+    let actor_key = fractal_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key);
+    let (receipt_subject, receipt) =
+        retained_action_receipt(&state, &session, &request, &request_digest, &actor_key)?;
+    if let Some(receipt) = receipt {
         let mut result = receipt
             .body
             .pointer("/fields/result")
@@ -12843,6 +12900,7 @@ mission "differential" state="ready" {
             client_relay: None,
             native_session_home: None,
             planner_default: crate::model::PlannerSpec::default(),
+            harness_question_sink: None,
         }
     }
 

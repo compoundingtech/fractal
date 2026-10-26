@@ -248,6 +248,7 @@ let state = crate::api::AppState {
     client_relay: None,
     native_session_home: None,
     planner_default: Default::default(),
+    harness_question_sink: None,
 };
 let response = crate::api::router(state)
     .oneshot(

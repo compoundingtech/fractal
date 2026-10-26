@@ -62,6 +62,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "schema",
             "actor-contract",
             "subject",
+            "harness-questions",
             "documents",
             "evidence",
             "blobs",

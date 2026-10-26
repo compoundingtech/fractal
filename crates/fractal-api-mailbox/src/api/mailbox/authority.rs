@@ -1321,6 +1321,7 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            harness_question_sink: None,
         };
         let request = Fence::new("agent/eval.worker", "current", "delivery");
         let agent_dir = source_agent_dir(&state, &request);

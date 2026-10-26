@@ -647,6 +647,7 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            harness_question_sink: None,
         };
         let grant = "custom/client/observation-pairing";
         let credential = "observation-credential";

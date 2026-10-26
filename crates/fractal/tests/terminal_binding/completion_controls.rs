@@ -140,6 +140,7 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        harness_question_sink: None,
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {

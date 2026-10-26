@@ -287,6 +287,7 @@ impl Fixture {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            harness_question_sink: None,
         };
         let socket = root.path().join("st3.sock");
         let router = make_router(state.clone());

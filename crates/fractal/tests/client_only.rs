@@ -157,6 +157,7 @@ fn state(root: &Path, node: &str) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        harness_question_sink: None,
     }
 }
 fn person_ask(state: &AppState, name: &str, title: &str) -> String {

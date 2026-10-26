@@ -85,6 +85,7 @@ impl Daemon {
             client_relay: None,
             native_session_home: None,
             planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
         }
     }
 

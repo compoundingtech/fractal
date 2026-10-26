@@ -372,7 +372,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         node: "todo-liveness".into(), state_dir: root.path().into(),
         pty_root: root.path().join("pty"), pty_binary: "pty".into(),
         fleet_id: None, configured_peers: vec![], client_relay: None,
-        native_session_home: None, planner_default: Default::default(),
+        native_session_home: None, harness_question_sink: None, planner_default: Default::default(),
     };
     let path = root.path().join("api.sock");
     let socket = path.clone();
@@ -2144,6 +2144,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -2237,6 +2238,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -2313,6 +2315,7 @@ async fn trace_wait_starts_after_existing_events() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
     };
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let app = router(state).layer(axum::middleware::from_fn(
@@ -5405,6 +5408,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -5494,6 +5498,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
         pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
         client_relay: None, native_session_home: None, owning_person: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
@@ -7372,6 +7377,7 @@ async fn serve_test_store(
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -8116,4 +8122,152 @@ fn native_identity_rename_allows_generated_idempotency_key() {
         panic!("expected identity rename");
     };
     assert_eq!(args.idempotency_key, None);
+}
+
+#[test]
+fn harness_question_cli_reads_require_an_explicit_person() {
+    for command in [
+        vec!["fractal", "harness-questions", "list"],
+        vec!["fractal", "harness-questions", "show", "00000000000000000000000000000001"],
+    ] {
+        assert!(Cli::try_parse_from(command.clone()).is_err());
+        for actor in ["operator", "person/", "person/*", "agent/example"] {
+            let mut arguments = command.clone();
+            arguments.extend(["--as", actor]);
+            assert!(Cli::try_parse_from(arguments).is_err(), "{actor}");
+        }
+        let mut arguments = command;
+        arguments.extend(["--as", "person/operator"]);
+        assert!(matches!(
+            Cli::try_parse_from(arguments).unwrap().command,
+            Command::HarnessQuestions { .. }
+        ));
+    }
+}
+
+#[test]
+fn harness_answer_action_identity_is_retryable_and_question_scoped() {
+    let key = "harness-answer-retry-key";
+    let question = "harness-question/00000000000000000000000000000001";
+    assert_eq!(
+        harness_answer_action_id(key, question),
+        harness_answer_action_id(key, question)
+    );
+    assert_ne!(
+        harness_answer_action_id(key, question),
+        harness_answer_action_id(key, "harness-question/00000000000000000000000000000002")
+    );
+    assert_ne!(
+        harness_answer_action_id("ab", "c"),
+        harness_answer_action_id("a", "bc")
+    );
+}
+
+#[test]
+fn harness_answer_cli_requires_positions_file_explicit_person_and_key() {
+    let arguments = [
+        "fractal", "harness-questions", "answer",
+        "harness-question/00000000000000000000000000000001",
+        "--as", "person/operator", "--answers-file", "answers.json",
+        "--idempotency-key", "harness-answer-retry-key",
+    ];
+    assert!(matches!(
+        Cli::try_parse_from(arguments).unwrap().command,
+        Command::HarnessQuestions { command: HarnessQuestionsCommand::Answer { .. } }
+    ));
+    for flag in ["--as", "--answers-file", "--idempotency-key"] {
+        let index = arguments.iter().position(|argument| *argument == flag).unwrap();
+        let missing = arguments[..index].iter().chain(&arguments[index + 2..]).copied();
+        assert!(Cli::try_parse_from(missing).is_err(), "{flag}");
+    }
+}
+
+#[tokio::test]
+async fn harness_answer_cli_uses_canonical_detail_identity_and_all_fences() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("question.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let canonical = "harness-question/00000000000000000000000000000001";
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let headers = String::from_utf8(request).unwrap();
+            let length = headers.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            }).unwrap_or(0);
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).await.unwrap();
+            requests.push((headers, body));
+            let (status, response) = if index == 0 {
+                ("200 OK", json!({
+                    "api_version":"st3.client.v0", "request_id":"request/question-detail",
+                    "snapshot":{"id":"snapshot/fixture/42", "host_id":"host/fixture",
+                        "store_index":42, "projection_version":"client-projection.v0",
+                        "created_at":"2026-10-26T10:00:00.000Z"},
+                    "value":{"kind":"harness-question", "id":canonical,
+                        "revision":"claim/observation", "updated_at":"2026-10-26T10:00:00.000Z",
+                        "agent":"agent/example", "session":"fixture-session",
+                        "native_id":format!("sha256:{}", "0".repeat(64)),
+                        "runtime_incarnation":"fixture-incarnation",
+                        "questions":[{"id":"q0", "options":2, "multi":false, "required":true}],
+                        "observed_at":1793008800000_u64, "resolution":null,
+                        "answer":{"state":"unavailable", "reason":"adapter_missing"}}
+                }))
+            } else {
+                ("409 Conflict", json!({
+                    "api_version":"st3.client.v0", "error_version":"st3.client.error.v0",
+                    "request_id":"request/question-answer", "code":"not-answerable",
+                    "message":"No native adapter is installed", "retryable":false,
+                    "details":{"reason":"adapter_missing"}
+                }))
+            };
+            let response = response.to_string();
+            stream.write_all(format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                response.len(),
+            ).as_bytes()).await.unwrap();
+        }
+        requests
+    });
+    let answers_file = root.path().join("answers.json");
+    fs::write(&answers_file, r#"{"q0":{"positions":[1]}}"#).unwrap();
+    let key = "fixture-harness-answer-key";
+    let error = run_harness_questions(
+        &Endpoint::Unix(socket),
+        HarnessQuestionsCommand::Answer {
+            question: "00000000000000000000000000000001".into(),
+            person: "person/operator".into(),
+            answers_file,
+            idempotency_key: key.into(),
+        },
+        true,
+    ).await.unwrap_err();
+    assert!(error.to_string().contains("not-answerable"), "{error:#}");
+    let requests = server.await.unwrap();
+    assert!(requests[0].0.starts_with("GET /v1/client/harness-questions/"));
+    assert!(requests[1].0.starts_with("POST /v1/client/actions "));
+    let action: Value = serde_json::from_slice(&requests[1].1).unwrap();
+    assert_eq!(action["id"], harness_answer_action_id(key, canonical));
+    assert_eq!(action["idempotency_key"], key);
+    assert_eq!(action["parameters"], json!({
+        "question":canonical, "answers":{"q0":{"positions":[1]}}
+    }));
+    assert_eq!(action["fence"], json!({
+        "snapshot_id":"snapshot/fixture/42",
+        "subject_revisions":{canonical:"claim/observation"},
+        "runtime_incarnation":"fixture-incarnation"
+    }));
 }

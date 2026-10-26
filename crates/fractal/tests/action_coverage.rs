@@ -562,6 +562,7 @@ impl Daemon {
             client_relay: None,
             native_session_home: Some(root.join("native")),
             planner_default: Default::default(),
+            harness_question_sink: None,
         }
     }
 
@@ -851,6 +852,7 @@ async fn dispatch(
         "agent.retire" => agent_retire, "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
         "custom.reply" => custom_reply, "prompt.respond" => prompt_respond,
         "arrangement.edit" => arrangement_edit,
+        "harness.answer" => harness_answer,
         "attention.resolve" => attention_resolve,
         "lane.approve" => lane_approve, "lane.join" => lane_join, "lane.leave" => lane_leave,
         "lane.mark" => lane_mark, "lane.move" => lane_move,

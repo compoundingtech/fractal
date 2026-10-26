@@ -117,6 +117,7 @@ agent "garden/worker" {{
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
     };
     let listener_socket = socket.clone();
     let state_socket = root.path().join("state.sock");

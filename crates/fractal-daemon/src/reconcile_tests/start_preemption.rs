@@ -209,6 +209,7 @@ let app = crate::api::router(crate::api::AppState {
     client_relay: None,
     native_session_home: None,
     planner_default: crate::model::PlannerSpec::default(),
+    harness_question_sink: None,
 });
 let response = app
     .oneshot(

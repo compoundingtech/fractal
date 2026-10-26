@@ -17,6 +17,7 @@ pub fn state(root: &Path) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
     }
 }
 

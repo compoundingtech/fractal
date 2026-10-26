@@ -320,6 +320,11 @@ enum Command {
         #[command(subcommand)]
         command: LaunchCommand,
     },
+    /// Inspect native harness question metadata or answer with option positions.
+    HarnessQuestions {
+        #[command(subcommand)]
+        command: HarnessQuestionsCommand,
+    },
     /// Show and answer alerts: asks, gates and approvals that wait on a person.
     ///
     /// Each alert belongs to the conversation of the agent behind it. Updates that ask nothing
@@ -2135,6 +2140,32 @@ struct DevicesArgs {
     limit: usize,
     #[command(subcommand)]
     command: Option<DevicesCommand>,
+}
+
+#[derive(Subcommand)]
+enum HarnessQuestionsCommand {
+    /// List native question metadata without question or option text.
+    List {
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+    },
+    /// Read one native question's metadata.
+    Show {
+        question: String,
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+    },
+    /// Answer with a JSON file mapping question ids to {positions: [zero-based indexes]}.
+    Answer {
+        question: String,
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+        #[arg(long)]
+        answers_file: PathBuf,
+        /// Reuse this key and the identical answer file when retrying.
+        #[arg(long)]
+        idempotency_key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -5441,6 +5472,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Service { command } => run_service(command, cli.json),
         Command::ClaudeChannel { command } => run_claude_channel(command),
         Command::Subject { command } => run_subject(&client, command, cli.json).await,
+        Command::HarnessQuestions { command } => {
+            run_harness_questions(&endpoint, command, cli.json).await
+        }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
@@ -6304,6 +6338,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .map(|relay| relay.with_links(store.clone())),
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
+        harness_question_sink: None,
     };
     fractal_daemon::api::configure_claude_ownership_observation(&config.state_dir,
         config.claude_primary_ownership_observe == Some(true));
@@ -9865,6 +9900,73 @@ fn unseen_timeline_entries(
             .then(a.sequence.cmp(&b.sequence))
     });
     changed
+}
+
+fn parse_harness_question_person(actor: &str) -> std::result::Result<String, String> {
+    let person = parse_person_subject(actor)?;
+    if person.contains('*') || person.chars().any(char::is_whitespace) {
+        return Err("harness questions require a concrete `person/NAME` subject".into());
+    }
+    Ok(person)
+}
+
+fn harness_answer_action_id(key: &str, question: &str) -> String {
+    let mut digest = Sha256::new();
+    for value in [key, question] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("action/harness-answer-{}", hex::encode(digest.finalize()))
+}
+
+async fn run_harness_questions(
+    endpoint: &Endpoint,
+    command: HarnessQuestionsCommand,
+    json_output: bool,
+) -> Result<()> {
+    match command {
+        HarnessQuestionsCommand::List { person } => {
+            let result = generated_client(endpoint, Some(&person))?
+                .harness_questions()
+                .await?;
+            print_client_value(&result, json_output)
+        }
+        HarnessQuestionsCommand::Show { question, person } => {
+            let result = generated_client(endpoint, Some(&person))?
+                .harness_question(&question)
+                .await?;
+            print_client_value(&result, json_output)
+        }
+        HarnessQuestionsCommand::Answer {
+            question,
+            person,
+            answers_file,
+            idempotency_key,
+        } => {
+            let generated = generated_client(endpoint, Some(&person))?;
+            let current = generated.harness_question(&question).await?;
+            let question = current.value.header.id;
+            let answers: BTreeMap<String, fractal_client::HarnessAnswerInput> =
+                serde_json::from_slice(&fs::read(answers_file)?)?;
+            let result = generated
+                .harness_answer(
+                    harness_answer_action_id(&idempotency_key, &question),
+                    idempotency_key,
+                    ClientFence {
+                        snapshot_id: current.snapshot.id,
+                        subject_revisions: BTreeMap::from([(
+                            question.clone(),
+                            current.value.header.revision,
+                        )]),
+                        runtime_incarnation: Some(current.value.runtime_incarnation),
+                        ..ClientFence::default()
+                    },
+                    fractal_client::HarnessAnswerParameters { question, answers },
+                )
+                .await?;
+            print_client_value(&result, json_output)
+        }
+    }
 }
 
 async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool) -> Result<()> {

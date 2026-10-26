@@ -40,6 +40,7 @@ async fn serve(
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        harness_question_sink: None,
     };
     let socket = root.join("st3.sock");
     let path = socket.clone();

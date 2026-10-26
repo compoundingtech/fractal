@@ -284,6 +284,7 @@ let state = crate::api::AppState {
     })
     .unwrap(),
     planner_default: crate::model::PlannerSpec::default(),
+    harness_question_sink: None,
 };
 let gateway_socket = root.path().join("gateway.sock");
 let served = gateway_socket.clone();

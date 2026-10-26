@@ -48,6 +48,7 @@ async fn provider_incarnation(
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
     };
     let listener_socket = socket.clone();
     let server = tokio::spawn(async move {

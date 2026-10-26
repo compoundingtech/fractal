@@ -155,6 +155,7 @@ mod socket_tests {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            harness_question_sink: None,
         };
         for (id, kind, facts) in [
             (
