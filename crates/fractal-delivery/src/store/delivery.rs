@@ -1,4 +1,4 @@
-//! The part of `store::delivery` that moved up from st3-store.
+//! The part of `store::delivery` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::message_desired_recipient_match;
 use crate::message_sent_recipient_match;
@@ -966,7 +966,7 @@ impl DeliveryStore for Store {
             mailbox_lease::record_argv_binding(&tx, &bound, member)?;
         }
         tx.commit().map_err(internal)?;
-        if let Some(wakes) = self.smalltalk.mailbox_wakes.get() {
+        if let Some(wakes) = self.fractal.mailbox_wakes.get() {
             wakes.owner_changed(&bound.subject, &bound.component);
         }
         Ok(bound)

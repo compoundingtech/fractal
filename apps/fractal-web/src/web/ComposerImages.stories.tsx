@@ -7,7 +7,7 @@ import { surfaceVars as surface, spaceVars as space, textVars as text } from '..
 import { imageUploadAdapter } from './composerSend.ts'
 
 /** The production adapter owns acceptance and size limits; only the upload transport is a controlled fixture. */
-function ComposerImages({ scheme, slow = false, previewImages = false }: { readonly scheme: 'dark' | 'light'; readonly slow?: boolean; readonly previewImages?: boolean }) {
+function ComposerImages({ scheme, slow = false, previewImages = false, stateLabel }: { readonly scheme: 'dark' | 'light'; readonly slow?: boolean; readonly previewImages?: boolean; readonly stateLabel?: string }) {
   const [receipts, setReceipts] = React.useState<readonly string[]>([])
   const [messages, setMessages] = React.useState<readonly (TextItem & { readonly role: 'user' })[]>([])
   const [blobUrls] = React.useState(() => new Map<string, string>())
@@ -87,10 +87,10 @@ function ComposerImages({ scheme, slow = false, previewImages = false }: { reado
     },
   }
   const turns: readonly TranscriptTurn[] = messages.map(prompt => ({ id: prompt.id, prompt, items: [], work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false } }))
-  return <section aria-label={slow ? 'Controlled image upload' : 'Live image adapter'} data-scheme={scheme} {...stylex.props(styles.surface, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
+  return <section aria-label={stateLabel ?? (slow ? 'Controlled image upload' : 'Live image adapter')} data-scheme={scheme} {...stylex.props(styles.surface, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
     <EmbraceRuntimeProvider options={options}>
       {messages.length > 0 && <div {...stylex.props(styles.transcript)}><Transcript turns={turns} title="Image review" showHeader={false} sync={{ _tag: 'Live', since: 0 }} now={1792822871000} observedAt={1792822871000} {...(previewImages ? { attachmentImages: { state: (id: string) => { const src = blobUrls.get(id); return src === undefined ? { _tag: 'Failed' as const } : { _tag: 'Loaded' as const, src } }, load: () => rereadBlobUrls() } } : {})} /></div>}
-      <EmbraceComposer variant="C1" readingColumn conversationLabel={slow ? 'Pending image review' : 'Image review'} imageAttachments={{ max: 4 }} />
+      <EmbraceComposer variant="C1" readingColumn conversationLabel={stateLabel ?? (slow ? 'Pending image review' : 'Image review')} imageAttachments={{ max: 4 }} />
     </EmbraceRuntimeProvider>
     {slow && <button onClick={upload.finish}>Complete fixture upload</button>}
     {slow && <output data-testid="fixture-upload-transport" data-state={transport._tag} data-attempt={transport._tag === 'Idle' ? undefined : transport.attempt} data-fresh-signal={transport._tag === 'Idle' ? undefined : transport.freshSignal} data-signal-aborted={transport._tag === 'Aborted' ? transport.signalAborted : undefined}>{transport._tag === 'Aborted' ? 'Upload transport aborted' : transport._tag === 'Complete' ? 'Fixture upload completed' : ''}</output>}
@@ -245,9 +245,14 @@ export const LongFilename: Story = {
   },
 }
 export const AllStates: Story = {
-  render: args => <><ComposerImages scheme={args.scheme} /><ComposerImages scheme={args.scheme} slow /><ComposerImages scheme={args.scheme} /><ComposerImages scheme={args.scheme} /></>,
+  render: args => <><ComposerImages scheme={args.scheme} stateLabel="Oversize image refusal" /><ComposerImages scheme={args.scheme} slow stateLabel="Image upload in progress" /><ComposerImages scheme={args.scheme} stateLabel="Several staged images" /><ComposerImages scheme={args.scheme} stateLabel="Sent image" /></>,
   play: async ({ canvasElement }) => {
-    const sections = canvasElement.querySelectorAll<HTMLElement>('section[aria-label="Live image adapter"], section[aria-label="Controlled image upload"]')
+    const canvas = within(canvasElement)
+    const labels = ['Oversize image refusal', 'Image upload in progress', 'Several staged images', 'Sent image']
+    const sections = labels.map(name => canvas.getByRole('region', { name }))
+    for (const [index, section] of sections.entries()) {
+      await expect(within(section).getByRole('form', { name: `Message composer, ${labels[index]}` })).toBeVisible()
+    }
     await refuseOversize(sections[0]!)
     await showUploading(sections[1]!)
     await showSeveralImages(sections[2]!)

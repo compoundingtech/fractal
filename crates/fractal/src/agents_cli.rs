@@ -517,6 +517,7 @@ pub(super) async fn run_agents(
                         "actor": args.actor,
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
                         "now": args.now,
+                        "fresh_session": args.fresh_session,
                     }),
                 )
                 .await?;

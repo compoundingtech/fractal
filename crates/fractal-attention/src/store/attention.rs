@@ -1,4 +1,4 @@
-//! The part of `store::attention` that moved up from st3-seats.
+//! The part of `store::attention` that moved up from fractal-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_seats::store::attention::*;
@@ -86,8 +86,8 @@ pub trait AttentionStore {
 impl AttentionStore for Store {
 
     fn answer_agent_roster_requests<T>(&self, refresh: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.smalltalk.agent_roster_attempt.fetch_or(1, std::sync::atomic::Ordering::AcqRel);
-        struct Attempt<'a>(&'a SmalltalkRuntime, bool);
+        self.fractal.agent_roster_attempt.fetch_or(1, std::sync::atomic::Ordering::AcqRel);
+        struct Attempt<'a>(&'a FractalRuntime, bool);
         impl Drop for Attempt<'_> {
             fn drop(&mut self) {
                 self.0.agent_roster_attempt.store(if self.1 { 0 } else { 2 }, std::sync::atomic::Ordering::Release);
@@ -95,8 +95,8 @@ impl AttentionStore for Store {
                 self.0.agent_roster_published.send_modify(|_| {});
             }
         }
-        let mut attempt = Attempt(&self.smalltalk, false);
-        let requested = &self.smalltalk.agent_roster_requested_at;
+        let mut attempt = Attempt(&self.fractal, false);
+        let requested = &self.fractal.agent_roster_requested_at;
         let pending = requested.swap(0, std::sync::atomic::Ordering::AcqRel);
         let result = refresh();
         attempt.1 = result.is_ok();
@@ -106,7 +106,7 @@ impl AttentionStore for Store {
                 std::sync::atomic::Ordering::Relaxed);
         }
         if result.is_ok() {
-            self.smalltalk.agent_roster_overdue_warned.store(false, std::sync::atomic::Ordering::Release);
+            self.fractal.agent_roster_overdue_warned.store(false, std::sync::atomic::Ordering::Release);
         }
         result
     }

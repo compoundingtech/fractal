@@ -358,6 +358,35 @@ assert lanes.index('lane "CSS asset guard" node --test apps/fractal-web/scripts/
 assert "fractalCssAssets()" in (root / "apps/fractal-web/vite.config.ts").read_text()
 print("passed: the CSS asset guard proves its negatives before guarding the app production build")
 
+# The play stage waits for a heavy-build slot when scripts/ci-local-web names the host's admission program, and runs as CI does otherwise.
+kit_plays_fn = lanes[lanes.index("kit_plays() ("):lanes.index("\n)\n", lanes.index("kit_plays() (")) + 3]
+for admitted in (False, True):
+    with tempfile.TemporaryDirectory() as scratch:
+        bin_dir, log = Path(scratch, "bin"), Path(scratch, "calls")
+        bin_dir.mkdir()
+        # The stub records the environment the play command gets: the assignments before it must still prefix it.
+        (bin_dir / "node").write_text('#!/usr/bin/env bash\necho "node $*" >> "$CALLS"\n'
+                                      'echo "env KIT_STORYBOOK_BUILD_SECONDS=${KIT_STORYBOOK_BUILD_SECONDS:-unset} '
+                                      'KIT_PLAY_SHARD_COUNT=${KIT_PLAY_SHARD_COUNT:-unset}" >> "$CALLS"\n')
+        Path(scratch, "receipts").mkdir()
+        Path(scratch, "receipts", "storybook-build-seconds").write_text("41\n")
+        (bin_dir / "build-admission").write_text('#!/usr/bin/env bash\necho "admission $*" >> "$CALLS"\nshift 4\nexec "$@"\n')
+        for tool in ("node", "build-admission"):
+            (bin_dir / tool).chmod(0o755)
+        harness = f'set -eu\nkit_receipt_dir={scratch}/receipts\n' + kit_plays_fn + "kit_plays\n"
+        subprocess.run(["bash", "-c", harness], check=True, capture_output=True, text=True,
+                       env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "CALLS": str(log),
+                            "KIT_PLAY_ADMISSION_BIN": str(bin_dir / "build-admission") if admitted else ""})
+        calls = log.read_text().splitlines()
+        play = "node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook-static " + f"{scratch}/receipts"
+        assert calls[-1] == "env KIT_STORYBOOK_BUILD_SECONDS=41 KIT_PLAY_SHARD_COUNT=1", calls
+        assert calls[-2] == play, calls
+        if admitted:
+            assert calls[0] == "admission run heavy kit-play -- " + play, calls
+        else:
+            assert len(calls) == 2, calls
+print("passed: the kit plays wait for a heavy-build slot only where the host's admission program is named")
+
 # Exercise the actual conditional lane wiring without launching browsers or installing dependencies.
 kit_lanes = lanes[lanes.index("# --- kit lane selection"):lanes.index("# --- end kit lane selection")]
 for required in (False, True):

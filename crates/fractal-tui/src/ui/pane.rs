@@ -53,7 +53,7 @@ impl Pane {
         }
     }
 
-    /// The pane a key names, or `None` for a key no stui knows.
+    /// The pane a key names, or `None` for a key no Fractal TUI knows.
     pub fn parse(key: &str) -> Option<Pane> {
         let (kind, subject) = key.split_once(':')?;
         let subject = (!subject.is_empty()).then(|| subject.to_owned());

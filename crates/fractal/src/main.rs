@@ -83,6 +83,7 @@ mod directive_note;
 mod completion;
 mod doctor_cli;
 mod fractal;
+mod release_version;
 #[cfg(test)]
 mod follow_tests;
 mod presentation;
@@ -94,6 +95,7 @@ mod attention_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
+mod deploy_cli;
 mod launch_cli;
 mod migrate_cli;
 mod replication_cli;
@@ -160,7 +162,7 @@ struct Cli {
 /// failing an agent's step.
 const DEFAULT_DAEMON_WAIT_SECS: u64 = 30;
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 const CLI_ENVIRONMENT_NAMES: [(&str, &str); 5] = [
     ("ST_INSTANCE", "FRACTAL_INSTANCE"),
     ("ST3_DAEMON_WAIT", "FRACTAL_DAEMON_WAIT"),
@@ -277,6 +279,8 @@ enum Command {
     },
     /// Inspect Git-backed changes and their separate ref/index/evidence freshness.
     Changes(change_cli::ChangesArgs),
+    /// Verify a deployment GO against the local replica without changing state.
+    Deploy(deploy_cli::DeployArgs),
     /// Validate and publish KDL files containing seats, missions and schedules.
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     /// Gate checks run mission and step scripts; loop until scripts run after each round.
@@ -648,8 +652,8 @@ struct FleetCreateArgs {
 struct FleetInviteArgs {
     /// The name the new machine must use.
     name: Option<String>,
-    /// How long the code stays valid: 10s to 24h.
-    #[arg(long, default_value = "15m")]
+    /// How long the code stays valid: 10s to 24h (Fabric pairing is capped at 10m).
+    #[arg(long, default_value = "10m")]
     expires: String,
     /// Which of this member's endpoints go into the code: auto, tailscale, fabric, loopback.
     #[arg(long, default_value = "auto")]
@@ -764,7 +768,7 @@ struct UninstallArgs {
     /// Leave the fleet without reaching any member first.
     #[arg(long)]
     offline: bool,
-    /// Keep the installed st3, st, stui, st3-migrate, and pty executables.
+    /// Keep the installed st3, st, stui, fractal-migrate, and pty executables.
     #[arg(long)]
     keep_binaries: bool,
     /// Also required when this machine's graph exists nowhere else.
@@ -2025,7 +2029,7 @@ enum DevicesCommand {
         /// Import a private mode-0600 DER PKCS#8 file; otherwise generate a key.
         #[arg(long)]
         key_file: Option<PathBuf>,
-        /// Credential and private-key profile; person devices share stui's profile by default,
+        /// Credential and private-key profile; person devices share Fractal TUI's profile by default,
         /// assistant grants use a separate assistant profile.
         #[arg(long)]
         profile: Option<PathBuf>,
@@ -3317,6 +3321,11 @@ struct AgentRestartArgs {
     /// Also interrupts immediately when restarting yourself during a turn.
     #[arg(long)]
     now: bool,
+    /// Start a new native session instead of continuing the last one. The seat must have a
+    /// handoff written or marked ready (`st agents handoff ready`) since its last turn; the new
+    /// session is given it first. Without this the restart continues the last session.
+    #[arg(long)]
+    fresh_session: bool,
 }
 
 #[derive(Subcommand)]
@@ -4050,7 +4059,7 @@ enum MessageCommand {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    /// Show one conversation as stui shows it: messages, folded tools, Fractal. `--raw`
+    /// Show one conversation as Fractal TUI shows it: messages, folded tools, Fractal. `--raw`
     /// prints every normalized entry (ids, message boundaries, tool JSON); `--json` the page.
     Timeline {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::Session)))]
@@ -4697,6 +4706,10 @@ fn cli_main() -> ExitCode {
             );
             return ExitCode::SUCCESS;
         }
+        Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion => {
+            release_version::print();
+            return ExitCode::SUCCESS;
+        }
         Err(error) => exit_usage_error(error),
     };
     reject_web_global_flags(&mut command, &matches)
@@ -4740,7 +4753,7 @@ fn cli_main() -> ExitCode {
         Ok(Some(incarnation)) => {
             // SAFETY: the single-threaded lookup runtime has been dropped; run_cli starts
             // the multi-threaded runtime only after this environment update.
-            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
             unsafe {
                 std::env::set_var("FRACTAL_INCARNATION", &incarnation);
                 std::env::set_var("ST3_INCARNATION", incarnation);
@@ -5258,6 +5271,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::ActorContract { .. } => unreachable!("the actor contract runs before the CLI runtime"),
         Command::Setup(_) => unreachable!(),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
+        Command::Deploy(args) => deploy_cli::run(&endpoint, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
         Command::Web { .. } => unreachable!("the browser opens before the CLI runtime"),
@@ -9844,7 +9858,7 @@ fn unseen_timeline_entries(
             seen.remove(&id);
         }
     }
-    // Small Talk and transcript entries number their sequences apart; time orders them.
+    // Fractal and transcript entries number their sequences apart; time orders them.
     changed.sort_by(|a, b| {
         a.timestamp
             .cmp(&b.timestamp)
@@ -10020,7 +10034,7 @@ impl LocalEventFeed {
                         .pointer("/features/bounded_legacy_events")
                         .and_then(Value::as_u64)
                         == Some(1),
-                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
+                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
                 );
                 Err(error)
             }

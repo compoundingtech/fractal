@@ -9,7 +9,7 @@ pub fn dispatch(arguments: &mut [OsString]) {
         .first()
         .and_then(|program| Path::new(program).file_name())
         == Some(OsStr::new("fractal"));
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     // st and st3 retain their bare-program behavior and command spellings.
     if !fractal {
         return;

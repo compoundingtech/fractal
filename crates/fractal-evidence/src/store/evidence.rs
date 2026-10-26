@@ -1,4 +1,4 @@
-//! The part of `store::evidence` that moved up from st3-store.
+//! The part of `store::evidence` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::SeatsStore;
 use super::*;
@@ -78,11 +78,10 @@ pub trait EvidenceStore {
 impl EvidenceStore for Store {
 
     fn ivm_publisher(&self) -> Result<Option<Arc<smallclaims::ivm::events::Publisher>>> {
-        if self.smalltalk.ivm_views.is_none() {
+        if self.fractal.ivm_views.is_none() {
             return Ok(None);
         }
-        let mut publisher = self
-            .smalltalk
+        let mut publisher = self.fractal
             .ivm_publisher
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -99,11 +98,11 @@ impl EvidenceStore for Store {
             index: u64,
             history: bool,
         ) -> Result<bool> {
-        if self.smalltalk.agent_roster_refresh.get().is_none()
+        if self.fractal.agent_roster_refresh.get().is_none()
             || self.agent_roster_faults_pending(history) {
             return Ok(false);
         }
-        let Some((cut, local, valid_until, items)) = self.smalltalk.agent_resources_cache.lock()
+        let Some((cut, local, valid_until, items)) = self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned").iter()
             .filter(|entry| entry.history == history && entry.covered.is_none() && entry.index <= index)
             .max_by_key(|entry| (entry.index, entry.local))
@@ -130,16 +129,16 @@ impl EvidenceStore for Store {
             index: u64,
             history: bool,
         ) -> Option<(u64, Arc<Vec<Value>>, u128)> {
-        self.smalltalk.agent_roster_refresh.get()?;
+        self.fractal.agent_roster_refresh.get()?;
         self.warn_if_agent_roster_overdue();
         let newest = |entries: &mut dyn Iterator<Item = &crate::store::runtime::AgentResourcesEntry>| entries
             .filter(|entry| entry.history == history && entry.covered.is_none() && entry.index <= index)
             .max_by_key(|entry| (entry.index, entry.local))
             .map(|entry| (entry.index, Arc::clone(&entry.items), entry.published_at_unix_ms));
         // While a projection catching up refolds the roster, readers keep the one they had.
-        let roster = newest(&mut self.smalltalk.agent_resources_cache.lock()
+        let roster = newest(&mut self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned").iter())
-            .or_else(|| newest(&mut self.smalltalk.agent_roster_previous.lock()
+            .or_else(|| newest(&mut self.fractal.agent_roster_previous.lock()
                 .expect("previous agent roster poisoned").resources.iter()))?;
         crate::otel::record_roster("hit", roster.1.len());
         Some(roster)
@@ -150,14 +149,14 @@ impl EvidenceStore for Store {
             cut: u64,
             history: bool,
         ) -> Option<(Arc<Vec<Value>>, u128)> {
-        self.smalltalk.agent_roster_refresh.get()?;
+        self.fractal.agent_roster_refresh.get()?;
         let at = |entries: &mut dyn Iterator<Item = &crate::store::runtime::AgentResourcesEntry>| entries
             .filter(|entry| entry.history == history && entry.covered.is_none() && entry.index == cut)
             .max_by_key(|entry| entry.local)
             .map(|entry| (Arc::clone(&entry.items), entry.published_at_unix_ms));
-        let roster = at(&mut self.smalltalk.agent_resources_cache.lock()
+        let roster = at(&mut self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned").iter())
-            .or_else(|| at(&mut self.smalltalk.agent_roster_previous.lock()
+            .or_else(|| at(&mut self.fractal.agent_roster_previous.lock()
                 .expect("previous agent roster poisoned").resources.iter()))?;
         crate::otel::record_roster("hit", roster.0.len());
         Some(roster)
@@ -168,9 +167,9 @@ impl EvidenceStore for Store {
             index: u64,
             count: usize,
         ) -> Option<PublishedRosterHead> {
-        self.smalltalk.agent_roster_refresh.get()?;
+        self.fractal.agent_roster_refresh.get()?;
         self.warn_if_agent_roster_overdue();
-        let current = self.smalltalk.agent_page_refs_cache.lock()
+        let current = self.fractal.agent_page_refs_cache.lock()
             .expect("agent page refs cache poisoned").iter()
             .filter(|entry| !entry.history && entry.index <= index)
             .max_by_key(|entry| entry.index)
@@ -188,14 +187,14 @@ impl EvidenceStore for Store {
             });
         let (cut, refs, head) = match current {
             Some((cut, refs)) => {
-                let head = head_at(cut, &refs, &mut self.smalltalk.agent_resources_cache.lock()
+                let head = head_at(cut, &refs, &mut self.fractal.agent_resources_cache.lock()
                     .expect("agent resources cache poisoned").iter())?;
                 (cut, refs, head)
             }
             // While a projection catching up refolds the roster, readers keep the head they had:
             // its page order and the cards at the same cut.
             None => {
-                let previous = self.smalltalk.agent_roster_previous.lock()
+                let previous = self.fractal.agent_roster_previous.lock()
                     .expect("previous agent roster poisoned");
                 let refs = previous.page_refs.as_ref().filter(|entry| entry.index <= index)?;
                 let (cut, refs) = (refs.index, Arc::clone(&refs.items));

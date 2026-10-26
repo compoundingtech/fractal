@@ -20,4 +20,4 @@ floated a few shapes as a *starting hint* (not the answer set — decide the rea
   decide for the humans** — escalate the values/irreversible calls back to them.
 
 Deliverable: each proposer writes `PROPOSAL.md` in their own dir; the supervisor synthesizes
-`RECOMMENDATION.md` in its own dir. Coordinate everything through Small Talk. Stay in your own dir.
+`RECOMMENDATION.md` in its own dir. Coordinate everything through Fractal. Stay in your own dir.
