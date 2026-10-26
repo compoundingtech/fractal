@@ -5718,6 +5718,64 @@ impl Store {
         Ok(false)
     }
 
+    /// Whether a seat on this member was working in `[from_ms, until_ms)`, or not known not to
+    /// be, from its harness observations, which only this member's drivers make: each seat's
+    /// newest one before `from_ms` (`carried`, as the check of the minute before returned it, or
+    /// else read here) and each one admitted in the span. A seat is quiet only in a state that
+    /// says so (`ready`, `idle`, `blocked`, `ended`) with no background jobs; `working`,
+    /// `starting`, `indeterminate` or anything else is busy, however old. Returns that, and each
+    /// seat's newest observation through the span, for the next check.
+    pub fn local_seats_busy(
+        &self,
+        from_ms: u64,
+        until_ms: u64,
+        carried: Option<BTreeMap<String, bool>>,
+    ) -> Result<(bool, BTreeMap<String, bool>)> {
+        fn quiet(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, bool)> {
+            let state: Option<String> = row.get(1)?;
+            let jobs: Option<i64> = row.get(2)?;
+            let quiet = matches!(state.as_deref(), Some("ready" | "idle" | "blocked" | "ended"));
+            Ok((row.get(0)?, quiet && jobs.unwrap_or(0) <= 0))
+        }
+        let (from, until) = (from_ms.min(i64::MAX as u64) as i64, until_ms.min(i64::MAX as u64) as i64);
+        let connection = self.readers.get();
+        let mut seats = match carried {
+            Some(seats) => seats,
+            None => connection
+                .prepare_cached(
+                    "SELECT seats.subject,
+                        COALESCE(json_extract(o.body, '$.fields.state'), json_extract(o.body, '$.state')),
+                        json_extract(o.body, '$.fields.background_jobs')
+                     FROM (SELECT DISTINCT subject FROM local_observations
+                           WHERE kind='harness.observed') AS seats
+                     JOIN local_observations AS o ON o.id=(
+                         SELECT id FROM local_observations
+                         WHERE subject=seats.subject AND kind='harness.observed'
+                           AND observed_at_unix_ms<?1
+                         ORDER BY id DESC LIMIT 1)",
+                )?
+                .query_map(params![from], quiet)?
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()?,
+        };
+        let mut busy = seats.values().any(|quiet| !quiet);
+        let within = connection
+            .prepare_cached(
+                "SELECT subject,
+                    COALESCE(json_extract(body, '$.fields.state'), json_extract(body, '$.state')),
+                    json_extract(body, '$.fields.background_jobs')
+                 FROM local_observations
+                 WHERE observed_at_unix_ms>=?1 AND observed_at_unix_ms<?2 AND kind='harness.observed'
+                 ORDER BY id",
+            )?
+            .query_map(params![from, until], quiet)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (subject, quiet) in within {
+            busy |= !quiet;
+            seats.insert(subject, quiet);
+        }
+        Ok((busy, seats))
+    }
+
     /// The newest local timeline observation for one incarnation at or before a snapshot.
     pub fn latest_local_timeline_at(
         &self,

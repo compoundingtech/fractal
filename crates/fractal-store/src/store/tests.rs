@@ -11071,3 +11071,41 @@ fn a_claude_trust_prompt_fences_its_incarnation_as_not_ready_with_the_reason() {
     append("harness.observed", Some(subject), ready("second"));
     assert!(store.current_harness(subject).unwrap().unwrap().is_ready());
 }
+
+#[test]
+fn local_seats_busy_reads_each_seats_newest_state_and_every_one_in_the_minute() {
+    const MINUTE: u64 = 60_000;
+    let store = Store::open_memory("node").unwrap();
+    let observe = |subject: &str, state: &str, at: u64, jobs: Option<u64>| {
+        let mut input = harness_state(subject, state, at);
+        if let Some(jobs) = jobs {
+            input.fields.insert("background_jobs".into(), json!(jobs));
+        }
+        store.append_latest_observation(&input, u128::from(at)).unwrap();
+    };
+    let base = 1_000 * MINUTE;
+    observe("agent/node.a", "working", base - 5_000, None);
+    observe("agent/node.a", "idle", base - 1_000, None);
+    observe("agent/node.b", "ended", base - 30 * MINUTE, None);
+    // Each seat's newest observation before the minute says it is quiet.
+    let (busy, seats) = store.local_seats_busy(base, base + MINUTE, None).unwrap();
+    assert!(!busy);
+    assert_eq!(seats, BTreeMap::from([("agent/node.a".into(), true), ("agent/node.b".into(), true)]));
+    // A seat that worked inside the minute keeps it from being idle, though idle by its end.
+    observe("agent/node.c", "working", base + MINUTE + 10, None);
+    observe("agent/node.c", "idle", base + MINUTE + 20, None);
+    let (busy, seats) = store.local_seats_busy(base + MINUTE, base + 2 * MINUTE, Some(seats)).unwrap();
+    assert!(busy);
+    let (busy, seats) = store.local_seats_busy(base + 2 * MINUTE, base + 3 * MINUTE, Some(seats)).unwrap();
+    assert!(!busy, "{seats:?}");
+    // Background jobs, and a state that does not say the seat is quiet, are busy, and stay busy
+    // into later minutes until the seat says otherwise.
+    observe("agent/node.a", "idle", base + 3 * MINUTE + 1, Some(2));
+    let (busy, seats) = store.local_seats_busy(base + 3 * MINUTE, base + 4 * MINUTE, Some(seats)).unwrap();
+    assert!(busy);
+    assert!(store.local_seats_busy(base + 4 * MINUTE, base + 5 * MINUTE, Some(seats)).unwrap().0);
+    assert!(store.local_seats_busy(base + 9 * MINUTE, base + 10 * MINUTE, None).unwrap().0, "read afresh");
+    observe("agent/node.a", "idle", base + 10 * MINUTE + 1, None);
+    observe("agent/node.d", "starting", base + 10 * MINUTE + 2, None);
+    assert!(store.local_seats_busy(base + 10 * MINUTE, base + 11 * MINUTE, None).unwrap().0);
+}
