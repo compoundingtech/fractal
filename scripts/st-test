@@ -202,7 +202,7 @@ def selecting(name):
     return name in SELECTING or name.startswith('GIT_PUSH_OPTION')
 
 
-SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'CLAUDE', 'ANTHROPIC_')
+SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'FRACTAL_', 'CLAUDE', 'ANTHROPIC_', 'PTY_')
 KEPT_SEAT = ('ST_AGENT', 'ST_SKIP_EVIDENCE')  # exact names, plus every ST_EVIDENCE* switch; this list is the only exception mechanism
 
 
@@ -228,8 +228,12 @@ def check_path():
 
 def scrub_seat_environment():
     """A CI runner has none of the variables an agent seat carries (identity, mission, session, daemon endpoint, hook and messaging
-    settings), and the checks must see what CI sees: tests that read them fail or behave differently under a seat (the ci-local-gate
-    drill's claude hook tests did). ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
+    settings, and the pty session it runs in), and the checks must see what CI sees: tests that read them fail or behave differently
+    under a seat (the ci-local-gate drill's claude hook tests did). A seat's PTY_ROOT names its live pty root: the legacy-runner tests
+    that spawn sessions then all spawn there instead of under their own catalogs, and concurrent ones collide (stream_authoring_cli's
+    "spawning pty 'example-linux.worker' failed"). FRACTAL_* are the seat's own names for the same things (FRACTAL_ENDPOINT,
+    FRACTAL_AGENT): a check that kept them could reach the live daemon as the seat. Every check starts in `nix develop`, whose shell
+    sets the dev shell's FRACTAL_* settings (flake.nix) itself, and scripts/ci-local drops the rest for its stages. ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
     starts the check); the evidence switches stay. The kept list is the only exception mechanism for a future ST_* switch."""
     for name in [name for name in os.environ
                  if name.startswith(SEAT_PREFIXES) and name not in KEPT_SEAT and not name.startswith('ST_EVIDENCE')]:

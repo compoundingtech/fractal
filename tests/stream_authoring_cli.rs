@@ -20,12 +20,21 @@ fn write_agent(root: &Path) {
     fractal_legacy_runner::event::publish_owner_binding_for_test(root, "example-linux").unwrap();
 }
 
+/// The pty root the in-process `SystemRunner` uses for `root`, handed to each `st2` so the CLI retires
+/// the sessions the runner spawned: the catalog's own, or PTY_ROOT when the test process has one. The
+/// other CLI tests remove PTY_ROOT, but this file's runner reads it in-process, so removing it only
+/// from `st2` would split the two. scripts/st-test drops an agent seat's PTY_ROOT (its live root).
+fn pty_root(root: &Path) -> std::path::PathBuf {
+    fractal_legacy_runner::run::effective_pty_root(root)
+}
+
 fn st2(root: &Path, args: &[&str]) -> std::process::Output {
     Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("--catalog")
         .arg(root)
         .args(args)
         .env("ST2_TEST_EVENT_HOST", "example-linux")
+        .env("PTY_ROOT", pty_root(root))
         .env_remove("ST_AGENT")
         .output()
         .unwrap()
@@ -467,6 +476,7 @@ fn failed_source_publish_after_stop_keeps_declaration_relaunchable() {
             "example-linux",
         ])
         .env("ST2_TEST_AGENT_AUTHOR_FAIL_BEFORE_PUBLISH", "1")
+        .env("PTY_ROOT", pty_root(catalog.path()))
         .output()
         .unwrap();
     assert!(!failed.status.success());
