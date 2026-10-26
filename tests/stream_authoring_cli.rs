@@ -1,21 +1,50 @@
 use fractal_legacy_runner::Runner as _;
 
-/// The runtime tests start real pty sessions under the user's st2 state directory, whose pty ids they
-/// share, so they must take turns. nextest runs each test in its own process, which a `Mutex` does not
-/// span (one in three runs of the group lost a spawn to a sibling's session), and so does another
-/// checkout's run of the same tests: an advisory file lock does, held until the guard drops.
-struct RuntimeTest(std::fs::File);
+/// The runtime tests start real pty sessions, and a session's id and state directory are the user's
+/// by default: a sibling test, another checkout's run of the group, or a session left by a killed run
+/// answers to the same `example-linux.worker` ids, and one in three runs lost a pty spawn to it. Each
+/// test therefore runs against its own `PTY_ROOT` and `XDG_STATE_HOME`, as the other supervision tests
+/// do. They also take turns (an advisory file lock, which spans nextest's process per test; the
+/// environment is the process's), so the variables they set are never read by a sibling thread.
+struct RuntimeTest {
+    _lock: std::fs::File,
+    _root: tempfile::TempDir,
+    saved: [(&'static str, Option<std::ffi::OsString>); 2],
+}
 
 impl RuntimeTest {
     fn take() -> Self {
-        let file = std::fs::OpenOptions::new()
+        let lock = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(false)
             .open(std::env::temp_dir().join("st-stream-authoring-cli-runtime.lock"))
             .unwrap();
-        file.lock().unwrap();
-        Self(file)
+        lock.lock().unwrap();
+        // A short path: the pty socket path must fit the socket address limit.
+        let root = tempfile::Builder::new().prefix("sa").tempdir_in("/tmp").unwrap();
+        let saved = ["PTY_ROOT", "XDG_STATE_HOME"].map(|name| (name, std::env::var_os(name)));
+        // SAFETY: the lock above is held for the guard's life, and every test that reads these
+        // variables through the runner holds it too.
+        unsafe {
+            std::env::set_var("PTY_ROOT", root.path().join("pty"));
+            std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+        }
+        Self { _lock: lock, _root: root, saved }
+    }
+}
+
+impl Drop for RuntimeTest {
+    fn drop(&mut self) {
+        for (name, value) in &self.saved {
+            // SAFETY: as in `take`, under the lock the guard still holds.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
     }
 }
 use std::fs;
