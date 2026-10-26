@@ -192,7 +192,12 @@ appId: com.compoundingtech.fractal.starter
 ---
 - openLink:
     link: '$link'
-    autoVerify: true
+# autoVerify is Android-only; a fresh iOS simulator asks before opening the app.
+- runFlow:
+    when:
+      visible: 'Open in.*Fractal Dev.*'
+    commands:
+      - tapOn: 'Open'
 - extendedWaitUntil:
     visible: '.*$expected.*'
     timeout: 30000
