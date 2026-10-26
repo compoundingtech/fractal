@@ -1259,9 +1259,23 @@ The replication-status JSON failed record also carries optional `failure` metada
 The phases are `dial`, `local-export`, `request-headers`, `response-body`, `verify`,
 `local-receive`, and `follow-up-export`; they describe the failing operation, not the
 carrier. Authenticated peer backend failures preserve allowlisted machine codes such
-as `replication-exchange-metadata-too-large` and the backend phase. The elapsed time
-is the local outbound attempt's duration, including any dial and polling time, not
-a remote clock measurement. Local daemon failures retain their typed API codes.
+as `replication-exchange-metadata-too-large` and the backend phase. `elapsed_ms`
+preserves the originating failure's local measurement when outer layers attach
+context; it is not replaced by the duration of the whole outbound attempt.
+For HTTP failures the clock starts immediately before send, after serialization,
+hashing, signing, optional deflate, and request construction. Response-body and
+verification failures include the preceding send/response-header time; these are
+local observations, not measurements of the peer's backend duration.
+
+`attempt_elapsed_ms` separately measures the worker's whole outbound attempt,
+including dial, exports, earlier requests, receives and overload polls.
+`preparation_ms` measures the failing HTTP request's serialization/hash/sign/deflate
+and construction before send. `request_body_uncompressed_bytes` reports serialized
+JSON bytes; `request_body_bytes` reports the HTTP body bytes after optional
+compression (equal to the uncompressed count when compression is not used).
+Lengths exclude HTTP headers and framing. Preparation and body counts are absent
+if preparation did not complete; whole-attempt timing is absent outside the dial
+worker. Local daemon failures retain their typed API codes and original timings.
 
 Causes retain safe error categories and typed I/O kinds, not free-form error/source
 displays, URLs, credentials, claim content, request bodies, or unsigned peer prose.
