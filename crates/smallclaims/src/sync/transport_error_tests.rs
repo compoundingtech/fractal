@@ -347,11 +347,12 @@ async fn exchange_middleware_observes_head_before_bytes_extraction() {
         .body(Body::from("payload")).unwrap())
         .with_subscriber(capture.clone()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let events = capture.0.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["correlation_id"], correlation);
-    assert_eq!(events[0]["request_body_bytes"], "7");
-    drop(events);
+    {
+        let events = capture.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["correlation_id"], correlation);
+        assert_eq!(events[0]["request_body_bytes"], "7");
+    }
     for method in ["HEAD", "POST"] {
         capture.0.lock().unwrap().clear();
         let response = app.clone().oneshot(axum::http::Request::builder()
