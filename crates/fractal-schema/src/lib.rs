@@ -661,7 +661,7 @@ impl Registry {
                 "a custom claim must use custom.NAMESPACE.NAME",
             ));
         }
-        if subject_spec.family == "custom" && !self.claims.contains_key(kind) {
+        if subject_spec.family == "custom" && !kind.starts_with("custom.") {
             return Err(error(
                 "invalid-custom-subject-claim",
                 "a custom/ subject requires a custom. claim",

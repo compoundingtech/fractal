@@ -60,18 +60,26 @@ fn helper_launcher_inherits_credential_reference_without_impersonation_or_secret
     assert_eq!(launch.environment["ST_AGENT"], helper.subject);
     assert!(!serde_json::to_string(launch).unwrap().contains("not-for-argv-or-env"));
     assert_eq!(std::fs::read_dir(&credentials).unwrap().count(), 1);
+    drop(started);
+    for _ in 0..3 {
+        reconciler.perform_start(&helper, helper.member.as_ref().unwrap(), "helper restart").unwrap();
+    }
     let receipts = store.observations_for(&helper.subject, "agent.helper-launched").unwrap();
+    assert!(receipts.len() >= 3, "each launch needs a distinct durable receipt");
     let receipt = receipts.last().unwrap();
     assert_eq!(receipt.body["fields"]["launcher"], "agent/node.launcher");
     assert_eq!(receipt.body["fields"]["person"], "person/avery");
     assert_eq!(receipt.body["fields"]["credential_home_label"], "credentials");
     assert!(receipt.body["fields"]["operation_id"].is_string());
     assert!(!serde_json::to_string(receipt).unwrap().contains(credentials.to_str().unwrap()));
+    let ids: Vec<_> = receipts.iter().map(|receipt| receipt.id.clone()).collect();
     let id = receipt.id.clone();
     store.trim_local_observations(u128::MAX, 1, 100).unwrap();
     assert!(store.observations_for(&helper.subject, "agent.helper-launched").unwrap().iter().any(|claim| claim.id == id));
     store.trim_local_observations(0, 1, 0).unwrap();
     assert!(store.observations_for(&helper.subject, "agent.helper-launched").unwrap().iter().any(|claim| claim.id == id));
+    let retained = store.observations_for(&helper.subject, "agent.helper-launched").unwrap();
+    assert!(ids.iter().all(|id| retained.iter().any(|claim| &claim.id == id)));
 }
 
 #[test]
