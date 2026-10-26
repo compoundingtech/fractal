@@ -1045,6 +1045,31 @@ class StTest(unittest.TestCase):
         self.assertIn(expected, json.dumps(statement))
         self.assertEqual(self.run_st_test('--status', '--check', 'demo')[0], 0, 'the tree CI judges now is the one signed')
 
+    def test_a_branch_with_an_old_st_test_runs_the_base_s_copy_once(self):
+        stub = ('import json, os, sys\n'
+                'print(json.dumps({"copy": "base", "argv": sys.argv[1:], "guard": os.environ.get("ST_TEST_REEXEC")}))\n')
+        self.main_commits('scripts/st-test', stub)  # main's st-test now differs from the copy this branch runs
+        base = git(self.work, 'rev-parse', 'origin/main')
+        run = lambda **extra_env: subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', '--base', 'origin/main'], cwd=self.work,
+                                                capture_output=True, text=True, timeout=60, env=dict(GIT_ENV, HOME=str(self.home), **extra_env))
+        done = run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout), {'copy': 'base', 'argv': ['--list', '--base', 'origin/main'], 'guard': base})
+        self.assertIn("running the base's st-test (origin/main at", done.stderr)
+        done = run(ST_TEST_REEXEC=base)  # already the base's copy: it runs itself, never re-executes again
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn('"copy": "base"', done.stdout)
+        self.assertIn('linux-gate:', done.stdout)  # this copy's own --list
+        # A real base copy (this st-test, one line newer) runs and removes the copy it was written to when it ends.
+        self.main_commits('scripts/st-test', (ROOT / 'scripts/st-test').read_text() + '# newer\n')
+        scratch = Path(self.tmp.name) / 'tmp'
+        scratch.mkdir()
+        done = run(TMPDIR=str(scratch))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("running the base's st-test", done.stderr)
+        self.assertIn('linux-gate:', done.stdout)
+        self.assertEqual(list(scratch.iterdir()), [])
+
     def test_when_main_moved_only_unprotected_files_the_head_tree_is_signed_as_before(self):
         self.branch_from_a_base_with_the_gate()
         head_tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
