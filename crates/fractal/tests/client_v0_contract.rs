@@ -1200,7 +1200,7 @@ async fn collection_socket_accepts_out_of_range_ignored_trace() {
     let state = test_state(root.path());
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix(&server_socket, st3::api::router(state)).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await.unwrap();
     });
     for _ in 0..100 {
         if socket.exists() { break; }

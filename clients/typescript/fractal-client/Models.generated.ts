@@ -1145,6 +1145,7 @@ export type CollectionCommand = ({
   person?: string | null;
   since_ms?: number;
   status?: null;
+  trace?: SubscribeTraceContext;
   until_ms?: number;
 } | {
   actor?: string | null;
@@ -1154,6 +1155,7 @@ export type CollectionCommand = ({
   limit?: number;
   person?: string | null;
   status?: string | null;
+  trace?: SubscribeTraceContext;
 } | {
   actor?: string | null;
   agent?: (AgentId | null);
