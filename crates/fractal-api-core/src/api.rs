@@ -72,6 +72,8 @@ mod client_blobs;
 mod client_documents;
 #[cfg(test)]
 mod terminal_gate_evidence;
+#[cfg(all(test, target_os = "linux"))]
+mod peer_process_tests;
 mod message_bodies;
 mod client_adapters;
 mod client_diagnostics;
@@ -6267,6 +6269,9 @@ async fn serve_reserved_unix_with_ancestor_ready(
         // Every local connection names its caller, so request counts by client are always on.
         let mut diagnostic_connection = crate::relay_trace::Connection::capture();
         let peer_pid = local_peer_pid(&stream);
+        // This must precede dispatch: the numeric peer PID can be recycled while
+        // a descendant continues using the connector's inherited socket.
+        let peer_process = local_peer_process(&stream).ok();
         let app = app.clone();
         tokio::spawn(async move {
             if let Some(connection) = &mut diagnostic_connection {
@@ -6302,6 +6307,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                 let bound_agent = bound_agent.clone();
                 let caller = caller.clone();
                 let delivery_peer = delivery_peer.clone();
+                let peer_process = peer_process.clone();
                 async move {
                     let mut request = request.map(Body::new);
                     if let Some(connection) = diagnostic_connection {
@@ -6310,6 +6316,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(pid) = peer_pid {
                         request.extensions_mut().insert(LocalPeer {
                             pid,
+                            peer_process,
                             ancestor: bound_agent.clone(),
                         });
                     }
@@ -6439,6 +6446,43 @@ fn native_delivery_identity(
         archives_inbox,
     })
 }
+/// Capture the kernel connector generation, independently of generic local auth.
+pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fractal_runtime::PeerProcessIdentity> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::{FromRawFd as _, OwnedFd};
+        let pid = local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?;
+        // Linux 6.5 added SO_PEERPIDFD; older libc headers may not name it yet.
+        const SO_PEERPIDFD: libc::c_int = 77;
+        let mut fd: libc::c_int = -1;
+        let mut length = std::mem::size_of_val(&fd) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, SO_PEERPIDFD,
+                (&mut fd as *mut libc::c_int).cast(), &mut length)
+        };
+        let pidfd = if result == 0 {
+            anyhow::ensure!(fd >= 0, "SO_PEERPIDFD returned an invalid descriptor");
+            // Successful SO_PEERPIDFD transfers a fresh descriptor to us.
+            let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+            anyhow::ensure!(length as usize == std::mem::size_of_val(&fd),
+                "SO_PEERPIDFD returned an invalid descriptor length");
+            owned
+        } else {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ENOPROTOOPT | libc::EINVAL)) {
+                anyhow::bail!("helper credential inheritance requires Linux SO_PEERPIDFD (kernel 6.5+): {error}");
+            }
+            anyhow::bail!("SO_PEERPIDFD failed: {error}");
+        };
+        fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
+    }
+}
+
 
 #[cfg(target_os = "linux")]
 pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
@@ -10074,6 +10118,8 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
 #[derive(Clone, Debug)]
 pub struct LocalPeer {
     pub pid: u32,
+    /// Accept-time generation witness; absent if the platform cannot prove it.
+    pub peer_process: Option<fractal_runtime::PeerProcessIdentity>,
     pub ancestor: Option<String>,
 }
 

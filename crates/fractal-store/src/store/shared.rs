@@ -221,6 +221,7 @@ impl Store {
                 )
                 .map_err(internal)?;
             for (position, claim) in batch.claims.iter().enumerate() {
+                super::classify_replicated_claim_with_registry(claim, fractal_schema::registry())?;
                 ensure_claim_blobs(&transaction, claim)?;
                 smallclaims::store::canonical::record_position_tx(
                     &transaction,

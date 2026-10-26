@@ -243,7 +243,7 @@ export class Feed {
   private heard(): void {
     if (!this.socket) return; // Node fakes or Expo Go do not expose protocol control frames.
     clearTimeout(this.heartbeat);
-    this.heartbeat = setTimeout(() => this.dropped(new Error('st stopped answering')), HEARTBEAT_WAIT_MS);
+    this.heartbeat = setTimeout(() => this.dropped(new Error('Fractal stopped answering')), HEARTBEAT_WAIT_MS);
   }
 
   setInventoryGranted(granted: boolean): void { this.inventory.setGranted(granted); }
@@ -284,7 +284,7 @@ export class Feed {
     this.handlers.onConnection(this.failures ? 'reconnecting' : 'connecting');
     try {
       let waiting: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<never>((_, reject) => { waiting = setTimeout(() => reject(new Error('st did not answer')), OPEN_WAIT_MS); });
+      const timeout = new Promise<never>((_, reject) => { waiting = setTimeout(() => reject(new Error('Fractal did not answer')), OPEN_WAIT_MS); });
       const attempt = this.client.collectionStream({
         ...(this.socket ? { socket: (url, protocols, headers) => {
           const socket = this.socket!(url, protocols, headers);

@@ -12,6 +12,23 @@ let work = client.work_list(None, Some(100), false).await?;
 Use `Client::unix_gateway` with a pairing credential for a paired Unix gateway, or
 `Client::fabric_loopback` with an HTTP(S) gateway URL and pairing credential for remote access.
 The HTTP(S) transport does not require Fabric; a reachable authenticated gateway is sufficient.
+
+For a native Fabric connection, use the remote NodeID or unique trusted peer name:
+
+```rust
+let endpoint = fractal_client::fabric::FabricEndpoint::parse(
+    "fabric://studio/st3-client-v0",
+)?;
+let client = fractal_client::Client::fabric(endpoint).with_credential(credential);
+let capabilities = client.capabilities().await?;
+```
+
+The local Fabric daemon resolves names case-insensitively and creates the tunnel;
+there is no HTTP proxy or manual TCP listener. Fabric trust and a protocol grant
+are prerequisites. The transport permits only `/v1/client/` and `/v1/health`;
+pairing credentials and device signing still follow the remote gateway's normal
+authorization policy.
+
 Every manifest read and mutation has a named typed method; raw collection strings, paths, JSON
 parameters, and manually paired action discriminators are private implementation details.
 Mutation callers pass the latest response snapshot and exact resource fences. `ClientError::Api`

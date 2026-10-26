@@ -377,6 +377,26 @@ different from fleet replication secrets. A remote client is always online: v0 h
 mutation queue, push notification sender, cached graph authority, or multi-master replication.
 A paired phone may register a push token ([push registration](push.md)), but nothing sends to it.
 
+### Native Fabric carrier
+
+The CLI and native generated-client transports accept
+`fabric://<node-or-name>/st3-client-v0`. The local Fabric daemon dials the remote
+client gateway protocol directly. An explicit NodeID needs no name lookup;
+otherwise the target must match one trusted Fabric peer name, ignoring ASCII
+case. Ambiguous names fail instead of selecting a peer arbitrarily.
+
+Only `/v1/client/` and `/v1/health` may use this transport. Private routes,
+absolute URLs, and path traversal fail before a Fabric dial. Requests do not
+inherit the trusted-local Unix person's authority merely because Fabric returns
+a local tunnel socket. The gateway still authenticates the paired client and
+checks its scopes and device signatures.
+
+For CLI requests, `FRACTAL_CLIENT_CREDENTIAL` explicitly supplies the remote
+bearer credential. It is never part of the endpoint URL. The reusable Rust client
+uses `Client::fabric(endpoint).with_credential(credential)`.
+Browser and phone runtimes cannot directly invoke a host-local Fabric daemon;
+their existing authenticated HTTP(S) gateway transport remains available.
+
 ### Tailnet carrier
 
 `st up` listens on two different Unix sockets. `st3.sock` is the privileged trusted-local API;
@@ -1247,12 +1267,24 @@ or checkpoint authority. Existing canonical claims and checkpoint rules are unch
 
 Asks, attention actions, message sends and held effects are not pinned by this local-response
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.
-Client actions keep their durable `custom.client.action-result` receipt; normal claim append
-uses its existing operation identity and checkpoint tombstones. Cleanup never deletes these
-claims. Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
+Client actions keep their server-only `client.action-result` receipt in the owner-local
+observation log, with the same durable retention class and ordinary age/count trimming;
+it is not pinned. This does not extend the existing idempotency retention window.
+Replay and receipt compare-and-set read the owner's local receipts, not peer claims.
+Only `agent.launcher-bound` and `agent.helper-launched` are pinned against local age/count
+trimming. Normal claim append uses its existing operation identity and checkpoint tombstones.
+Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
 follow `retryable`, and this new code is terminal. TypeScript/phone `isTransient` and
 `retryTransient` likewise stop on this code; the phone's fresh-fence `notApplied` retry list
 contains only stale-fence/rate-limited. Swift preserves unknown codes and `retryable: false`.
+
+Legacy `custom.client.action-result` receipts cannot prove server authorship, even
+with a local origin and absent/null actor. A retry whose key has any such receipt
+fails closed with HTTP 409 `legacy-action-receipt-untrusted` before dispatch or
+side effects. This covers both actor-bearing old server receipts and old
+client-forged receipts; neither is silently upgraded or replayed. Inspect the
+original outcome before choosing a new key. New typed receipts replay normally.
+No stored claims are rewritten and no migration is required.
 
 Caller keys have one namespace across actors and nodes that share these claims. Use a fresh,
 globally unique key for each new request; keys are not an authorization boundary. Reusing
@@ -2295,6 +2327,61 @@ its usual new-agent directory. The host creates missing agent workspaces. OpenCo
 `effort`. Message text is nonempty, at most 64 KiB, and uses the native harness startup argument.
 An existing active seat requires a different name; a stopped seat may be deliberately recreated.
 
+Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
+emitted exactly once. Short names retain the usual host qualification.
+
+When an agent with runtime evidence creates another agent, the new agent is a
+run-owned helper, regardless of harness. An agent identity with no runtime
+observation retains the ordinary non-inheriting creation flow: no launcher run or
+credential reference is inferred. The server records an owner-local `agent.launcher-bound`
+receipt with the authenticated launcher, its person owner (if known), the selected
+declaration, and the exact launcher runtime incarnation. Claude and Codex helpers
+must match the launcher's credential-bearing harness and inherit only that
+harness's credential-directory reference; cross-provider creation is refused.
+The helper retains its own agent identity. Credential files and secret values are never copied into
+arguments or environment variables. Absolute credential-directory references remain
+host-local; owner-local action receipts carry only non-authoritative attribution
+labels. Peer-replicated binding and action-result claims cannot grant authority.
+An unowned launcher does not confer person ownership.
+Credential-directory references are local to the launcher's host, so helpers must
+launch on that host. Inheritance also requires kernel-authenticated Unix socket
+peer credentials and proof that the peer descends from the launcher's exact
+daemon-recorded harness PID and Linux process-start token. Inheritance requires
+Linux with `SO_PEERPIDFD` (kernel 6.5 or newer). The server retains the original
+connector's kernel pidfd and refuses exited connectors, even when the socket
+remains open or its PID is reused. There is no PID-only or start-token fallback:
+an unavailable socket pidfd refuses inheritance without changing ordinary authentication.
+Every intermediate ancestor's generation and parent edge is checked
+again before granting. `ST_AGENT`, headers and other environment values cannot
+establish this grant. Old launcher runs without process provenance must be
+relaunched. Platforms without verified process ancestry (currently non-Linux),
+missing peer identity, unreadable procfs or unavailable process evidence fail
+closed with a clear refusal; no alternative account or login is selected.
+
+Socket peer credentials and a pidfd identify the original connector, not the
+current writer of each request. A descriptor handed over by the launcher's
+subtree retains that connector's authority while its identity remains live:
+this is delegation. Ancestry trusts the entire launcher subtree; it is not
+isolation between its descendants. Do not pass an authenticated descriptor to
+an untrusted process.
+
+Reconciliation stops a helper when that exact launcher incarnation ends.
+Spawning and restarting refuse an ended binding, including after a daemon
+restart; the credential reference is no longer usable for a new launch.
+Restarting the launcher ends its helpers: the new incarnation must create them
+again. Historical binding receipts remain for attribution.
+Each successful helper launch atomically records a server-only, durable owner-local
+`agent.helper-launched` receipt with its launcher, person owner, credential-home
+label, launcher incarnation, and operation ID. Age and count retention preserve it.
+Client-writable or peer-replicated receipts cannot grant binding authority.
+A declaration edit cannot silently switch the helper to a different login:
+if it no longer matches its credential receipt, stop and recreate the helper.
+
+This is a Fractal lifecycle bound, not native process containment: while the
+daemon is unavailable, a helper can outlive its launcher until reconciliation
+resumes. Agent Policy accepts this explicit exception; native containment is
+tracked in [#3923](https://github.com/compoundingtech/fractal/issues/3923).
+
 `repo` is an existing repository's absolute path on the selected host. It adds the existing
 `checkout` declaration and creates the agent workspace as a worktree. `base` defaults to
 `origin/main`; `branch` defaults to the simple agent name with Git-invalid characters replaced
@@ -2513,6 +2600,68 @@ ST3_TERMINALS_COMPAT_BIN=/path/to/older/st3 cargo test -p fractal --test integra
 
 Choose a binary built before these terminal filters. The fake legacy-server refusal
 and escaping test, server filter/paging tests, and TypeScript client checks run in CI.
+
+### Native delivery receipt links
+
+Capability `conversation-delivery-links` version 1 supports the optional top-level
+`TimelineEntry.delivers` message reference. Request it with
+`X-St3-Features: conversation-delivery-links.v1` (alongside any other features).
+A link names the Small Talk message consumed by that native user turn. Use
+`message.read` to retrieve its full body; a clipped native envelope is a preview.
+Without this feature the field is omitted, including on relayed and cached pages.
+The updated Rust owner-relay client negotiates it and preserves it through typed
+serialization; older daemons/clients keep their existing envelope workaround.
+
+The first producer is Claude's current verified transcript binding, explicit
+user-record id and existing consumption predicate. Queue acceptance/removal,
+ordinal-only ids, other unqualified adapters and old receipts supply no link.
+The lookup uses the qualified transcript's driver/native session identity; managed
+route session IDs and cursors remain separate and unchanged. The owner retains
+only native session/record ids beside the newly appended read
+receipt in the same existing writer savepoint. Claim body, signature, receipt
+operation/idempotency digest and ACK timing are unchanged. This local metadata
+is not replicated, a transcript payload or an admission authority. No history
+is backfilled: restore from claim-only backups leaves these links unavailable.
+A normal reopen retains metadata. Acceptance-time corrections keep the binding;
+updates to the receipt's id, subject, kind, actor, origin or body retire it. The
+conditional deletion trigger also clears it with foreign keys disabled. Reads
+never initialize or rebuild it. A private receipt-meaning fingerprint (subject,
+actor, origin and canonical receipt body) refuses changed/reused ids even if a
+fault or unsupported table copy lost its update trigger. It is an equality
+witness, never native authority. The lookup bounds count missing and above-cut
+physical candidates too; its logical cut checks the current claim row position.
+
+The actual production projection replay/rebuild retains claim ids/rows, this
+local table and its triggers. The old migration in store.rs swaps batches only;
+it does not replace claims, and their native receipt bindings survive. The cited
+foreign-keys-off deletion in peer.rs is a test fault on intent.desired claims.
+Actual retention/repair deletions of receipt rows retire the local binding;
+claim-only reinsertion/restoration does not guess or rebuild it. Arbitrary
+claims-table replacement is not a supported migration: a future implementation
+must preserve proof metadata for unchanged claim identities/meaning, reinstall
+guard triggers, and explicitly retire changed ids. Missing or changed receipts
+never produce a link. Earlier unreleased v1 PR-head metadata is not adopted or
+backfilled into v2; the optional link remains unavailable for those old receipts.
+
+The daemon currently validates only the identity's well-formed shape from its
+authenticated Claude delivery peer. Matching that session/record to the verified
+Claude binding and existing envelope-consumption predicate happens in the
+channel, not again in the daemon. A compromised authenticated seat can therefore
+mislabel links in its own timelines; this feature grants no new native authority.
+If the same-savepoint metadata INSERT fails, the read receipt is rolled back and
+no ACK is issued. Existing receipt recovery retains the frozen proof and retries
+with exponential delay capped at 30 seconds. The delay and each request remain
+bounded; there is no new finite retry count, TTL eviction or silent proof loss.
+
+One statement checks at most 200 selected native ids, at most three indexed
+receipts each, and at most 4 KiB of receipt body each. Two eligible receipts for
+one native turn, an exhausted physical bound, repaired/noncanonical claims or
+missing operation proof leave the optional field absent. Newly recorded receipts
+wake the existing follower and cause its ordinary cursor-gap refresh when they
+would change an already delivered native entry. This is receipt provenance,
+not a read-after-send guarantee or proof that the owner's harness has delivered
+any unobserved send. Daemons roll out first. Optional author/recipients fields
+are a separate approved follow-up; existing from/to types are unchanged here.
 
 ### Owner-native conversation blocks
 
