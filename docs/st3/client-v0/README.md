@@ -2534,8 +2534,8 @@ subjects remain distinct: neither matching text nor temporal proximity proves
 one shared send. This slice adds truthful optional identities without changing
 SEND, receipt, idempotency, grouping, ordering or paging semantics. Native turns
 without an authoritative graph message claim do not invent these fields.
-Daemons roll out first; old codecs ignore additive fields, old clients keep
-working against the unchanged scalar types, and new consumers opt in explicitly.
+Daemons roll out first; unnegotiated clients receive neither addition and keep
+working against the unchanged scalar types. New consumers opt in explicitly.
 
 ### Native delivery receipt links
 
