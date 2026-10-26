@@ -7289,6 +7289,54 @@ mod tests {
     }
 
     #[test]
+    fn held_down_in_the_palette_moves_every_row_over_an_attached_terminal() {
+        use crossterm::event::{Event, KeyEventKind};
+
+        for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+            let mut ui = glass();
+            ui.live = true;
+            let shell = "terminal/example-shell".to_owned();
+            ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
+            ui.terminal = Some(crate::ui::TerminalView {
+                agent: shell.clone(),
+                title: "shell".into(),
+                name: "shell".into(),
+                lines: Vec::new(),
+                cursor: None,
+                stale: None,
+                ended: None,
+                native: None,
+            });
+            ctrl(&mut ui, 'k');
+            assert!(ui.terminal_focused(), "the terminal stays focused under the palette");
+            let count = ui.matches(ui.glasses.palette.as_ref().unwrap()).len();
+            assert!(count > 6);
+            ui.effects.clear();
+            for n in 1..=50 {
+                let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, kind);
+                ui.input_event(Event::Key(key));
+                assert_eq!(
+                    ui.glasses.palette.as_ref().unwrap().selected,
+                    n.min(count - 1),
+                    "{kind:?} event {n} must move exactly one row, clamped"
+                );
+            }
+            let release = KeyEvent::new_with_kind(
+                KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Release,
+            );
+            ui.input_event(Event::Key(release));
+            assert_eq!(ui.glasses.palette.as_ref().unwrap().selected, count - 1);
+            let enter = KeyEvent::new_with_kind(
+                KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat,
+            );
+            ui.input_event(Event::Key(enter));
+            assert!(ui.palette_open(), "held Enter must not open the selection");
+            assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell)));
+            assert!(ui.effects.is_empty(), "navigation must not request daemon work");
+        }
+    }
+
+    #[test]
     fn a_click_in_another_split_focuses_it() {
         let mut ui = glass();
         ui.open_in_glass(

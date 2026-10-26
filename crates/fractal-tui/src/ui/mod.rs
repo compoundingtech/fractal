@@ -4089,11 +4089,15 @@ impl Ui {
     }
 
     /// Whether a held key may act again as a press. While text is being typed (a message box,
-    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may; outside
-    /// it only the keys that move. Never a pending confirmation or answer: Enter, y and the
+    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may;
+    /// the palette owns input even over a focused terminal. Outside it only the keys that move.
+    /// Never a pending confirmation or answer: Enter, y and the
     /// commands that change things act once per press, so holding one can never repeat them.
     fn repeat_is_safe(&self, key: &KeyEvent) -> bool {
-        if self.confirm.is_some() || self.answering.is_some() || self.terminal_focused() {
+        if self.confirm.is_some()
+            || self.answering.is_some()
+            || (self.terminal_focused() && !self.palette_open())
+        {
             return false;
         }
         let typing = self.editing
