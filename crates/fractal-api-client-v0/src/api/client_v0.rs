@@ -14900,12 +14900,12 @@ subscription "watch/source" {
             let root = tempfile::tempdir().unwrap();
             let state = test_state(root.path());
             let session = ClientSession::local(Some("person/alex")).unwrap();
-            // Invalid creation must fail if dispatch occurs; forged replay used to bypass it.
+            // A valid creation must be refused before dispatch when a legacy receipt exists.
             let request = ActionRequest {
                 api_version: CLIENT_API_VERSION.into(), id: "action/forged-helper".into(),
                 action_type: "agent.create".into(), idempotency_key: "forged-helper-key".into(),
                 fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
-                parameters: json!({}),
+                parameters: json!({"name":"forged-helper", "harness":"codex", "workspace":root.path()}),
             };
             let digest = hex::encode(Sha256::digest(
                 format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
