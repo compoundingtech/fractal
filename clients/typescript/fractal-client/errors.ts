@@ -11,19 +11,22 @@ export function plainMessage(code: Code | string | undefined, message: string): 
   switch (code) {
     // A native prompt's answer is refused in words written for the person: the prompt was
     // answered elsewhere or replaced, or only its terminal can answer it.
-    case 'stale-fence': return message.startsWith('that prompt ') ? message : 'st changed while this was on its way, so it was not applied';
+    case 'stale-fence': return message.startsWith('that prompt ') ? message : 'Fractal changed while this was on its way, so it was not applied';
     case 'page-cursor-expired':
     case 'cursor-gap': return 'the list changed while it was being read';
     case 'remote-unavailable': return host ? `${host} cannot be reached right now` : 'the host this lives on cannot be reached right now';
-    case 'rate-limited': return 'st asked to slow down for a moment';
-    case 'runtime-authority-indeterminate': return 'st cannot tell yet which host runs this';
+    case 'rate-limited': return 'Fractal asked to slow down for a moment';
+    case 'runtime-authority-indeterminate': return 'Fractal cannot tell yet which host runs this';
     case 'idempotency-conflict': return 'this was already sent once in another form, so it was not sent again';
-    case 'unsupported-capability': return `this st does not do that yet (${message})`;
+    case 'unsupported-capability': return `Fractal does not do that yet (${message})`;
     case 'not-found': return `it is gone: ${message}`;
     case 'forbidden': return `not allowed: ${message}`;
-    case 'internal': return `st hit a problem: ${message}`;
+    case 'internal': return `Fractal hit a problem: ${message}`;
     case 'terminal-ended': return 'the terminal ended: its process exited';
     case 'terminal-unavailable': return 'the terminal cannot be reached right now';
+    case 'timeline-history-incomplete': return message === 'the retained transcript starts after its first entries; st cannot show it from the start'
+      ? 'the retained transcript starts after its first entries; Fractal cannot show it from the start'
+      : message;
     default: return message;
   }
 }
@@ -59,11 +62,11 @@ export function promptGone(error: unknown): boolean {
 
 /** Any error as a person reads it. */
 export function plainError(error: unknown): string {
-  if (appliedAnswer(error) === 'unknown') return 'st may have taken it and has not confirmed it yet; sending it again is safe';
+  if (appliedAnswer(error) === 'unknown') return 'Fractal may have taken it and has not confirmed it yet; sending it again is safe';
   if (error instanceof ClientError) return plainMessage(error.response.code, error.response.message);
   if (error instanceof Error) {
-    if (/network request failed|failed to fetch/i.test(error.message)) return 'st cannot be reached right now';
-    if (/timed? ?out|deadline/i.test(error.message)) return 'st took too long to answer; it may or may not have done it';
+    if (/network request failed|failed to fetch/i.test(error.message)) return 'Fractal cannot be reached right now';
+    if (/timed? ?out|deadline/i.test(error.message)) return 'Fractal took too long to answer; it may or may not have done it';
     return error.message;
   }
   return String(error);

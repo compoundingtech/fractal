@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { ClientError, appliedAnswer, isTransient, isTransientCode, notApplied, outcomeUnknown, plainError, plainMessage, promptGone, retryTransient } from '../../clients/typescript/fractal-client/index.ts';
 
 // st's errors read as sentences, as in the Rust client: no codes reach a person.
-assert.equal(plainMessage('stale-fence', 'the client snapshot changed before the action was submitted'), 'st changed while this was on its way, so it was not applied');
+assert.equal(plainMessage('stale-fence', 'the client snapshot changed before the action was submitted'), 'Fractal changed while this was on its way, so it was not applied');
 // A native prompt's refusal keeps st's own words: why it cannot be answered from here.
 assert.equal(plainMessage('stale-fence', 'that prompt is no longer waiting: it was answered or replaced'), 'that prompt is no longer waiting: it was answered or replaced');
 assert.equal(plainMessage('remote-unavailable', 'owner host/Juniper is temporarily unavailable; cached data remains usable'), 'Juniper cannot be reached right now');
@@ -10,7 +10,7 @@ assert.equal(plainMessage('not-found', 'agent `agent/x` does not exist'), 'it is
 assert.equal(plainMessage(undefined, 'invalid subscription'), 'invalid subscription');
 const refused = code => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'm', retryable: false, details: {} }, 409);
 assert.equal(plainError(refused('forbidden')), 'not allowed: m');
-assert.equal(plainError(new TypeError('Network request failed')), 'st cannot be reached right now');
+assert.equal(plainError(new TypeError('Network request failed')), 'Fractal cannot be reached right now');
 
 assert.ok(isTransient(refused('stale-fence')) && !isTransient(refused('not-found')));
 assert.ok(isTransientCode(undefined) && isTransientCode('page-cursor-expired') && !isTransientCode('forbidden'));
@@ -42,7 +42,7 @@ const answered = (code, applied, status = 503) => new ClientError({ api_version:
 const unconfirmed = answered('message-send-unconfirmed', 'unknown');
 assert.equal(appliedAnswer(unconfirmed), 'unknown');
 assert.ok(outcomeUnknown(unconfirmed) && !notApplied(unconfirmed), 'it may still complete: repeat the identical request, never a new one');
-assert.equal(plainError(unconfirmed), 'st may have taken it and has not confirmed it yet; sending it again is safe');
+assert.equal(plainError(unconfirmed), 'Fractal may have taken it and has not confirmed it yet; sending it again is safe');
 const queueFull = answered('rate-limited', 'none', 429);
 assert.ok(notApplied(queueFull) && !outcomeUnknown(queueFull), 'nothing was queued: a fresh request is safe');
 assert.ok(notApplied(answered('some-future-code', 'none')), 'the answer decides, not the code');

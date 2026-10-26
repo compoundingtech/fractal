@@ -7,12 +7,13 @@ const ts = require('typescript');
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'st3-ts-client-'));
 fs.writeFileSync(path.join(temporary, 'package.json'), JSON.stringify({ type: 'commonjs' }));
-for (const name of ['Models.generated', 'Client.generated', 'fetch-receiver.test']) {
+for (const name of ['Models.generated', 'Client.generated', 'errors', 'fetch-receiver.test']) {
     const source = fs.readFileSync(path.join(__dirname, `${name}.ts`), 'utf8');
     const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, rewriteRelativeImportExtensions: true } }).outputText;
     fs.writeFileSync(path.join(temporary, `${name}.js`), output);
 }
 const { FractalClient, ClientError, applyWindow } = require(path.join(temporary, 'Client.generated.js'));
+const { plainMessage, plainError } = require(path.join(temporary, 'errors.js'));
 require(path.join(temporary, 'fetch-receiver.test.js'));
 fs.rmSync(temporary, { recursive: true, force: true });
 
@@ -1050,4 +1051,22 @@ test('schedules list preserves unknown rows and explicitly encodes one page; old
         'https://example.test/v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000',
         'https://example.test/v1/client/schedules',
     ], 'cached capabilities, no unsupported fallback or automatic page traversal');
+});
+
+test('legacy product sentences render as Fractal without rewriting other server text', () => {
+    assert.equal(plainMessage('stale-fence', 'the client snapshot changed before the action was submitted'), 'Fractal changed while this was on its way, so it was not applied');
+    assert.equal(plainMessage('stale-fence', 'that prompt is no longer waiting: it was answered or replaced'), 'that prompt is no longer waiting: it was answered or replaced');
+    assert.equal(plainMessage('timeline-history-incomplete', 'the retained transcript starts after its first entries; st cannot show it from the start'), 'the retained transcript starts after its first entries; Fractal cannot show it from the start');
+    assert.equal(plainMessage('timeline-history-incomplete', 'st kept a partial note'), 'st kept a partial note');
+    assert.equal(plainMessage('internal', 'disk full'), 'Fractal hit a problem: disk full');
+    assert.equal(plainMessage('unsupported-capability', 'widgets'), 'Fractal does not do that yet (widgets)');
+    assert.equal(plainMessage(undefined, 'please use st'), 'please use st');
+    const refused = (code, details = {}) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'm', retryable: false, details }, 409);
+    assert.equal(plainError(refused('forbidden')), 'not allowed: m');
+    assert.equal(refused('forbidden').response.api_version, 'st3.client.v0');
+    assert.equal(plainError(new TypeError('Network request failed')), 'Fractal cannot be reached right now');
+    assert.equal(plainError(new TypeError('please use st')), 'please use st');
+    const unconfirmed = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'message-send-unconfirmed', message: 'the database has not confirmed the send', retryable: false, details: { applied: 'unknown' } }, 503);
+    assert.equal(plainError(unconfirmed), 'Fractal may have taken it and has not confirmed it yet; sending it again is safe');
+    assert.equal(unconfirmed.response.message, 'the database has not confirmed the send');
 });
