@@ -15933,6 +15933,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             actual["error_code"] != "rate-limited") {
             next_check = next_check.min(now_ms().saturating_add(u128::from(spec.every_ms.unwrap())));
         }
+        // Provider retry deadlines remain a lower bound even after a restart or a
+        // desired revision change. Older rate-limit receipts have no revision.
+        if refresh_attempt.is_none()
+            && let Some(retry_at) = observer_actual.as_ref()
+                .filter(|actual| actual["error_code"] == "rate-limited")
+                .and_then(|actual| actual.get("next_check_unix_ms"))
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<u128>().ok())
+        {
+            next_check = next_check.max(retry_at);
+        }
         let observer_prefix = format!("{}:", observer.subject);
         let operation_prefix = format!("{observer_prefix}{revision}:{}:",
             refresh_attempt.as_deref().unwrap_or("scheduled"));
@@ -35325,10 +35336,9 @@ observer "repo" {
                 loop {
                     let deadline = reconciler.observer_deadlines.lock().unwrap().get(&key).copied();
                     if calls.load(Ordering::SeqCst) == expected
-                        && deadline.is_some() && deadline != old {
+                        && let Some(deadline) = deadline.filter(|deadline| Some(*deadline) != old) {
                         let actual = reconciler.store.latest_actual_value(subject).unwrap().unwrap();
                         assert_eq!(actual["state"], "healthy", "{subject} poll {expected}: {actual}");
-                        let deadline = deadline.unwrap();
                         assert!(deadline >= before + interval,
                             "{subject} poll {expected}: next delay {}ms, expected at least {interval}ms", deadline.saturating_sub(before));
                         assert!(deadline <= now_ms() + interval,
