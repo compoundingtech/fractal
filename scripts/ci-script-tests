@@ -9,6 +9,8 @@
 set -euo pipefail
 . "$(dirname "$0")/script-test-supervisor"
 . "$(dirname "$0")/git-env-clean"
+# Fixture repositories must not inherit a developer's hooks, identity or signing settings.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 root=$(cd "$(dirname "$0")/.." && pwd)
 sparse=$(mktemp -d "${TMPDIR:-/tmp}/ci-script-tests.XXXXXX")
 trap 'rm -rf "$sparse"' EXIT
@@ -27,5 +29,5 @@ parallel_tests \
   evidence-wrap-test ci-evidence-signing-test evidence-publish-test ci-evidence-shadow-test nix-check-facts-test \
   ci-evidence-gate-test evidence-flip-ready-test evidence-skip-report-test ci-evidence-presign-notice-test evidence-sign-hardening-test ci-daily-long-report-test \
   ci-nextest-flaky-test nix-typescript-client-test nix-evidence-job-test ci-nextest-test ci-local-web-test ci-sparse-tree-test \
-  ci-rust-test-notes-test lane-definition-closure-test \
+  ci-rust-test-notes-test lane-definition-closure-test review-risk-test review-validate-test \
   check-pty-boot-identities-test

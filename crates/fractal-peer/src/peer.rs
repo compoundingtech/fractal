@@ -1989,7 +1989,7 @@ mod tests {
             &error, ReplicationFailurePhase::FollowUpExport, Duration::from_millis(123), None,
         );
         assert_eq!(contextual.phase, ReplicationFailurePhase::FollowUpExport);
-        assert_eq!(contextual.elapsed_ms, 123);
+        assert_eq!(contextual.elapsed_ms, failure.elapsed_ms);
         assert_eq!(contextual.http_status, Some(500));
     }
 

@@ -67,7 +67,7 @@ const sendFailureDetails: Readonly<Record<Extract<SendState, { _tag: 'Failed' }>
     failed: 'The message could not be sent. Check your connection and retry.',
     'stale-fence': 'The conversation changed before this message could be sent. Retry to use its current state.',
     'snapshot-unavailable': 'The conversation could not be loaded for sending. Nothing was sent. Retry when it is available.',
-    unconfirmed: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.',
+    unconfirmed: 'Fractal may have taken this message and has not confirmed it yet. Sending it again is safe.',
   }
 
 /** Send diagnostics are not display copy, including for unclassified failure reasons. */

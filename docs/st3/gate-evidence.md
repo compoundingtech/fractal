@@ -1129,16 +1129,17 @@ note covers.
 
 | Check | `enforce` | `events` | `sample_one_in` | Since |
 | --- | --- | --- | --- | --- |
-| `typescript-client` | true | `pull_request` | 5 | this change |
-| `fractal-web` (whole-check note; one shard's note never counts) | true | `pull_request` | 5 | 2026-10-23 |
-| `linux-gate` | true | `pull_request` | 5 | 2026-10-23 |
-| `genie-freshness` | true | `pull_request` | 5 | 2026-10-23 |
-| `ci-script-tests` | true | `pull_request` | 5 | 2026-10-23 |
+| `typescript-client` | true | `pull_request` | 1 | this change |
+| `fractal-web` (whole-check note; one shard's note never counts) | true | `pull_request` | 1 | 2026-10-23 |
+| `linux-gate` | true | `pull_request` | 1 | 2026-10-23 |
+| `genie-freshness` | true | `pull_request` | 1 | 2026-10-23 |
+| `ci-script-tests` | true | `pull_request` | 1 | 2026-10-23 |
 
 `typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
 trusted note, 254 of which would have skipped (the rest were sampled or touched a protected file), and not one satisfied note sat beside a failing
 real job; the published notes' shadow verification (`evidence-shadow v1`) was `ok` for every lane in every merge-group run since it landed. The
-sampled one in five keeps comparing the note with a real run. Each further check is its own reviewed change to this table, the policy and the
+sampled one in five kept comparing the note with a real run until 2026-10-26, when sampling was turned off for every check (Nathan: our pull
+requests skip CI entirely; the merge queue's full run is the comparison). Each further check is its own reviewed change to this table, the policy and the
 `enforced` lists in `ci-evidence-gate-test` and `evidence-verify-test`.
 
 ### Which checks our pull requests skipped (`scripts/evidence-skip-report`)
@@ -1340,7 +1341,12 @@ otherwise: the head repository is this repository and the pull request is not a 
 actor and triggering actor are known; the head commit is present or fetchable; the checked-out commit is the merge whose second parent is that head
 (or the head itself); the opener, the actor and the triggering actor are on `.st/evidence-authors.json` at the base and every non-merge commit of
 the branch has a listed author and committer (the signing guard's own `check_authors`, loaded from the base's `ci-evidence-signing`); and no
-protected file differs between the branch point and the head, the base, or the current tip of the merge's first parent. The gate, verifier, policy,
+protected file differs between the branch point and the base, or the current tip of the merge's first parent (main moved one since the
+branch: that is about which tree, so it still falls back). The protected files the branch ITSELF changes no longer make it fall back: they are
+the run's protected changes, and a protected change skips only on a `pull_request` run whose note is a host level's (`OWN_LEVELS` in the gate),
+since 2026-10-26 (Nathan: our pull requests skip CI entirely). That is safe because the run is judged by the gate and verifier the workflow
+fetches from `BASE_SHA`, never the pull request's copies, and the merge queue runs every check in full, so a change to the machinery is tested
+before it lands. Any other note (a fleet note, an agent note) and every `merge_group` run still run a protected change. The gate, verifier, policy,
 keys and author rule are all taken from the base, never from the checkout. The decision line says which: `tree_of=head|merge`, `pr_head=`,
 `merge_tree=` and `head_tree=used` or `head_tree=fallback:<why>`. A `merge_group` run never uses a head tree: only a note for its own tree can skip
 it, and a head-tree decision on any other event is refused (`pull_request_target` is not `pull_request`: it never uses a head tree and never skips). The line also
@@ -1372,7 +1378,10 @@ stopped counting as soon as main moved again. A lane edit is therefore judged by
 when the gate uses the head tree, it passes the branch point (`git merge-base BASE HEAD`) to the verifier as
 `--lane-base`, and the head is held to the lane's definition at that commit. The definition paths must be byte-identical in the head and at
 the branch point (`definition_changed` otherwise: the pull request edits its lane, CI runs it) and the note must carry the branch point's
-`lane_definition_sha256` (`wrong_definition` otherwise). The verifier refuses a lane base that is not an ancestor of the base, and one whose
+`lane_definition_sha256` (`wrong_definition` otherwise). A level whose by_level rule says `"lane": "tree"` (the host level, since 2026-10-26)
+may edit its lane: its note must then carry the digest of the lane as the SIGNED tree defines it (the base's argv and paths, the tree's bytes;
+`tree_sha256` beside `sha256` in `lane_definition`), so it covers that edited definition and no other. `evidence-wrap` records that digest.
+The verifier refuses a lane base that is not an ancestor of the base, and one whose
 `.st/required-lanes.json` differs from the base's (`definition_changed`), so the argv and paths are the base's either way; the gate never
 uses a head tree whose branch point has another lane file anyway (it is a protected path). What this admits, stated plainly: a note made
 with an older lane definition that main had accepted, for a pull request that changed none of it; the merge queue still tests the
@@ -1438,13 +1447,18 @@ request run asks about"), so the tree you built and signed is the tree that coun
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a clean
 worktree of that commit, so untracked or ignored files in your checkout cannot change the result. The worktree is one of a small pool
-of persistent ones per repository (`~/.cache/st-test/<hash of the git common dir>/tree-N`), each held by an flock while a run uses it
+of persistent ones per ORIGIN (`~/.cache/st-test/pools/<hash of the normalised origin URL>/tree-N`; a clone without an origin has a pool of its own, keyed by its git common dir), each held by an flock while a run uses it
 (a run waits for a free one and never shares one with a concurrent run); before each run the tree is reset to the commit and stripped of
 untracked and ignored files except the inputs that cost minutes to fetch again (the megarepo members under `repos/`, every `node_modules/`
 and `target/compat-baselines/`), and its tracked files must equal the commit (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
 fingerprints and sccache's absolute-path keys stay valid and a second run is warm. `ST_TEST_TREES` sets the pool size (default: the
 host's heavy slots from `~/.config/cargo-heavy-slots`, plus one; `off` runs in a fresh throwaway worktree as before) and `ST_TEST_POOL`
-its directory. When that tree has a
+its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked by `ST_AGENT` in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`), aged like the cargo shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. its directory. **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
+the slot keeps its path (`tree-N` and `target-N`, so cargo's ids for the workspace crates, which contain the path, still match), and when the tree
+there was last registered by another clone it is re-registered as a worktree of the clone now running (its notes land in that clone) while the inputs
+the cleaning keeps (members, installed dependencies, compat baselines) move across by rename. The run still signs only what it built and tested in
+its own exact tree: the tree is reset to the commit and cleaned every run, whoever used the slot before. The pool cap (`ST_TEST_POOL_MAX_GB`)
+evicts whole slots, least recently used first, the old per-clone layout included. When that tree has a
 `megarepo.lock`, its members are materialized under `repos/` first with the command CI's `megarepoApplyStep` runs (`mr apply`
 from the flake's effect-utils pin; a test pins the two together): `genie-freshness` imports `repos/effect-utils`, and the dev
 shells only warn when it is missing. If that fails, no check runs and nothing is signed. A failing run is
@@ -1452,6 +1466,25 @@ recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from t
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
+Without `--push`, the run keeps its records in this repository's local refs: per record a tag `refs/tags/evidence/<tree>/<record>` and a note
+`refs/notes/evidence/<tree>/<record>` (per-crate test records add `refs/tags/evidence/input/rust-tests/<key>/<record>` and
+`refs/notes/evidence-input/rust-tests/<key>/<record>`). Run `scripts/st-test --status` to see each check's coverage, not the tree ID.
+The run's summary prints a short tree ID; its JSON run record has the full `tree` in
+`${XDG_STATE_HOME:-$HOME/.local/state}/st-test/runs.jsonl` (`ST_TEST_RUNS` overrides that path; `off` disables recording).
+Use that run's full tree ID, not necessarily `HEAD^{tree}`: when protected files differ from the branch point, it signs the merge with
+`origin/main`. Without a run record, expand the summary's short ID with `tree=$(git for-each-ref --format='%(refname)'
+"refs/notes/evidence/SHORT*" | cut -d/ -f4 | sort -u)`; proceed only if `test "$(printf '%s\n' "$tree" | wc -l)" -eq 1 &&
+test "${#tree}" -eq 40` succeeds (one full tree ID, not an absent or ambiguous prefix).
+To publish by hand, set `tree` to that full ID and push only that tree's refs: `git push origin $(git for-each-ref
+--format='%(refname):%(refname)' "refs/tags/evidence/$tree/" "refs/notes/evidence/$tree/")`. Add the run's
+`refs/tags/evidence/input/...` and `refs/notes/evidence-input/...` refs that the remote lacks as explicit `REF:REF` arguments to that push
+(compare with `git ls-remote --refs origin 'refs/tags/evidence/input/*' 'refs/notes/evidence-input/*'`). Do not push the full evidence globs:
+a shared clone holds other runs' records too, and sending them all can fail with a remote `Internal Server Error` per ref.
+Push the evidence refs before `git push origin HEAD:BRANCH`, so the branch's first CI run finds them; existing evidence refs are never
+updated or deleted (a ruleset protects `refs/tags/evidence/**`). An agent note can yield `decision=skip ... signer=<principal>` only for
+wrapper-kind checks on `pull_request` runs, never in the merge queue (see "Agent keys"), and only when all skip conditions hold.
+A sampled pull request (one in five), or a check whose skip policy is still shadow, instead shows
+`decision=run outcome=satisfied ... signer=<principal>`: the note counts, but the real job still runs.
 On a host that runs the evidence log (`evidence-log.service` installed as a systemd user unit, see "Portable evidence" in the plan), a
 run with `--push` then starts that unit without waiting (`systemctl --user start --no-block evidence-log.service`, or the JSON argv in
 `ST_EVIDENCE_LOG_NUDGE`): a pass counts only once the log lists it, so the agent's record is logged in seconds instead of at the next
@@ -1496,13 +1529,17 @@ output), which a signature on the head does not cover. `st-test` asks the base's
 `choose_tree` calls: one rule, not a copy). When it says fallback, `st-test` makes the merge of the head with the base as a commit (`git merge-tree`,
 nothing is checked out in your clone), signs and tests THAT tree in its pool tree, and says so; if the branch does not merge cleanly it refuses and tells
 you to merge the base into the branch first. `st-test --status`, which the pre-push hook asks, judges the same tree, so a push is refused when the tree CI
-will judge is not covered even if the head tree is.
+will judge is not covered even if the head tree is. A run that waits for a pool tree fetches the base again once it has one and chooses the commit to sign
+at the base's tip then, so the merge it signs is only as old as the run itself, not the run plus its wait (a branch that does not merge with the base
+is still refused before the wait).
 A check whose base policy compares a note's input with the run's own value (`input_order`: `fractal-web`'s `kit_inputs`) is judged the way the CI gate
 judges it: `st-test` passes the verifier `--run-input kit_inputs=...`, computed by the base's `scripts/ci-fractal-web-changes` (`kit_paths` of the diff
 from the merge base; `true` when that cannot be told) in `--status`, in the pre-push hook (which only asks `--status`) and in the skip of an
 already-signed check. Without it a signed `fractal-web` tree read as `not covered: no_run_input`.
-`scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
-counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); unless `--check` names checks, every check of the skip
+`scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A tree that edits a check's lane
+is signed like any other since 2026-10-26 (the base's `evidence-wrap` records the edited definition's digest, which the host level's `"lane":
+"tree"` accepts), so it is covered only by such a note; against an older base, whose wrapper refuses it, the check reads `lane edit: CI runs it`,
+and the pre-push hook refuses that row like a missing note. Unless `--check` names checks, every check of the skip
 policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
 
 **An agent's push is refused unless its tree is covered.** Our agents run the tests deliberately, as part of their work, with
@@ -1804,8 +1841,8 @@ It lists a check only when all of these hold:
 - Its gate ran it for lack of a note: `decision=run outcome=no_note` on a same-repository pull request.
 - The gate asked about the head's own tree (`tree_of=head head_tree=used`). After a fallback to the merge tree, a pre-signed
   note could not have counted.
-- The pull request does not edit the lane's `definition_paths` (from the pull request's file list). `st-test` refuses to sign
-  such a tree.
+- The pull request does not edit the lane's `definition_paths` (from the pull request's file list). `st-test` refused to sign
+  such a tree before 2026-10-26; it signs it now.
 
 With a check listed, it writes one notice annotation and the job summary:
 

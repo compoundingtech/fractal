@@ -134,6 +134,11 @@ name = "integration"
 path = "tests/integration.rs"
 
 [[test]]
+name = "website_cli_capture"
+path = "tests/website_cli_capture.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "perf_load"
 path = "tests/perf_load.rs"
 required-features = ["perf-load"]

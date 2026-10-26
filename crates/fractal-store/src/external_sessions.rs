@@ -2471,6 +2471,13 @@ pub fn digest(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
+pub fn external_session_id(driver: ExternalDriver, native_id: &str) -> String {
+    format!(
+        "session/external-{}",
+        &digest(&format!("{}:{native_id}", driver.as_str()))[..24]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(any(test, feature = "test-support"))]

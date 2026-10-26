@@ -10,6 +10,8 @@ set -euo pipefail
 . "$(dirname "$0")/script-test-supervisor"
 # Run from a git hook or alias this would see the caller's GIT_DIR, and every fixture test below would act on the caller's repository.
 . "$(dirname "$0")/git-env-clean"
+# Fixture repositories must not inherit a developer's hooks, identity or signing settings.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 cd "$(dirname "$0")/.."
 . scripts/ci-parallel-tests
 
