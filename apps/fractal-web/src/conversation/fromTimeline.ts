@@ -385,7 +385,7 @@ export class LiveTimeline {
   get subagents(): readonly SubagentSummary[] {
     const children = new Map<string, SubagentSummary>()
     for (const entry of this.entries.values()) {
-      if (entry.type === 'unrecognized' || !('blocks' in entry.body)) continue
+      if (entry.type !== 'content' && entry.type !== 'tool_call' && entry.type !== 'tool_result') continue
       for (const block of entry.body.blocks ?? []) {
         if (block.view?.type !== 'task' || !('agents' in block.view)) continue
         for (const child of block.view.agents ?? []) {

@@ -226,8 +226,8 @@ describe('ConversationPane kit composition', () => {
       ts.forEachChild(node, visit)
     }
     visit(tree)
-    // The empty-publication placeholder adds the fourth div.
-    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div'])
+    // The retained parent host and empty-publication placeholder are structural, not transcript presentation.
+    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div', 'div'])
     expect(pane).toContain("style={{ display: 'contents' }}")
     const workspace = readFileSync(new URL('./LiveAgentWorkspace.tsx', import.meta.url), 'utf8')
     expect(workspace).toContain('<RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === \'changes\'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>')

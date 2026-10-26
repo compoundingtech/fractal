@@ -5,12 +5,14 @@ import { LiveTimeline } from './fromTimeline.ts'
 import { transcriptTurnsForItems } from '../web/conversationTranscript.ts'
 
 describe('addressable OMP child threads', () => {
-  it('joins task summaries by child conversation and follows revisions and replacement', () => {
+  it.each(['content', 'tool_call', 'tool_result'] as const)('joins %s task summaries by child conversation and follows revisions and replacement', carrier => {
     const timeline = new LiveTimeline()
     const task = (revision: number, name: string) => Schema.decodeUnknownSync(TimelineEntry)({
       id: 'timeline-entry/task', sequence: 1, revision, final: true,
-      timestamp: '2026-10-15T00:00:00Z', type: 'content', role: 'tool',
-      body: { media_type: 'text/plain', text: 'Task result', blocks: [{
+      timestamp: '2026-10-15T00:00:00Z', type: carrier, role: 'tool',
+      body: { ...(carrier === 'content' ? { media_type: 'text/plain', text: 'Task result' }
+        : carrier === 'tool_call' ? { call_id: 'task-call', name: 'task', arguments: {} }
+          : { call_id: 'task-call', content: 'Task result', media_type: 'text/plain', status: 'success' }), blocks: [{
         id: 'task/0', kind: 'tool_output', source_type: 'tool_result', payload: {},
         view: { type: 'task', tool: 'task', agents: [
           { id: 'review', name, status: 'running', conversation: { session_id: 'session/external-child-review' } },
