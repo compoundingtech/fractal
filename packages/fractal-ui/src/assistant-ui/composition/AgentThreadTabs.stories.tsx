@@ -46,6 +46,14 @@ function ThreadTabsHost({ scheme, width, initialId }: HarnessProps) {
   </NarrowLayoutContext.Provider>
 }
 
+/** The selected tab controls the one conversation panel, which is labelled by that tab. */
+async function assertPanelLinked(root: HTMLElement) {
+  const tab = within(root).getByRole('tab', { selected: true })
+  const panel = within(root).getByRole('tabpanel')
+  await waitFor(() => expect(tab.getAttribute('aria-controls')).toBe(panel.id))
+  await expect(panel.id).not.toBe('')
+  await expect(panel).toHaveAttribute('aria-labelledby', tab.id)
+}
 const drawerName = 'All agent threads'
 const keyboardPlay: NonNullable<Story['play']> = async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
@@ -64,6 +72,7 @@ const keyboardPlay: NonNullable<Story['play']> = async ({ canvasElement, args })
   await expect(tabs[1]).toHaveAttribute('aria-selected', 'true')
   await expect(canvas.getByTestId('thread-selection')).toHaveTextContent('layout')
   await expect(canvas.getByTestId('thread-conversation')).toHaveTextContent('Layout review conversation')
+  await assertPanelLinked(canvasElement)
   await userEvent.keyboard('{End}')
   await expect(tabs[visible - 1]).toHaveFocus()
   await expect(tabs[visible - 1]).toHaveAttribute('aria-selected', 'true')
@@ -86,6 +95,7 @@ const keyboardPlay: NonNullable<Story['play']> = async ({ canvasElement, args })
   await expect(toggle).toHaveAttribute('aria-expanded', 'false')
 
   // Choosing a thread beyond the strip closes the drawer and focuses its tab, which takes the strip's last slot.
+  const conversation = canvas.getByTestId('thread-conversation')
   await userEvent.keyboard('{Enter}')
   const reopened = await canvas.findByRole('complementary', { name: drawerName })
   await userEvent.click(within(reopened).getByRole('button', { name: /^Release notes/ }))
@@ -95,6 +105,10 @@ const keyboardPlay: NonNullable<Story['play']> = async ({ canvasElement, args })
   await expect(chosen).toHaveAttribute('aria-selected', 'true')
   await expect(within(tablist).getAllByRole('tab')).toHaveLength(visible)
   await expect(canvas.getByTestId('thread-selection')).toHaveTextContent('release')
+  await assertPanelLinked(canvasElement)
+  // The host's conversation stays mounted across the switch: same element, new content.
+  await expect(canvas.getByTestId('thread-conversation')).toBe(conversation)
+  await expect(conversation).toHaveTextContent('Release notes conversation')
 
   // A read-only thread carries the note; the host renders no composer for it.
   await expect(canvas.getByRole('note')).toHaveTextContent('Read only')
@@ -157,6 +171,7 @@ export const AllStates: Story = { render: () => <AllStatesMatrix />, play: async
     // The selected thread is on the strip even when it sits beyond the visible count.
     const selected = within(tablist).getByRole('tab', { selected: true })
     await expect(selected).toHaveAccessibleName(thread.readOnly ? `${thread.label}, read only` : thread.label)
+    await assertPanelLinked(region)
     if (thread.readOnly) {
       await expect(scoped.getByRole('note')).toHaveTextContent(`${thread.label} can be viewed here, not replied to.`)
       await expect(scoped.queryByRole('textbox')).toBeNull()
