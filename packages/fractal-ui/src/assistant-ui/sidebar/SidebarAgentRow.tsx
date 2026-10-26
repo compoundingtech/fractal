@@ -58,6 +58,9 @@ export const sidebarRowTitle = (row: Row): string => row.title
 /** Concise label-in-name for the tree host, which cannot attach a row description. */
 export const sidebarRowAccessibleName = (row: Row): string => {
   const parts = [row.title, row.statusLabel]
+  if (row.parentRef === undefined && row.childrenKnown !== undefined && row.subagentCount !== 0) {
+    parts.splice(1, 0, row.subagentCount === undefined ? '? subagents' : `${row.subagentCount} ${row.subagentCount === 1 ? 'subagent' : 'subagents'}`)
+  }
   if (row.missionContext?._tag === 'Mission') {
     const { slug, progress, step } = row.missionContext
     parts.push(`Mission ${slug}`)

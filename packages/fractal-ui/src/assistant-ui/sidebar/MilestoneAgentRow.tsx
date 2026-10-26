@@ -1,7 +1,7 @@
 // Explicit-clock presentation only: time leaves read the shared context clock, or the host's fixed instant when given.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Popover } from 'react-aria-components'
+import { Button, Popover, VisuallyHidden } from 'react-aria-components'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import type { SidebarActions, SidebarAgentRow as Row } from './model'
@@ -38,6 +38,12 @@ export interface MilestoneAgentRowProps {
   readonly touchDisclosure?: React.ReactNode
   /** Host callbacks enable the corresponding actions; reported details are always available. */
   readonly onOpen?: (row: Row) => void
+  /**
+   * Makes the subagent count its own button (e.g. to focus the conversation's subagent tabs). Its press never reaches the
+   * hosting tree item, so it neither selects nor opens the row. Omitted, the count is plain text. Pass a stable callback:
+   * the row is memoized.
+   */
+  readonly onSubagentsPress?: (row: Row) => void
   readonly actions?: SidebarActions
   readonly onMarkRead?: (ref: string) => void
 }
@@ -53,7 +59,7 @@ export const openAgentRowMenu = (element: Element): boolean => {
 }
 
 /**
- * RM1 SR-2 two-line row, 48px. Line 1: status glyph · title · last turn · attention · (chevron), each trailing column a
+ * RM1 SR-2 two-line row, 48px. Line 1: status glyph · title + subagent count · last turn · attention · (chevron), each trailing column a
  * fixed width so every time ends on one edge. Line 2: `[mission pill] · step` while the agent works on a mission (see
  * `SidebarMissionLine`), otherwise `status · host`; spend and duration live in the hover card and reported details.
  * On touch layouts (narrow host or coarse pointer) a row whose mission line holds a button (a queue, or Stale/Failed
@@ -62,8 +68,10 @@ export const openAgentRowMenu = (element: Element): boolean => {
  * Activation belongs to the hosting tree item, so the row is never a button. Desktop pointer hover shows the kit hover
  * card with no timers: the CSS entrance delay supplies hover intent. The shared action trigger overlays line 2 on
  * desktop; narrow rows reserve an always-visible touch-sized action column.
+ * The subagent count sits right after the title, which truncates before the count does: "N subagents", "1 subagent",
+ * "? subagents" while unreported, nothing at zero; display-only rows carry none.
  */
-export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, reportedStatusOnly = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, onOpen, actions, onMarkRead }: MilestoneAgentRowProps) {
+export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, reportedStatusOnly = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, onOpen, onSubagentsPress, actions, onMarkRead }: MilestoneAgentRowProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const anchor = React.useRef<HTMLDivElement>(null)
   const touch = useTouchLayout()
@@ -81,7 +89,10 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
     {...stylex.props(styles.row, !displayOnly && styles.interactive, !displayOnly && chevron !== undefined && styles.withChevron, narrow && !displayOnly && styles.narrowRow, narrow && !displayOnly && chevron !== undefined && styles.narrowWithChevron, !displayOnly && touchDisclosure !== undefined && styles.touchWithDisclosure, touchMission && styles.touchMissionRow, !displayOnly && active && styles.active, !displayOnly && focused && styles.focused)}>
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} statusSince={row.statusSince} variant="SG-1" discRefinement="G3" freshness={row.freshness} frozen={frozen} iconOnly /></span>
-    <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
+    <span data-row-column="name" {...stylex.props(styles.name)}>
+      <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
+      {!displayOnly && row.subagentCount !== 0 && <SubagentCount count={row.subagentCount} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} />}
+    </span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
     <span data-row-column="time" {...stylex.props(styles.time, frozen && styles.frozenInk)}>{row.lastTurn._tag === 'Known' && <span data-row-field="last-turn"><SidebarTime at={row.lastTurn.at} now={now} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact /></span>}</span>
     <span data-row-column="signal" {...stylex.props(styles.signal)}>{signal}</span>
@@ -101,6 +112,20 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     </Popover>}
   </div>
 })
+
+/**
+ * Running subagents; `undefined` when the harness does not report them. A known count is its own accessible text; the
+ * unreported "?" is spoken as "Unreported subagents", which keeps the visible word in the name.
+ */
+function SubagentCount({ count, onPress }: { readonly count: number | undefined; readonly onPress: (() => void) | undefined }) {
+  const content = count === undefined
+    ? <><span aria-hidden="true" data-count-text {...stylex.props(styles.countTag)}>? subagents</span><VisuallyHidden>Unreported subagents</VisuallyHidden></>
+    : <span data-count-text {...stylex.props(styles.countTag)}>{count} {count === 1 ? 'subagent' : 'subagents'}</span>
+  const id = count === undefined ? 'unknown' : String(count)
+  return onPress === undefined
+    ? <span data-subagent-count={id} {...stylex.props(styles.countHit)}>{content}</span>
+    : <Button data-subagent-count={id} onPress={onPress} {...stylex.props(styles.countHit, styles.countButton)}>{content}</Button>
+}
 
 const styles = stylex.create({
   // Relative: the containing block for the visually hidden details trigger, so it never escapes the scroll clip.
@@ -122,7 +147,14 @@ const styles = stylex.create({
   // Sidebar rows ring keyboard focus in neutral fgMuted, never the accent, so focus does not read as selection.
   focused: { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` },
   glyph: { gridColumn: '1', gridRow: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  title: { gridColumn: '2', gridRow: '1', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
+  // Line 1's name column: the title truncates first; the count keeps its whole width right after it.
+  name: { gridColumn: '2', gridRow: '1', display: 'flex', alignItems: 'center', columnGap: s.sm, minWidth: 0 },
+  title: { flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
+  // The hit area is line 1's full 24px track; the visible tag inside it is an outlined 11px label with no fill.
+  countHit: { flexShrink: 0, display: 'inline-flex', alignItems: 'center', height: g.controlSm, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans },
+  countButton: { cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted } },
+  // fgSoft, not fgMuted: 11px text must clear 4.5:1 on the hover and active-row washes too.
+  countTag: { display: 'inline-flex', alignItems: 'center', paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   time: { gridColumn: '3', gridRow: '1', justifySelf: 'end', color: ink.fgSoft, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   signal: { gridColumn: '4', gridRow: '1', display: 'flex', justifyContent: 'center' },
   needs: { color: tone.attention, fontSize: t.denseSize, fontWeight: t.weightSemibold },

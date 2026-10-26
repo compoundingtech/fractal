@@ -563,7 +563,7 @@ test('app mode debt matches its reviewed shrink-only pin', () => {
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(391)
+  expect(exemptions).toHaveLength(394)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 

@@ -1,4 +1,4 @@
-/** RM1 two-line agent row: every canonical G3 state in both schemes at the live default sidebar width, G3 glyph states live and frozen, the 48px two-line anatomy, nesting inside the kit SidebarTree, and the hover card. */
+/** RM1 two-line agent row: every canonical G3 state in both schemes at the live default sidebar width, G3 glyph states live and frozen, the 48px two-line anatomy, nesting inside the kit SidebarTree, the hover card, and the subagent count after the title. */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
@@ -214,7 +214,8 @@ export const TwoLineAndNesting: Story = {
     await expect(leaf!.closest('[role="row"]')!.querySelector('[data-sidebar-disclosure]')).toBeNull()
     await expect(Math.abs(box(root!, 'status').left - box(leaf!, 'status').left)).toBeLessThanOrEqual(0.5)
     await expect(Math.abs(box(root!, 'title').left - box(leaf!, 'title').left)).toBeLessThanOrEqual(0.5)
-    await expect(Math.abs(box(root!, 'title').width - box(leaf!, 'title').width)).toBeLessThanOrEqual(0.5)
+    // Name column (title plus subagent count): the same width at the same depth; the title alone is content-sized.
+    await expect(Math.abs(box(root!, 'name').width - box(leaf!, 'name').width)).toBeLessThanOrEqual(0.5)
     await expect(disclosure.width).toBeGreaterThan(0)
     await expect(disclosure.left).toBeGreaterThanOrEqual(root!.closest('[role="row"]')!.getBoundingClientRect().left - 0.5)
     await expect(disclosure.right).toBeLessThanOrEqual(root!.getBoundingClientRect().left + 0.5)
@@ -601,6 +602,152 @@ export const ReportedDetails: Story = {
   },
 }
 
+/** Count fixtures: plural, singular, zero (no chip), unreported, and long titles that must truncate before the count. */
+const countRow = (key: string, title: string, subagentCount: number | undefined, extra: Partial<Row> = {}): Row => ({
+  ...base, ref: `agent/example-count-${key}`, id: `count-${key}`, title, status: 'working', statusLabel: 'Working', host: 'build-3', subagentCount,
+  lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 95_000 }, ...extra,
+})
+const countRows = [
+  countRow('plural', 'Align the metric track across every row', 3, { needsMe: true }),
+  countRow('singular', 'Fix tabs', 1),
+  countRow('zero', 'Ship the sidebar count', 0),
+  countRow('unknown', 'Harness without subagent reports for this agent', undefined),
+  countRow('many', 'Coordinate the long release train across every package', 14, { unread: 2 }),
+] as const satisfies readonly Row[]
+const countChild = countRow('child', 'Reported child with its own children', 2, { parentRef: countRows[0].ref })
+const expectedCount: Readonly<Record<string, string | null>> = {
+  [countRows[0].title]: '3 subagents', [countRows[1].title]: '1 subagent', [countRows[2].title]: null,
+  [countRows[3].title]: '? subagents', [countRows[4].title]: '14 subagents', [countChild.title]: null,
+}
+const longCountTitles: readonly string[] = [countRows[0].title, countRows[3].title, countRows[4].title]
+/** The desktop sidebar at its 240px minimum and 320px, and the 320px phone Agents sheet. */
+const countHosts = [
+  { key: 'desktop-240', width: 240, narrow: false },
+  { key: 'desktop-320', width: 320, narrow: false },
+  { key: 'phone-320', width: 320, narrow: true },
+] as const
+
+function SubagentCountMatrix({ scheme }: { readonly scheme: Scheme }) {
+  return <main data-testid="subagent-count" data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}><ThemePortal>
+    <span aria-hidden="true" data-tone-probe="" {...stylex.props(styles.toneProbe)} />
+    <div {...stylex.props(styles.matrix)}>
+      {countHosts.map(host => <NarrowLayoutContext.Provider key={host.key} value={host.narrow}>
+        <section aria-label={host.key} data-count-host={host.key} data-width={host.width} {...stylex.props(styles.column, host.width === 240 ? styles.width240 : styles.width320)}>
+          <h3 {...stylex.props(styles.heading)}>{host.narrow ? `Phone sheet · ${host.width}px` : `Desktop · ${host.width}px`}</h3>
+          {countRows.map(row => <MilestoneAgentRow key={row.ref} row={row} now={storyNow} />)}
+          <MilestoneAgentRow row={countChild} depth={1} displayOnly now={storyNow} />
+        </section>
+      </NarrowLayoutContext.Provider>)}
+    </div>
+  </ThemePortal></main>
+}
+
+const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async ({ canvasElement }) => {
+  const surfaceRoot = within(canvasElement).getByTestId('subagent-count')
+  const soft = getComputedStyle(surfaceRoot.querySelector('[data-tone-probe]')!).color
+  const hosts = [...surfaceRoot.querySelectorAll<HTMLElement>('[data-count-host]')]
+  await expect(hosts).toHaveLength(countHosts.length)
+  for (const host of hosts) {
+    await expect(Math.abs(host.getBoundingClientRect().width - Number(host.dataset.width))).toBeLessThanOrEqual(1)
+    // Without a handler the count is text, never a button.
+    await expect(host.querySelector('button[data-subagent-count]')).toBeNull()
+    for (const [title, expected] of Object.entries(expectedCount)) {
+      const row = [...host.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(element => element.querySelector('[data-row-column="title"]')?.textContent === title)!
+      await expect(Math.abs(row.getBoundingClientRect().height - 48)).toBeLessThanOrEqual(1)
+      const chip = row.querySelector<HTMLElement>('[data-subagent-count]')
+      // Zero and display-only rows carry no count at all.
+      if (expected === null) { await expect(chip).toBeNull(); continue }
+      const tag = chip!.querySelector<HTMLElement>('[data-count-text]')!
+      await expect(tag.textContent).toBe(expected)
+      // The unreported count shows "?" but is spoken as "Unreported subagents".
+      if (expected === '? subagents') {
+        await expect(chip).toHaveAttribute('data-subagent-count', 'unknown')
+        await expect(tag).toHaveAttribute('aria-hidden', 'true')
+        await expect(chip!.textContent).toContain('Unreported subagents')
+      }
+      const titleElement = row.querySelector<HTMLElement>('[data-row-column="title"]')!
+      const titleBox = titleElement.getBoundingClientRect(), chipBox = chip!.getBoundingClientRect(), tagBox = tag.getBoundingClientRect()
+      const time = row.querySelector('[data-row-column="time"]')!.getBoundingClientRect()
+      const line2 = row.querySelector('[data-row-column="line2"]')!.getBoundingClientRect()
+      // Immediately after the title (the s.sm gap), on line 1, centred with the title and clear of the time column.
+      await expect(Math.abs(chipBox.left - titleBox.right - 6)).toBeLessThanOrEqual(1)
+      await expect(Math.abs((chipBox.top + chipBox.bottom) / 2 - (titleBox.top + titleBox.bottom) / 2)).toBeLessThanOrEqual(1)
+      await expect(chipBox.bottom).toBeLessThanOrEqual(line2.top + 0.5)
+      await expect(chipBox.right).toBeLessThanOrEqual(time.left + 0.5)
+      // One line each: the title and the count never wrap, and the count is never clipped.
+      await expect(titleBox.height).toBeLessThanOrEqual(24)
+      await expect(tagBox.height).toBeLessThan(24)
+      await expect(tag.scrollWidth).toBeLessThanOrEqual(tag.clientWidth + 1)
+      await expect(getComputedStyle(tag).whiteSpace).toBe('nowrap')
+      await expect(getComputedStyle(tag).color).toBe(soft)
+      // Long titles truncate with an ellipsis yet keep a readable stretch; short titles stay whole.
+      if (longCountTitles.includes(title)) {
+        await expect(titleElement.scrollWidth).toBeGreaterThan(titleElement.clientWidth)
+        await expect(getComputedStyle(titleElement).textOverflow).toBe('ellipsis')
+        await expect(titleBox.width).toBeGreaterThanOrEqual(32)
+      } else await expect(titleElement.scrollWidth).toBeLessThanOrEqual(titleElement.clientWidth + 1)
+    }
+  }
+  const [red, green, blue] = getComputedStyle(surfaceRoot).backgroundColor.match(/\d+(\.\d+)?/g)!.map(Number)
+  await expect((0.2126 * red! + 0.7152 * green! + 0.0722 * blue!) / 255 > 0.5).toBe(surfaceRoot.getAttribute('data-scheme') === 'light')
+}
+
+export const SubagentCount: StoryObj<{ scheme: Scheme }> = {
+  name: 'Subagent count · after the title · 240/320 desktop and phone',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported and display-only counts with long titles verify the count copy, its placement right after the title, title truncation and one-line fit at 240px and 320px desktop and phone widths.' } },
+  args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
+  render: ({ scheme }) => <SubagentCountMatrix scheme={scheme} />,
+  play: subagentCountPlay,
+}
+export const SubagentCountLight: StoryObj<{ scheme: Scheme }> = { ...SubagentCount, name: 'Subagent count · after the title · 240/320 desktop and phone · light', args: { scheme: 'light' } }
+
+const countPressItems: readonly AgentItem[] = [toItem(countRow('press', 'Review the subagent switching flow', 2), 0), toItem(countRows[3], 0)]
+function SubagentCountPressTree() {
+  const [selected, setSelected] = React.useState<string>()
+  const [pressed, setPressed] = React.useState<readonly string[]>([])
+  // Stable: the row is memoized.
+  const onSubagentsPress = React.useCallback((row: Row) => setPressed(refs => [...refs, row.ref]), [])
+  return <section aria-label="Count press" data-host="count-press" data-selected={selected} data-subagents={pressed.join(' ') || undefined} {...stylex.props(styles.column, styles.width320, styles.tree)}>
+    <SidebarTree aria-label="Agents with subagent counts" items={countPressItems} expandedKeys={new Set()} onExpandedChange={() => {}} onAction={key => setSelected(String(key))}
+      renderRow={(item, state) => <MilestoneAgentRow row={item.row} now={storyNow} touchDisclosure={touchDisclosure(state)} onSubagentsPress={onSubagentsPress} />} />
+  </section>
+}
+
+export const SubagentCountPress: Story = {
+  name: 'Subagent count · own press never activates the row',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed tree with a counted and an unreported agent verifies the count button by pointer and keyboard reaches only its own callback, never tree selection, while the row title still activates.' } },
+  args: { row: base },
+  render: () => <main {...stylex.props(styles.root)}><ThemePortal><SubagentCountPressTree /></ThemePortal></main>,
+  play: async ({ canvasElement }) => {
+    const host = canvasElement.querySelector<HTMLElement>('[data-host="count-press"]')!
+    const [counted, unknown] = countPressItems.map(item => item.row) as [Row, Row]
+    const row = (title: string) => within(host).getByRole('row', { name: title })
+    // The count is not part of the row's accessible name.
+    const chip = await waitFor(() => within(row(counted.title)).getByRole('button', { name: '2 subagents' }))
+    await expect(chip.getBoundingClientRect().height).toBeGreaterThanOrEqual(24)
+    await userEvent.click(chip)
+    await waitFor(() => expect(host).toHaveAttribute('data-subagents', counted.ref))
+    await expect(host).not.toHaveAttribute('data-selected')
+    await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
+    // Keyboard: Enter on the focused count is its own press too.
+    chip.focus()
+    await expect(chip).toHaveFocus()
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(host).toHaveAttribute('data-subagents', `${counted.ref} ${counted.ref}`))
+    await expect(host).not.toHaveAttribute('data-selected')
+    // Unreported: "? subagents" on screen, "Unreported subagents" spoken.
+    const unknownChip = within(row(unknown.title)).getByRole('button', { name: 'Unreported subagents' })
+    await expect(unknownChip.querySelector('[data-count-text]')).toHaveTextContent('? subagents')
+    await userEvent.click(unknownChip)
+    await waitFor(() => expect(host).toHaveAttribute('data-subagents', `${counted.ref} ${counted.ref} ${unknown.ref}`))
+    await expect(host).not.toHaveAttribute('data-selected')
+    // Control: the title still activates the tree item, so the negatives above are not vacuous.
+    await userEvent.click(row(counted.title).querySelector('[data-row-column="title"]')!)
+    await waitFor(() => expect(host).toHaveAttribute('data-selected', counted.ref))
+    await expect(host).toHaveAttribute('data-subagents', `${counted.ref} ${counted.ref} ${unknown.ref}`)
+  },
+}
+
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   matrix: { display: 'flex', alignItems: 'flex-start', flexWrap: 'wrap', gap: s.xl },
@@ -614,6 +761,8 @@ const styles = stylex.create({
   folderRow: { display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0 },
   folderStatus: { display: 'flex', alignItems: 'center', gap: s.xs, flexShrink: 0, color: ink.fgMuted, fontSize: t.denseSize },
   clipped: { width: g.sidebarDefault, overflow: 'hidden', transform: 'translateX(0)' },
+  width240: { width: '240px' },
+  width320: { width: '320px' },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   // Resolves the surface's own tokens for the tone assertions: soft (neutral states), muted (stale), danger (never stale).
   toneProbe: { position: 'absolute', width: s.zero, height: s.zero, overflow: 'hidden', color: ink.fgSoft, backgroundColor: ink.fgMuted, borderTopColor: tone.dangerFg },
