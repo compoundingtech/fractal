@@ -2528,7 +2528,7 @@ claim actors supply no author. The typed owner relay preserves both fields;
 unnegotiated gateway/cache clients receive neither.
 
 Recipients currently contains the one ParticipantRef destination proven by this
-canonical message.sent claim; destinations outside that type keep their legacy
+canonical message.sent claim. Assistant destinations keep their existing legacy
 scalar without an invented recipient. Legacy broadcasts stored as multiple distinct message
 subjects remain distinct: neither matching text nor temporal proximity proves
 one shared send. This slice adds truthful optional identities without changing

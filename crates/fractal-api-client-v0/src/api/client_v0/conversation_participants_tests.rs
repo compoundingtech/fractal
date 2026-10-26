@@ -25,7 +25,7 @@ fn daemon_authorship_is_truthful_without_widening_legacy_sender_or_guessing_broa
     let legacy = session_message_body(&state, &daemon, false);
     assert!(legacy.get("author").is_none());
     assert!(legacy.get("recipients").is_none());
-    for recipient in ["agent/one", "person/two", "step/three"] {
+    for recipient in ["agent/one", "person/two"] {
         let claim = send(
             &format!("message/{}", recipient.replace('/', "-")),
             Some("person/fixture"),
@@ -38,6 +38,22 @@ fn daemon_authorship_is_truthful_without_widening_legacy_sender_or_guessing_broa
         assert_eq!(body["recipients"], json!([recipient]));
         assert_eq!(body["message_id"], claim.subject);
     }
+    // step/ is retained by the read-side ParticipantRef schema, but the current
+    // write registry admits step-run/ instead. Exercise the historical record at
+    // the projection boundary without changing or bypassing that write policy.
+    let mut historical = send(
+        "message/historical-step",
+        Some("person/fixture"),
+        "person/fixture",
+        "agent/worker",
+    );
+    historical.body["fields"]["to"] = json!("step/three");
+    let historical_body = session_message_body(&state, &historical, true);
+    assert_eq!(historical_body["author"], "person/fixture");
+    assert_eq!(historical_body["from"], "person/fixture");
+    assert_eq!(historical_body["to"], "step/three");
+    assert_eq!(historical_body["recipients"], json!(["step/three"]));
+    assert_eq!(historical_body["message_id"], historical.subject);
     // The canonical actor and displayed sender can differ under delegation.
     let delegated = send(
         "message/delegated",
@@ -50,13 +66,16 @@ fn daemon_authorship_is_truthful_without_widening_legacy_sender_or_guessing_broa
     assert_eq!(delegated_body["from"], "person/fixture");
     let assistant = send(
         "message/assistant",
-        Some("assistant/fixture"),
-        "assistant/fixture",
-        "assistant/worker",
+        Some("assistant/chatgpt"),
+        "assistant/chatgpt",
+        "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567",
     );
     let assistant_body = session_message_body(&state, &assistant, true);
-    assert_eq!(assistant_body["from"], "assistant/fixture");
-    assert_eq!(assistant_body["to"], "assistant/worker");
+    assert_eq!(assistant_body["from"], "assistant/chatgpt");
+    assert_eq!(
+        assistant_body["to"],
+        "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567"
+    );
     assert!(assistant_body.get("author").is_none());
     assert!(assistant_body.get("recipients").is_none());
     let unknown = send(
