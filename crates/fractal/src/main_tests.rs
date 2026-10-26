@@ -3345,14 +3345,14 @@ fn work_detail_labels_a_reason_blocked_only_for_blocked_work() {
     let mut work = work.clone();
     work.blocked_reason = Some("the step's lease expired".into());
     work.state = "claimed".into();
-    let claimed = render_client_work_detail(&work);
+    let claimed = render_client_work_detail(&work, false);
     assert!(!claimed.contains("Blocked:"), "{claimed}");
     assert!(
         claimed.contains("\nReason: the step's lease expired\n"),
         "{claimed}"
     );
     work.state = "blocked".into();
-    let blocked = render_client_work_detail(&work);
+    let blocked = render_client_work_detail(&work, false);
     assert!(
         blocked.contains("\nBlocked: the step's lease expired\n"),
         "{blocked}"
@@ -3366,9 +3366,9 @@ fn work_detail_says_when_its_holder_was_nudged() {
         panic!("expected work fixture");
     };
     let mut work = work.clone();
-    assert!(!render_client_work_detail(&work).contains("Nudged:"));
+    assert!(!render_client_work_detail(&work, false).contains("Nudged:"));
     work.nudged_at_unix_ms = Some(1_791_581_505_000);
-    let rendered = render_client_work_detail(&work);
+    let rendered = render_client_work_detail(&work, false);
     assert!(
         rendered.contains("\nNudged: 2026-10-09T21:31:45Z ("),
         "{rendered}"
@@ -8334,3 +8334,26 @@ fn native_identity_rename_allows_generated_idempotency_key() {
 fn github_watch_continuation_keeps_the_agent_executable() {
     assert_eq!(GH_UNWATCH_HINT, "To stop: st gh unwatch");
 }
+
+    #[test]
+    fn work_detail_explains_managed_and_unmanaged_leases() {
+        let page = fixture_product_page(&["work"], false);
+        let ClientResource::Work(work) = &page.items[0] else {
+            panic!("expected work fixture");
+        };
+        let mut work = work.clone();
+        work.claimant = Some("agent/example".into());
+        work.claim_incarnation = Some("incarnation/current".into());
+        work.claim_expires_at_unix_ms = Some(62_001);
+        let managed = render_client_work_detail(&work, true);
+        assert!(managed.contains("\nLease: The Fractal driver renews the lease on claimed Fractal work. A managed agent must not run a renewal loop.\n"));
+        assert!(!managed.contains("fractal work renew"));
+        let unmanaged = render_client_work_detail(&work, false);
+        assert!(unmanaged.contains(&format!("\nLease: The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: fractal work renew {} --as agent/example --incarnation incarnation/current\n", work.header.id)));
+        assert!(!unmanaged.contains("Fractal driver renews"));
+        work.claim_incarnation = None;
+        let unmanaged = render_client_work_detail(&work, false);
+        assert!(unmanaged.contains(" --as agent/example\n"));
+        assert!(!unmanaged.contains("--incarnation"));
+    }
+
