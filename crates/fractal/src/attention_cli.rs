@@ -117,7 +117,7 @@ pub(super) async fn run_attention(
                 .attention_list(cursor.as_deref(), Some(limit), all)
                 .await?;
             let history = if all { " --all" } else { "" };
-            let command = format!("st alerts ls --as {actor}{history}");
+            let command = format!("fractal alerts ls --as {actor}{history}");
             if json_output {
                 print_value(&response, true)?;
             } else {

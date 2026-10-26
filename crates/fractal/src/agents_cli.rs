@@ -129,7 +129,7 @@ pub(super) async fn run_agents(
     match command {
         AgentsCommand::AcknowledgeSeed(args) => {
             let actor = args.actor.as_deref().or(configured_person)
-                .context("st agents acknowledge-seed needs --as ACTOR or a configured person")?;
+                .context("fractal agents acknowledge-seed needs --as ACTOR or a configured person")?;
             let claim = fractal_daemon::native_seed::acknowledge(
                 &cli_client(endpoint), &normalize_agent_subject(&args.subject), actor, &args.reason,
             ).await?;
@@ -214,7 +214,7 @@ pub(super) async fn run_agents(
         }
         AgentsCommand::Rename(args) => {
             let actor = args.actor.as_deref().or(configured_person).context(
-                "st3 agents rename needs --as ACTOR or a configured person",
+                "fractal agents rename needs --as ACTOR or a configured person",
             )?;
             let response: Value = cli_client(endpoint).post(
                 "/v1/agents/rename",
@@ -265,7 +265,7 @@ pub(super) async fn run_agents(
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         AgentsCommand::Apply(args) => {
             eprintln!(
-                "st: agents apply is legacy; use st apply FILE --no-gate-check with the same options"
+                "st: agents apply is legacy; use fractal apply FILE --no-gate-check with the same options"
             );
             let client = cli_client(endpoint);
             if !args.dry_run {
@@ -322,7 +322,8 @@ pub(super) async fn run_agents(
                         return Ok(());
                     }
                     println!(
-                        "{subject} is declared by {run}; `st agents restart {subject}` relaunches it"
+                        "{subject} is declared by {run}; `{command} agents restart {subject}` relaunches it",
+                        command = if json_output { "st" } else { "fractal" }
                     );
                     return Ok(());
                 }
@@ -446,7 +447,7 @@ pub(super) async fn run_agents(
             } else {
                 let suspension = agent.suspension.as_ref();
                 println!(
-                    "Suspended {subject}: {} session {}; resume it with `st agents resume {subject}`",
+                    "Suspended {subject}: {} session {}; resume it with `fractal agents resume {subject}`",
                     suspension
                         .and_then(|item| item.harness.as_deref())
                         .unwrap_or("native"),
@@ -547,7 +548,7 @@ pub(super) async fn run_agents(
                         current.conflicts.is_empty()
                             && current.desired_token.as_deref()
                                 == request.body.pointer("/evidence/0").and_then(Value::as_str),
-                        "`{subject}` declaration changed during restart; inspect it with `st agents show {subject}`"
+                        "`{subject}` declaration changed during restart; inspect it with `fractal agents show {subject}`"
                     );
                     let response = gateway.agents_get(&subject).await?;
                     if let ClientResource::Agent(agent) = response.value {
@@ -566,7 +567,7 @@ pub(super) async fn run_agents(
                                 .is_some_and(|incarnation| incarnation != previous)
                         {
                             anyhow::bail!(
-                                "`{subject}` replacement is {}: {}; inspect it with `st agents show {subject}`",
+                                "`{subject}` replacement is {}: {}; inspect it with `fractal agents show {subject}`",
                                 agent.state,
                                 agent
                                     .fault
@@ -590,7 +591,7 @@ pub(super) async fn run_agents(
                                 .is_some_and(|incarnation| incarnation != previous)
                         {
                             anyhow::bail!(
-                                "`{subject}` restarted and is waiting for your input; attach with `st terminals attach {subject}`"
+                                "`{subject}` restarted and is waiting for your input; attach with `fractal terminals attach {subject}`"
                             );
                         }
                     }
@@ -615,7 +616,7 @@ pub(super) async fn run_agents(
                             })
                         {
                             anyhow::bail!(
-                                "`{subject}` could not restart: {}; inspect it with `st agents show {subject}`",
+                                "`{subject}` could not restart: {}; inspect it with `fractal agents show {subject}`",
                                 fields["reason"]
                                     .as_str()
                                     .unwrap_or("the runtime could not restart")
@@ -626,7 +627,7 @@ pub(super) async fn run_agents(
                 }
             };
             let agent = tokio::time::timeout(Duration::from_millis(timeout), wait).await
-                .with_context(|| format!("`{subject}` did not reach a new running incarnation within {}; inspect it with `st agents show {subject}`", args.timeout))??;
+                .with_context(|| format!("`{subject}` did not reach a new running incarnation within {}; inspect it with `fractal agents show {subject}`", args.timeout))??;
             if json_output {
                 print_value(&agent, true)
             } else {
@@ -772,7 +773,7 @@ async fn agent_start_declaration(
         }
         anyhow::ensure!(
             desired.kind == "stop" && claim.predecessors.len() == 1,
-            "`{subject}` has no unambiguous prior agent declaration; use `st apply`"
+            "`{subject}` has no unambiguous prior agent declaration; use `fractal apply`"
         );
         claim = client
             .get(&format!("/v1/claims/by-id/{}", claim.predecessors[0]))
@@ -881,7 +882,7 @@ async fn run_agent_new(
                 && agent.state != "stopped"
             {
                 anyhow::bail!(
-                    "`{subject}` already exists and is {}; change it with `st apply`, or stop it with `st agents stop` first",
+                    "`{subject}` already exists and is {}; change it with `fractal apply`, or stop it with `fractal agents stop` first",
                     agent.state
                 );
             }
@@ -956,7 +957,7 @@ async fn run_agent_new(
             return match other {
                 Ok(Err(error)) => Err(error),
                 Err(_) => anyhow::bail!(
-                    "`{subject}` was created, but was not ready after {}; see `st agents show {subject}`",
+                    "`{subject}` was created, but was not ready after {}; see `fractal agents show {subject}`",
                     args.timeout
                 ),
                 Ok(Ok(_)) => unreachable!(),
@@ -1093,7 +1094,7 @@ async fn wait_for_agent_harness(
                 "running" => return Ok(agent),
                 "waiting" if attach && agent.reachability == "reachable" => return Ok(agent),
                 "waiting" if agent.reachability == "reachable" => anyhow::bail!(
-                    "`{subject}` started and is waiting for your input; attach with `st terminals attach {subject}`"
+                    "`{subject}` started and is waiting for your input; attach with `fractal terminals attach {subject}`"
                 ),
                 "failed" => anyhow::bail!(
                     "`{subject}` failed to start: {}",
@@ -1149,7 +1150,7 @@ async fn run_agent_inspection(
                         format!("agent `{subject}` does not exist")
                     } else {
                         format!(
-                            "agent `{subject}` is not operational; use `st agents show {subject} --all` for history"
+                            "agent `{subject}` is not operational; use `fractal agents show {subject} --all` for history"
                         )
                     }
                 })?;
@@ -1232,9 +1233,9 @@ async fn run_agent_inspection(
         return Ok(());
     }
     let mut continuation = if tree {
-        "st agents tree".to_owned()
+        "fractal agents tree".to_owned()
     } else {
-        "st agents ls".to_owned()
+        "fractal agents ls".to_owned()
     };
     if let Some(status) = args.status.as_deref() {
         continuation.push_str(&format!(" --status {status}"));
@@ -1268,11 +1269,11 @@ async fn run_agent_queue(
     json_output: bool,
 ) -> Result<()> {
     let Some(AgentQueueCommand::Move(args)) = args.command else {
-        let agent = args.agent.context("st agents queue needs an AGENT")?;
+        let agent = args.agent.context("fractal agents queue needs an AGENT")?;
         return show_agent_queue(endpoint, &agent, json_output).await;
     };
     let actor = args.actor.as_deref().or(configured_person).context(
-        "st agents queue move needs `--as person/NAME`, `--as agent/PATH`, or `person = \"person/NAME\"` in the st config",
+        "fractal agents queue move needs `--as person/NAME`, `--as agent/PATH`, or `person = \"person/NAME\"` in the st config",
     )?;
     let actor = parse_queue_move_actor(actor).map_err(anyhow::Error::msg)?;
     let agent = seat_subject(&args.agent);
@@ -1393,7 +1394,7 @@ async fn request_suspension(
                         format!(" ({})", suspension.blocking.join(", "))
                     };
                     anyhow::anyhow!(
-                        "`{subject}` could not {}: {}{blocking}: {}; inspect it with `st agents show {subject}`",
+                        "`{subject}` could not {}: {}{blocking}: {}; inspect it with `fractal agents show {subject}`",
                         if resume { "resume" } else { "suspend" },
                         suspension.code.as_deref().unwrap_or("failed"),
                         suspension.reason.as_deref().unwrap_or("no reason recorded"),
@@ -1415,7 +1416,7 @@ async fn request_suspension(
         .await
         .with_context(|| {
             format!(
-                "`{subject}` did not {} within {timeout_text}; inspect it with `st agents show {subject}`",
+                "`{subject}` did not {} within {timeout_text}; inspect it with `fractal agents show {subject}`",
                 if resume { "resume" } else { "suspend" }
             )
         })?
