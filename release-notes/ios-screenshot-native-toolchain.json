@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "summary": "Repair iOS landing screenshots with Apple's native Xcode 26 toolchain, the demo gateway's declared ws ESM dependency, and a matching Metro readiness host",
-  "replay": {"status": "none", "detail": "Screenshot tooling only; no replay changes."},
+  "summary": "Repair iOS landing screenshots with Apple's Xcode toolchain, explicit demo gateway dependencies, matching Metro readiness, retained Maestro diagnostics, and mount-aware navigation observation",
+  "replay": {"status": "none", "detail": "No replay changes."},
   "schema": {"status": "none", "detail": "No schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rule change."},
-  "compatibility": {"status": "none", "detail": "No app, client protocol, or harness changes."},
+  "compatibility": {"status": "none", "detail": "Navigation observation waits for readiness; no client protocol or harness compatibility change."},
   "downtime": {"status": "none", "detail": "No service restart or deployment."},
   "manual": {"status": "none", "detail": "No upgrade steps; native screenshot commands isolate their toolchain automatically."},
   "recovery": {"status": "none", "detail": "No data migration or recovery action."}
