@@ -958,3 +958,24 @@ fn queued_mission_deadlines_decode_for_stui() {
         Some("2026-09-20T11:05:00Z")
     );
 }
+
+#[path = "support/legacy_message_body.rs"]
+mod legacy_message_body;
+
+#[test]
+fn optional_message_participants_preserve_legacy_scalar_types_and_typed_relay() {
+    let bytes = fixture("timeline-message-participants.json");
+    let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let page: Envelope<TimelinePage> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(serde_json::to_value(&page).unwrap(),raw);
+    for entry in raw["value"]["items"].as_array().unwrap() {
+        let old: legacy_message_body::TimelineMessageBody = serde_json::from_value(entry["body"].clone()).unwrap();
+        let mut expected = entry["body"].clone(); expected.as_object_mut().unwrap().remove("author");
+        expected.as_object_mut().unwrap().remove("recipients");
+        assert_eq!(serde_json::to_value(old).unwrap(),expected);
+    }
+    let changes = serde_json::json!({"kind":"conversation-changes", "session_id":raw["value"]["session_id"],
+        "items":raw["value"]["items"], "next_cursor":"conversation-cursor/participants/next"});
+    let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(),changes);
+}
