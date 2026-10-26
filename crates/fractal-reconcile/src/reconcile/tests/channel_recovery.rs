@@ -111,6 +111,51 @@ fn attempts(store: &Store) -> Vec<crate::model::ClaimRecord> {
         .collect()
 }
 
+const POLICY_BANNER: &str = "--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)\nInbound messages will be silently dropped. Have an administrator set channelsEnabled: true in managed settings to enable";
+
+#[test]
+fn channel_policy_refusal_stops_without_spending_retries_and_survives_daemon_restart() {
+    let (store, runtime, reconciler, mut desired) = setup();
+    desired.member.as_mut().unwrap().restart = RestartType::Always;
+    let since = attachment(&store, "orchid-one", false);
+    *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
+    let error = recover(&reconciler, &desired, "orchid-one", since).unwrap_err();
+    assert!(error.to_string().contains("channelsEnabled: true"), "{error}");
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+    assert!(attempts(&store).is_empty());
+    let fault = store.latest_observation(SEAT, "runtime.action.failed").unwrap().unwrap();
+    assert_eq!(fault.body["fields"]["action"], "claude-channel-policy-blocked");
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    // No screen or running process is needed to retain the permanent failure.
+    runtime.screen.lock().unwrap().clear();
+    assert!(restarted.reconcile_claude_channel_recovery(
+        &desired, desired.member.as_ref().unwrap(), None, None, since + 86_400_000,
+    ).unwrap_err().to_string().contains("channelsEnabled"));
+    assert!(attempts(&store).is_empty());
+    store.append_claim(&ClaimInput {
+        subject: SEAT.into(), kind: "runtime.action.requested".into(),
+        actor: Some(SEAT.into()),
+        fields: BTreeMap::from([("action".into(), json!("restart"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    assert!(!restarted.reconcile_claude_channel_recovery(
+        &desired, desired.member.as_ref().unwrap(), None, None, since + 86_400_001,
+    ).unwrap());
+}
+
+#[test]
+fn channel_policy_banner_does_not_stop_an_attached_or_stale_incarnation() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
+    assert!(!recover(&reconciler, &desired, "predecessor", since).unwrap());
+    attachment(&store, "orchid-one", true);
+    assert!(!recover(&reconciler, &desired, "orchid-one", since).unwrap());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+}
+
 #[test]
 fn channel_recovery_rechecks_then_restarts_once_and_ignores_a_stale_incarnation() {
     let (store, runtime, reconciler, desired) = setup();
