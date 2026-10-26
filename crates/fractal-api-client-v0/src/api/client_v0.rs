@@ -70,6 +70,8 @@ mod alert_action_tests;
 mod stream_start_tests;
 #[cfg(test)]
 mod conversation_delivery_tests;
+#[cfg(test)]
+mod conversation_participants_tests;
 
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
@@ -12588,7 +12590,7 @@ mission "differential" state="ready" {
             .claims_for(&sent.subject, Some("message.sent"))
             .unwrap()
             .remove(0);
-        let body = session_message_body(&state, &claim);
+        let body = session_message_body(&state, &claim, false);
         assert_eq!(
             body["attachments"],
             json!([{
@@ -12621,10 +12623,10 @@ mission "differential" state="ready" {
             .claims_for(&plain.subject, Some("message.sent"))
             .unwrap()
             .remove(0);
-        assert!(session_message_body(&state, &claim).get("attachments").is_none());
+        assert!(session_message_body(&state, &claim, false).get("attachments").is_none());
         // What a person wrote carries its provenance (here no signature: the fixture seals
         // nothing); what an agent wrote carries none.
-        let provenance = session_message_body(&state, &claim)["provenance"].clone();
+        let provenance = session_message_body(&state, &claim, false)["provenance"].clone();
         assert_eq!(provenance["verdict"], "unsigned", "{provenance}");
         assert!(provenance.get("signer").is_none());
         let agent_claim = state
@@ -12634,7 +12636,7 @@ mission "differential" state="ready" {
             .remove(0);
         let mut agent_claim = agent_claim;
         agent_claim.body["fields"]["from"] = json!("agent/terminal-test.seat");
-        assert!(session_message_body(&state, &agent_claim).get("provenance").is_none());
+        assert!(session_message_body(&state, &agent_claim, false).get("provenance").is_none());
     }
 
     #[test]
@@ -22213,7 +22215,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
-            conversation_delivery_links: false,
+            conversation_delivery_links: false, conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),
