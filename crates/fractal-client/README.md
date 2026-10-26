@@ -34,6 +34,16 @@ parameters, and manually paired action discriminators are private implementation
 Mutation callers pass the latest response snapshot and exact resource fences. `ClientError::Api`
 preserves stable error codes such as `stale-fence`, `runtime-not-local`, and `cursor-gap`.
 
+## Shared scenario fixtures
+
+`scenarios::load_index(path)` reads the shared world catalog (including cast and slice paths).
+`scenarios::load_slice(path)` reads a committed slice without embedding or pinning its bytes.
+Call `slice.rebased(now_epoch_ms)?` to shift only its declared instant pointers, then
+`slice.decode()?` to obtain located client-v0 models from both state and timeline.
+Strict slices reject unknown fields and enum cases; tolerant slices retain the production
+models' forward-compatible behavior. Diagnostic `unknown` repair witnesses never replace
+wire data. Replay offsets, durations and opaque content are not shifted.
+
 ## Retained typed collection follows
 
 `follow::FollowClient::connect(client.clone()).await?` owns one collections socket and
