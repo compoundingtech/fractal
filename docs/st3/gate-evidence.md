@@ -1129,16 +1129,17 @@ note covers.
 
 | Check | `enforce` | `events` | `sample_one_in` | Since |
 | --- | --- | --- | --- | --- |
-| `typescript-client` | true | `pull_request` | 5 | this change |
-| `fractal-web` (whole-check note; one shard's note never counts) | true | `pull_request` | 5 | 2026-10-23 |
-| `linux-gate` | true | `pull_request` | 5 | 2026-10-23 |
-| `genie-freshness` | true | `pull_request` | 5 | 2026-10-23 |
-| `ci-script-tests` | true | `pull_request` | 5 | 2026-10-23 |
+| `typescript-client` | true | `pull_request` | 1 | this change |
+| `fractal-web` (whole-check note; one shard's note never counts) | true | `pull_request` | 1 | 2026-10-23 |
+| `linux-gate` | true | `pull_request` | 1 | 2026-10-23 |
+| `genie-freshness` | true | `pull_request` | 1 | 2026-10-23 |
+| `ci-script-tests` | true | `pull_request` | 1 | 2026-10-23 |
 
 `typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
 trusted note, 254 of which would have skipped (the rest were sampled or touched a protected file), and not one satisfied note sat beside a failing
 real job; the published notes' shadow verification (`evidence-shadow v1`) was `ok` for every lane in every merge-group run since it landed. The
-sampled one in five keeps comparing the note with a real run. Each further check is its own reviewed change to this table, the policy and the
+sampled one in five kept comparing the note with a real run until 2026-10-26, when sampling was turned off for every check (Nathan: our pull
+requests skip CI entirely; the merge queue's full run is the comparison). Each further check is its own reviewed change to this table, the policy and the
 `enforced` lists in `ci-evidence-gate-test` and `evidence-verify-test`.
 
 ### Which checks our pull requests skipped (`scripts/evidence-skip-report`)
@@ -1340,7 +1341,12 @@ otherwise: the head repository is this repository and the pull request is not a 
 actor and triggering actor are known; the head commit is present or fetchable; the checked-out commit is the merge whose second parent is that head
 (or the head itself); the opener, the actor and the triggering actor are on `.st/evidence-authors.json` at the base and every non-merge commit of
 the branch has a listed author and committer (the signing guard's own `check_authors`, loaded from the base's `ci-evidence-signing`); and no
-protected file differs between the branch point and the head, the base, or the current tip of the merge's first parent. The gate, verifier, policy,
+protected file differs between the branch point and the base, or the current tip of the merge's first parent (main moved one since the
+branch: that is about which tree, so it still falls back). The protected files the branch ITSELF changes no longer make it fall back: they are
+the run's protected changes, and a protected change skips only on a `pull_request` run whose note is a host level's (`OWN_LEVELS` in the gate),
+since 2026-10-26 (Nathan: our pull requests skip CI entirely). That is safe because the run is judged by the gate and verifier the workflow
+fetches from `BASE_SHA`, never the pull request's copies, and the merge queue runs every check in full, so a change to the machinery is tested
+before it lands. Any other note (a fleet note, an agent note) and every `merge_group` run still run a protected change. The gate, verifier, policy,
 keys and author rule are all taken from the base, never from the checkout. The decision line says which: `tree_of=head|merge`, `pr_head=`,
 `merge_tree=` and `head_tree=used` or `head_tree=fallback:<why>`. A `merge_group` run never uses a head tree: only a note for its own tree can skip
 it, and a head-tree decision on any other event is refused (`pull_request_target` is not `pull_request`: it never uses a head tree and never skips). The line also
@@ -1372,7 +1378,10 @@ stopped counting as soon as main moved again. A lane edit is therefore judged by
 when the gate uses the head tree, it passes the branch point (`git merge-base BASE HEAD`) to the verifier as
 `--lane-base`, and the head is held to the lane's definition at that commit. The definition paths must be byte-identical in the head and at
 the branch point (`definition_changed` otherwise: the pull request edits its lane, CI runs it) and the note must carry the branch point's
-`lane_definition_sha256` (`wrong_definition` otherwise). The verifier refuses a lane base that is not an ancestor of the base, and one whose
+`lane_definition_sha256` (`wrong_definition` otherwise). A level whose by_level rule says `"lane": "tree"` (the host level, since 2026-10-26)
+may edit its lane: its note must then carry the digest of the lane as the SIGNED tree defines it (the base's argv and paths, the tree's bytes;
+`tree_sha256` beside `sha256` in `lane_definition`), so it covers that edited definition and no other. `evidence-wrap` records that digest.
+The verifier refuses a lane base that is not an ancestor of the base, and one whose
 `.st/required-lanes.json` differs from the base's (`definition_changed`), so the argv and paths are the base's either way; the gate never
 uses a head tree whose branch point has another lane file anyway (it is a protected path). What this admits, stated plainly: a note made
 with an older lane definition that main had accepted, for a pull request that changed none of it; the merge queue still tests the
