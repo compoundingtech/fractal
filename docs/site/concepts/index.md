@@ -10,6 +10,8 @@ Fractal is a **software factory framework**. It turns agent work from a collecti
 
 A harness crash should not erase the goal. A worker's claim that it finished should not be the only evidence. A person should not need to read every terminal to find the decision that needs them.
 
+New to the idea? [Why a software factory](why-software-factory.md) explains the problem these building blocks solve.
+
 ## The building blocks
 
 | Concept | What it contributes |

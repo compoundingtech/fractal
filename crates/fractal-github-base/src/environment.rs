@@ -12,7 +12,7 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 type Environment = BTreeMap<String, String>;
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 /// Resolve one source layer before overlaying it: empty/conflicted values mask lower layers.
 /// ST3 suffixes are explicit because Fractal folds ST_ and ST3_ into one namespace.
 fn old_alias(name: &str) -> Option<String> {

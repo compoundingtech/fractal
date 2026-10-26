@@ -30,7 +30,7 @@ class DiagnosticsTests(unittest.TestCase):
             code = '''
 import json, os, subprocess, sys, time
 from pathlib import Path
-root = Path(os.environ['SMALLTALK_FLEET_LEAVE_DIAGNOSTICS'])
+root = Path(os.environ['FRACTAL_FLEET_LEAVE_DIAGNOSTICS'])
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'],
                          start_new_session=True)
 (root / 'a').mkdir()

@@ -4,6 +4,8 @@ pub mod arrangements;
 pub mod custom;
 pub mod accountable;
 pub mod directive_notes;
+pub mod deploy;
+pub mod deploy_policy;
 pub mod full_value;
 pub mod glasses;
 pub mod harness_questions;
@@ -704,6 +706,7 @@ impl Registry {
             }
         }
         review::validate_claim(self, kind, fields)?;
+        deploy::validate_claim(kind, fields)?;
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
         }
@@ -1807,6 +1810,12 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             false,
             &[],
         ),
+        ("deploy.go", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("deploy.go-revoked", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("deploy.go-consumed", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("deploy.stop", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("deploy.stop-lifted", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("deploy.compat-signoff", &["resource"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         ("gate.head-bound", &["gate-operation"], WritePolicy::SystemOnly, Cardinality::Append, Some("gates"), true, &["gate"]),
         ("gate.review-verdict", &["gate-operation"], WritePolicy::CapabilityHolder, Cardinality::Append, Some("gates"), true, &["gate"]),
         ("gate.review-withdrawn", &["gate-operation"], WritePolicy::SystemOnly, Cardinality::Append, Some("gates"), true, &["gate"]),
@@ -2849,6 +2858,42 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        "deploy.go" => &[
+            ("version", required_integer()),
+            ("host", required_string()),
+            ("actor", required_reference_to(&["agent"])),
+            ("operation", required_enum(&["install", "rollback"])),
+            ("trainId", required_string()),
+            ("old", required_object()),
+            ("new", required_object()),
+            ("issuedAt", required_string()),
+            ("expiresAt", required_string()),
+            ("failureRestore", required_boolean()),
+            ("previewDigest", required_string()),
+            ("combined", object()),
+            ("compatSignoffId", required_string()),
+        ],
+        "deploy.go-revoked" => &[
+            ("version", required_integer()), ("goId", required_string()),
+        ],
+        "deploy.go-consumed" => &[
+            ("version", required_integer()), ("goId", required_string()),
+            ("operation", required_enum(&["install", "rollback"])),
+            ("result", required_string()),
+        ],
+        "deploy.stop" => &[
+            ("version", required_integer()), ("stopId", required_string()),
+            ("scope", required_string()), ("hosts", required_array()),
+            ("liftCondition", required_string()),
+        ],
+        "deploy.stop-lifted" => &[
+            ("version", required_integer()), ("stopId", required_string()),
+            ("releaseGoId", required_string()),
+        ],
+        "deploy.compat-signoff" => &[
+            ("version", required_integer()), ("trainId", required_string()),
+            ("oldCommit", required_string()), ("newCommit", required_string()),
+        ],
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
@@ -3391,6 +3436,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "fleet.member-admitted" => &[
             ("fleet_id", required_string()),
             ("member_key", required_string()),
+            ("node_id", string()),
             ("via", required_enum(&["anchor", "invite", "migration"])),
             ("sponsor", reference_to(&["host"])),
             ("invite", reference_to(&["fleet-invite"])),
@@ -3492,6 +3538,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("deadline_unix_ms", string()),
             ("signal", string()),
             ("reason", string()),
+            ("fresh_session", boolean()),
         ],
         "runtime.action.succeeded"
         | "runtime.action.failed"

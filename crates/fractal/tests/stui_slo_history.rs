@@ -31,7 +31,7 @@ fn history(root: &Path) -> String {
 #[test]
 fn empty_history_needs_no_person_daemon_or_terminal_and_creates_nothing() {
     let root = tempfile::tempdir().unwrap();
-    assert!(history(root.path()).contains("Local stui quality"));
+    assert!(history(root.path()).contains("Local Fractal TUI quality"));
     assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
 }
 

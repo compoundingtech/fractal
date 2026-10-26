@@ -502,11 +502,11 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
-ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness')
+ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
 # The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
-HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'linux-gate', 'fractal-web'})
-HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web'})
+HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests'})
+HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests'})
 
 
 def policy_text(**overrides):
@@ -1296,7 +1296,7 @@ class CommittedPolicy(unittest.TestCase):
 
     def rules(self, check):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
-        return evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')
+        return evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')
 
     def test_the_committed_lane_file_is_valid_exists_at_head_and_matches_what_st_test_runs(self):
         text = (ROOT / '.st/required-lanes.json').read_text()
@@ -1309,7 +1309,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(rules['argv'], command, lane)  # the lane is what the local producer runs
             for path in rules['definition_paths']:
                 self.assertTrue((ROOT / path).exists(), path)
-            declared = evidence_verify.policy_rules(policy, lane, 'compoundingtech/smalltalk')['inputs']
+            declared = evidence_verify.policy_rules(policy, lane, 'compoundingtech/fractal')['inputs']
             if declared is not None:
                 self.assertEqual(rules['tree_inputs'], declared, lane)  # what the lane tests is what the policy declares as inputs
         self.assertEqual(set(json.loads(text)['lanes']), set(module.LOCAL))
@@ -1324,7 +1324,7 @@ class CommittedPolicy(unittest.TestCase):
             for path in rules['definition_paths']:
                 target = f.repo / path / 'file' if (ROOT / path).is_dir() else f.repo / path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(f'{path}\n')
+                target.write_text('# fixture\n' if target.name == '.gitignore' else f'{path}\n')  # a .gitignore naming itself is not added
             f.git('add', '-A')
             f.git('commit', '-q', '--allow-empty', '-m', f'base {lane}')
             base_tree = f.git('rev-parse', 'HEAD^{tree}')
@@ -1345,8 +1345,9 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
-        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
-        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'fractal-web': 'off'})
+        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')['require'] for check in json.loads(text)['checks']}
+        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'ci-script-tests': 'shadow', 'fractal-web': 'off',
+                                 'rust-tests': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
             if mode != 'off':
@@ -1354,7 +1355,9 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_declared_inputs_are_exactly_the_reviewed_list_and_all_exist(self):
         # Written out here: changing what a check depends on is a reviewed change to the policy AND to this list.
-        declared = {'linux-gate': sorted([
+        declared = {'ci-script-tests': sorted([
+            # The self-tests that run in a sparse copy of exactly these (scripts/ci-script-tests): a read outside them fails the check.
+            '.config/daily-only.filterset', '.gitattributes', '.github', '.gitignore', '.st', 'apps/fractal-web/.gitignore', 'apps/fractal-web/src/changelog/seen.ts', 'crates/fractal/tests/daemon_load.rs', 'crates/fractal/tests/messaging_faults.rs', 'docs/st3/gate-evidence.md', 'flake.lock', 'flake.nix', 'megarepo.lock', 'nix', 'package.json', 'packages/fractal-ui/.gitignore', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts', 'src/main.rs']), 'linux-gate': sorted([
             '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components', 'crates',
             'docs/st2', 'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
             'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/fractal-daemon/src/attach_image.rs
@@ -1380,7 +1383,7 @@ class CommittedPolicy(unittest.TestCase):
             # lint the scenario privacy lane runs.
             'apps/ios/package.json', 'docs/st3/client-v0/fixtures', 'pnpm-source-inputs.json', 'pnpm-source-inputs.json.genie.ts',
             'scripts/check-public-repo'])}
-        for check in ('linux-gate', 'typescript-client', 'genie-freshness', 'fractal-web'):
+        for check in ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web'):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['inputs']) if rules['inputs'] else None, declared.get(check), check)
             for path in rules['inputs'] or ():
@@ -1507,15 +1510,15 @@ class CommittedPolicy(unittest.TestCase):
         self.assertEqual(sorted(with_queue), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
 
     def test_every_required_check_has_a_valid_entry_that_accepts_only_the_fleet_signer(self):
-        for check in ('linux-gate', 'typescript-client', 'genie-freshness'):
+        for check in ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests'):
             rules = self.rules(check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)
             self.assertIsNone(rules['max_age_s'], check)  # no age limit by default
             self.assertIs(rules['enforce'], check in ENFORCED, check)  # skipping is off until the policy says otherwise
             observed = rules['kinds']['observed']
-            self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/smalltalk',
+            self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/fractal',
                                                    '.github/workflows/fleet.yml', check])
-            self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/smalltalk/')
+            self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/fractal/')
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
         for check in ('isolation-vm', 'mail-redelivery-canaries'):  # daily only: nothing in the per-PR policy waits on them
@@ -1536,6 +1539,7 @@ class CommittedPolicy(unittest.TestCase):
         self.assertIn('linux-gate', jobs)
         # The separate checks have their own notes; the aggregate does not record them (ci-evidence-signing SEPARATE_CHECKS).
         self.assertNotIn('genie-freshness', jobs)
+        self.assertNotIn('ci-script-tests', jobs)
         self.assertNotIn('typescript-client', jobs)
         common = ['attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256']
         self.assertEqual(gate['required_inputs'], common)
@@ -1547,6 +1551,7 @@ class CommittedPolicy(unittest.TestCase):
     def test_the_step_outcome_notes_of_the_other_two_checks_have_their_own_exact_rules(self):
         expected = {
             'genie-freshness': ['bash', 'scripts/ci-genie-freshness'],
+            'ci-script-tests': ['bash', 'scripts/ci-script-tests'],
             'typescript-client': ['bash', 'scripts/ci-typescript-client'],
         }
         required = ['attempt', 'flake_lock_sha256', 'job', 'step_outcomes', 'steps', 'system', 'toolchain_sha256', 'wrapper_sha256']
@@ -1557,7 +1562,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(wrapper['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
 
     def test_every_required_check_lists_observed_and_wrapper_and_only_the_fleet_signer(self):
-        for check in ('linux-gate', 'typescript-client', 'genie-freshness'):
+        for check in ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests'):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['kinds']), ['observed', 'wrapper'], check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)  # the wrapper signs as fleet/ci
@@ -1587,6 +1592,112 @@ class CommittedPolicy(unittest.TestCase):
                          {'count': 'kit_shard_count', 'results': 'shard_results', 'pull_request_count': 1})
         # A note made without kit plays covers only a run whose own change detection says the kit did not change either.
         self.assertEqual(web['kinds']['wrapper']['input_order'], {'kit_inputs': ['true', 'false']})
+
+
+class PerCrateNotes(unittest.TestCase):
+    """What counts as a note for one crate (docs/per-crate-test-signing.md): the crate, the key, and, once a policy judges it, a run that ran a test."""
+
+    def statement(self, **inputs):
+        return {'predicate': {'observed': {'inputs': dict({'crate': 'base', 'source_inputs': 'k' * 40}, **inputs)}}}
+
+    def test_a_note_counts_for_its_crate_and_key_only(self):
+        note = self.statement(tests_run='3')
+        self.assertTrue(evidence_verify.signed_for_crate(note, 'base', 'k' * 40))
+        self.assertFalse(evidence_verify.signed_for_crate(note, 'top', 'k' * 40))
+        self.assertFalse(evidence_verify.signed_for_crate(note, 'base', 'j' * 40))
+
+    def test_a_run_that_ran_no_test_does_not_count_when_tests_are_needed(self):
+        for ran in ('0', '', 'many', '-1', None):
+            note = self.statement(tests_run=ran) if ran is not None else self.statement()
+            self.assertTrue(evidence_verify.signed_for_crate(note, 'base', 'k' * 40), ran)  # no policy judges it
+            self.assertFalse(evidence_verify.signed_for_crate(note, 'base', 'k' * 40, True), ran)
+        self.assertTrue(evidence_verify.signed_for_crate(self.statement(tests_run='1'), 'base', 'k' * 40, True))
+        self.assertTrue(evidence_verify.signed_for_crate(self.statement(tests_run=2), 'base', 'k' * 40, True))
+
+    def test_the_no_tests_list_is_the_bases_and_must_be_an_array_of_names(self):
+        f = Fixture()
+        self.addCleanup(f.tmp.cleanup)
+        def at_base(text):
+            (f.repo / '.st').mkdir(exist_ok=True)
+            (f.repo / '.st/rust-test-inputs.json').write_text(text)
+            f.git('add', '-A')
+            f.git('commit', '-q', '-m', text)
+            return f.git('rev-parse', 'HEAD')
+        repo = str(f.repo)
+        self.assertEqual(evidence_verify.zero_test_crates(repo, at_base('{"global": []}')), set())
+        self.assertEqual(evidence_verify.zero_test_crates(repo, at_base('{"no_tests": ["a", "b"]}')), {'a', 'b'})
+        for bad in ('{"no_tests": "a"}', '{"no_tests": [1]}', 'not json', '[]'):
+            with self.assertRaises(evidence_verify.Failure) as caught:
+                evidence_verify.zero_test_crates(repo, at_base(bad))
+            self.assertEqual(caught.exception.reason, 'error', bad)
+
+
+class MembersLogView(unittest.TestCase):
+    """The log's view of a per-crate check (rust-tests): the head judged once, then each member's own key file. Every member's pass must be
+    listed, and a record the log lists under any member's key that is not here is missing, as for one record."""
+
+    CHECK = 'rust-tests'
+
+    def setUp(self):
+        self.f = Fixture(layout='tag')
+        self.addCleanup(self.f.tmp.cleanup)
+        self.commit, self.tree = self.f.commit('content\n')
+        self.log_key = self.f.key('log-key')
+        self.log_keys = self.f.root / 'log-keys'
+        self.log_keys.write_text(f'log/evidence namespaces="git" {self.log_key.with_suffix(".pub").read_text()}')
+        self.keys = {'base': 'a' * 40, 'top': 'b' * 40}
+
+    def record(self, crate):
+        """A record indexed under the crate's key (the index ref is named by the object it points at)."""
+        oid = self.f.git('hash-object', '-w', '--stdin', stdin=f'{crate} {len(self.f.git("for-each-ref").splitlines())}\n'.encode())
+        self.f.git('update-ref', f'refs/notes/evidence-input/{self.CHECK}/{self.keys[crate]}/{oid}', oid)
+        return oid
+
+    def log(self, by_key):
+        """A signed log head whose keys/<check>/<prefix>/<key> files list the given record ids."""
+        def tree_of(entries):
+            return self.f.git('mktree', stdin=''.join(f'{mode} {kind} {oid}\t{name}\n' for name, (mode, kind, oid) in sorted(entries.items())).encode())
+        prefixes = {}
+        for key, records in by_key.items():
+            blob = self.f.git('hash-object', '-w', '--stdin',
+                              stdin=''.join(f'record {r} {self.CHECK} 0 machine/ci1 {NOW.isoformat()}\n' for r in records).encode())
+            prefixes.setdefault(key[:2], {})[key] = ('100644', 'blob', blob)
+        check_tree = tree_of({prefix: ('040000', 'tree', tree_of(files)) for prefix, files in prefixes.items()})
+        root = tree_of({'keys': ('040000', 'tree', tree_of({self.CHECK: ('040000', 'tree', check_tree)}))})
+        head = self.f.git('-c', 'gpg.format=ssh', '-c', f'user.signingKey={self.log_key}', 'commit-tree', '-S', root,
+                          '-m', f'evidence-log v1 as_of={NOW.isoformat()} added=0 gc=0 missing=0')
+        self.f.git('update-ref', 'refs/evidence-log/main', head)
+        return head
+
+    def view(self, chosen):
+        return evidence_verify.members_log_view(str(self.f.repo), str(self.log_keys), self.tree, self.CHECK,
+                                                {crate: (self.keys[crate], chosen.get(crate)) for crate in self.keys},
+                                                now=NOW + timedelta(seconds=30))
+
+    def test_every_members_pass_listed_is_ok_and_one_not_listed_is_an_unlogged_pass(self):
+        base, top = self.record('base'), self.record('top')
+        head = self.log({self.keys['base']: [base], self.keys['top']: [top]})
+        view = self.view({'base': base, 'top': top})
+        self.assertEqual((view['log'], view['log_head'], view['log_missing'], view['log_unlogged']), ('ok', head, 0, 0), view)
+        self.log({self.keys['base']: [base]})
+        view = self.view({'base': base, 'top': top})
+        self.assertEqual((view['log'], view['log_missing'], view['log_unlogged']), ('unlogged_pass', 0, 1), view)
+
+    def test_a_record_the_log_lists_under_a_members_key_that_is_not_here_is_missing_with_or_without_a_choice(self):
+        base, top = self.record('base'), self.record('top')
+        gone = 'c' * 40
+        self.log({self.keys['base']: [base, gone], self.keys['top']: [top]})
+        self.assertEqual((self.view({'base': base, 'top': top})['log'], self.view({})['log']), ('missing', 'missing'))
+        self.assertEqual(self.view({})['log_missing'], 1)
+        self.log({self.keys['base']: [base], self.keys['top']: [top]})
+        self.assertEqual(self.view({})['log'], 'ok', 'a check that did not hold: only missing can follow')
+
+    def test_a_head_that_is_absent_or_unsigned_says_so_for_every_member_at_once(self):
+        base = self.record('base')
+        self.assertEqual(self.view({'base': base})['log'], 'absent')
+        self.log_key = self.f.key('not-the-log-key')
+        self.log({self.keys['base']: [base]})
+        self.assertEqual(self.view({'base': base})['log'], 'unsigned')
 
 
 class ValueRules(unittest.TestCase):

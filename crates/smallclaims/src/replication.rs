@@ -434,6 +434,16 @@ pub enum ReplicationFailurePhase {
     FollowUpExport,
 }
 
+/// Last observed HTTP client boundary. Pool acquisition is not exposed by reqwest.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplicationClientStage {
+    SendStarted,
+    Connected,
+    HeadersReceived,
+    PooledOrUnknown,
+}
+
 /// Bounded, allowlisted diagnostic metadata, not arbitrary error display or peer prose.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ReplicationExchangeFailure {
@@ -443,6 +453,10 @@ pub struct ReplicationExchangeFailure {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
     pub cause: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_stage: Option<ReplicationClientStage>,
 }
 
 impl ReplicationExchangeFailure {
@@ -498,6 +512,8 @@ impl ReplicationExchangeFailure {
             elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             http_status,
             cause,
+            correlation_id: None,
+            client_stage: None,
         }
     }
 }

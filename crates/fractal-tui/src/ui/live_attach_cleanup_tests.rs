@@ -61,7 +61,7 @@ async fn action(Json(request): Json<Value>) -> Json<Value> {
 }
 
 async fn collections(State(server): State<FakeServer>, ws: WebSocketUpgrade) -> Response {
-    ws.protocols(["st3.client.collections.v0"]).on_upgrade(move |mut socket| async move {
+    ws.protocols(["fractal.client.collections.v0"]).on_upgrade(move |mut socket| async move {
         server.bookkeeping.lock().await.connected = true;
         while let Some(message) = socket.recv().await {
             let Ok(Message::Text(text)) = message else { break; };

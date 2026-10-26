@@ -16,7 +16,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = fractal_daemon::test_support::canonical_tempdir();
+        let root = fractal_daemon::test_support::memory_tempdir();
         for dir in ["home/.config/st3", "run", "archive", "bin"] {
             fs::create_dir_all(root.path().join(dir)).unwrap();
         }
