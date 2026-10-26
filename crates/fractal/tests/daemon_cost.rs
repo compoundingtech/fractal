@@ -933,6 +933,7 @@ const PROBES: &[Probe] = &[
         "/v1/mission-runs/{run}/revision-proposal",
     ),
     get("GET /v1/mission-runs/{run}/waiting-on", "/v1/mission-runs/{run}/waiting-on"),
+    get("GET /v1/blocked-runs", "/v1/blocked-runs"),
     get("GET /v1/mission-runs/{run}", "/v1/mission-runs/{run}"),
     get(
         "GET /v1/run-generations/{generation}",

@@ -2765,10 +2765,10 @@ async fn cli_reads_preserve_operational_views_after_restart() {
     }
 }
 
-/// What a run waits on reads the daemon's published lists, as a daemon serves them; before and
-/// after a restart, the same run reads the same way.
+/// What a run waits on and the blocked runs read the daemon's published lists, as a daemon
+/// serves them; before and after a restart, the same run reads the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cli_waiting_on_reads_published_lists_after_restart() {
+async fn cli_waiting_on_and_blocked_runs_read_published_lists_after_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -2794,6 +2794,16 @@ async fn cli_waiting_on_reads_published_lists_after_restart() {
         assert_eq!(waiting["open"][0]["path"], "work");
         assert_eq!(waiting["open"][0]["kind"], "ready");
         assert_eq!(waiting["open"][0]["who"], WORKER);
+        // Quiet for longer than a millisecond: nobody claims the ready step.
+        let output = daemon.cli(PERSON, &["missions", "blocked", "--quiet", "1ms"]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let blocked: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(blocked["groups"][0]["cause"], "unclaimed", "{blocked:#}");
+        assert_eq!(blocked["groups"][0]["runs"][0]["run"], run.subject.as_str());
+        let output = daemon.cli(PERSON, &["missions", "blocked"]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let blocked: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(blocked["groups"], json!([]), "within the default quiet limit nothing is blocked");
         daemon.restart().await;
     }
 }

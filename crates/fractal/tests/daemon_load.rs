@@ -243,6 +243,8 @@ const PERSON_READS: &[(&str, u64)] = &[
     ("/v1/client/work", 250),
     ("/v1/client/terminals", 250),
     ("/v1/mission-runs?mission=bench/fleet", 250),
+    // Why is this stuck: every blocked run in the fleet, by cause.
+    ("/v1/blocked-runs", 250),
     ("/v1/replication/status", 250),
 ];
 

@@ -40,8 +40,9 @@ paths = [
   "GET /v1/client/now",
   "GET /v1/client/attention",
   "stream attention",
-  # Why a run is stuck
+  # Why a run is stuck, and every blocked run
   "GET /v1/mission-runs/{run}/waiting-on",
+  "GET /v1/blocked-runs",
   # Documents
   "GET /v1/client/documents/content",
   "GET /v1/documents",

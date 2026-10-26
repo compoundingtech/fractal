@@ -1519,6 +1519,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st missions blocked",
+      "description": "Every blocked run in the fleet, one line each, grouped by cause, from the published work and missions lists",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_waiting_on_and_blocked_runs_read_published_lists_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st missions queued",
       "description": "Show one seat's current claim and its queued mission runs in order; same as `st agents queue AGENT`",
       "tests": [
@@ -1595,7 +1603,7 @@
       "command": "st missions waiting-on",
       "description": "What one run waits on: each open step, whom it waits on and since when, open asks, steps not ready and finished, and whether it stalled",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_waiting_on_reads_published_lists_after_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_waiting_on_and_blocked_runs_read_published_lists_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },

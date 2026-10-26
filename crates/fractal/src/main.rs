@@ -1216,6 +1216,16 @@ enum MissionViewCommand {
         #[arg(long)]
         quiet: Option<String>,
     },
+    /// Every blocked run in the fleet, one line each, grouped by cause: an ask on a person, a
+    /// seat stopped or down, a claim with no progress, a ready step nobody claims, a hold.
+    ///
+    /// Reads the same published lists as `missions waiting-on`; a run is blocked when a step
+    /// is stuck, or when nothing in it moves and a step waits on a person or a hold.
+    Blocked {
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        #[arg(long)]
+        quiet: Option<String>,
+    },
     /// Change a mission's canonical ID without replacing its runs or revision history.
     RenameId(IdentityRenameArgs),
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da

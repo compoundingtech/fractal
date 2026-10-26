@@ -821,6 +821,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/mission-runs/{run}/waiting-on",
             get(waiting_on::get_run_waiting_on),
         )
+        .route("/v1/blocked-runs", get(waiting_on::get_blocked_runs))
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
