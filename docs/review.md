@@ -1,9 +1,9 @@
 # The review standard
 
-Every pull request is reviewed against this one standard, by whoever or whatever runs the review: a contributor's agent before it
-pushes, `scripts/review` (which runs the standard over a head and signs the verdict), or a second reader. The standard is written
-here so that no reviewer depends on what was said in a conversation, and so that two reviewers given the same head reach the same
-verdict.
+Every pull request to this repository is reviewed against this one standard (other repositories use it where it fits), by
+whoever or whatever runs the review: a contributor's agent before it pushes, `scripts/review` (which runs the standard over a head
+and signs the verdict), or a second reader. The standard is written here so that no reviewer depends on what was said in a
+conversation, and so that two reviewers given the same head reach the same verdict.
 
 A change goes from idea to main in this order, and each agent does all of it for its own change:
 
@@ -55,19 +55,23 @@ Words reviewers use, and what they mean:
 - **CHANGES** — at least one blocking finding. It names the file, the line, the reason and the fix that would be accepted, so the
   author can act without asking anything.
 - **HOLD** — not a verdict on the code: the review waits on something named (a conflict to resolve, checks still running, a
-  disposition of a flake on the evidence path). It says what, and who gives it.
+  flake that has to be fixed first). It says what, and who gives it. There is no "GO, not final": a change either has a `GO` at
+  its head, or it is a `HOLD` naming what is open.
 
 ## What a GO means
 
 All at one exact head:
 
-1. **Identity.** The verdict names the full head and base. A verdict is never reused for another head except by a delta read.
-2. **It merges cleanly.** `git merge-tree --write-tree origin/main <head>` succeeds, and the head is not behind `main` by a change
-   that touches the same files (see "Behind main").
-3. **Every check is signed at this head** (or the merge of this head with `main`, where the protected files moved), and none is
-   red. A skipped check is a pass only where its signed note says why it was skipped.
-4. **No flake.** A test that passed only on a retry is a finding on the evidence, policy, workflow and store paths; elsewhere it
-   is recorded as unrelated against the repository's flake list and does not block. A flake is never waived by assumption.
+1. **Identity.** The verdict names the full head and base. A verdict is never reused for another head except by a delta read,
+   which includes a head that is only a merge of `main` with an empty `git show --remerge-diff`.
+2. **It merges cleanly.** `git merge-tree --write-tree origin/main <head>` succeeds. Whether a clean merge still breaks something
+   that changed on `main` is judged by the checks signed on the merge (see "Behind main"), not guessed by the reviewer.
+3. **Every check is signed at this head** (`scripts/st-test --status`; or the merge of this head with `main`, where the protected
+   files moved), and none is red; the required checks on GitHub agree. A skipped check is a pass only where its signed note says
+   why it was skipped.
+4. **No flake.** A crate with a test that passed only on a retry is not signed (so item 3 fails), on every path, not only the
+   evidence, policy, workflow and store paths. The flake is fixed or its test is fixed first; it is never waived by assumption, and
+   the reviewer does not record it as unrelated.
 5. **It does what its description says, with tests that would fail without it.** The reviewer finds the test that fails on the
    old behaviour (or checks the author's claim that it does) and asks whether its assertions would catch the mistake it claims
    to catch. For a change that only touches tests, the reviewer reads intent: no coverage dropped, no assertion weakened, the
@@ -101,8 +105,8 @@ a deploy, a release or the merge queue waits for a person's approval. **Only `lo
 
 **High** — any one of these makes the change high:
 
-- a stored format or a claim kind: a new or changed claim kind or field, a schema or table change, a rules-version change, a
-  checkpoint or digest change
+- a stored format or a claim kind: a new claim kind, a field whose meaning changes or is removed, a schema or table change, a
+  rules-version change, a checkpoint or digest change
 - deleting data, or an opt-in deletion that has no way back
 - a trust boundary or a permission: who may sign, who may do what, keys, grants, an authorisation check relaxed
 - a breaking change to a public contract: the client API, the wire, the CLI, a published file format, in a way that older
@@ -113,8 +117,8 @@ a deploy, a release or the merge queue waits for a person's approval. **Only `lo
 **Medium** — none of the above, and any one of these:
 
 - runtime, reconcile, store or replication behaviour changes, with a revert as the way back
-- an additive, optional, negotiated change: a new optional wire field that older readers ignore, a read-only route, a new
-  local-only mode that is off by default
+- an additive, optional, negotiated change: a new optional claim or wire field that older readers ignore (with its rollout rule,
+  for example daemons before clients), a read-only route, a new local-only mode that is off by default
 - the evidence, signing, CI or policy path changes without weakening it
 - a workspace-wide toolchain or dependency pin (the flake, the lock files)
 - a change too large to read in full, with the unread parts named
@@ -181,6 +185,9 @@ files and lines actually read.
   is not empty, the reviewer reads it.
 - A **rebase**, or a conflict resolution that leaves each file's own change equal, is free for the same reason. Generated files
   and appended documentation or release-note fragments are read as a delta too.
+- Done by hand, the same read is `git diff OLDHEAD NEWHEAD`, `git log --no-merges` for commits not on `main`, and
+  `git show --remerge-diff` for every merge; the patch-id record is how `scripts/review` does it, and either way the verdict says
+  what was served from the record.
 - A **delta read is enough** when a verdict exists for an ancestor of the head. The delta verdict says what was served from the
   record and what was read.
 - A change that was **never reviewed gets a full first read**, whatever its author calls the request.
