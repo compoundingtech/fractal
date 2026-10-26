@@ -44,6 +44,7 @@ pub mod resources;
 pub mod search;
 pub mod arrangements;
 pub mod conversation_blocks;
+pub mod conversation_delivery;
 pub mod collection_windows;
 pub mod inventory;
 pub mod published_missions;
@@ -356,6 +357,7 @@ pub struct ClientSession {
     pub local_peer: bool,
     pub custom_forms: bool,
     pub conversation_blocks: bool,
+    pub conversation_delivery_links: bool,
     /// Internal assistant projection option, never negotiated by native clients.
     pub assistant_content_handles: bool,
     pub messages_paging: bool,
@@ -376,6 +378,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms: true,
             conversation_blocks: false,
+            conversation_delivery_links: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
@@ -416,6 +419,7 @@ impl ClientSession {
                 local_peer: false,
                 custom_forms,
                 conversation_blocks: false,
+                conversation_delivery_links: false,
                 assistant_content_handles: false,
                 messages_paging: false,
                 scopes: ["read.projections", "terminal.read"]
@@ -437,6 +441,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms,
             conversation_blocks: false,
+            conversation_delivery_links: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
@@ -455,6 +460,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            conversation_delivery_links: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
@@ -520,6 +526,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         json!({ "id": action, "version": 0, "state": state })
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
+    capabilities.push(json!({"id":"conversation-delivery-links", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"push-registration", "version":1, "state":if session.pairing_issued_here && session.transport != "unix" {"granted"} else {"unavailable"}}));
     capabilities.push(json!({"id":"messages-paging", "version":2, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
@@ -593,6 +600,10 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "conversation-blocks.v1")
         });
+    let conversation_delivery_links = request.headers().get("x-st3-features")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|feature|
+            feature.trim() == "conversation-delivery-links.v1"));
     let messages_paging = request
         .headers()
         .get("x-st3-features")
@@ -629,6 +640,7 @@ pub fn authenticate(
             }
             session.custom_forms = custom_forms;
             session.conversation_blocks = conversation_blocks;
+            session.conversation_delivery_links = conversation_delivery_links;
             session.messages_paging = messages_paging;
             return Ok(session);
         }
@@ -667,6 +679,7 @@ pub fn authenticate(
     };
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     session.conversation_blocks = conversation_blocks;
+    session.conversation_delivery_links = conversation_delivery_links;
     session.messages_paging = messages_paging;
     if request.method() == axum::http::Method::POST
         && request.uri().path() == "/v1/client/diagnostics"
@@ -731,6 +744,7 @@ pub fn paired_client_session(
         local_peer: false,
         custom_forms,
         conversation_blocks: false,
+        conversation_delivery_links: false,
         assistant_content_handles: false,
         messages_paging: false,
         scopes,
@@ -770,6 +784,7 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
     }.ok_or_else(|| forbidden("the client session grant is absent"))?;
     let mut current = paired_client_session(state, &paired, session.transport, session.custom_forms)?;
     current.conversation_blocks = session.conversation_blocks;
+    current.conversation_delivery_links = session.conversation_delivery_links;
     current.messages_paging = session.messages_paging;
     if current.authority_actor != session.authority_actor {
         return Err(forbidden("the client session authority changed"));
@@ -2337,6 +2352,10 @@ pub fn native_slice_page_at_generation(
     items.truncate(limit);
     drop(overlay);
     let _page_preparation = crate::profile::span("conversation/page-preparation");
+    let receipt_source = crate::external_sessions::external_session_id(source.driver, &source.native_id);
+    conversation_delivery::annotate(state, snapshot, session, &receipt_source,
+        managed.map(|managed| managed.0.as_str()),
+        items.iter_mut().map(|(item, _)| item))?;
     // A page never outgrows what a paired reader can take from a remote owner (its reads are
     // capped at 1 MiB): a seat with very large entries gets a shorter newest page and a cursor
     // for the rest. A lone entry can exceed the target budget, but not the hard ceiling.
@@ -3038,6 +3057,7 @@ pub fn timeline_value(
             .as_deref()
             .and_then(|cursor| offset_continuation_header(state, session, &session_id, snapshot, cursor));
         for item in &mut page.items {
+            if !session.conversation_delivery_links && let Some(item) = item.as_object_mut() { item.remove("delivers"); }
             if !session.conversation_blocks && let Some(body) = item["body"].as_object_mut() {
                 body.remove("blocks");
             }

@@ -7067,7 +7067,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if !explicit_retry
             && matches!(subject.kind.as_str(), "agent" | "exec" | "pty")
             && member.driver.as_deref() != Some("codex")
-            && self.defer_or_park_failed_start(subject)?
+            && self.defer_or_park_failed_start(subject, member)?
         {
             return Ok(false);
         }
@@ -8485,7 +8485,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             && member.lifecycle == MemberLifecycle::Service
             && member.driver.as_deref() != Some("codex")
             && !self.claude_trust_recovery_stopped(&subject.subject, observation)?
-            && self.park_unready_crash_loop(subject)?
+            && self.park_unready_crash_loop(subject, member)?
         {
             return Ok(());
         }
@@ -8601,10 +8601,10 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Keep a failed durable launch from turning each graph write into another PTY spawn.
-    fn defer_or_park_failed_start(&self, subject: &DesiredSubject) -> Result<bool> {
+    fn defer_or_park_failed_start(&self, subject: &DesiredSubject, member: &MemberSpec) -> Result<bool> {
         let token = self.launch_token(&subject.subject)?;
         if self.runtime_crash_loop_raised(&subject.subject, &token)? {
-            return Ok(true);
+            return Ok(!self.crash_loop_retry_due(subject, member, &token)?);
         }
         let last_success_index = self
             .store
@@ -8656,10 +8656,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(false)
     }
 
-    fn park_unready_crash_loop(&self, subject: &DesiredSubject) -> Result<bool> {
+    fn park_unready_crash_loop(&self, subject: &DesiredSubject, member: &MemberSpec) -> Result<bool> {
         let token = self.launch_token(&subject.subject)?;
         if self.runtime_crash_loop_raised(&subject.subject, &token)? {
-            return Ok(true);
+            return Ok(!self.crash_loop_retry_due(subject, member, &token)?);
         }
         let first_launch = self
             .store
@@ -8720,6 +8720,149 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// Whether a launch that a crash loop parked is tried again now. A member that restarts always is
+    /// not left stopped for good by a launcher that failed three times: it is retried after a wait that
+    /// doubles, from `CRASH_LOOP_RETRY_BASE_MS` to `CRASH_LOOP_RETRY_CAP_MS`, at most `CRASH_LOOP_RETRIES`
+    /// times since its last successful launch, and each retry says in a reconcile decision on the seat
+    /// (and its owner run) what the launch before it failed with. After the last, the launch stays parked
+    /// and one decision says so; an explicit restart still tries once more.
+    fn crash_loop_retry_due(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        token: &str,
+    ) -> Result<bool> {
+        if member.restart != RestartType::Always {
+            return Ok(false);
+        }
+        let decisions = self
+            .store
+            .claims_for(&subject.subject, Some("runtime.reconcile-decision"))?;
+        let key_of = |claim: &crate::model::ClaimRecord| {
+            claim.body.pointer("/fields/key").and_then(Value::as_str).map(str::to_owned)
+        };
+        let raise_key = format!("runtime-crash-loop:{token}");
+        let retry_key = format!("runtime-crash-loop-retry:{token}:");
+        let order = crate::store::claim_log_order;
+        let last_success = self
+            .store
+            .observations_for(&subject.subject, "runtime.action.succeeded")?
+            .into_iter()
+            .filter(|claim| {
+                claim.body.pointer("/fields/desired_token").and_then(Value::as_str) == Some(token)
+            })
+            .max_by_key(order);
+        let retries = decisions
+            .iter()
+            .filter(|claim| {
+                last_success.as_ref().is_none_or(|success| order(claim) > order(success))
+                    && key_of(claim).is_some_and(|key| key.starts_with(&retry_key))
+            })
+            .collect::<Vec<_>>();
+        let failures = self.start_failures(&subject.subject, token)?;
+        let last_failure = failures.iter().max_by_key(|claim| order(claim));
+        // A retry whose launch has not been tried yet is still the one in hand: the pass that grants it
+        // asks again before it launches.
+        if let Some(granted) = retries.last()
+            && last_failure.is_none_or(|failure| order(failure) < order(granted))
+        {
+            return Ok(true);
+        }
+        let since = decisions
+            .iter()
+            .filter(|claim| {
+                key_of(claim).is_some_and(|key| key == raise_key || key.starts_with(&retry_key))
+            })
+            .map(|claim| claim.accepted_at_unix_ms)
+            .chain(last_failure.map(|claim| claim.accepted_at_unix_ms))
+            .chain(last_success.as_ref().map(|claim| claim.accepted_at_unix_ms))
+            .max()
+            .unwrap_or(0);
+        let owner = subject.owner_run.as_ref().map(|run| Value::String(run.clone()));
+        let with_owner = |mut fields: BTreeMap<String, Value>| {
+            if let Some(owner) = &owner {
+                fields.insert("owner_run".into(), owner.clone());
+            }
+            fields
+        };
+        let attempted = retries.len();
+        if attempted >= CRASH_LOOP_RETRIES {
+            let key = format!("runtime-crash-loop-retries-exhausted:{token}");
+            self.store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "runtime.reconcile-decision".into(),
+                actor: None,
+                fields: with_owner(BTreeMap::from([
+                    ("key".into(), Value::String(key.clone())),
+                    ("decision".into(), Value::String("retries-exhausted".into())),
+                    (
+                        "reason".into(),
+                        Value::String(format!(
+                            "the launch failed after {CRASH_LOOP_RETRIES} retries and stays stopped: restart it with `st agents restart`"
+                        )),
+                    ),
+                ])),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("{key}:{}:{}", subject.subject, retries.len())),
+            })?;
+            if let Some(run) = subject.owner_run.as_deref()
+                && let Err(error) = self.tell_seat_down(
+                    &subject.subject,
+                    run,
+                    token,
+                    &format!("its launch failed after {CRASH_LOOP_RETRIES} retries and stays stopped"),
+                )
+            {
+                eprintln!("st3: seat down report for {}: {error:#}", subject.subject);
+            }
+            return Ok(false);
+        }
+        let wait = u128::from(CRASH_LOOP_RETRY_BASE_MS.load(std::sync::atomic::Ordering::SeqCst))
+            .saturating_mul(1u128 << attempted.min(20))
+            .min(CRASH_LOOP_RETRY_CAP_MS);
+        let due = since.saturating_add(wait);
+        let now = now_ms();
+        if now < due {
+            self.arm_restart(&subject.subject, due);
+            return Ok(false);
+        }
+        let detail = last_failure
+            .and_then(|claim| claim.body.pointer("/fields/reason"))
+            .and_then(Value::as_str)
+            .unwrap_or("the runtime start failed");
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: with_owner(BTreeMap::from([
+                ("decision".into(), Value::String("retry".into())),
+                ("key".into(), Value::String(format!("{retry_key}{}", attempted + 1))),
+                (
+                    "reason".into(),
+                    Value::String(format!(
+                        "retry {} of {CRASH_LOOP_RETRIES} of a launch parked by a crash loop; the launch before it failed: {detail}",
+                        attempted + 1
+                    )),
+                ),
+            ])),
+            evidence: Vec::new(),
+            expected_subject: None,
+            // Counted over every retry of this declaration, so a retry after a success is a new one.
+            idempotency_key: Some(format!(
+                "{retry_key}n{}:{}",
+                decisions
+                    .iter()
+                    .filter(|claim| key_of(claim).is_some_and(|key| key.starts_with(&retry_key)))
+                    .count()
+                    + 1,
+                subject.subject
+            )),
+        })?;
+        self.signal_changed();
+        Ok(true)
     }
 
     fn runtime_crash_loop_raised(&self, subject: &str, token: &str) -> Result<bool> {
@@ -18736,6 +18879,14 @@ struct GateCheck<'a> {
 /// producer: longer than a launcher takes to publish a session or to be declared timed out. Tests lower it.
 pub static STALE_FAILED_START_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(15 * 60 * 1000);
+
+/// The wait before the first retry of a launch that a crash loop parked; each further retry waits twice
+/// as long, up to `CRASH_LOOP_RETRY_CAP_MS`. Tests lower it.
+pub static CRASH_LOOP_RETRY_BASE_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(60_000);
+const CRASH_LOOP_RETRY_CAP_MS: u128 = 30 * 60_000;
+/// How many times a parked launch is retried before it stays parked for good.
+pub const CRASH_LOOP_RETRIES: usize = 6;
 
 pub fn now_ms() -> u128 {
     smallclaims::store::now_ms()
