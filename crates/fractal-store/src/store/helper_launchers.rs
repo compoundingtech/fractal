@@ -164,6 +164,11 @@ impl Store {
         binding_at(&self.readers.get(), subject)
     }
 
+    /// An edited helper remains run-owned even when it no longer matches its credential receipt.
+    pub fn helper_launcher_has_lifetime_binding(&self, subject: &str) -> Result<bool> {
+        Ok(lifetime_binding_at(&self.readers.get(), subject)?.is_some())
+    }
+
     /// Capture references only, before publishing the declaration so reconciliation cannot race it.
     /// All authority fields come from the authenticated actor and current server runtime evidence.
     pub fn bind_helper_launcher(
@@ -345,6 +350,7 @@ mod tests {
         desired.member.as_mut().unwrap().cwd = "/elsewhere".into();
         publish(&store, &helper, "replacement", Some("agent/node.launcher"));
         assert!(store.helper_launcher_binding("agent/node.helper").unwrap().is_none());
+        assert!(store.helper_launcher_has_lifetime_binding("agent/node.helper").unwrap());
         append(&store, "agent/node.launcher", "runtime.observed",
             json!({"status":"stopped", "incarnation_id":"launcher-1"}));
         assert!(!store.helper_launcher_alive("agent/node.helper").unwrap());
