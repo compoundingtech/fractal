@@ -65,7 +65,7 @@ def patch_ids(repo, merge_base, head, paths):
     """Per-file patch-id of the change's own diff against the merge base."""
     ids = {}
     for path in paths:
-        diff = subprocess.run(["git", "diff", "--no-color", f"{merge_base}", head, "--", path], cwd=repo, capture_output=True).stdout
+        diff = subprocess.run(["git", "diff", "--no-color", "--no-renames", f"{merge_base}", head, "--", path], cwd=repo, capture_output=True).stdout
         if not diff:
             continue
         done = subprocess.run(["git", "patch-id", "--stable"], cwd=repo, input=diff, capture_output=True)
@@ -76,7 +76,7 @@ def patch_ids(repo, merge_base, head, paths):
 
 
 def changed_paths(repo, merge_base, head):
-    return [name for name in git(repo, "diff", "--name-only", merge_base, head).split("\n") if name]
+    return [name for name in git(repo, "diff", "--name-only", "--no-renames", "-z", merge_base, head).split("\0") if name]
 
 
 def record_dir(repo):
@@ -346,7 +346,7 @@ def review(args, repo):
     prompt_head = build_prompt(text, head, base, merge_base, changed, structure, served, bool(remerge_text), round_number, previous, answers_note)
     diff_parts = []
     for path in changed:
-        diff_parts.append(git(repo, "diff", "--no-color", merge_base, head, "--", path, check=False))
+        diff_parts.append(git(repo, "-c", "core.quotePath=false", "diff", "--no-color", "--no-renames", merge_base, head, "--", path, check=False))
     prompt = prompt_head + "\n== THE DIFF OF THE FILES TO READ ==\n" + "\n".join(diff_parts) + "\n== END OF THE DIFF ==\n" + instruction_tail(SCHEMA_NOTE)
     checkout = tempfile.mkdtemp(prefix="review-head-")
     git(repo, "worktree", "add", "--detach", "-q", checkout, head)
