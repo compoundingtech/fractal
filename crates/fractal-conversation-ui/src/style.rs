@@ -1,5 +1,5 @@
 //! How each kind of conversation entry is drawn, by theme token: the one table the renderer
-//! reads. stui writes it to `fixtures/clients/conversation-style.json` and the phone draws
+//! reads. Fractal TUI writes it to `fixtures/clients/conversation-style.json` and the phone draws
 //! from that file, so both apps draw a conversation the same way.
 
 #[cfg(feature = "ratatui")]
@@ -95,7 +95,7 @@ pub struct Tool {
     pub collapse: Label,
 }
 
-/// One side of Small Talk mail: who sent it, its edge and its text.
+/// One side of Fractal mail: who sent it, its edge and its text.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct MailLook {
     pub edge: Token,
@@ -104,7 +104,7 @@ pub struct MailLook {
     pub text: Token,
 }
 
-/// Small Talk mail: mail the person is part of leads, mail between others stays back, and
+/// Fractal mail: mail the person is part of leads, mail between others stays back, and
 /// mail to the person is filled like their own messages.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Mail {

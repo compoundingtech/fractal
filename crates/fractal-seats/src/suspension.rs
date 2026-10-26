@@ -1,4 +1,4 @@
-//! The part of `suspension` that moved up from st3-store.
+//! The part of `suspension` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::SeatsStoreCore;
 use crate::model::ClaimRecord;
@@ -9,6 +9,10 @@ use serde_json::Value;
 pub use crate::native_resume::{CONTINUE_ENV, CONTINUE_PATH_ENV, RESUME_ENV};
 pub use fractal_missions::suspension::*;
 pub use fractal_missions::suspension::{Suspension, blockers, bound_session, current, current_at, publication_action, resume_completed_key, resume_failed_key, resume_started_key, suspend_completed_key, suspend_failed_key, suspend_snapshot_key};
+
+/// The `action` of a request that the next launch of a seat starts a new native session. Unlike
+/// `fresh-context`, it keeps the seat's watches: the seat is the same, only its conversation ends.
+pub const FRESH_SESSION_ACTION: &str = "fresh-session";
 
 /// Launcher-owned declaration identity forwarded into the durable native binding.
 pub const LAUNCH_DESIRED_TOKEN_ENV: &str = "ST3_LAUNCH_DESIRED_TOKEN";
@@ -128,7 +132,7 @@ pub fn continue_session(
     };
     let mut fresh_since = false;
     for claim in store.claims_for(subject, Some("runtime.action.requested"))? {
-        if field(&claim, "action") == Some("fresh-context")
+        if matches!(field(&claim, "action"), Some("fresh-context" | FRESH_SESSION_ACTION))
             && store.claim_is_after(&claim.id, &bound.id)?
         {
             fresh_since = true;

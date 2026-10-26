@@ -190,7 +190,7 @@ pub(super) async fn run_attention(
                     .context("this alert names no agent to talk to; pass --to AGENT")?,
             };
             let id = card_id.unwrap_or_else(|| item.subject.clone());
-            // The same words stui's "Chat about this" sends.
+            // The same words Fractal TUI's "Chat about this" sends.
             let mut body = format!("{}\n\n---\nThis is about {} ({id}", args.body, item.title);
             if let Some(mission) = &item.mission {
                 body.push_str(&format!(", mission {mission}"));

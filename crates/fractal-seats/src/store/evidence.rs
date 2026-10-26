@@ -1,4 +1,4 @@
-//! The part of `store::evidence` that moved up from st3-store.
+//! The part of `store::evidence` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::SeatsStore;
 use super::*;
@@ -39,7 +39,7 @@ impl EvidenceSeatsStore for Store {
         let local = crate::performance::task("roster/frontier-read", || {
             roster_local_frontier(&self.readers.get(), index)
         })?;
-        let cache = self.smalltalk.agent_resources_cache.lock()
+        let cache = self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned");
         let hit = cache.iter().rev()
             .find(|entry| entry.index == index && entry.local == local && entry.history == history)

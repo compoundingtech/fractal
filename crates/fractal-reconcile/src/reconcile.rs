@@ -10,6 +10,7 @@ use crate::MissionsStoreCore;
 use crate::PersonWorkStore;
 use crate::AccountsStore;
 use crate::RuntimeStartsStore;
+use crate::store::RuntimeStartOperation;
 use crate::SeatsStore;
 use crate::SeatsStoreCore;
 use crate::StopDeferralStore;
@@ -3734,6 +3735,20 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
+    /// `Ok` when the subject's latest actual state is a running member, else its status (`absent` when
+    /// none is recorded).
+    fn member_liveness(&self, subject: &str) -> Result<std::result::Result<(), String>> {
+        let status = self
+            .store
+            .latest_actual_value(subject)?
+            .and_then(|actual| actual_field(&actual, "status").and_then(Value::as_str).map(str::to_owned));
+        Ok(match status.as_deref() {
+            Some("running" | "ready" | "working" | "idle" | "starting") => Ok(()),
+            Some(other) => Err(other.to_owned()),
+            None => Err("absent".to_owned()),
+        })
+    }
+
     fn record_member_reconcile_result(&self, subject: &str, result: Result<()>) -> Result<()> {
         let previous = self.store.member_reconcile_fault(subject, None)?;
         let (decision, reason) = match result {
@@ -3745,10 +3760,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 ("member-fault", reason)
             }
-            Ok(()) if previous.is_some() => (
-                "member-recovered",
-                "the member reconciled successfully".to_owned(),
-            ),
+            // A pass that returns Ok may have started nothing: the member loop returns early while a
+            // start is pending, while a restart waits, or when nothing is due. Only a member seen
+            // alive has recovered; for any other, say what the pass did, so an earlier fault does
+            // not read as cured by a pass that left the seat absent.
+            Ok(()) if previous.is_some() => match self.member_liveness(subject)? {
+                Ok(()) => (
+                    "member-recovered",
+                    "the member reconciled successfully".to_owned(),
+                ),
+                Err(status) => (
+                    "member-pass-clean",
+                    format!(
+                        "the member pass completed without error, but the member is {status}: nothing was started"
+                    ),
+                ),
+            },
             Ok(()) => return Ok(()),
         };
         self.record_once(
@@ -7949,6 +7976,74 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// A requester-authored action replicates to the runtime owner. The declaration and old
     /// incarnation fence it, so a delayed request cannot stop a replacement or revive a stop.
+    /// A start that FAILED and whose producer closure was never proven stays pending, and while it
+    /// does an explicit restart is swallowed (the seat looks parked for good). Once the failed start
+    /// is older than any launcher could still publish a session, no runtime of the seat is observed
+    /// running, and no launch worker holds the start lock, the failure is final: close the operation
+    /// so the request makes a new attempt. Returns whether it did.
+    fn supersede_stale_failed_start(
+        &self,
+        subject: &DesiredSubject,
+        pending: &RuntimeStartOperation,
+        observation: Option<&RuntimeObservation>,
+    ) -> Result<bool> {
+        let stale_after = u128::from(STALE_FAILED_START_MS.load(Ordering::Relaxed));
+        let failed = pending.finished
+            && !pending.cleanup_verified
+            && pending
+                .result
+                .as_ref()
+                .is_some_and(|result| result["error"].is_string());
+        if !failed {
+            return Ok(false);
+        }
+        let created_ms = uuid::Uuid::parse_str(&pending.id)
+            .ok()
+            .filter(|id| id.get_version_num() == 7)
+            .and_then(|id| id.get_timestamp())
+            .map(|timestamp| {
+                let (seconds, nanos) = timestamp.to_unix();
+                u128::from(seconds) * 1000 + u128::from(nanos / 1_000_000)
+            });
+        let Some(created) = created_ms else {
+            return Ok(false);
+        };
+        let stale_at = created.saturating_add(stale_after);
+        if now_ms() < stale_at {
+            // Nothing the member pass reads changes when the start grows old: wake it then.
+            self.arm_restart(&format!("stale-failed-start:{}", pending.id), stale_at);
+            return Ok(false);
+        }
+        if observation.is_some_and(|item| !matches!(item.status.as_str(), "exited" | "vanished" | "stopped")) {
+            return Ok(false);
+        }
+        // The kernel lock, not a PID guess, says no launch worker holds admission.
+        let Some(_lock) = self.store.try_runtime_start_lock(&subject.subject)? else {
+            return Ok(false);
+        };
+        if pending.revoked_by.is_none() {
+            self.revoke_start(&subject.subject)?;
+        }
+        self.store.retain_runtime_start_producer_closed(&pending.id)?;
+        self.record_once(
+            &subject.subject,
+            "runtime.reconcile-decision",
+            BTreeMap::from([
+                ("key".into(), Value::String(format!("restart-superseded-failed-start:{}", pending.id))),
+                ("decision".into(), Value::String("restart-superseded-failed-start".into())),
+                (
+                    "reason".into(),
+                    Value::String(format!(
+                        "the failed runtime start {} never proved its producer closed; it is older than any launcher could still publish and no runtime is running, so a new restart request makes a new attempt",
+                        pending.id
+                    )),
+                ),
+            ]),
+        )?;
+        self.start_changed(&subject.subject);
+        Ok(true)
+    }
+
     fn reconcile_requested_restart(
         &self,
         subject: &DesiredSubject,
@@ -7988,7 +8083,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         let attempted = self
             .store
             .operation_claim(&format!("agent-restart-attempt:{}", request.id))?;
-        if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(true); }
+        if let Some(pending) = self.store.runtime_start_for(&subject.subject)? {
+            if self.supersede_stale_failed_start(subject, &pending, observation)? {
+                // The failed start no longer holds the seat: this request makes the new attempt.
+            } else {
+                // The request is not lost: it waits for this start. Say so (once per request and
+                // start), so a restart that is never consumed is visible and not a silent success.
+                self.record_once(
+                    &subject.subject,
+                    "runtime.reconcile-decision",
+                    BTreeMap::from([
+                        ("key".into(), Value::String(format!("restart-waiting:{}", request.id))),
+                        ("decision".into(), Value::String("restart-waiting".into())),
+                        (
+                            "reason".into(),
+                            Value::String(format!(
+                                "the requested restart {} waits for the pending runtime start {} to finish",
+                                request.id, pending.id
+                            )),
+                        ),
+                    ]),
+                )?;
+                return Ok(true);
+            }
+        }
         let previous = request.body["fields"]["incarnation_id"]
             .as_str()
             .unwrap_or("");
@@ -8236,6 +8354,25 @@ impl<R: RuntimeControl> Reconciler<R> {
                     "the explicit launch attempt was interrupted before its result was recorded"
                 },
             );
+        }
+        if request.body["fields"]["fresh_session"] == true {
+            // The old incarnation is gone, so nothing can bind its session after this. A launch
+            // finds the request newer than the last binding and starts a new session; so does any
+            // relaunch before the new session binds.
+            self.store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "runtime.action.requested".into(),
+                // Authored by the requester, like the restart: only an authored request is a
+                // claim in the seat's log, which is where a launch looks for it.
+                actor: request.actor.clone(),
+                fields: BTreeMap::from([
+                    ("action".into(), Value::String(crate::suspension::FRESH_SESSION_ACTION.into())),
+                    ("runtime_id".into(), Value::String(member.runtime_id.clone())),
+                ]),
+                evidence: vec![request.id.clone()],
+                expected_subject: None,
+                idempotency_key: Some(format!("agent-restart-fresh-session:{}", request.id)),
+            })?;
         }
         match self.perform_start_for_request(
             subject,
@@ -8949,6 +9086,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Reuse the observation needed for record-once deduplication. Unmarked agents
         // need no extra actual-state query or harness fold on this hot path.
         let previous = self.store.latest_observation(&subject.subject, "runtime.observed")?;
+        // An exec incarnation that has ended cannot run again; a restart is a new incarnation. The
+        // `st3 driver exec` wrapper reports its child's exit before it exits itself, so its own
+        // process can still look live here for a moment. Recording that would put `running` over
+        // the exit until the next full pass. Only a terminal latest observation needs the fold.
+        // Execs only: a pty a registry snapshot wrongly called vanished must read running again at
+        // once, or the reconciler could relaunch or clean up a live seat.
+        if member.kind == MemberKind::Exec
+            && matches!(observation.status.as_str(), "running" | "starting")
+            && let Some(incarnation) = observation.incarnation_id.as_deref()
+            && previous.as_ref().is_some_and(|claim| {
+                matches!(
+                    claim.body.pointer("/fields/status").and_then(Value::as_str),
+                    Some("exited" | "vanished" | "stopped")
+                )
+            })
+            && let Some(actual) = self.store.latest_actual_value(&subject.subject)?
+            && actual_field(&actual, "incarnation_id").and_then(Value::as_str) == Some(incarnation)
+            && matches!(
+                actual_field(&actual, "status").and_then(Value::as_str),
+                Some("exited" | "vanished" | "stopped")
+            )
+        {
+            return Ok(());
+        }
         if subject.kind == "agent"
             && let Some(from) = previous.as_ref()
                 .and_then(|claim| claim.body.pointer("/fields/restarting_from"))
@@ -18571,6 +18732,11 @@ struct GateCheck<'a> {
     start_failure: Option<String>,
 }
 
+/// How old a FAILED runtime start must be before an explicit restart may close it without proof from its
+/// producer: longer than a launcher takes to publish a session or to be declared timed out. Tests lower it.
+pub static STALE_FAILED_START_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(15 * 60 * 1000);
+
 pub fn now_ms() -> u128 {
     smallclaims::store::now_ms()
 }
@@ -19962,6 +20128,161 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             reconciler.evaluate_gate(&stage, &gate).unwrap(),
             GateOutcome::Fail(_)
         ));
+    }
+
+    /// An exec started by a pass, observed running as `incarnation`, whose `st3 driver exec`
+    /// wrapper has just reported its child's exit (with no incarnation, as the wrapper does).
+    fn exec_whose_wrapper_reported_its_exit() -> (Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>, String, String, u64) {
+        use serde_json::json;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nexec \"orchid/probe\" { workspace \"/tmp\"; command \"exit 2\"; restart \"never\" }",
+            "exec",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.reconcile_once().unwrap();
+        let subject = "exec/orchid/probe".to_owned();
+        let desired = store.desired_subject_with_writer(&subject).unwrap().unwrap().0;
+        let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+        let incarnation = store
+            .observations_for(&subject, "runtime.action.succeeded")
+            .unwrap()
+            .into_iter()
+            .find(|claim| claim.body["fields"]["action"] == "start")
+            .unwrap().body["fields"]["incarnation_id"]
+            .as_str().unwrap().to_owned();
+        runtime.execs.lock().unwrap().insert(
+            runtime_id.clone(),
+            RuntimeObservation {
+                runtime_id: runtime_id.clone(),
+                terminal: false,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(incarnation.clone()),
+            },
+        );
+        reconciler.reconcile_once().unwrap();
+        let report = store
+            .append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.clone()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("exited")),
+                    ("exit_code".into(), json!(2)),
+                    ("exit_signal".into(), Value::Null),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        (store, runtime, reconciler, subject, incarnation, report.store_index)
+    }
+
+    #[test]
+    fn the_folded_actual_keeps_the_incarnation_a_wrapper_exit_report_omits() {
+        // The guard against a late `running` matches the exit to its incarnation through this fold.
+        let (store, _runtime, _reconciler, subject, incarnation, _) =
+            exec_whose_wrapper_reported_its_exit();
+        let actual = store.latest_actual_value(&subject).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("exited"));
+        assert_eq!(actual_field(&actual, "exit_code").and_then(Value::as_i64), Some(2));
+        assert_eq!(
+            actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+            Some(incarnation.as_str())
+        );
+    }
+
+    #[test]
+    fn a_wrapper_still_live_after_its_exit_report_does_not_make_the_exec_run_again() {
+        let (store, runtime, reconciler, subject, incarnation, report) =
+            exec_whose_wrapper_reported_its_exit();
+        // The wrapper's own process is still alive for a moment after it reports its child's exit.
+        reconciler.reconcile_once().unwrap();
+        let after = store
+            .claims_for(&subject, Some("runtime.observed"))
+            .unwrap()
+            .into_iter()
+            .filter(|claim| claim.store_index > report)
+            .map(|claim| claim.body["fields"]["status"].clone())
+            .collect::<Vec<_>>();
+        assert!(!after.contains(&Value::from("running")), "{after:?}");
+        let actual = store.latest_actual_value(&subject).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("exited"));
+        // A new incarnation is a new launch and still records running.
+        let runtime_id = runtime.execs.lock().unwrap().keys().next().unwrap().clone();
+        runtime.execs.lock().unwrap().insert(
+            runtime_id.clone(),
+            RuntimeObservation {
+                runtime_id,
+                terminal: false,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(format!("{incarnation}-next")),
+            },
+        );
+        // A real relaunch writes its start receipt; this one only swaps the runtime's answer, and
+        // the exec watch compares statuses, so tell the incremental pass what changed.
+        reconciler.incremental.touch("exec:exec.orchid.probe");
+        reconciler.reconcile_once().unwrap();
+        let actual = store.latest_actual_value(&subject).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("running"));
+        assert_eq!(
+            actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+            Some(format!("{incarnation}-next").as_str())
+        );
+    }
+
+    #[test]
+    fn a_pty_seen_again_after_a_vanished_report_still_reads_running() {
+        use serde_json::json;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"orchid/seat\" { workspace \"/tmp\"; command \"true\" }",
+            "seat",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.reconcile_once().unwrap();
+        let subject = "agent/orchid/seat".to_owned();
+        let runtime_id = runtime.started_members.lock().unwrap()[0].runtime_id.clone();
+        let incarnation = "4242:1792800000".to_owned();
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id,
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(incarnation.clone()),
+        });
+        reconciler.reconcile_once().unwrap();
+        // A registry snapshot that missed the live pty, recorded for the same pid:created.
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("status".into(), json!("vanished")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        let actual = store.latest_actual_value(&subject).unwrap().unwrap();
+        assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("running"));
+        assert_eq!(
+            actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+            Some(incarnation.as_str())
+        );
     }
 
     #[test]
@@ -23657,6 +23978,32 @@ agent "import/omp/fixture" {{
         );
         reconciler.reconcile_once().unwrap();
         assert!(reconciler.file_watchers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pass_that_started_nothing_does_not_say_the_member_recovered() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let subject = "agent/node.seat";
+        reconciler
+            .record_member_reconcile_result(subject, Err(anyhow::anyhow!("spawn PTY failed: launcher-incompatible")))
+            .unwrap();
+        assert!(store.member_reconcile_fault(subject, None).unwrap().is_some());
+        // The pass returns Ok, but the seat is absent: nothing was started.
+        reconciler.record_member_reconcile_result(subject, Ok(())).unwrap();
+        let decisions = store
+            .claims_for(subject, Some("runtime.reconcile-decision"))
+            .unwrap();
+        let last = decisions.last().unwrap();
+        assert_eq!(last.body.pointer("/fields/decision").and_then(Value::as_str), Some("member-pass-clean"));
+        let reason = last.body.pointer("/fields/reason").and_then(Value::as_str).unwrap();
+        assert!(reason.contains("absent") && reason.contains("nothing was started"), "{reason}");
+        assert!(!reason.contains("recovered"), "{reason}");
     }
 
     #[test]

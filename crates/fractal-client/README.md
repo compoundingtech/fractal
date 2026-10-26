@@ -83,9 +83,11 @@ mode, and stream capability.
 The normal terminal stream authentication and terminal access rules also apply to raw streams.
 
 `raw_terminal_stream(&attachment)` consumes that capability at the gateway and returns a
-`tokio::net::UnixStream`, usable as a `pty-terminal` connector. It negotiates `st3.client.pty.v0`
-with the capability in the secondary `st3.cap.<capability>` WebSocket subprotocol.
+`tokio::net::UnixStream`, usable as a `pty-terminal` connector. It negotiates `fractal.client.pty.v0`
+with the capability in the secondary `fractal.cap.<capability>` WebSocket subprotocol.
 Both trusted local Unix and paired Unix/HTTP(S) clients expose the same connector.
+Every receiving host must run the #3430 accepting release before this sender
+cutover is deployed. Pre-alias receivers are unsupported; there is no old-name retry.
 
 ```rust
 let attachment = client

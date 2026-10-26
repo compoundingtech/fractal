@@ -31,7 +31,7 @@ PATTERNS = (
     "clients/typescript/fractal-client/BUCK*",
     "clients/typescript/fractal-views/**",
     "clients/typescript/fractal-scenarios/**",
-    # The st3-scenarios recording import reads the client wire schema at runtime.
+    # The fractal-scenarios recording import reads the client wire schema at runtime.
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     # Views tests and scenario lanes read committed client/scenario fixtures.
     "fixtures/**",
@@ -77,6 +77,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/changelog/**",
     "apps/fractal-web/src/web/ColdOpen.stories.tsx",
     "apps/fractal-web/src/web/coldOpen.fixtures.ts",
+    # The image composer integration story exercises the app's live imageUploadAdapter in kit Storybook.
+    "apps/fractal-web/src/web/ComposerImages.stories.tsx",
     # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
     "apps/fractal-web/.changelog/**",
     "packages/fractal-sdk/src/**",
@@ -195,10 +197,15 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/liveSidebarTree.ts",
     "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
     "apps/fractal-web/src/web/perfMarks.ts",
+    "apps/fractal-web/src/web/ResponsiveAgentSidebar.stories.tsx",
+    "apps/fractal-web/src/web/ResponsiveAgentSidebar.tsx",
     "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
     "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
     "apps/fractal-web/src/web/sidebarAttention.ts",
+    "apps/fractal-web/src/web/SidebarChrome.stories.tsx",
+    "apps/fractal-web/src/web/SidebarChromeFooter.tsx",
     "apps/fractal-web/src/web/SidebarEmptyState.tsx",
+    "apps/fractal-web/src/web/SidebarTreeBinding.stories.tsx",
     "apps/fractal-web/src/web/sidebarRow.ts",
     "apps/fractal-web/src/web/useNativeDetails.ts",
     "apps/fractal-web/src/web/workspaceView.ts",
@@ -209,7 +216,7 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/index.html",
     "clients/typescript/fractal-scenarios/**",
     "clients/typescript/fractal-client/**",
-    # The st3-scenarios recording import reads the client wire schema at runtime.
+    # The fractal-scenarios recording import reads the client wire schema at runtime.
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "package.json*",
     "pnpm-workspace.yaml*",

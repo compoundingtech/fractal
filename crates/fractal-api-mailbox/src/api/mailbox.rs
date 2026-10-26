@@ -1,4 +1,4 @@
-//! The part of `api::mailbox` that moved up from st3-api.
+//! The part of `api::mailbox` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::DeliveryStore;
 use crate::MailboxChangesStore;
@@ -36,7 +36,7 @@ pub fn admitted_mailbox_protocol_router(state: AppState) -> Router {
     admitted_mailbox_protocol_router_with(state, &[routes])
 }
 
-/// [`admitted_mailbox_protocol_router`] over st3-api's router with these route families (st3-daemon
+/// [`admitted_mailbox_protocol_router`] over fractal-api-core's router with these route families (fractal-daemon
 /// passes every family it serves).
 #[cfg(feature = "test-support")]
 pub fn admitted_mailbox_protocol_router_with(state: AppState, families: &[RouteFamily]) -> Router {
@@ -53,7 +53,7 @@ pub fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Rout
     synthetic_mailbox_protocol_router_with(state, subject, &[routes])
 }
 
-/// [`synthetic_mailbox_protocol_router`] over st3-api's router with these route families.
+/// [`synthetic_mailbox_protocol_router`] over fractal-api-core's router with these route families.
 #[cfg(feature = "test-support")]
 pub fn synthetic_mailbox_protocol_router_with(state: AppState, subject: &str, families: &[RouteFamily]) -> Router {
     assert!(subject.starts_with("agent/example/"));

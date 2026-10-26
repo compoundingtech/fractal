@@ -1,11 +1,15 @@
 # Current collection subscriptions
 
 Connect once to `GET /v1/client/collections/stream` with WebSocket subprotocol
-`st3.client.collections.v0`. The same Unix or paired client credentials used by
+`fractal.client.collections.v0`. The same Unix or paired client credentials used by
 the rest of client v0 apply. One connection accepts up to sixteen subscriptions.
 The optional `collections` capability version 1 advertises this bound; older
 daemons omit it and accept eight. Clients reserve their existing conversation
 and terminal slots before adding optional windows on older daemons.
+
+Every receiving fleet host must run #3430 or later before these new-only senders
+are deployed. That release still accepts old-only `st3.client.collections.v0`
+clients; there is no dual-offer negotiation or automatic old-name retry.
 
 The server sends a WebSocket protocol ping every eight seconds and answers client
 pings with the same payload. These frames do not read collection windows. A send

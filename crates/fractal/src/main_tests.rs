@@ -715,7 +715,7 @@ fn a_conversation_reads_as_stui_shows_it_and_raw_keeps_every_entry() {
     );
     assert!(pretty.starts_with("CONVERSATION  session/example"), "{pretty}");
     assert!(pretty.contains("Please check why the n"), "{pretty}");
-    // The harness's own wrappers are cleaned away, as in stui; no escapes without colour.
+    // The harness's own wrappers are cleaned away, as in Fractal TUI; no escapes without colour.
     for noise in ["<task-notification>", "<channel", "<command-name>", "\x1b["] {
         assert!(!pretty.contains(noise), "{noise}: {pretty}");
     }
@@ -2431,6 +2431,21 @@ fn every_cli_command_has_a_valid_help_surface() {
             "{} has empty help",
             path.join(" ")
         );
+        for line in help.render_long_help().to_string().lines() {
+            // These describe real executable filenames, not the product identity.
+            if line.contains("Install st3, the st link")
+                || line.contains("Keep the installed st3, st,")
+            {
+                continue;
+            }
+            assert!(
+                !line.split_whitespace().any(|word| {
+                    matches!(word.trim_matches(['`', '.', ',', ';']), "st" | "st3")
+                }),
+                "{} contains legacy product wording: {line}",
+                path.join(" ")
+            );
+        }
         let subcommands = command.get_subcommands().cloned().collect::<Vec<_>>();
         for subcommand in subcommands {
             let mut child_path = path.to_vec();
@@ -2453,7 +2468,126 @@ fn every_cli_command_has_a_valid_help_surface() {
 
     let command = Cli::command();
     command.clone().debug_assert();
-    visit(&command, &["st".into()]);
+    visit(&command, &["fractal".into()]);
+}
+
+#[test]
+fn cli_branding_is_fractal_even_through_legacy_aliases() {
+    for program in ["fractal", "st", "st3"] {
+        let help = Cli::try_parse_from([program, "setup", "--help"]).err().unwrap().to_string();
+        assert!(help.contains("Usage: fractal setup"), "{help}");
+        assert!(help.contains("start fractal"), "{help}");
+        assert!(!help.contains("start st"), "{help}");
+        let version = Cli::try_parse_from([program, "--version"]).err().unwrap().to_string();
+        assert!(version.starts_with("fractal "), "{version}");
+    }
+}
+
+#[test]
+fn web_is_visible_in_root_help_and_parses_as_a_public_command() {
+    let help = cli_help::root_help(false);
+    assert!(help.lines().any(|line| line.starts_with("  web ")), "{help}");
+    let command = Cli::command();
+    assert!(!command.find_subcommand("web").unwrap().is_hide_set());
+    assert!(matches!(
+        Cli::try_parse_from(["fractal", "web", "--state-dir", "/tmp/example"]).unwrap().command,
+        Command::Web { state_dir: Some(_) }
+    ));
+}
+
+#[test]
+fn web_without_arguments_uses_the_configured_state_directory() {
+    for program in ["fractal", "st", "st3"] {
+        assert!(matches!(
+            Cli::try_parse_from([program, "web"]).unwrap().command,
+            Command::Web { state_dir: None }
+        ));
+    }
+}
+
+#[test]
+fn web_long_help_exits_successfully() {
+    let error = Cli::try_parse_from(["fractal", "web", "--help"]).err().unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert_eq!(error.exit_code(), 0);
+}
+
+#[test]
+fn web_short_help_exits_successfully() {
+    let error = Cli::try_parse_from(["fractal", "web", "-h"]).err().unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert_eq!(error.exit_code(), 0);
+}
+
+#[test]
+fn web_state_directory_preserves_every_legacy_value_form() {
+    // The previous positional parser accepted any OS string after --state-dir,
+    // including strings that otherwise name flags or delimit options.
+    for directory in ["/example/state", "relative", "", "-state", "--help", "-h", "--", "--state-dir"] {
+        let cli = Cli::try_parse_from(["fractal", "web", "--state-dir", directory]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new(directory)
+        ), "{directory:?}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let directory = std::ffi::OsString::from_vec(vec![b'-', 0xff]);
+        let cli = Cli::try_parse_from([
+            std::ffi::OsString::from("fractal"), "web".into(), "--state-dir".into(), directory.clone(),
+        ]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new(&directory)
+        ));
+    }
+}
+
+#[test]
+fn web_rejects_missing_values_repeats_positionals_and_unknown_flags_with_usage_status() {
+    for arguments in [
+        vec!["fractal", "web", "--state-dir"],
+        vec!["fractal", "web", "--state-dir", "one", "--state-dir", "two"],
+        vec!["fractal", "web", "unexpected"],
+        vec!["fractal", "web", "--unknown"],
+        vec!["fractal", "web", "--unknown", "value"],
+        vec!["fractal", "web", "--state-dir", "one", "extra"],
+        vec!["fractal", "web", "--", "unexpected"],
+    ] {
+        let error = Cli::try_parse_from(arguments.clone()).err().expect("invalid web arguments");
+        assert_eq!(error.exit_code(), 2, "{arguments:?}: {error}");
+    }
+}
+
+#[test]
+fn web_uses_clap_option_delimiters_and_equals_values() {
+    for arguments in [
+        vec!["fractal", "web", "--state-dir=relative"],
+        vec!["fractal", "web", "--state-dir", "relative", "--"],
+    ] {
+        assert!(matches!(
+            Cli::try_parse_from(arguments).unwrap().command,
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new("relative")
+        ));
+    }
+    assert!(matches!(
+        Cli::try_parse_from(["fractal", "web", "--"]).unwrap().command,
+        Command::Web { state_dir: None }
+    ));
+}
+
+#[test]
+fn web_global_rejection_covers_the_complete_inherited_inventory() {
+    let command = Cli::command();
+    let globals = command.get_arguments()
+        .filter(|argument| argument.is_global_set())
+        .map(|argument| argument.get_id().as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(globals, std::collections::BTreeSet::from([
+        "read_contract_inventory_json", "checkpoint_space_gate_capabilities",
+        "endpoint", "instance", "catalog", "json", "daemon_wait",
+    ]), "review each new global and add its real-binary web rejection case");
 }
 
 #[test]
@@ -2478,7 +2612,7 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
 
     let mut help = command.clone();
     let help = help.render_long_help().to_string();
-    assert!(help.contains("Usage: st ["), "{help}");
+    assert!(help.contains("Usage: fractal ["), "{help}");
     assert!(
         command
             .find_subcommand("claude-channel")
@@ -2520,6 +2654,8 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
 fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     #[cfg(test)]
     const SCHEDULES_SOURCE: &str = include_str!("schedules_cli.rs");
+    #[cfg(test)]
+    const DEPLOY_SOURCE: &str = include_str!("deploy_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -2527,6 +2663,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
+        ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
         ("driver", /* sqlite-large-value: allow-for-now lv-he57a4ce28014 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
         ("fleet", /* sqlite-large-value: allow-for-now lv-hc13a087df895 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
@@ -4075,7 +4212,7 @@ fn mission_start_help_shows_the_run_subject_an_id_names() {
 
 #[test]
 fn mission_start_bare_ids_are_scoped_to_each_mission() {
-    for mission in ["fleet/smalltalk/daemon-github-sekrets", "release/demo"] {
+    for mission in ["fleet/fractal/daemon-github-sekrets", "release/demo"] {
         for requested in ["2026-10-07", "mission-run/2026-10-07"] {
             let run_id = mission_start_run_id(mission, Some(requested));
             assert_eq!(run_id, format!("{mission}/2026-10-07"));

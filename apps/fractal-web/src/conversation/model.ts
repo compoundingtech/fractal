@@ -1,4 +1,4 @@
-// moves to smalltalk/clients/typescript
+// moves to fractal/clients/typescript
 //
 // The normalized conversation view model. Both sources fold into it: the live st3 conversation
 // follow (generated `TimelineEntry`, see ./fromTimeline.ts) and offline harness history
@@ -114,7 +114,7 @@ export const ConversationItem = Schema.TaggedUnion({
     sender: Schema.optional(Sender),
     sendState: Schema.optional(SendState),
   },
-  /** A Small Talk message envelope joined into the conversation (st `message` entry). */
+  /** A Fractal message envelope joined into the conversation (st `message` entry). */
   Message: {
     id: Schema.String,
     messageId: Schema.String,
@@ -203,7 +203,7 @@ export type ConversationItem = typeof ConversationItem.Type
 
 /** Participant prose, attachments, and streaming state. */
 export type TextItem = (typeof ConversationItem.cases.Text)['Type']
-/** Small Talk message envelope embedded in the transcript. */
+/** Fractal message envelope embedded in the transcript. */
 export type MessageItem = (typeof ConversationItem.cases.Message)['Type']
 /** Model reasoning text and optional elapsed duration. */
 export type ReasoningItem = (typeof ConversationItem.cases.Reasoning)['Type']
