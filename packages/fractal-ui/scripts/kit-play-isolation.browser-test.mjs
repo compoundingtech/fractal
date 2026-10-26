@@ -231,6 +231,24 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
   assert.equal(control.url(), 'about:blank')
   assert.deepEqual(await worker.context.cookies(), [])
   await worker.audit()
+  // An exact-URL audit may still acquire a cross-site child target, where the
+  // parent's script-disable flag is not a sufficient boundary.
+  const childAttached = cleanAudit.waitForEvent('frameattached')
+  await cleanAudit.evaluate(() => {
+    const frame = document.createElement('iframe')
+    frame.src = 'https://audit-child.invalid/'
+    document.body.append(frame)
+  })
+  await childAttached
+  assert.equal(cleanAudit.url(), `${base}/`)
+  assert.equal(cleanAudit.frames().length, 2)
+  await assert.rejects(() => worker.audit(), /Kit isolation audit page changed/)
+  await worker.reset()
+  assert.ok(cleanAudit.isClosed(), 'reset replaces an exact-URL audit containing a child frame')
+  const singleFrameAudit = worker.context.pages().find(page => page.url() === `${base}/`)
+  assert.ok(singleFrameAudit)
+  assert.equal(singleFrameAudit.frames().length, 1)
+  assert.equal(singleFrameAudit.workers().length, 0)
 
   const next = await worker.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: 'light' })
   assert.notEqual(next, previous)

@@ -47,6 +47,7 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
     // another Chromium page for every case. They never execute story code or
     // share a case's sessionStorage; fresh case documents audit that separately.
     const auditPages = new Map()
+    const inertAudit = (origin, page) => !page.isClosed() && page.url() === new URL(origin).href && page.frames().length === 1 && page.workers().length === 0
     const assertControl = () => {
       if (control.isClosed() || control.url() !== 'about:blank') {
         throw new Error('Kit isolation control page must remain open and blank')
@@ -73,7 +74,7 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
           await probe.goto(origin)
           auditPages.set(origin, probe)
         }
-        if (probe.isClosed() || probe.url() !== new URL(origin).href) {
+        if (!inertAudit(origin, probe)) {
           throw new Error(`Kit isolation audit page changed at ${origin}`)
         }
         residualStorage('reset', await probe.evaluate(() => ({
@@ -105,11 +106,11 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
           if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Kit isolation page cleanup failed')
           pages = casePages()
         }
-        // A case worker can claim and navigate an audit client, including to
-        // same-origin blob HTML. Scripts stay disabled there, but do not retain
-        // a substituted document across the reset boundary.
+        // Guard accidental leaks between our own stories, not hostile stories.
+        // Retain only an inert single-frame, worker-free document at its exact
+        // URL with target scripts disabled; replace anything else before clear.
         for (const [origin, probe] of auditPages) {
-          if (probe.isClosed() || probe.url() !== new URL(origin).href) {
+          if (!inertAudit(origin, probe)) {
             await probe.close()
             auditPages.delete(origin)
           }
