@@ -8,7 +8,7 @@ import type {
   Runtime,
   Snapshot,
   TerminalScreen,
-} from '@smalltalk/st3-client'
+} from '@fractal/client'
 import type { AttachmentSendRequest, MessageSendAction } from './source.ts'
 import { Effect, Layer } from 'effect'
 import * as Option from 'effect/Option'
@@ -52,6 +52,7 @@ class Gateway {
   readonly commands: CollectionCommand[] = []
   readonly sentFollowSubscribes: Array<{ readonly id: string; readonly key: string }> = []
   readonly runtimeReads: string[] = []
+  readonly httpPaths: string[] = []
   readonly terminalActions: ActionOf<'terminal.attach'>[] = []
   readonly terminalRequests: Array<'read' | 'attach'> = []
   terminalReplacement = ''
@@ -93,6 +94,7 @@ class Gateway {
 
   readonly fetch: typeof fetch = async (input, init) => {
     const path = new URL(String(input)).pathname
+    this.httpPaths.push(path)
     let value: unknown
     if (path === '/v1/client/capabilities') {
       this.capabilityReads += 1
@@ -413,6 +415,51 @@ const withGateway = (
     yield* test(live, gateway)
   }).pipe(Effect.scoped)
 
+describe('session inventory independence', () => {
+  it.live('reads selected threads before the roster and reconnects without listing sessions', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      yield* Effect.promise(() => live.ready)
+      const releaseRoster = live.registry.mount(live.source.agents)
+      const releaseInterest = live.registry.mount(live.source.conversationInterest!(agent.id))
+      const releaseThread = live.registry.mount(live.source.conversation(agent.id))
+      yield* settle
+      expect(live.registry.get(live.source.agents)._tag).toBe('Waiting')
+      gateway.mailEcho()
+      yield* settle
+      expect(live.registry.get(live.source.conversation(agent.id))).toMatchObject({
+        _tag: 'Observed', value: { items: [{ _tag: 'Text', text: 'hello' }] },
+      })
+      releaseThread()
+      releaseInterest()
+      const next = 'agent/selected-without-roster'
+      const releaseNextInterest = live.registry.mount(live.source.conversationInterest!(next))
+      const releaseNext = live.registry.mount(live.source.conversation(next))
+      yield* settle
+      gateway.send({
+        kind: 'conversation', id: gateway.subscription('conversation').id,
+        collection: 'conversation', session_id: 'session/selected', replace: true, has_more: false, items: [],
+      })
+      yield* settle
+      expect(live.registry.get(live.source.conversation(next))).toMatchObject({ _tag: 'Observed' })
+      live.suspendSockets()
+      yield* settle
+      live.resumeSockets()
+      yield* settle
+      expect(gateway.subscription('conversation')).toMatchObject({ conversation: next })
+      gateway.send({
+        kind: 'conversation', id: gateway.subscription('conversation').id,
+        collection: 'conversation', session_id: 'session/reconnected', replace: true, has_more: false, items: [],
+      })
+      yield* settle
+      expect(live.registry.get(live.source.conversation(next))).toMatchObject({ _tag: 'Observed' })
+      expect(gateway.httpPaths.filter(path => path === '/v1/client/sessions')).toEqual([])
+      releaseNext()
+      releaseNextInterest()
+      releaseRoster()
+    })),
+  )
+})
+
 
 describe('connection loss detection', () => {
   const withBrowser = (test: (live: LiveSource, gateway: Gateway, browser: EventTarget, documentEvents: EventTarget) => Effect.Effect<void>) =>
@@ -721,6 +768,32 @@ describe('live feed sync sidecars', () => {
       }),
     ),
   )
+  it.live('explicit roster Retry reacquires a failed follow and leaves a healthy follow alone', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        live.registry.mount(live.source.agents)
+        yield* settle
+        const first = gateway.subscription('agents').id
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).toBe(first)
+        gateway.send({ kind: 'error', id: first, collection: 'agents', code: 'unavailable', message: 'Roster temporarily unavailable', retryable: false })
+        yield* settle
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'failed' })
+        expect(live.source.retryAgents).toBeTypeOf('function')
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).not.toBe(first)
+        gateway.fleet([agent])
+        yield* settle
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Observed', freshness: 'live', value: [{ id: agent.id }] })
+        const recovered = gateway.subscription('agents').id
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).toBe(recovered)
+      }),
+    ),
+  )
   it.live('reports a rejected socket credential as Failed on mounted and later-opened follows', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
@@ -799,6 +872,59 @@ describe('cold conversation admission', () => {
 
 
 describe('terminal dependent-read authority', () => {
+  it.live('prefetches only explicit terminal intent and shares that retained viewer with drawer demand', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      live.registry.mount(live.source.agents)
+      yield* settle
+      gateway.fleet([agent])
+      yield* settle
+      expect(gateway.runtimeReads).toEqual([])
+      expect(gateway.terminalActions).toEqual([])
+      const ref = 'terminal/example'
+      live.source.prefetchTerminal?.(ref)
+      yield* settle
+      expect(gateway.runtimeReads).toEqual(['runtime/old'])
+      expect(gateway.terminalActions).toHaveLength(1)
+      live.source.prefetchTerminal?.(ref)
+      live.registry.mount(live.source.terminalInterest!(ref))
+      yield* settle
+      expect(gateway.runtimeReads).toEqual(['runtime/old'])
+      expect(gateway.terminalActions).toHaveLength(1)
+    })),
+  )
+
+  it.live('renders the retained terminal immediately on warm remount without Waiting or another attach', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      live.registry.mount(live.source.agents)
+      yield* settle
+      gateway.fleet([agent])
+      yield* settle
+      const ref = 'terminal/example'
+      const leave = live.registry.mount(live.source.terminalInterest!(ref))
+      const stopReading = live.registry.mount(live.source.terminal(ref))
+      yield* settle
+      gateway.screen(gateway.subscription('terminal').id, 'old', 'Retained output')
+      yield* settle
+      expect(live.registry.get(live.source.terminal(ref))).toMatchObject({ _tag: 'Observed' })
+      stopReading()
+      leave()
+      yield* settle
+      const reads = gateway.runtimeReads.length
+      const attaches = gateway.terminalActions.length
+      /** React reads the retained snapshot before its passive visible-interest effect. */
+      expect(live.registry.get(live.source.terminal(ref))).toMatchObject({
+        _tag: 'Observed', value: { lines: [expect.objectContaining({ text: 'Retained output' })] },
+      })
+      const reopen = live.registry.mount(live.source.terminalInterest!(ref))
+      expect(live.registry.get(live.source.terminal(ref))).toMatchObject({
+        _tag: 'Observed', value: { lines: [expect.objectContaining({ text: 'Retained output' })] },
+      })
+      expect(gateway.runtimeReads).toHaveLength(reads)
+      expect(gateway.terminalActions).toHaveLength(attaches)
+      reopen()
+    })),
+  )
+
   it.live('terminal failure contract: reports a seat missing from an authoritative live roster without runtime reads', () =>
     withGateway((live, gateway) => Effect.gen(function* () {
       live.registry.mount(live.source.agents)

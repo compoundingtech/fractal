@@ -1,5 +1,5 @@
-import type { ActionOf, Arrangement } from '@smalltalk/st3-client'
-import { ActionResult, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import type { ActionOf, Arrangement } from '@fractal/client'
+import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { createArrangementEditor, optimisticArrangement, type ArrangementEditorState, type SidebarOperation } from './edit.ts'

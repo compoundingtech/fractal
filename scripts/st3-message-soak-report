@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 
 # The defaults define the delivery soak gate. Overrides exist for synthetic tests only.
-STATE_DIR=${ST3_SOAK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/st3/message-soak}
-LOG=${ST3_SOAK_REPORT_LOG:-$STATE_DIR/events.log}
-NOW=${ST3_SOAK_REPORT_NOW_UNIX:-$(date +%s)}
-MIN_DURATION=${ST3_SOAK_REPORT_MIN_DURATION_SECONDS:-259200}
-MAX_GAP=${ST3_SOAK_REPORT_MAX_GAP_SECONDS:-900}
-MIN_EACH=${ST3_SOAK_REPORT_MIN_EACH_DIRECTION:-400}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+STATE_DIR=${FRACTAL_SOAK_STATE_DIR-${ST3_SOAK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/st3/message-soak}}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+LOG=${FRACTAL_SOAK_REPORT_LOG-${ST3_SOAK_REPORT_LOG:-$STATE_DIR/events.log}}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+NOW=${FRACTAL_SOAK_REPORT_NOW_UNIX-${ST3_SOAK_REPORT_NOW_UNIX:-$(date +%s)}}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+MIN_DURATION=${FRACTAL_SOAK_REPORT_MIN_DURATION_SECONDS-${ST3_SOAK_REPORT_MIN_DURATION_SECONDS:-259200}}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+MAX_GAP=${FRACTAL_SOAK_REPORT_MAX_GAP_SECONDS-${ST3_SOAK_REPORT_MAX_GAP_SECONDS:-900}}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+MIN_EACH=${FRACTAL_SOAK_REPORT_MIN_EACH_DIRECTION-${ST3_SOAK_REPORT_MIN_EACH_DIRECTION:-400}}
 
 for value in "$NOW" "$MIN_DURATION" "$MAX_GAP" "$MIN_EACH"; do
   [[ $value =~ ^[0-9]+$ ]] || { echo 'invalid numeric report setting' >&2; exit 2; }
 done
 [[ -r $LOG ]] || { echo "soak evidence log is unavailable: $LOG" >&2; exit 1; }
 
-if [[ ${ST3_SOAK_REPORT_SKIP_RUNTIME_CHECKS:-0} != 1 ]]; then
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+if [[ ${FRACTAL_SOAK_REPORT_SKIP_RUNTIME_CHECKS-${ST3_SOAK_REPORT_SKIP_RUNTIME_CHECKS:-0}} != 1 ]]; then
   systemctl --user is-active --quiet st3-message-soak.service || {
     echo 'soak monitor service is not active' >&2; exit 1;
   }
