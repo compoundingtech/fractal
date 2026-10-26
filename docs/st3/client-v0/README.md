@@ -2316,6 +2316,8 @@ Spawning and restarting refuse an ended binding, including after a daemon
 restart; the credential reference is no longer usable for a new launch.
 Restarting the launcher ends its helpers: the new incarnation must create them
 again. Historical binding receipts remain for attribution.
+A declaration edit cannot silently switch the helper to a different login:
+if it no longer matches its credential receipt, stop and recreate the helper.
 
 This is a Fractal lifecycle bound, not native process containment: while the
 daemon is unavailable, a helper can outlive its launcher until reconciliation

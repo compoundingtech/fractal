@@ -7589,6 +7589,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             launch.environment.insert(variable.into(), binding.credential_home);
             return Ok(());
         }
+        anyhow::ensure!(
+            !self.store.helper_launcher_has_lifetime_binding(&subject.subject)?,
+            "the helper declaration no longer matches its credential binding; stop and recreate it"
+        );
         let Some(binding) = crate::accounts::harness_binding(&subject.desired) else {
             // No binding: the harness keeps its login, but a login that is a declared account's
             // directory still belongs to that account.

@@ -96,3 +96,22 @@ fn helper_launcher_end_stops_helper_and_blocks_restart_and_credential_resolution
     assert!(restarted.perform_start(&helper, member, "daemon restart").is_err());
     assert!(runtime.starts.lock().unwrap().iter().all(|id| id != "node.helper"));
 }
+
+#[test]
+fn helper_launcher_declaration_edit_cannot_fall_through_to_another_credential_home() {
+    let (root, store, runtime, helper) = fixture(true);
+    let source = format!(
+        "version 2\nagent \"helper\" {{ description \"edited\"; workspace {:?}; harness \"claude\" {{}} }}\n",
+        root.path().display().to_string(),
+    );
+    publish_as(&store, &source, "edited-helper", Some("agent/node.launcher"));
+    let selected = store.desired_subjects_named(&[helper.subject]).unwrap().remove(0);
+    let member = selected.member.as_ref().unwrap();
+    let mut launch = member.clone();
+    let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+    assert!(store.helper_launcher_binding(&selected.subject).unwrap().is_none());
+    assert!(store.helper_launcher_alive(&selected.subject).unwrap());
+    assert!(reconciler.bind_account(&selected, member, &mut launch).is_err());
+    assert!(!launch.environment.contains_key("CLAUDE_CONFIG_DIR"));
+    assert!(!launch.environment.contains_key("ST3_ACCOUNT"));
+}
