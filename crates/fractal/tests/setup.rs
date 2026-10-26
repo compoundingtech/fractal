@@ -1307,7 +1307,7 @@ fn skipping_sets_up_st_and_no_agent() {
     // Name, machine, login box, the Pi row, then the two buttons: Tab to Skip for now.
     let (success, output) = play(
         command,
-        &[("Fractal setup", "\t\t\t\t\t\r"), ("st is set up", "\r")],
+        &[("Fractal setup", "\t\t\t\t\t\r"), ("Fractal is set up", "\r")],
         &mut fixture,
     );
     assert!(success, "{output}");

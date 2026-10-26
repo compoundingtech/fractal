@@ -513,7 +513,7 @@ fn accounts(world: &World) -> Vec<(String, Total, Option<&UsageLimit>)> {
 fn limit_lines(id: &str, limit: Option<&UsageLimit>, spent: &Total) -> Vec<Line<'static>> {
     let Some(limit) = limit else {
         let note = if id == "usage/no-account" {
-            format!("   {} tokens · from before st kept accounts", tokens(spent.tokens))
+            format!("   {} tokens · from before Fractal kept accounts", tokens(spent.tokens))
         } else {
             format!("   {} tokens · no limits reported", tokens(spent.tokens))
         };

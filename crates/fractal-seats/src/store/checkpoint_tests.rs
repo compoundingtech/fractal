@@ -12,15 +12,6 @@ use fractal_missions::store::checkpoint_tests_shared_seats::{AGENT, LIMITS_HOUR,
 #[test]
 fn a_usage_trim_keeps_lifetime_usage_and_the_proof_guards_it() {
     let store = Store::open_memory("alder").unwrap();
-    store
-        .append_claim_outcome(&input(
-            AGENT,
-            "harness.observed",
-            Some(AGENT),
-            json!({"state": "idle", "incarnation_id": "inc-1"}),
-            "harness",
-        ))
-        .unwrap();
     let old = now_ms() - 9 * DAY_MS;
     for (n, offset) in [0, 1, 2].into_iter().enumerate() {
         store

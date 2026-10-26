@@ -87,6 +87,7 @@ const agentRefs = (scenario: keyof typeof scenarios) => {
 
 /** Negative control: the synthetic old-literal row decodes through the SDK and raises no notice. */
 export const FullyDecoded: Story = {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'The synthetic SDK old-literal agent row, decoded by decodeResourceRows into the roster notices, is the negative control: no decode or stale notice.' } },
   args: { scenario: 'decoded' },
   play: async ({ canvasElement }) => {
     expect(decodeResourceRows([wire]).undecodable).toEqual([])
@@ -98,6 +99,7 @@ export const FullyDecoded: Story = {
 }
 
 export const UndecodableRow: Story = {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Single-field variants of the SDK old-literal agent row pin per-row decode failures: kept rows, one polite partial notice and the hidden-agent details list.' } },
   args: { scenario: 'partial' },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
@@ -137,6 +139,7 @@ export const UndecodableRow: Story = {
 }
 
 export const AllBadStale: Story = {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'An all-undecodable frame of SDK old-literal row variants over the retained last-good roster pins the decode-stale marker and stale notice.' } },
   args: { scenario: 'allBad' },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)

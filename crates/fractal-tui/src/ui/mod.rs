@@ -1429,7 +1429,7 @@ impl Ui {
         }
         let (text, color) = match (live, age) {
             (true, Some(age)) => (format!(" ● live · updated {age} "), theme::OVERLAY1),
-            (true, None) => (" ● live · waiting for st ".to_owned(), theme::OVERLAY1),
+            (true, None) => (" ● live · waiting for Fractal ".to_owned(), theme::OVERLAY1),
             (false, Some(age)) => (
                 format!(" ○ paused · updated {age} · focus to follow "),
                 theme::YELLOW,
@@ -1525,7 +1525,7 @@ impl Ui {
                 }
                 if !self.world.stale.is_empty() {
                     self.flash(format!(
-                        "Out of date: st stopped serving {}",
+                        "Out of date: Fractal stopped serving {}",
                         self.world.stale.join("; ")
                     ));
                 }
@@ -1548,7 +1548,7 @@ impl Ui {
                 }
             }
             Link::Connecting => self.flash(format!(
-                "Connecting to {}: st has not answered yet",
+                "Connecting to {}: Fractal has not answered yet",
                 self.world.host
             )),
             Link::Offline(reason) => self.flash(reason),
@@ -3528,12 +3528,12 @@ impl Ui {
         let over = size > limit;
         let note = if over {
             format!(
-                "  {} is over the {} st takes: shorten it before sending",
+                "  {} is over the {} Fractal takes: shorten it before sending",
                 size_text(size),
                 size_text(limit)
             )
         } else {
-            format!("  {} of the {} st takes", size_text(size), size_text(limit))
+            format!("  {} of the {} Fractal takes", size_text(size), size_text(limit))
         };
         Some(Line::from(Span::styled(
             text::truncate(&note, width),
@@ -3644,7 +3644,7 @@ impl Ui {
             (
                 "?",
                 theme::QUIET,
-                "not started by st, so st cannot see inside it",
+                "not started by Fractal, so Fractal cannot see inside it",
             ),
             ("✉", theme::SAPPHIRE, "a Fractal message"),
         ] {
@@ -3704,7 +3704,7 @@ impl Ui {
                     "the selected subject's actions; ↑↓ and Enter choose",
                 ),
                 ("t", "Agents, Missions: the path tree or the groups"),
-                ("x", "Missions: show st's own missions"),
+                ("x", "Missions: show Fractal's own missions"),
                 ("n", "Agents: a new agent; Missions: a new mission"),
                 ("y", "confirm what a card asks; Enter never does"),
                 ("x", "Inbox: dismiss a request, update or message"),
@@ -4813,7 +4813,7 @@ impl Ui {
                             self.editing = true;
                         } else {
                             self.flash(
-                                "st does not say how to answer this here: answer it with st alerts",
+                                "Fractal does not say how to answer this here: answer it with fractal alerts",
                             );
                         }
                     }
@@ -4877,11 +4877,11 @@ impl Ui {
         if self.live {
             // st's client API lets a person neither retry a step nor restart an agent yet.
             let hint = match key {
-                'r' => "st work retry STEP",
-                _ => "st agents start AGENT",
+                'r' => "fractal work retry STEP",
+                _ => "fractal agents start AGENT",
             };
             self.flash(format!(
-                "{what}: st does not let Fractal TUI do this yet · use {hint}"
+                "{what}: Fractal does not let Fractal TUI do this yet · use {hint}"
             ));
         } else {
             self.flash(format!("{what} · demo: nothing was sent"));
@@ -5299,7 +5299,7 @@ impl Ui {
         {
             self.flash_for(
                 format!(
-                    "Too long to send: {} where st takes {}. Shorten it or send it in parts; the text is still here",
+                    "Too long to send: {} where Fractal takes {}. Shorten it or send it in parts; the text is still here",
                     size_text(draft.len()),
                     size_text(limit)
                 ),
@@ -5413,7 +5413,7 @@ impl Ui {
                     }
                     self.flash("Sending…");
                 }
-                None => self.flash("This needs the st CLI for now"),
+                None => self.flash("This needs the fractal CLI for now"),
             }
             return;
         }
@@ -5653,7 +5653,7 @@ impl Ui {
                 });
                 self.flash("Sending…");
             } else {
-                self.flash(format!("st does not offer {name} here"));
+                self.flash(format!("Fractal does not offer {name} here"));
             }
             return;
         }
@@ -6257,7 +6257,7 @@ impl Ui {
             Hit::Pane(PaneIntent::Open(id)) => self.open(&id),
             Hit::Pane(PaneIntent::Image(image)) => {
                 self.flash(format!(
-                    "Reading {} from st…",
+                    "Reading {} from Fractal…",
                     image.name.as_deref().unwrap_or("the image")
                 ));
                 self.effects.push(Effect::OpenImage { image });

@@ -117,7 +117,7 @@ use work_cli::{run_wait, run_work};
 
 use presentation::{
     OutputStyle, follow_snapshot, glance, mission_run_signature, relative_time,
-    render_attention_show, render_generation, render_generations, render_host_facts,
+    render_attention_show, render_claim_lease, render_generation, render_generations, render_host_facts,
     render_human_value, render_mission_run_page, render_revision_proposal, render_step_run,
     shell_argument,
 };
@@ -262,7 +262,7 @@ enum Command {
     /// Configure this machine and start fractal, with flags for unattended setup.
     Setup(crate::setup::SetupArgs),
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
-    #[command(version = fractal_drivers::version::display_version())]
+    #[command(alias = "tui", version = fractal_drivers::version::display_version())]
     Ui(fractal_tui::Args),
     /// Open the daemon's local web session in a browser.
     ///
@@ -4612,7 +4612,7 @@ fn cli_main() -> ExitCode {
     if let Some(program) = fractal_daemon::recorder::invoked_program() {
         fractal_daemon::recorder::run(program);
     }
-    let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    let arguments = std::env::args_os().collect::<Vec<_>>();
     // Parse the local launcher before any raw scanner can mistake its state path
     // for an unrelated option. Inspect clap's value sources, never raw tokens.
     if arguments.get(1).is_some_and(|argument| argument == "web") {
@@ -4645,7 +4645,6 @@ fn cli_main() -> ExitCode {
         }
         None => {}
     }
-    fractal::dispatch(arguments.as_mut_slice());
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());
@@ -13393,7 +13392,7 @@ feedback and a custom choice need text. The resumed step's `person_answers` carr
 as {"type", "outcome", "id", "label", "text"}: read it with `fractal work show STEP --json` and
 act on `id` and `outcome`, not on the words."##;
 
-fn render_client_work_detail(work: &fractal_client::Work) -> String {
+fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bool>) -> String {
     use std::fmt::Write as _;
 
     let mut output = String::new();
@@ -13414,6 +13413,12 @@ fn render_client_work_detail(work: &fractal_client::Work) -> String {
     }
     if let Some(incarnation) = &work.submitted_incarnation {
         let _ = writeln!(output, "Submitted incarnation: {incarnation}");
+    }
+    if let Some(expires) = work.claim_expires_at_unix_ms {
+        let _ = writeln!(output, "Lease: {}", render_claim_lease(
+            &work.header.id, work.claimant.as_deref(), work.claim_incarnation.as_deref(),
+            u128::from(expires), driver_held,
+        ));
     }
     if let Some(nudged) = work
         .nudged_at_unix_ms
@@ -16731,16 +16736,41 @@ fn renewal_lost_its_claim(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Lease guidance is optional enrichment: Fabric cannot expose the legacy status route.
+/// A failed lookup must neither hide successful work output nor assert unmanaged ownership.
+async fn claim_has_driver(
+    client: &Client,
+    claimant: Option<&str>,
+    incarnation: Option<&str>,
+) -> Option<bool> {
+    let Some(subject) = claimant.filter(|subject| subject.starts_with("agent/")) else {
+        return Some(false);
+    };
+    let Some(incarnation) = incarnation else {
+        return Some(false);
+    };
+    let status: StatusResponse = client.get(&format!(
+        "/v1/status?subject={}&harness_only=true", urlencoding::encode(subject),
+    )).await.ok()?;
+    let harness = status.subjects.iter()
+        .find(|candidate| candidate.subject == subject)
+        .and_then(|candidate| candidate.harness.as_ref());
+    Some(claim_has_active_harness(Some(incarnation), harness))
+}
+
 fn work_claim_has_active_harness(
     step: &StepRunView,
     subject: &str,
     harness: Option<&CurrentHarnessView>,
 ) -> bool {
     step.work_claim_is_held_by(subject)
-        && harness.is_some_and(|harness| {
-            harness.state != "ended"
-                && step.claim_incarnation.as_deref() == Some(harness.incarnation_id.as_str())
-        })
+        && claim_has_active_harness(step.claim_incarnation.as_deref(), harness)
+}
+
+fn claim_has_active_harness(incarnation: Option<&str>, harness: Option<&CurrentHarnessView>) -> bool {
+    harness.is_some_and(|harness| {
+        harness.state != "ended" && incarnation == Some(harness.incarnation_id.as_str())
+    })
 }
 
 /// Seconds into each minute at which this seat renews its work leases, 0 to 49, fixed per seat.

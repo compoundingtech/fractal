@@ -415,6 +415,9 @@ pub struct Agent {
     /// The graph path, a stable id.
     pub id: String,
     pub name: String,
+    /// Declared seat intent; absence is unknown, never inferred from activity or ownership.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<fractal_client::AgentLifecycle>,
     pub harness: Harness,
     pub state: AgentState,
     pub host: String,
@@ -517,7 +520,7 @@ impl Reach {
             Reach::Direct => "connected",
             Reach::Indirect => "online via others",
             Reach::Offline => "offline",
-            Reach::Unknown => "st cannot tell",
+            Reach::Unknown => "Fractal cannot tell",
         }
     }
 }
