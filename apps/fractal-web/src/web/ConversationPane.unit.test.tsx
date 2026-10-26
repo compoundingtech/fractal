@@ -79,6 +79,28 @@ describe('ConversationPane kit composition', () => {
     expect(html).not.toContain('Connecting')
   })
 
+  it('shows only children with task-block conversation references as thread tabs', () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [], hasOlder: false, subagents: [
+        { id: 'review', name: 'Reviewer', status: 'running', conversation: { session_id: 'session/external-child-review' } },
+        { id: 'other-harness', name: 'Count only', status: 'running' },
+      ],
+    } }
+    const html = render()
+    expect(html).toContain('Agent threads')
+    expect(html).toContain('Reviewer')
+    expect(html).not.toContain('Count only')
+  })
+
+  it('never mounts a composer for a read-only thread', () => {
+    source.feed = observed(scenario.slice(0, 5))
+    const html = renderToStaticMarkup(<ConversationPane agentRef="session/external-child-review" agentName="Reviewer" onOpenTool={() => {}} readOnly />)
+    expect(html).toContain('data-testid="transcript-scroll"')
+    expect(html).not.toContain('textarea')
+    expect(html).not.toContain('conversation-composer-dock')
+    expect(html).not.toContain('Cancel:')
+  })
+
   it('groups a scenario page into turns with rendered markdown and the reasoning disclosure', () => {
     // Complete history: the work fold settles and carries the elapsed summary.
     source.feed = observed(scenario.slice(0, 5))
@@ -204,8 +226,8 @@ describe('ConversationPane kit composition', () => {
       ts.forEachChild(node, visit)
     }
     visit(tree)
-    // The empty-publication placeholder adds the fourth div.
-    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div'])
+    // The retained parent host and empty-publication placeholder are structural, not transcript presentation.
+    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div', 'div'])
     expect(pane).toContain("style={{ display: 'contents' }}")
     const workspace = readFileSync(new URL('./LiveAgentWorkspace.tsx', import.meta.url), 'utf8')
     expect(workspace).toContain('<RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === \'changes\'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>')

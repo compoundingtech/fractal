@@ -173,6 +173,29 @@ const mount = async (ux?: UxTelemetry, strictMode = false) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('keeps the parent composer mounted while child tabs remain read-only', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: scenario, hasOlder: false, observation: { empty: false },
+      subagents: [{ id: 'review', name: 'Reviewer', status: 'running', conversation: { session_id: 'session/external-child-review' } }],
+    } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    source.sendable = true
+    await mount()
+    const composer = container.querySelector('[data-testid="conversation-composer-dock"]')!
+    const parent = container.querySelector<HTMLElement>('[role="tab"][data-thread-id="agent/selected"]')!
+    const child = container.querySelector<HTMLElement>('[role="tab"][data-thread-id="session/external-child-review"]')!
+    await act(async () => child.click())
+    expect(container.querySelector('[data-thread-read-only]')?.textContent).toContain('not replied to')
+    expect(container.querySelectorAll('[data-testid="conversation-composer-dock"]')).toHaveLength(1)
+    expect(container.querySelector('[data-testid="conversation-composer-dock"]')).toBe(composer)
+    expect(composer.closest('[hidden]')).not.toBeNull()
+    expect(container.querySelector('[data-thread-item]')).toBeNull()
+    await act(async () => parent.click())
+    expect(container.querySelector('[data-thread-read-only]')).toBeNull()
+    expect(container.querySelector('[data-testid="conversation-composer-dock"]')).toBe(composer)
+    expect(composer.closest('[hidden]')).toBeNull()
+  })
+
   it('registers the real composer field and only the latest turn, including a newly mounted transcript tail', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }

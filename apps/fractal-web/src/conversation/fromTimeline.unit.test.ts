@@ -4,6 +4,32 @@ import { describe, expect, it } from 'vitest'
 import { LiveTimeline } from './fromTimeline.ts'
 import { transcriptTurnsForItems } from '../web/conversationTranscript.ts'
 
+describe('addressable OMP child threads', () => {
+  it.each(['content', 'tool_call', 'tool_result'] as const)('joins %s task summaries by child conversation and follows revisions and replacement', carrier => {
+    const timeline = new LiveTimeline()
+    const task = (revision: number, name: string) => Schema.decodeUnknownSync(TimelineEntry)({
+      id: 'timeline-entry/task', sequence: 1, revision, final: true,
+      timestamp: '2026-10-15T00:00:00Z', type: carrier, role: 'tool',
+      body: { ...(carrier === 'content' ? { media_type: 'text/plain', text: 'Task result' }
+        : carrier === 'tool_call' ? { call_id: 'task-call', name: 'task', arguments: {} }
+          : { call_id: 'task-call', content: 'Task result', media_type: 'text/plain', status: 'success' }), blocks: [{
+        id: 'task/0', kind: 'tool_output', source_type: 'tool_result', payload: {},
+        view: { type: 'task', tool: 'task', agents: [
+          { id: 'review', name, status: 'running', conversation: { session_id: 'session/external-child-review' } },
+          { id: 'unsupported', status: 'running' },
+        ] },
+      }] },
+    })
+    timeline.apply({ replace: true, hasMore: false, entries: [task(1, 'Reviewer')] })
+    expect(timeline.subagents).toMatchObject([{ id: 'review', name: 'Reviewer', conversation: { session_id: 'session/external-child-review' } }])
+    timeline.apply({ replace: false, hasMore: false, entries: [task(2, 'Updated reviewer')] })
+    expect(timeline.subagents).toHaveLength(1)
+    expect(timeline.subagents[0]?.name).toBe('Updated reviewer')
+    timeline.apply({ replace: true, hasMore: false, entries: [] })
+    expect(timeline.subagents).toEqual([])
+  })
+})
+
 describe('native block visibility', () => {
   // Synthetic copy of st's normalize_omp tool_execution_start projection.
   const raw = {
