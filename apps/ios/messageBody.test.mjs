@@ -15,4 +15,4 @@ assert.equal(wholeTextFailure(refused('blob-expired', 'the full text of this mes
 assert.match(wholeTextFailure(refused('blob-not-found')), /no longer on the machine that took it/);
 assert.match(wholeTextFailure(refused('remote-unavailable', 'owner host/Juniper is temporarily unavailable')), /^Juniper cannot be reached right now, so only the start/);
 for (const code of ['blob-expired', 'blob-not-found', 'remote-unavailable', 'not-found', 'forbidden']) assert.doesNotMatch(wholeTextFailure(refused(code)), /image/i, code);
-assert.equal(wholeTextFailure(new TypeError('Network request failed')), 'st cannot be reached right now');
+assert.equal(wholeTextFailure(new TypeError('Network request failed')), 'Fractal cannot be reached right now');
