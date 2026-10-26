@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Finish live Fractal product, component and crate references in documentation, release automation and test tooling",
+  "replay": {"status": "none", "detail": "No claim replay or stored-data changes. Internal runtime identifiers and test-only environment markers use the Fractal name."},
+  "schema": {"status": "none", "detail": "No serialized schema, registry, message envelope or protocol changes."},
+  "rules": {"status": "none", "detail": "No checkpoint, hash, signature or admission-rule changes."},
+  "compatibility": {"status": "none", "detail": "Shipped binary names, public environment variables, existing state paths and migration bridges are unchanged. Release workflow display names and concurrency groups now say Fractal; generated configuration follows its source."},
+  "downtime": {"status": "none", "detail": "No service restart or coordinated upgrade is required."},
+  "manual": {"status": "none", "detail": "No operator steps. Home Manager option names, release script filenames and existing macOS app paths retain their current compatibility contracts."},
+  "recovery": {"status": "none", "detail": "No persistent state changes; ordinary release rollback remains available."}
+}

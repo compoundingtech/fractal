@@ -29,7 +29,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use st2::host_lock::process_alive;
+use fractal_legacy_runner::host_lock::process_alive;
 
 const HOST: &str = "isotest";
 // `exec sleep` so `sh -c` replaces itself with the workload (the recorded pid IS the task, not a
@@ -120,7 +120,7 @@ impl Fixture {
     /// Returns the systemd-run handle; the scope is registered for teardown.
     fn spawn_transport(&self, transport_unit: &str) -> Child {
         self.scopes.borrow_mut().push(transport_unit.to_string());
-        let st2 = env!("CARGO_BIN_EXE_st2");
+        let st2 = test_env!("CARGO_BIN_EXE_st2");
         let script = self.root().join(format!("{transport_unit}.sh"));
         std::fs::write(
             &script,

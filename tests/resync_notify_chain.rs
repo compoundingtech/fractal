@@ -12,24 +12,23 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const DEMO_WASM_SRC: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/crates/agent-spec/tests/fixtures/demo_resolver.wasm"
-);
+fn demo_wasm_src() -> &'static str {
+    test_env!("CARGO_MANIFEST_DIR", "/crates/agent-spec/tests/fixtures/demo_resolver.wasm")
+}
 
 /// The demo resolver denotes `<agent_dir>/resources/goal.md` for any subject of its scheme, so
 /// each agent's own declaration resolves to that agent's own carrier — exactly the per-layer
 /// shape a composing profile has.
 fn catalog_with_profile(catalog: &Path, notify_chain: bool) {
     fs::create_dir_all(catalog.join("resolvers")).unwrap();
-    fs::copy(DEMO_WASM_SRC, catalog.join("resolvers/goal.wasm")).unwrap();
+    fs::copy(demo_wasm_src(), catalog.join("resolvers/goal.wasm")).unwrap();
     let chain = if notify_chain {
         "  notify-chain #true\n"
     } else {
         ""
     };
     fs::write(
-        st2::catalog::config_path(catalog),
+        fractal_legacy_runner::catalog::config_path(catalog),
         format!(
             "profile \"dev.schickling.agent-goal\" {{\n  wasm \"resolvers/goal.wasm\"\n  class \"immediate\"\n{chain}}}\n"
         ),
@@ -87,15 +86,15 @@ fn wait_for(condition: impl Fn() -> usize, expected: usize) -> bool {
     condition() >= expected
 }
 
-fn spawn(catalog: &Path) -> st2::resync::ResyncSupervisor {
-    st2::event::publish_owner_binding_for_test(catalog, "example-linux").unwrap();
-    let registry = st2::catalog::declared_profiles(catalog).unwrap();
-    let supervisor = st2::resync::ResyncSupervisor::with_profiles(
+fn spawn(catalog: &Path) -> fractal_legacy_runner::resync::ResyncSupervisor {
+    fractal_legacy_runner::event::publish_owner_binding_for_test(catalog, "example-linux").unwrap();
+    let registry = fractal_legacy_runner::catalog::declared_profiles(catalog).unwrap();
+    let supervisor = fractal_legacy_runner::resync::ResyncSupervisor::with_profiles(
         catalog.to_path_buf(),
         "example-linux".to_owned(),
         registry,
     );
-    let found = st2::discover_strict(catalog);
+    let found = fractal_legacy_runner::discover_strict(catalog);
     assert!(
         found.errors.is_empty(),
         "clean discovery: {:?}",
@@ -246,13 +245,13 @@ fn a_suspended_ancestor_contributes_its_layer_without_becoming_a_subscription() 
     );
     let worker = write_agent(catalog.path(), "worker", Some("example-linux.lead"), None);
     write_layer(&lead, "before\n");
-    let specs = st2::discover_strict(catalog.path()).specs;
+    let specs = fractal_legacy_runner::discover_strict(catalog.path()).specs;
     let worker_spec = specs.iter().find(|spec| spec.identity == "worker").unwrap();
-    let set = st2::resync::watch_set_for_in_catalog(
+    let set = fractal_legacy_runner::resync::watch_set_for_in_catalog(
         worker_spec,
         &specs,
         "example-linux",
-        &st2::catalog::declared_profiles(catalog.path()).unwrap(),
+        &fractal_legacy_runner::catalog::declared_profiles(catalog.path()).unwrap(),
     );
     assert!(
         set.carriers
@@ -306,10 +305,10 @@ fn live_install_reports_an_unwalkable_notify_chain() {
     let catalog = tempfile::tempdir().unwrap();
     catalog_with_profile(catalog.path(), true);
     write_agent(catalog.path(), "worker", Some("example-linux.missing"), None);
-    st2::event::publish_owner_binding_for_test(catalog.path(), "example-linux").unwrap();
-    let specs = st2::discover_strict(catalog.path()).specs;
-    let registry = st2::catalog::declared_profiles(catalog.path()).unwrap();
-    let supervisor = st2::resync::ResyncSupervisor::with_profiles(
+    fractal_legacy_runner::event::publish_owner_binding_for_test(catalog.path(), "example-linux").unwrap();
+    let specs = fractal_legacy_runner::discover_strict(catalog.path()).specs;
+    let registry = fractal_legacy_runner::catalog::declared_profiles(catalog.path()).unwrap();
+    let supervisor = fractal_legacy_runner::resync::ResyncSupervisor::with_profiles(
         catalog.path().to_path_buf(),
         "example-linux".to_owned(),
         registry,
