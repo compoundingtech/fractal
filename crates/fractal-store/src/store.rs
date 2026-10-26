@@ -2012,6 +2012,45 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 
 /// Fractal's store: the graph store, which it derefs to, and Fractal's runtime, which
 /// keeps the caches of its projections and plugs its claim kinds into the graph.
+/// What one minute's check of this member's seats carries into the next (`local_seats_busy`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LocalSeats {
+    /// Each seat's newest harness observation: the incarnation it names and whether it was quiet.
+    pub harness: BTreeMap<String, (Option<String>, bool)>,
+    /// Each seat this member observed a runtime for: whether it is live, and its incarnation.
+    pub runtimes: BTreeMap<String, (bool, Option<String>)>,
+}
+
+impl LocalSeats {
+    /// Fold one runtime observation's fields; true when it says the seat is live, which in a
+    /// checked span is a start or a seat still running.
+    fn fold_runtime(&mut self, subject: String, fields: &str) -> Result<bool> {
+        let fields: Value = serde_json::from_str(fields)?;
+        let status = fields["status"].as_str();
+        let live = !matches!(status, Some("absent" | "exited" | "vanished" | "stopped"));
+        let runtime = self.runtimes.entry(subject).or_default();
+        runtime.0 = live;
+        match fields.get("incarnation_id") {
+            Some(Value::String(incarnation)) => runtime.1 = Some(incarnation.clone()),
+            Some(_) => runtime.1 = None,
+            None => {}
+        }
+        Ok(live)
+    }
+
+    /// Whether, as folded so far, a seat is working or not known not to be.
+    fn busy(&self) -> bool {
+        let live = self.runtimes.iter().any(|(subject, (live, incarnation))| {
+            *live
+                && !self.harness.get(subject).is_some_and(|(observed, quiet)| {
+                    *quiet && incarnation.is_some() && observed == incarnation
+                })
+        });
+        let quiet = |subject: &String| self.runtimes.get(subject).is_some_and(|(live, _)| !live);
+        live || self.harness.iter().any(|(subject, (_, q))| !q && !quiet(subject))
+    }
+}
+
 pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
@@ -5716,6 +5755,118 @@ impl Store {
             }
         }
         Ok(false)
+    }
+
+    /// Whether a seat on this member was working in `[from_ms, until_ms)`, or not known not to
+    /// be. Two sources, as of `from_ms` (`carried` from the check of the minute before, or else
+    /// read here) and through the span:
+    ///
+    /// - Each seat's harness observations. A local driver's `harness.observed` is `latest`
+    ///   retention, so every one is a row of `local_observations` stamped when admitted, and a
+    ///   replicated claim only when its state changed. A seat is quiet only in a state that says
+    ///   so (`ready`, `idle`, `blocked`, `ended`) with no background jobs; `working`, `starting`,
+    ///   `indeterminate` or anything else is busy, however old, and so is any such observation
+    ///   inside the span.
+    /// - This member's runtime observations, the `runtime.observed` claims its reconciler
+    ///   authors. A seat whose newest one is not `absent`, `exited`, `vanished` or `stopped` is
+    ///   live here, and is busy unless its newest harness observation names the same incarnation
+    ///   and is quiet. So a live seat with no harness observation, as when harness observations
+    ///   stop reaching the store, is never quiet. A seat that starts inside the span is busy; a
+    ///   seat this member ended no longer counts its last harness state.
+    ///
+    /// Returns that, and both sources as of `until_ms` for the next check.
+    pub fn local_seats_busy(
+        &self,
+        from_ms: u64,
+        until_ms: u64,
+        carried: Option<LocalSeats>,
+    ) -> Result<(bool, LocalSeats)> {
+        fn harness(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, (Option<String>, bool))> {
+            let state: Option<String> = row.get(1)?;
+            let jobs: Option<i64> = row.get(2)?;
+            let quiet = matches!(state.as_deref(), Some("ready" | "idle" | "blocked" | "ended"));
+            Ok((row.get(0)?, (row.get(3)?, quiet && jobs.unwrap_or(0) <= 0)))
+        }
+        fn runtime(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String)> {
+            Ok((row.get(0)?, row.get(1)?))
+        }
+        let (from, until) = (from_ms.min(i64::MAX as u64) as i64, until_ms.min(i64::MAX as u64) as i64);
+        let origin = self.graph.origin.as_str();
+        let connection = self.readers.get();
+        let mut seats = match carried {
+            Some(seats) => seats,
+            None => {
+                let mut seats = LocalSeats {
+                    harness: connection
+                        .prepare_cached(
+                            "SELECT seats.subject,
+                                COALESCE(json_extract(o.body, '$.fields.state'), json_extract(o.body, '$.state')),
+                                json_extract(o.body, '$.fields.background_jobs'),
+                                json_extract(o.body, '$.fields.incarnation_id')
+                             FROM (SELECT DISTINCT subject FROM local_observations
+                                   WHERE kind='harness.observed') AS seats
+                             JOIN local_observations AS o ON o.id=(
+                                 SELECT id FROM local_observations
+                                 WHERE subject=seats.subject AND kind='harness.observed'
+                                   AND observed_at_unix_ms<?1
+                                 ORDER BY id DESC LIMIT 1)",
+                        )?
+                        .query_map(params![from], harness)?
+                        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?,
+                    runtimes: BTreeMap::new(),
+                };
+                // Once, after a start: every runtime observation this member authored before the
+                // span, folded in order, as a later one that omits a field keeps the earlier one's.
+                let before = from.to_string();
+                let rows = connection
+                    .prepare_cached(
+                        "SELECT subject, COALESCE(json_extract(body, '$.fields'), body) FROM claims
+                         WHERE kind='runtime.observed' AND origin=?1
+                           AND (length(accepted_at_unix_ms)<length(?2)
+                                OR (length(accepted_at_unix_ms)=length(?2) AND accepted_at_unix_ms<?2))
+                         ORDER BY store_index",
+                    )?
+                    .query_map(params![origin, before], runtime)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for (subject, fields) in rows {
+                    seats.fold_runtime(subject, &fields)?;
+                }
+                seats
+            }
+        };
+        let mut busy = seats.busy();
+        let within = connection
+            .prepare_cached(
+                "SELECT subject,
+                    COALESCE(json_extract(body, '$.fields.state'), json_extract(body, '$.state')),
+                    json_extract(body, '$.fields.background_jobs'),
+                    json_extract(body, '$.fields.incarnation_id')
+                 FROM local_observations
+                 WHERE observed_at_unix_ms>=?1 AND observed_at_unix_ms<?2 AND kind='harness.observed'
+                 ORDER BY id",
+            )?
+            .query_map(params![from, until], harness)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (subject, observed) in within {
+            busy |= !observed.1;
+            seats.harness.insert(subject, observed);
+        }
+        let (from_text, until_text) = (from.to_string(), until.to_string());
+        let started = connection
+            .prepare_cached(
+                "SELECT subject, COALESCE(json_extract(body, '$.fields'), body)
+                 FROM claims INDEXED BY claims_accepted_order_index
+                 WHERE length(accepted_at_unix_ms)=length(?1) AND accepted_at_unix_ms>=?1
+                   AND accepted_at_unix_ms<?2 AND kind='runtime.observed' AND origin=?3
+                 ORDER BY length(accepted_at_unix_ms), accepted_at_unix_ms, store_index",
+            )?
+            .query_map(params![from_text, until_text, origin], runtime)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (subject, fields) in started {
+            busy |= seats.fold_runtime(subject, &fields)?;
+        }
+        busy |= seats.busy();
+        Ok((busy, seats))
     }
 
     /// The newest local timeline observation for one incarnation at or before a snapshot.

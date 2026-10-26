@@ -6434,6 +6434,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
             },
         )));
     }
+    // The member's CPU by closed minute, for the CPU targets. A member in a fleet runs one
+    // replication worker, whose CPU counts with the daemon's; `run_worker` needs a fleet.
+    tokio::spawn(fractal_daemon::task_cpu::account("slo.cpu_minutes", fractal_daemon::api::run_cpu_minutes(
+        store.clone(),
+        usize::from(config.fleet_id.is_some()),
+    )));
     tokio::spawn(fractal_daemon::task_cpu::account("recorder.receipts", fractal_daemon::recorder_receipts::run(
         store.clone(),
         fractal_daemon::recorder::receipt_path(&config.state_dir),
