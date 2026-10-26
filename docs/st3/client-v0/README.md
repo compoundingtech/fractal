@@ -1247,12 +1247,20 @@ or checkpoint authority. Existing canonical claims and checkpoint rules are unch
 
 Asks, attention actions, message sends and held effects are not pinned by this local-response
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.
-Client actions keep their durable `custom.client.action-result` receipt; normal claim append
+Client actions keep their durable, server-only `client.action-result` receipt; normal claim append
 uses its existing operation identity and checkpoint tombstones. Cleanup never deletes these
 claims. Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
 follow `retryable`, and this new code is terminal. TypeScript/phone `isTransient` and
 `retryTransient` likewise stop on this code; the phone's fresh-fence `notApplied` retry list
 contains only stale-fence/rate-limited. Swift preserves unknown codes and `retryable: false`.
+
+Legacy `custom.client.action-result` receipts cannot prove server authorship, even
+with a local origin and absent/null actor. A retry whose key has any such receipt
+fails closed with HTTP 409 `legacy-action-receipt-untrusted` before dispatch or
+side effects. This covers both actor-bearing old server receipts and old
+client-forged receipts; neither is silently upgraded or replayed. Inspect the
+original outcome before choosing a new key. New typed receipts replay normally.
+No stored claims are rewritten and no migration is required.
 
 Caller keys have one namespace across actors and nodes that share these claims. Use a fresh,
 globally unique key for each new request; keys are not an authorization boundary. Reusing
