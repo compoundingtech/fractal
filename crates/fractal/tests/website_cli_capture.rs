@@ -95,6 +95,7 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
                 action,
                 &WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(seat.into()),
                     incarnation: Some(format!("{seat}:1")),
                     summary: Some(summary.into()),
