@@ -125,7 +125,7 @@ export function AgentThreadTabs({ threads, selectedId, onSelectionChange, childr
       </Button> : null}
     </Tabs>
     <div {...stylex.props(styles.body)}>
-      <div ref={attachPanel} role="tabpanel" data-thread-panel={selected.id} {...stylex.props(styles.panel)}>
+      <div ref={attachPanel} role="tabpanel" data-thread-panel={selected.id} inert={narrow && drawerOpen} {...stylex.props(styles.panel)}>
         {selected.readOnly ? <div role="note" data-thread-read-only {...stylex.props(styles.note)}>
           <span {...stylex.props(styles.tag)}>Read only</span>
           <span {...stylex.props(styles.noteText)}>{selected.label} can be viewed here, not replied to.</span>

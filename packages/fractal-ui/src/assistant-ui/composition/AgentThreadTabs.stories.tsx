@@ -89,10 +89,32 @@ const keyboardPlay: NonNullable<Story['play']> = async ({ canvasElement, args })
   await expect(toggle).toHaveAttribute('aria-controls', drawer.id)
   await expect(drawer.querySelectorAll('[data-thread-item]')).toHaveLength(threads.length)
   await waitFor(() => expect(drawer.querySelector('[aria-current="true"]')).toHaveFocus())
+  const panel = canvasElement.querySelector<HTMLElement>('[data-thread-panel]')!
+  const composer = canvas.getByRole('textbox', { name: 'Message Coordinator', hidden: true })
+  if (args.width === 440) {
+    // The phone drawer covers the conversation. Backward traversal must skip its still-mounted composer.
+    await expect(panel).toHaveAttribute('inert')
+    await userEvent.tab({ shift: true })
+    await expect(within(drawer).getByRole('button', { name: 'Close agent threads' })).toHaveFocus()
+    await userEvent.tab({ shift: true })
+    await expect(toggle).toHaveFocus()
+    await expect(panel.contains(canvasElement.ownerDocument.activeElement)).toBe(false)
+    await expect(composer).not.toHaveFocus()
+    await userEvent.tab()
+    await expect(within(drawer).getByRole('button', { name: 'Close agent threads' })).toHaveFocus()
+  } else {
+    await expect(panel).not.toHaveAttribute('inert')
+  }
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('complementary', { name: drawerName })).toBeNull())
   await expect(toggle).toHaveFocus()
   await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(panel).not.toHaveAttribute('inert')
+  // Closing the drawer restores the parent composer to the keyboard order without remounting it.
+  await userEvent.tab()
+  await expect(composer).toHaveFocus()
+  await userEvent.tab({ shift: true })
+  await expect(toggle).toHaveFocus()
 
   // Choosing a thread beyond the strip closes the drawer and focuses its tab, which takes the strip's last slot.
   const conversation = canvas.getByTestId('thread-conversation')
