@@ -465,32 +465,33 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
             )?);
         }
     }
-    let mut schema = match object.get("x-st-ref") {
+    let mut checks = vec![];
+    if !object.contains_key("x-st-ref")
+        && let Some(pattern) = object.get("pattern")
+    {
+        checks.push(format!(
+            "Schema.isPattern(new RegExp({}, \"u\"))",
+            js(pattern)
+        ));
+    }
+    if let Some(min) = object.get("minLength") {
+        checks.push(format!("Schema.isMinLength({min})"));
+    }
+    if let Some(max) = object.get("maxLength") {
+        checks.push(format!("Schema.isMaxLength({max})"));
+    }
+    match object.get("format").and_then(Value::as_str) {
+        Some("date-time") => checks.push(
+            "Schema.isPattern(DATE_TIME, { expected: \"an RFC 3339 date-time\" })".into(),
+        ),
+        Some("uri-reference") | None => {}
+        Some(other) => bail!("unsupported string format `{other}`"),
+    }
+    let base = match object.get("x-st-ref") {
         Some(families) => subject_ref(object, families)?,
-        None => {
-            let mut checks = vec![];
-            if let Some(pattern) = object.get("pattern") {
-                checks.push(format!(
-                    "Schema.isPattern(new RegExp({}, \"u\"))",
-                    js(pattern)
-                ));
-            }
-            if let Some(min) = object.get("minLength") {
-                checks.push(format!("Schema.isMinLength({min})"));
-            }
-            if let Some(max) = object.get("maxLength") {
-                checks.push(format!("Schema.isMaxLength({max})"));
-            }
-            match object.get("format").and_then(Value::as_str) {
-                Some("date-time") => checks.push(
-                    "Schema.isPattern(DATE_TIME, { expected: \"an RFC 3339 date-time\" })".into(),
-                ),
-                Some("uri-reference") | None => {}
-                Some(other) => bail!("unsupported string format `{other}`"),
-            }
-            with_checks("Schema.String".into(), checks)
-        }
+        None => "Schema.String".into(),
     };
+    let mut schema = with_checks(base, checks);
     if let Some(value) = excluded {
         schema = format!(
             "{schema}.check(Schema.makeFilter((value: string) => value !== {}, {{ expected: {} }}))",
@@ -1640,6 +1641,22 @@ pub fn models(schema: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subject_references_keep_string_length_constraints() -> Result<()> {
+        let schema = json!({
+            "type": "string",
+            "pattern": ID_PATTERN,
+            "x-st-ref": "*",
+            "minLength": 8,
+            "maxLength": 256
+        });
+        let output = emit_string(schema.as_object().context("string schema")?)?;
+        assert!(output.contains("subjectRef<string>"));
+        assert!(output.contains("Schema.isMinLength(8)"));
+        assert!(output.contains("Schema.isMaxLength(256)"));
+        Ok(())
+    }
 
     #[test]
     fn wire_alias_schemas_keep_the_deployed_sender_constant() -> Result<()> {

@@ -16,7 +16,8 @@ export type ActionCommon = {
 
 };
   type: 
-  "arrangement.edit"
+  "harness.answer"
+  | "arrangement.edit"
   | "custom.reply"
   | "prompt.respond"
   | "attention.resolve"

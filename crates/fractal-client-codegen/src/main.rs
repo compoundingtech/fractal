@@ -1454,7 +1454,7 @@ fn typescript_operation_methods(
             continue;
         }
         if id == "harness-questions.get" {
-            writeln!(out, "    async harnessQuestion(id: string): Promise<EnvelopeOf<HarnessQuestion>> {{ return this.get(`/v1/client/harness-questions/${{encodeURIComponent(id)}}`); }}")?;
+            writeln!(out, "    async harnessQuestion(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HarnessQuestion>> {{ return this.get(`/v1/client/harness-questions/${{encodeURIComponent(id)}}`, undefined, requestOptions); }}")?;
             continue;
         }
         if id == "conversation.search" {
@@ -1859,9 +1859,10 @@ mod tests {
         let typescript = typescript_operation_methods(reads, actions)?;
         assert!(typescript.contains("async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'>"));
         assert!(typescript.contains("'/v1/client/harness-questions' + query(options), undefined, requestOptions"));
-        assert!(typescript.contains("async harnessQuestion(id: string)"));
+        assert!(typescript.contains("async harnessQuestion(id: string, requestOptions: RequestOptions = {})"));
         assert!(typescript.contains("async harnessAnswer("));
         assert!(typescript.contains("harness-questions/${encodeURIComponent(id)}"));
+        assert!(typescript.contains("harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions"));
         Ok(())
     }
 

@@ -2819,6 +2819,7 @@
         "id": { "$ref": "#/$defs/Id" },
         "type": {
           "enum": [
+            "harness.answer",
             "arrangement.edit",
             "custom.reply",
             "prompt.respond",

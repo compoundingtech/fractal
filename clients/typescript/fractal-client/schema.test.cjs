@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
 test('harness questions retain canonical private metadata and open response enums', async () => {
-    const [{ Schema }, Rich] = await modules;
+    const [{ DateTime, Option, Schema }, Rich] = await modules;
     const wire = {
         kind: 'harness-question', id: 'harness-question/00ca25ee5d0da6af852c81a5ee4949df', revision: 'claim/ada-observed',
         updated_at: '2026-10-26T10:00:00.000Z', agent: 'agent/ada', session: 'ada-session',
@@ -16,10 +16,18 @@ test('harness questions retain canonical private metadata and open response enum
         answer: { state: 'unavailable', reason: 'resolved' },
     };
     const decode = Rich.decodeUnknownSync(Rich.HarnessQuestion, 'strict');
-    for (const value of [wire, { ...wire, resolution: null, answer: { state: 'available' } },
-        { ...wire, resolution: { ...wire.resolution, status: 'future_status' }, answer: { state: 'future_state', reason: 'future_reason' } }]) {
-        assert.deepEqual(Schema.encodeSync(Rich.HarnessQuestion)(decode(value)), value);
+    for (const value of [wire, { ...wire, resolution: null, answer: { state: 'available' } }]) {
+        const decoded = decode(value);
+        assert.equal(DateTime.toEpochMillis(decoded.observed_at), value.observed_at);
+        assert.equal(Option.isSome(decoded.resolution), value.resolution !== null);
+        assert.deepEqual(Schema.encodeSync(Rich.HarnessQuestion)(decoded), value);
     }
+    const future = { ...wire, resolution: { ...wire.resolution, status: 'future_status' },
+        answer: { state: 'future_state', reason: 'future_reason' } };
+    const decodedFuture = Rich.decodeUnknownSync(Rich.HarnessQuestion)(future);
+    assert.deepEqual(decodedFuture.answer.state, { _tag: 'Unknown', raw: 'future_state' });
+    assert.deepEqual(Schema.encodeSync(Rich.HarnessQuestion)(decodedFuture), future);
+    assert.throws(() => decode(future));
     for (const value of [
         { ...wire, id: 'harness-question/native' }, { ...wire, native_id: 'raw-native-id' },
         { ...wire, session: 'has whitespace' }, { ...wire, session: '' },
@@ -77,11 +85,15 @@ test('harness refusal details stay closed while result statuses remain lossless'
             assert.throws(() => decode({ ...base, code, details }));
     }
     const future = { ...base, code: 'future-error', details: { future: 1 } };
-    assert.deepEqual(Schema.encodeSync(Rich.ErrorEnvelope)(decode(future)), future);
+    assert.deepEqual(Schema.encodeSync(Rich.ErrorEnvelope)(Rich.decodeUnknownSync(Rich.ErrorEnvelope)(future)), future);
+    assert.throws(() => decode(future));
     for (const status of ['accepted', 'already_resolved', 'future_status']) {
         const value = { status, resolution: { status: 'future_resolution', revision: 'claim/observed', answers: {}, resolved_at: 1793008801000 } };
-        assert.deepEqual(Schema.encodeSync(Rich.HarnessAnswerResult)(Rich.decodeUnknownSync(Rich.HarnessAnswerResult, 'strict')(value)), value);
+        assert.deepEqual(Schema.encodeSync(Rich.HarnessAnswerResult)(Rich.decodeUnknownSync(Rich.HarnessAnswerResult)(value)), value);
+        assert.throws(() => Rich.decodeUnknownSync(Rich.HarnessAnswerResult, 'strict')(value));
     }
+    const known = { status: 'accepted', resolution: { status: 'answered', revision: 'claim/observed', answers: {}, resolved_at: 1793008801000 } };
+    assert.deepEqual(Schema.encodeSync(Rich.HarnessAnswerResult)(Rich.decodeUnknownSync(Rich.HarnessAnswerResult, 'strict')(known)), known);
 });
 test('push registration schema bounds secret input and exposes only safe device status', async () => {
     const [{ Schema }, Rich] = await modules;
@@ -132,21 +144,25 @@ test('every wire version receiver accepts exactly the deployed and fractal names
     const [{ Schema }, Rich] = await modules;
     const contract = require('../../../docs/st3/client-v0/schemas/client-v0.schema.json');
     let receivers = 0;
+    const branches = schema => schema.members ? schema.members.flatMap(branches) : [schema];
     for (const [name, definition] of Object.entries(contract.$defs)) {
         for (const [field, specification] of Object.entries(definition.properties ?? {})) {
             if (!specification.enum?.some(value => typeof value === 'string' && value.startsWith('st3.'))) continue;
             receivers++;
             const [oldName, newName] = specification.enum;
             assert.deepEqual(specification.enum, [oldName, oldName.replace(/^st3\./, 'fractal.')]);
-            const receiver = Rich[name].fields[field];
-            for (const mode of ['strict', 'tolerant']) {
-                const decode = Rich.decodeUnknownSync(receiver, mode);
-                for (const value of [oldName, newName]) {
-                    assert.equal(Schema.encodeSync(receiver)(decode(value)), value, `${name}.${field}`);
-                }
-                for (const value of [oldName.replace(/^st3\./, 'smalltalk.'), `${newName}.unknown`,
-                    `${oldName},${newName}`, [oldName, newName]]) {
-                    assert.throws(() => decode(value), `${name}.${field} must reject ${JSON.stringify(value)}`);
+            for (const branch of branches(Rich[name])) {
+                const receiver = branch.fields[field];
+                assert(receiver, `${name}.${field} must exist on every receiver branch`);
+                for (const mode of ['strict', 'tolerant']) {
+                    const decode = Rich.decodeUnknownSync(receiver, mode);
+                    for (const value of [oldName, newName]) {
+                        assert.equal(Schema.encodeSync(receiver)(decode(value)), value, `${name}.${field}`);
+                    }
+                    for (const value of [oldName.replace(/^st3\./, 'smalltalk.'), `${newName}.unknown`,
+                        `${oldName},${newName}`, [oldName, newName]]) {
+                        assert.throws(() => decode(value), `${name}.${field} must reject ${JSON.stringify(value)}`);
+                    }
                 }
             }
         }

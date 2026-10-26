@@ -980,6 +980,7 @@ fn resource_fixture_covers_every_resource_kind_with_stable_unique_ids() {
     let expected = BTreeSet::from([
         "agent",
         "attention",
+        "harness-question",
         "history",
         "launch",
         "launch-approval",
