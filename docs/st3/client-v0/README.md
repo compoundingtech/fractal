@@ -2326,11 +2326,11 @@ An unowned launcher does not confer person ownership.
 Credential-directory references are local to the launcher's host, so helpers must
 launch on that host. Inheritance also requires kernel-authenticated Unix socket
 peer credentials and proof that the peer descends from the launcher's exact
-daemon-recorded harness PID and Linux process-start token. On supported Linux
-kernels, the server retains the original connector's `SO_PEERPIDFD` and refuses
-exited connectors, even when the socket remains open or its PID is reused.
-Older kernels capture the connector's start token at accept time and recheck it
-at the grant; this fallback has the kernel start-time clock's tick granularity.
+daemon-recorded harness PID and Linux process-start token. Inheritance requires
+Linux with `SO_PEERPIDFD` (kernel 6.5 or newer). The server retains the original
+connector's kernel pidfd and refuses exited connectors, even when the socket
+remains open or its PID is reused. There is no PID-only or start-token fallback:
+an unavailable socket pidfd refuses inheritance without changing ordinary authentication.
 Every intermediate ancestor's generation and parent edge is checked
 again before granting. `ST_AGENT`, headers and other environment values cannot
 establish this grant. Old launcher runs without process provenance must be

@@ -6466,12 +6466,13 @@ pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fra
             let owned = unsafe { OwnedFd::from_raw_fd(fd) };
             anyhow::ensure!(length as usize == std::mem::size_of_val(&fd),
                 "SO_PEERPIDFD returned an invalid descriptor length");
-            Some(owned)
+            owned
         } else {
             let error = std::io::Error::last_os_error();
-            anyhow::ensure!(matches!(error.raw_os_error(), Some(libc::ENOPROTOOPT | libc::EINVAL)),
-                "SO_PEERPIDFD failed: {error}");
-            None
+            if matches!(error.raw_os_error(), Some(libc::ENOPROTOOPT | libc::EINVAL)) {
+                anyhow::bail!("helper credential inheritance requires Linux SO_PEERPIDFD (kernel 6.5+): {error}");
+            }
+            anyhow::bail!("SO_PEERPIDFD failed: {error}");
         };
         fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
     }

@@ -14,26 +14,23 @@ pub struct PeerProcessIdentity {
     #[cfg(target_os = "linux")]
     start_token: u64,
     #[cfg(target_os = "linux")]
-    pidfd: Option<Arc<OwnedFd>>,
+    pidfd: Arc<OwnedFd>,
 }
 
 impl PeerProcessIdentity {
-    /// Capture immediately at accept. `None` is only appropriate when SO_PEERPIDFD
-    /// is unsupported, not after an arbitrary failure to acquire its kernel witness.
-    pub fn capture(pid: u32, pidfd: Option<OwnedFd>) -> Result<Self> {
+    /// Capture immediately at accept using the socket's mandatory SO_PEERPIDFD witness.
+    pub fn capture(pid: u32, pidfd: OwnedFd) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
-            if let Some(pidfd) = &pidfd {
-                // Establish kernel liveness before the first numeric PID lookup;
-                // validate() checks it again after capturing the start token.
-                let mut poll = libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-                let result = unsafe { libc::poll(&mut poll, 1, 0) };
-                anyhow::ensure!(result == 0 && poll.revents == 0,
-                    "socket connector pidfd is exited or invalid at accept");
-            }
+            // Establish kernel liveness before the first numeric PID lookup;
+            // validate() checks it again after capturing the start token.
+            let mut poll = libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            let result = unsafe { libc::poll(&mut poll, 1, 0) };
+            anyhow::ensure!(result == 0 && poll.revents == 0,
+                "socket connector pidfd is exited or invalid at accept");
             let (state, start_token) = crate::process::process_identity(pid)?;
             anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x'), "socket connector has exited");
-            let identity = Self { pid, start_token, pidfd: pidfd.map(Arc::new) };
+            let identity = Self { pid, start_token, pidfd: Arc::new(pidfd) };
             identity.validate()?;
             Ok(identity)
         }
@@ -53,29 +50,25 @@ impl PeerProcessIdentity {
         #[cfg(target_os = "linux")]
         {
             crate::procfs::require_matching_procfs()?;
-            if let Some(pidfd) = &self.pidfd {
-                // A pidfd is readable after exit; invalid/other descriptor types must
-                // never turn into a start-token-only authorization.
-                let mut poll = libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-                let result = unsafe { libc::poll(&mut poll, 1, 0) };
-                if result < 0 {
-                    return Err(std::io::Error::last_os_error()).context("poll connector pidfd");
-                }
-                anyhow::ensure!(result == 0 && poll.revents == 0, "socket connector pidfd is exited or invalid");
-                let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd()))?;
-                let pid = info.lines().find_map(|line| line.strip_prefix("Pid:")).and_then(|pid| pid.trim().parse::<u32>().ok());
-                anyhow::ensure!(pid == Some(self.pid), "socket connector pidfd does not identify the accepted peer");
+            // A pidfd is readable after exit; invalid/other descriptor types must
+            // never turn into a start-token-only authorization.
+            let mut poll = libc::pollfd { fd: self.pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            let result = unsafe { libc::poll(&mut poll, 1, 0) };
+            if result < 0 {
+                return Err(std::io::Error::last_os_error()).context("poll connector pidfd");
             }
+            anyhow::ensure!(result == 0 && poll.revents == 0, "socket connector pidfd is exited or invalid");
+            let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", self.pidfd.as_raw_fd()))?;
+            let pid = info.lines().find_map(|line| line.strip_prefix("Pid:")).and_then(|pid| pid.trim().parse::<u32>().ok());
+            anyhow::ensure!(pid == Some(self.pid), "socket connector pidfd does not identify the accepted peer");
             let (state, token) = crate::process::process_identity(self.pid)?;
             anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x') && token == self.start_token,
                 "socket connector exited or its PID was reused");
             // Check again after procfs: exit/reuse during that read cannot replace
             // the exact kernel witness with a merely matching numeric candidate.
-            if let Some(pidfd) = &self.pidfd {
-                let mut poll = libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-                let result = unsafe { libc::poll(&mut poll, 1, 0) };
-                anyhow::ensure!(result == 0 && poll.revents == 0, "socket connector exited during validation");
-            }
+            let mut poll = libc::pollfd { fd: self.pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            let result = unsafe { libc::poll(&mut poll, 1, 0) };
+            anyhow::ensure!(result == 0 && poll.revents == 0, "socket connector exited during validation");
             Ok(())
         }
         #[cfg(not(target_os = "linux"))]
@@ -87,9 +80,17 @@ impl PeerProcessIdentity {
 mod tests {
     use super::*;
 
+    fn pidfd(pid: u32) -> OwnedFd {
+        use std::os::fd::FromRawFd as _;
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+        // A successful pidfd_open transfers a fresh descriptor to this fixture.
+        unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) }
+    }
+
     #[test]
     fn peer_process_reused_pid_candidate_is_refused() {
-        let mut identity = PeerProcessIdentity::capture(std::process::id(), None).unwrap();
+        let mut identity = PeerProcessIdentity::capture(std::process::id(), pidfd(std::process::id())).unwrap();
         identity.validate().unwrap();
         // Deterministically substitute another generation for the same numeric PID.
         // This does not force real PID reuse or claim tick-level uniqueness.
@@ -108,23 +109,12 @@ mod tests {
     #[test]
     fn exited_kernel_witness_rejects_a_live_replacement_candidate() {
         use std::io::Write as _;
-        use std::os::fd::FromRawFd as _;
         use std::process::{Command, Stdio};
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "peer_process::tests::peer_process_waiting_child"])
             .env("FRACTAL_PEER_PROCESS_WAITING_CHILD", "1")
             .stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
-        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
-        if raw < 0 {
-            let error = std::io::Error::last_os_error();
-            child.kill().unwrap();
-            child.wait().unwrap();
-            // Pre-pidfd kernels exercise the accept-time token test instead.
-            assert_eq!(error.raw_os_error(), Some(libc::ENOSYS));
-            return;
-        }
-        let descriptor = unsafe { OwnedFd::from_raw_fd(raw as libc::c_int) };
-        let captured = PeerProcessIdentity::capture(child.id(), Some(descriptor));
+        let captured = PeerProcessIdentity::capture(child.id(), pidfd(child.id()));
         child.stdin.take().unwrap().write_all(b"x").unwrap();
         assert!(child.wait().unwrap().success());
         let mut identity = captured.unwrap();
@@ -139,6 +129,6 @@ mod tests {
     #[test]
     fn peer_process_non_pidfd_descriptor_is_refused() {
         let descriptor = std::fs::File::open("/dev/null").unwrap();
-        assert!(PeerProcessIdentity::capture(std::process::id(), Some(descriptor.into())).is_err());
+        assert!(PeerProcessIdentity::capture(std::process::id(), descriptor.into()).is_err());
     }
 }

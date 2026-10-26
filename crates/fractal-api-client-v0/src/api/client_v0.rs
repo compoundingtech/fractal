@@ -13144,6 +13144,14 @@ subscription "watch/source" {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn helper_creation_uses_authenticated_launcher_and_persists_binding_in_receipt() {
+        fn pidfd(pid: u32) -> std::os::fd::OwnedFd {
+            use std::os::fd::FromRawFd as _;
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+            // A successful pidfd_open transfers a fresh descriptor to this fixture.
+            unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) }
+        }
+
         for owner in [Some("person/ada"), None] {
             let root = tempfile::tempdir().unwrap();
             let state = test_state_named(root.path(), "helper-binding");
@@ -13166,7 +13174,7 @@ subscription "watch/source" {
                 }).unwrap();
             }
             let mut session = ClientSession::local(Some(launcher)).unwrap();
-            session.peer_process = Some(fractal_runtime::PeerProcessIdentity::capture(std::process::id(), None).unwrap());
+            session.peer_process = Some(fractal_runtime::PeerProcessIdentity::capture(std::process::id(), pidfd(std::process::id())).unwrap());
             let snapshot = new_client_snapshot(&state);
             let request = ActionRequest {
                 api_version: CLIENT_API_VERSION.into(), id: "action/helper".into(),

@@ -211,7 +211,7 @@ impl Store {
 
     /// Credential grants require kernel peer credentials and the daemon's exact process witness.
     pub fn verify_helper_launcher_peer(&self, launcher: &str, peer_process: Option<&fractal_runtime::PeerProcessIdentity>) -> Result<String> {
-        let peer_process = peer_process.context("helper inheritance requires a kernel-authenticated local socket peer process")?;
+        let peer_process = peer_process.context("helper inheritance requires a live kernel-authenticated SO_PEERPIDFD local socket witness on Linux kernel 6.5+")?;
         let (actual, host) = launcher_runtime(self, launcher)?
             .context("the launcher has no unambiguous current runtime")?;
         anyhow::ensure!(host.trim_start_matches("host/") == self.origin().trim_start_matches("host/"),
@@ -329,6 +329,15 @@ impl Store {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    fn pidfd(pid: u32) -> std::os::fd::OwnedFd {
+        use std::os::fd::FromRawFd as _;
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+        // A successful pidfd_open transfers a fresh descriptor to this fixture.
+        unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) }
+    }
+
     fn declaration(name: &str) -> NormalizedIntent {
         crate::graph::parse_intent(
             &format!("version 2\nagent \"{name}\" {{ workspace \"/tmp\"; harness \"codex\" {{}}; }}"),
@@ -445,7 +454,7 @@ mod tests {
         let desired = intent.subjects.values().next().unwrap();
         let pid = std::process::id();
         let token = fractal_runtime::process_start_token(pid).unwrap();
-        let peer = fractal_runtime::PeerProcessIdentity::capture(pid, None).unwrap();
+        let peer = fractal_runtime::PeerProcessIdentity::capture(pid, pidfd(pid)).unwrap();
         assert!(store.bind_helper_launcher_from_peer(desired, "create-helper",
             "agent/node.launcher", "codex", None).unwrap_err().to_string().contains("kernel-authenticated"));
         assert!(store.bind_helper_launcher_from_peer(desired, "create-helper",
@@ -472,7 +481,7 @@ mod tests {
         launcher(&store, Some("person/ada"));
         let pid = std::process::id();
         let token = fractal_runtime::process_start_token(pid).unwrap();
-        let peer = fractal_runtime::PeerProcessIdentity::capture(pid, None).unwrap();
+        let peer = fractal_runtime::PeerProcessIdentity::capture(pid, pidfd(pid)).unwrap();
         let mut parent = "agent/node.launcher".to_owned();
         for (index, name) in ["garden/root/helper", "garden/root/helper/child"].into_iter().enumerate() {
             append(&store, &parent, "runtime.action.succeeded",
