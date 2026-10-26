@@ -156,3 +156,33 @@ fn helper_launcher_other_harnesses_share_lifetime_without_credential_inheritance
         assert!(reconciler.perform_start(&helper, member, "ended launcher").is_err());
     }
 }
+
+#[test]
+fn helper_launcher_cross_provider_refuses_other_person_default_login() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let source = format!(
+        "version 2\naccount \"ada/codex\" {{ provider \"openai\"; owner \"person/ada\"; login {:?} }}\naccount \"mallory/claude\" {{ provider \"anthropic\"; owner \"person/mallory\"; login {:?} }}\nagent \"launcher\" {{ workspace {:?}; harness \"codex\" {{ account \"ada/codex\" }}; env {{ HOME {:?} }} }}",
+        root.path().join("ada").display().to_string(),
+        root.path().join(".claude").display().to_string(),
+        root.path().display().to_string(), root.path().display().to_string(),
+    );
+    std::fs::create_dir(root.path().join("ada")).unwrap();
+    std::fs::create_dir(root.path().join(".claude")).unwrap();
+    publish_as(&store, &source, "account-launcher", Some("person/ada"));
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+    reconciler.reconcile_once().unwrap();
+    let launcher = store.desired_subjects_named(&["agent/node.launcher".into()]).unwrap().remove(0);
+    let receipt = store.observations_for(&launcher.subject, "runtime.action.succeeded").unwrap().pop().unwrap();
+    assert_eq!(receipt.body["fields"]["credential_home"], root.path().join("ada").display().to_string());
+    let incarnation = receipt.body["fields"]["incarnation_id"].as_str().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: launcher.subject.clone(), kind: "runtime.observed".into(), actor: None,
+        fields: member_fields(launcher.member.as_ref().unwrap(), "running", Some(incarnation), true),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let helper = parse_intent(&format!("version 2\nagent \"helper\" {{ workspace {:?}; harness \"claude\" {{}} }}", root.path().display().to_string()), "node").unwrap();
+    let error = store.bind_helper_launcher(helper.subjects.values().next().unwrap(), "cross-provider", &launcher.subject, "claude").unwrap_err();
+    assert!(error.to_string().contains("same harness"));
+}
