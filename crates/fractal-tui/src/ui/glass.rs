@@ -52,15 +52,6 @@ pub(super) struct TabStatuses {
 impl TabStatuses {
     pub(super) fn new(world: &World, closed: &HashSet<String>, snoozed: &HashSet<String>) -> Self {
         let mut status = Self { loaded: world.attention.ready().is_some(), ..Self::default() };
-        // Classify question calls once. A cached call identifies a tool only when an exact,
-        // still-open live prompt names it; its presence alone never establishes activity.
-        let question_calls: BTreeMap<_, BTreeSet<_>> = world.pending_calls.iter()
-            .filter_map(|(agent, calls)| {
-                let questions: BTreeSet<_> = calls.iter()
-                    .filter(|call| matches!(call.tool.as_str(), "AskUserQuestion" | "request_user_input"))
-                    .map(|call| call.id.as_str()).collect();
-                (!questions.is_empty()).then_some((agent.as_str(), questions))
-            }).collect();
         let agent_missions: BTreeMap<_, _> = world.agents.items().iter()
             .filter_map(|agent| agent.mission.as_deref().map(|mission| (agent.id.as_str(), mission)))
             .collect();
@@ -88,9 +79,14 @@ impl TabStatuses {
             // Question identity outlives answer eligibility (for example, an expired client
             // submission window). Only live attention establishes that the prompt is open.
             let question_seat = match (&world.link, &item.kind) {
-                (Link::Live, AttentionKind::Prompt { seat_id, question, call, .. })
+                // A call st serves beside the prompt identifies a question only when the prompt
+                // names it exactly; its presence alone never establishes activity.
+                (Link::Live, AttentionKind::Prompt { seat_id, question, call, calls, .. })
                     if *question || call.as_ref().and_then(Option::as_deref).is_some_and(|call| {
-                        question_calls.get(seat_id.as_str()).is_some_and(|calls| calls.contains(call))
+                        calls.as_ref().is_ok_and(|calls| calls.iter().any(|pending| {
+                            pending.id == call
+                                && matches!(pending.tool.as_str(), "AskUserQuestion" | "request_user_input")
+                        }))
                     }) => Some(seat_id.as_str()),
                 _ => None,
             };
@@ -4625,6 +4621,11 @@ mod tests {
             question: true,
             answers: vec!["answer".into()], episode: "episode/question".into(),
             call: Some(Some("call/question".into())),
+            calls: Ok(vec![PendingCall {
+                id: "call/question".into(), tool: "AskUserQuestion".into(), input: serde_json::json!({}),
+                complete: true,
+            }]),
+            allow: true,
         };
         let mut second = alert.clone();
         second.id = "attention/b".into();
@@ -4632,9 +4633,6 @@ mod tests {
         update.id = "attention/update".into();
         update.kind = AttentionKind::Message { from: "agent/a".into(), body: "informational".into() };
         ui.world.attention = Load::Ready(vec![alert, second, update]);
-        ui.world.pending_calls.insert("agent/a".into(), vec![PendingCall {
-            id: "call/question".into(), tool: "AskUserQuestion".into(), input: serde_json::json!({}),
-        }]);
         ui.glasses.glass_mut().layout = Layout::Group(Group {
             tabs: [
                 ("agent:agent/a", "Atlas"), ("agent:agent/b", "Idle"),
@@ -4652,15 +4650,15 @@ mod tests {
         for native_kind in [true, false] {
             let mut ui = tab_badge_world();
             let mut next = ui.world.clone();
-            if native_kind {
-                next.pending_calls.clear();
-            }
             if let Load::Ready(items) = &mut next.attention {
                 for item in items {
-                    if let AttentionKind::Prompt { question, answers, call, .. } = &mut item.kind {
+                    if let AttentionKind::Prompt { question, answers, call, calls, .. } = &mut item.kind {
                         *question = native_kind;
                         answers.clear();
-                        if native_kind { *call = Some(None); }
+                        if native_kind {
+                            *call = Some(None);
+                            *calls = Ok(vec![]);
+                        }
                     }
                 }
             }
@@ -4743,7 +4741,6 @@ mod tests {
     fn tab_badge_live_updates_clear_questions_and_preserve_unknown_counts() {
         let mut ui = tab_badge_world();
         let mut next = ui.world.clone();
-        next.pending_calls.clear();
         next.attention = Load::Ready(Vec::new());
         ui.set_world(next);
         let tab = Tab::pane("agent:agent/a");
@@ -4804,8 +4801,6 @@ mod tests {
         ui.show_tab(1);
         let mut next = ui.world.clone();
         next.attention = Load::Ready(Vec::new());
-        // Its unsubscribed timeline remains cached and has not received the answer.
-        assert!(!next.pending_calls["agent/a"].is_empty());
         ui.set_world(next);
         for key in ["agent:agent/a", "mission:mission/m", "list:home"] {
             let tab = Tab::pane(key);
@@ -5043,6 +5038,8 @@ mod tests {
                 answers: vec!["allow".into(), "deny".into()],
                 episode: "episode-1".into(),
                 call: None,
+                calls: Ok(vec![]),
+                allow: false,
             },
             actions: vec!["prompt.respond".into()],
             related: vec![],

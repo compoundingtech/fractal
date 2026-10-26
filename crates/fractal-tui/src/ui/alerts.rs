@@ -212,40 +212,36 @@ impl Ui {
             .collect()
     }
 
-    /// The tool calls the conversation records with no result yet, oldest first, in full.
-    fn calls_waiting(&self, agent: &str) -> &[PendingCall] {
-        self.world
-            .pending_calls
-            .get(agent)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
-    /// The calls to show beside a prompt's answers: the exact call it asks about, when st names
-    /// it (none when its harness named none); from an older daemon, every unanswered call, of
-    /// which only a lone one is certain.
-    fn prompt_calls(&self, seat: &str, call: &Option<Option<String>>) -> Vec<&PendingCall> {
-        let waiting = self.calls_waiting(seat);
-        match call {
-            None => waiting.iter().collect(),
-            Some(named) => waiting
+    /// The calls to show beside a prompt's answers, from those st serves beside it
+    /// (`presentation.prompt.calls`): the exact call it asks about, when st names it (none when
+    /// its harness named none); else every one. `Err` says why st serves none.
+    fn prompt_calls(&self, id: &str) -> Result<Vec<&PendingCall>, &str> {
+        let Some((calls, call)) = self.world.attention.items().iter().find_map(|item| match &item.kind {
+            AttentionKind::Prompt { calls, call, .. } if item.id == id => Some((calls, call)),
+            _ => None,
+        }) else {
+            return Ok(Vec::new());
+        };
+        let calls = calls.as_ref().map_err(String::as_str)?;
+        Ok(match call {
+            None => calls.iter().collect(),
+            Some(named) => calls
                 .iter()
                 .filter(|pending| named.as_deref() == Some(pending.id.as_str()))
                 .collect(),
-        }
+        })
     }
 
     /// What the band shows under a native prompt, and its buttons. `allow` and `approve` are
-    /// offered only beside the one waiting call shown in full; a question's options are chosen
-    /// here and sent together; a screen prompt's own answers (use, skip, trust, ...) and `deny`
-    /// are always one tap.
+    /// offered only where st allows it (`allowed`), beside the call shown in full; a question's
+    /// options are chosen here and sent together; a screen prompt's own answers (use, skip,
+    /// trust, ...) and `deny` are always one tap.
     fn prompt_answer_rows(
         &self,
         id: &str,
-        seat: &str,
         answers: &[String],
         prompt: &str,
-        call: &Option<Option<String>>,
+        allowed: bool,
         width: usize,
     ) -> (Vec<BandRow>, Vec<(String, Color, Hit)>) {
         let mut rows = Vec::new();
@@ -276,7 +272,10 @@ impl Ui {
             );
             return (rows, buttons);
         }
-        let calls = self.prompt_calls(seat, call);
+        let (calls, unread) = match self.prompt_calls(id) {
+            Ok(calls) => (calls, None),
+            Err(why) => (Vec::new(), Some(why)),
+        };
         let gated = answers
             .iter()
             .find(|answer| matches!(answer.as_str(), "allow" | "approve" | "answer"));
@@ -319,12 +318,15 @@ impl Ui {
                         .and_then(|chosen| chosen.get(&index))
                         .is_some_and(|picked| !picked.is_empty())
                 });
-                if complete {
+                if complete && allowed {
                     buttons.push(button("answer", theme::GREEN));
                 }
             }
             (Some("answer"), _) => rows.extend(note_rows(
-                "the question is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Inbox",
+                &match unread {
+                    Some(why) => format!("{why}: answer it in the terminal (Ctrl+]) or open it in Inbox"),
+                    None => "the question is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Inbox".into(),
+                },
                 width,
             )),
             // Several calls wait and the prompt names none: show them all and offer no allow.
@@ -374,17 +376,25 @@ impl Ui {
                     rows.push(BandRow { line, hits: Vec::new() });
                 }
                 // The whole call must be in view to allow it, and the whole plan to approve it.
-                if !cut {
+                if !cut && allowed {
                     buttons.push(button(gated, theme::GREEN));
-                } else {
+                } else if cut || !only.complete {
                     rows.extend(note_rows(
                         "it is too long to show here in full: open it in Inbox, or answer it in the terminal (Ctrl+])",
+                        width,
+                    ));
+                } else {
+                    rows.extend(note_rows(
+                        "st does not let this call be allowed from here: answer it in the terminal (Ctrl+])",
                         width,
                     ));
                 }
             }
             (Some(_), []) => rows.extend(note_rows(
-                "the call it would make is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Inbox",
+                &match unread {
+                    Some(why) => format!("{why}: answer it in the terminal (Ctrl+]) or open it in Inbox"),
+                    None => "the call it would make is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Inbox".into(),
+                },
                 width,
             )),
             (None, _) => rows.extend(note_rows(first_line(prompt), width)),
@@ -413,16 +423,13 @@ impl Ui {
     /// Choose an option of a harness question alert's question, or for a multi-select toggle
     /// it. Nothing is sent until the person sends every question's choice.
     pub(super) fn choose_answer(&mut self, id: &str, question: usize, option: usize) {
-        let Some((seat, call)) = self.world.attention.items().iter().find_map(|item| match &item.kind {
-            AttentionKind::Prompt { seat_id, call, .. } if item.id == id => {
-                Some((seat_id.clone(), call.clone()))
-            }
-            _ => None,
-        }) else {
+        if !self.world.attention.items().iter().any(|item| {
+            item.id == id && matches!(item.kind, AttentionKind::Prompt { .. })
+        }) {
             self.flash("That alert is gone");
             return;
-        };
-        let Some((asked, key)) = (match self.prompt_calls(&seat, &call).as_slice() {
+        }
+        let Some((asked, key)) = (match self.prompt_calls(id).unwrap_or_default().as_slice() {
             [only] => questions(only).map(|asked| (asked, question_key(id, &only.id))),
             _ => None,
         }) else {
@@ -455,8 +462,8 @@ impl Ui {
     /// The JSON a question alert sends: positions only, each question's position to the positions
     /// of the options chosen. The questions and labels stay in the conversation; the seat's hook
     /// turns positions into labels.
-    fn question_answer(&self, id: &str, seat: &str, call: &Option<Option<String>>) -> Option<String> {
-        let calls = self.prompt_calls(seat, call);
+    fn question_answer(&self, id: &str) -> Option<String> {
+        let calls = self.prompt_calls(id).ok()?;
         let [only] = calls.as_slice() else {
             return None;
         };
@@ -580,14 +587,13 @@ impl Ui {
             let mut buttons: Vec<(String, Color, Hit)> = Vec::new();
             match &item.kind {
                 AttentionKind::Prompt {
-                    seat_id,
                     answers,
                     text: prompt,
-                    call,
+                    allow,
                     ..
                 } => {
                     let (prompt_rows, prompt_buttons) =
-                        self.prompt_answer_rows(&item.id, seat_id, answers, prompt, call, width);
+                        self.prompt_answer_rows(&item.id, answers, prompt, *allow, width);
                     rows.extend(prompt_rows);
                     buttons.extend(prompt_buttons);
                 }
@@ -721,12 +727,12 @@ impl Ui {
             return;
         };
         let effect = match &item.kind {
-            AttentionKind::Prompt { seat_id, call, .. }
+            AttentionKind::Prompt { .. }
                 if item.actions.iter().any(|a| a == "prompt.respond") =>
             {
                 // A question's answer is the choices made here.
                 let sent = if answer == "answer" {
-                    self.question_answer(id, seat_id, call)
+                    self.question_answer(id)
                 } else {
                     Some(answer.to_owned())
                 };
@@ -825,6 +831,8 @@ mod tests {
                 answers: answers.iter().map(|answer| (*answer).to_owned()).collect(),
                 episode: "episode-1".into(),
                 call: None,
+                calls: Ok(vec![]),
+                allow: false,
             },
             actions: if answers.is_empty() {
                 vec![]
@@ -849,6 +857,7 @@ mod tests {
             id: format!("call-{tool}"),
             tool: tool.into(),
             input,
+            complete: true,
         }
     }
 
@@ -856,10 +865,38 @@ mod tests {
         call("Bash", serde_json::json!({"command": command}))
     }
 
+    /// st serves `calls` beside each prompt. A prompt a test has not named a call for asks about
+    /// a lone call, as its harness would; st allows the call it asks about when it is among
+    /// them and whole.
     fn waiting(ui: &mut Ui, calls: Vec<PendingCall>) {
+        let Load::Ready(items) = &mut ui.world.attention else {
+            panic!("no attention");
+        };
+        for item in items {
+            if let AttentionKind::Prompt { calls: served, call, allow, answers, .. } = &mut item.kind {
+                if let (None, [only]) = (&call, calls.as_slice()) {
+                    *call = Some(Some(only.id.clone()));
+                }
+                *allow = !answers.is_empty()
+                    && call.clone().flatten().is_some_and(|named| {
+                        calls.iter().any(|pending| pending.id == named && pending.complete)
+                    });
+                *served = Ok(calls.clone());
+            }
+        }
+    }
+
+    /// The calls st serves beside the first prompt.
+    fn served(ui: &Ui) -> Vec<PendingCall> {
         ui.world
-            .pending_calls
-            .insert("agent/example/atlas".into(), calls);
+            .attention
+            .items()
+            .iter()
+            .find_map(|item| match &item.kind {
+                AttentionKind::Prompt { calls: Ok(calls), .. } => Some(calls.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     /// The cards, as a person sees them after expanding the band.
@@ -1068,7 +1105,7 @@ mod tests {
         assert!(texts(&rows).contains("✓ Blue"), "{}", texts(&rows));
         assert!(taps(&rows).contains(&send));
         // Another question call replaces it: the picks made for the first never answer it.
-        let asked = ui.world.pending_calls["agent/example/atlas"][0].clone();
+        let asked = served(&ui)[0].clone();
         waiting(&mut ui, vec![PendingCall { id: "call-replaced".into(), ..asked.clone() }]);
         let rows = ui.expanded_band("agent/example/atlas", 80);
         assert!(!texts(&rows).contains("✓ Blue"), "{}", texts(&rows));
