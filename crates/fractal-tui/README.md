@@ -35,6 +35,15 @@ close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens or focuses the Inbox 
 Middle-click a tab to close it: press and release over the same tab. This uses the same
 close action as `Ctrl+W` and the tab's right-click menu.
 
+Documents are read-only. `Ctrl+K` opens one by name (`doc/NAME` or `doc/NAME@HASH`) and the
+**Documents** list (`doc/PREFIX/` for one prefix); a `doc/…` link in a message, a mission card
+(which lists the documents the mission and its steps name) or a document opens it too. On a
+document page `b` or `Backspace` goes back along the links followed in that split, `n` and `p`
+choose a link and `Enter` opens it, and `r` reads it again; in the list `m` reads the next page.
+A document that cannot be shown says why (not found, not synced yet, the host did not answer, not
+text). Reads go through `document.get`, `documents.list` and `document-references.get`, and the
+page is `fractal_ui_model::documents`, the model the phone and web read.
+
 Tab prefixes identify **A**gent (including its terminal), **M**ission, and **I**nbox/alert
 cards. Agent activity follows the type: `>` working/compacting, `-` idle, `x`
 down/stopped/retired, `◆` waiting on a person or a login, `!` fault, `~` starting/unknown.
