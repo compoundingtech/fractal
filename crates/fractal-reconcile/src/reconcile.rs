@@ -223,7 +223,7 @@ fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) 
 }
 
 fn schedule_progress_ready<'a>(
-    sync: impl IntoIterator<Item = &'a crate::replication::ReplicationPeerSync>,
+    sync: impl IntoIterator<Item = &'a smallclaims::replication::ReplicationPeerSync>,
     since: u128,
     strict: bool,
 ) -> bool {

@@ -12,7 +12,7 @@ schedule "orchard" {{ {placement}
 
 fn measure(store: &Store, peer: &str, missing: u64, at: u128) {
     store.replication_sync.lock().unwrap().insert(peer.into(), PeerSyncProgress {
-        measured: Some(crate::replication::ReplicationPeerSync {
+        measured: Some(smallclaims::replication::ReplicationPeerSync {
             peer_only_envelopes: missing, measured_at_unix_ms: at, ..Default::default()
         }), ..Default::default()
     });
