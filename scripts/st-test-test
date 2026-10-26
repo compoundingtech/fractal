@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -173,6 +174,16 @@ class StTest(unittest.TestCase):
         for summary in summaries:
             self.assertGreater((directory / f'{summary["record"]}.pack').stat().st_size, 0)
         return summaries
+
+    def test_a_runs_checks_carry_an_admission_run_of_the_accepted_form_a_new_one_per_run_replacing_the_callers(self):
+        seen = Path(self.tmp.name) / 'admission-run'
+        self.assertEqual(self.run_st_test(command=['sh', '-c', f'printf "%s\\n" "$ADMISSION_RUN" >> {seen}'], extra_env={'ADMISSION_RUN': 'stale@1'})[0], 0)
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test(command=['sh', '-c', f'printf "%s\\n" "$ADMISSION_RUN" >> {seen}'])[0], 0)
+        first, second = seen.read_text().split()
+        for value in (first, second):
+            self.assertRegex(value, r'^st-test-[0-9]+@[0-9]{19}$')        # the form build admission accepts: [A-Za-z0-9._-]{1,64}@<start-ns>
+        self.assertNotEqual(first, second)                                 # a caller's stale value is replaced, and each run has its own start
 
     def test_out_resolves_a_nested_relative_directory_and_does_not_import_or_claim_coverage(self):
         self.commit('b.txt', 'two')
@@ -1000,6 +1011,22 @@ class StTest(unittest.TestCase):
         # the pool tree was the merge, at no cost to the branch: HEAD of the clone did not move
         self.assertEqual(git(self.work, 'rev-parse', 'HEAD^{tree}'), head_tree)
 
+    def test_a_base_that_moves_while_the_run_waits_for_a_tree_is_signed_at_its_new_tip(self):
+        self.branch_from_a_base_with_the_gate()
+        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))  # a protected file: the merge is what is signed
+        real_acquire = st_test.acquire_tree
+        def main_moves_while_waiting(*args, **kwargs):
+            self.main_commits('later.txt', 'merged while the run waited')
+            return real_acquire(*args, **kwargs)
+        with mock.patch.object(st_test, 'acquire_tree', side_effect=main_moves_while_waiting):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        expected = git(self.work, 'merge-tree', '--write-tree', '--no-messages', 'HEAD', 'origin/main').split()[0]
+        git(self.work, 'cat-file', '-e', f'{expected}:later.txt')  # the merge holds the tip that landed during the wait
+        statement, = self.statements()
+        self.assertIn(expected, json.dumps(statement))
+        self.assertEqual(self.run_st_test('--status', '--check', 'demo')[0], 0, 'the tree CI judges now is the one signed')
+
     def test_when_main_moved_only_unprotected_files_the_head_tree_is_signed_as_before(self):
         self.branch_from_a_base_with_the_gate()
         head_tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
@@ -1646,6 +1673,95 @@ if os.environ.get('CI_TEST_FLAKY'):
     # As scripts/ci-nextest-flaky after the tests stage: the tests that passed only on a retry, one per line.
     open(os.environ['CI_TEST_FLAKY'], 'w').write(os.environ['FAKE_GATE_FLAKY'] + ' unit_one\\n' if os.environ.get('FAKE_GATE_FLAKY') else '')
 """
+
+
+class PoolQueue(unittest.TestCase):
+    """Pool trees go to waiters in the build host's order (cargo-priority rank by ST_AGENT, aged as the shim ages it, then arrival), not by a race."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'pool'
+        speed = mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.05)
+        speed.start()
+        self.addCleanup(speed.stop)
+
+    def test_a_rank_3_waiter_gets_the_next_free_tree_before_an_earlier_rank_50_waiter(self):
+        self.root.mkdir(parents=True)
+        holder = open(self.root / 'tree-0.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        served, locks = [], []
+
+        def waiter(tag, rank):
+            n, lock = st_test.acquire_tree(self.root, 1, rank=rank)
+            served.append(tag)
+            locks.append(lock)
+            time.sleep(0.3)
+            lock.close()
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            ordinary = threading.Thread(target=waiter, args=('rank-50, first to wait', 50))
+            ordinary.start()
+            time.sleep(0.5)                                                         # both are waiting before the tree comes free
+            p0 = threading.Thread(target=waiter, args=('rank-3, later', 3))
+            p0.start()
+            time.sleep(0.5)
+            holder.close()
+            ordinary.join(10)
+            p0.join(10)
+        self.assertEqual(served, ['rank-3, later', 'rank-50, first to wait'])
+        self.assertEqual(os.listdir(self.root / 'queue'), [])                      # both tickets are gone
+
+    def test_a_worse_waiter_leaves_a_free_tree_alone_while_a_better_ticket_waits(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        better = queue / f'003.{time.time_ns():019d}.{os.getpid()}'          # a rank-3 waiter between two of its looks at the trees
+        better.touch()
+        got = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)))
+            worse.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])                                           # tree-0 is free, but it is the rank-3 ticket's
+            better.unlink()
+            worse.join(5)
+        self.assertEqual(got[0][0], 0)
+        got[0][1].close()
+
+    def test_the_queue_orders_by_aged_rank_then_arrival_and_drops_dead_tickets(self):
+        queue = Path(self.tmp.name) / 'queue'
+        queue.mkdir()
+        now = 10_000 * 10**9
+        live = os.getpid()
+        names = {'old-50': f'050.{now - 200 * 60 * 10**9:019d}.{live}',   # 200 minutes: aged to the floor, 5
+                 'p0': f'003.{now - 10**9:019d}.{live}',                  # under the floor: never aged, always first
+                 'new-12': f'012.{now - 10**9:019d}.{live}',
+                 'young-50': f'050.{now - 5 * 60 * 10**9:019d}.{live}',  # 5 minutes: 48
+                 'dead': f'001.{now:019d}.999999999'}
+        for name in names.values():
+            (queue / name).touch()
+        order = [name for _, _, name in st_test.tree_queue(queue, now)]
+        self.assertEqual(order, [names['p0'], names['old-50'], names['new-12'], names['young-50']])
+        self.assertFalse((queue / names['dead']).exists())
+
+    def test_the_rank_is_the_first_matching_line_of_the_priority_file_and_50_otherwise(self):
+        priority = Path(self.tmp.name) / 'cargo-priority'
+        priority.write_text('# rank glob\n3 agent/crew/hot/*/hot-builder*\n4 agent/crew/leads/*\n12 agent/*\n')
+        rank = lambda agent: st_test.priority_rank({'ST_AGENT': agent, 'CARGO_PRIORITY_FILE': str(priority)})
+        self.assertEqual(rank('agent/crew/hot/2026-10-26/hot-builder'), 3)
+        self.assertEqual(rank('agent/crew/leads/lead-2'), 4)
+        self.assertEqual(rank('agent/other'), 12)
+        self.assertEqual(rank(''), 50)
+        self.assertEqual(st_test.priority_rank({'ST_AGENT': 'agent/x', 'CARGO_PRIORITY_FILE': str(priority) + '.missing'}), 50)
+
+    def test_an_interrupted_waiter_leaves_no_ticket(self):
+        self.root.mkdir(parents=True)
+        holder = open(self.root / 'tree-0.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        self.addCleanup(holder.close)
+        with mock.patch.object(st_test.time, 'sleep', side_effect=KeyboardInterrupt), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                st_test.acquire_tree(self.root, 1, rank=50)
+        self.assertEqual(os.listdir(self.root / 'queue'), [])
 
 
 class PerCrate(StTest):
