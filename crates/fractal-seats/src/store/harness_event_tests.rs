@@ -3,6 +3,7 @@ use super::*;
 use crate::harness_events::Publication;
 use fractal_missions::store::harness_event_tests_shared_seats::*;
 use fractal_missions::store::harness_event_tests_shared_seats::{SEAT, event, runtime};
+use crate::store::limits::{AccountLimit, LIMITS_REFRESH_MS, LimitsStore};
 
 
 #[test]
@@ -80,7 +81,9 @@ fn native_event_admission_fences_every_retention_and_replays_lost_acknowledgemen
         assert!(changed);
         let (replayed, changed) = store.append_harness_event(&input).unwrap();
         assert!(!changed);
-        if !latest_retention(kind) {
+        // Native limits reports keep the local log too, and replicate only what changes.
+        let logged = latest_retention(kind) || kind == "harness.limits";
+        if !logged {
             assert_eq!(first.id, replayed.id);
         }
         assert_eq!(replayed.body["fields"], json!(input.claim.fields));
@@ -98,7 +101,7 @@ fn native_event_admission_fences_every_retention_and_replays_lost_acknowledgemen
         input.runtime_incarnation = "runtime-b".into();
         let (replayed, changed) = store.append_harness_event(&input).unwrap();
         assert!(!changed);
-        if !latest_retention(kind) {
+        if !logged {
             assert_eq!(first.id, replayed.id);
         }
         input.sequence = 2;
@@ -154,4 +157,107 @@ fn event_envelopes_cannot_publish_foreign_or_non_harness_claims() {
     input.sequence = 1;
     input.claim.kind = "intent.desired".into();
     assert!(store.append_harness_event(&input).is_err());
+}
+
+/// Four seats share one account for an hour. Each re-sends the reading it last saw every five
+/// minutes, as idle seats do, while one of them measures the account three times. The graph
+/// gets a claim per seat that joins the account and one per change, not one per report, and
+/// reads the same account limits as a store that kept every report.
+#[test]
+fn limits_replicate_once_per_account_change_and_read_as_every_report_would() {
+    const MINUTE: u64 = 60_000;
+    const WEEK_END: u64 = 1_800_000_000_000;
+    let deduped = Store::open_memory("amber").unwrap();
+    let every = Store::open_memory("amber").unwrap();
+    let seats = ["a", "b", "c", "d"].map(|name| format!("agent/example/limits-{name}"));
+    for seat in &seats {
+        deduped
+            .append_claim(&ClaimInput {
+                subject: seat.clone(),
+                kind: "runtime.observed".into(),
+                actor: Some(seat.clone()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("running")),
+                    ("incarnation_id".into(), json!("runtime-a")),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    let reading = |measured_at: u64, weekly: f64, five_hour: f64| {
+        BTreeMap::from([
+            ("driver".into(), json!("claude")),
+            ("account".into(), json!("claude/example-account")),
+            ("incarnation_id".into(), json!("runtime-a")),
+            ("measured_at_unix_ms".into(), json!(measured_at)),
+            ("weekly_percent".into(), json!(weekly)),
+            ("weekly_resets_at_unix_ms".into(), json!(WEEK_END)),
+            ("five_hour_percent".into(), json!(five_hour)),
+            ("five_hour_resets_at_unix_ms".into(), json!(WEEK_END - 100 * MINUTE)),
+        ])
+    };
+    let start = WEEK_END - 1_000 * MINUTE;
+    // What seat a measures at each minute; the other seats keep the first reading.
+    let measured = [(0, 10.0, 30.0), (20, 11.0, 30.0), (40, 11.0, 35.0), (50, 11.0, 35.0), (60, 11.0, 35.0)];
+    let mut latest = BTreeMap::new();
+    let (mut reports, mut sequence) = (0, 0);
+    let values = |limits: Vec<AccountLimit>| {
+        limits
+            .into_iter()
+            .map(|limit| {
+                (limit.plan, limit.weekly_percent, limit.five_hour_percent, limit.seats)
+            })
+            .collect::<Vec<_>>()
+    };
+    for minute in (0..=60).step_by(5) {
+        if let Some((_, weekly, five_hour)) = measured.iter().find(|(at, ..)| *at == minute) {
+            latest.insert(seats[0].clone(), reading(start + minute * MINUTE, *weekly, *five_hour));
+        }
+        for seat in &seats {
+            let fields = latest
+                .entry(seat.clone())
+                .or_insert_with(|| reading(start, 10.0, 30.0))
+                .clone();
+            sequence += 1;
+            reports += 1;
+            let claim = ClaimInput {
+                subject: seat.clone(),
+                kind: "harness.limits".into(),
+                actor: Some(seat.clone()),
+                fields,
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("limits:{seat}:{sequence}")),
+            };
+            every.append_claim(&claim).unwrap();
+            deduped
+                .append_harness_event(&Publication {
+                    runtime_incarnation: "runtime-a".into(),
+                    sequence,
+                    claim,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            values(deduped.account_limits().unwrap()),
+            values(every.account_limits().unwrap()),
+            "minute {minute}"
+        );
+        let newest = |store: &Store| store.account_limits().unwrap()[0].measured_at_unix_ms;
+        assert!(newest(&every) - newest(&deduped) < LIMITS_REFRESH_MS, "minute {minute}");
+    }
+    let claims = seats
+        .iter()
+        .map(|seat| deduped.claims_for(seat, Some("harness.limits")).unwrap().len())
+        .sum::<usize>();
+    assert_eq!(reports, 52);
+    // One per seat joining the account, the weekly and five-hour changes, and the refresh at
+    // minute 60 (minute 50 measured the same values within the refresh window).
+    assert_eq!(claims, 4 + 2 + 1, "limits claims for {reports} reports");
+    assert_eq!(
+        deduped.account_limits().unwrap()[0].measured_at_unix_ms,
+        every.account_limits().unwrap()[0].measured_at_unix_ms
+    );
 }
