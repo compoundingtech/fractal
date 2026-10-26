@@ -1682,6 +1682,12 @@ mod tests {
         press(&mut ui, KeyCode::Char('n'), KeyModifiers::CONTROL);
         press(&mut ui, KeyCode::Char('1'), KeyModifiers::NONE);
         assert!(ui.effects.is_empty(), "the key cannot allow what is not shown");
+        // Its note is the way to the whole call: a click opens the card in Inbox, selected.
+        let open = Hit::Alert("attention/one".into(), AlertTap::Open);
+        assert!(ui.frame.borrow().hits.iter().any(|(_, hit)| *hit == open));
+        ui.click(open);
+        assert_eq!(ui.attention_focus().as_deref(), Some("attention/one"));
+        assert!(render(&ui, 120, 60).contains("echo step 12"));
 
         let ui = in_inbox(world);
         let shown = render(&ui, 120, 60);
@@ -1771,7 +1777,7 @@ mod tests {
 
     /// Inbox follows the conversation of the prompt it shows, where the call it asks about is.
     #[test]
-    fn now_follows_the_seat_of_the_prompt_it_shows() {
+    fn inbox_follows_the_seat_of_the_prompt_it_shows() {
         let ui = in_inbox(bash_world());
         assert!(ui.live_conversations().contains(&SEAT.to_owned()));
     }
