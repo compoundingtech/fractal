@@ -55,18 +55,45 @@ def rule_files(repo, base, from_checkout, folder):
     return json.loads(texts["rules"]), json.loads(texts["classes"]), load_engine(engine_path)
 
 
+def unquote(name):
+    """A path as git prints it in a diff header: plain, or C-quoted with octal escapes."""
+    if not (name.startswith('"') and name.endswith('"')):
+        return name
+    out, body, index = bytearray(), name[1:-1], 0
+    escapes = {"n": 10, "t": 9, "r": 13, "a": 7, "b": 8, "f": 12, "v": 11, '"': 34, "\\": 92}
+    while index < len(body):
+        char = body[index]
+        if char != "\\":
+            out += char.encode()
+            index += 1
+        elif body[index + 1] in escapes:
+            out.append(escapes[body[index + 1]])
+            index += 2
+        else:
+            out.append(int(body[index + 1:index + 4], 8))
+            index += 4
+    return out.decode(errors="replace")
+
+
 def read_diff(repo, base, head):
-    """(paths, lines): the changed paths, and per path its (marker, line) pairs, marker '+' or '-'."""
-    names = subprocess.check_output(["git", "diff", "--name-only", f"{base}...{head}"], cwd=repo, text=True).split("\n")
-    text = subprocess.check_output(["git", "diff", "-U0", "--no-color", f"{base}...{head}"], cwd=repo, text=True, errors="replace")
+    """(paths, lines): the changed paths, and per path its (marker, line) pairs, marker '+' or '-'.
+
+    Renames are not followed: a moved file shows as a deletion of the old path and an addition of the new one, so the old path
+    still counts. Paths come NUL-separated and unquoted, so a path with a non-ASCII character or a space is read as it is.
+    """
+    names = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"], cwd=repo, text=True, errors="replace").split("\0")
+    text = subprocess.check_output(["git", "-c", "core.quotePath=false", "diff", "-U0", "--no-color", "--no-renames", f"{base}...{head}"],
+                                   cwd=repo, text=True, errors="replace")
     lines, current, header = {}, None, False
     for line in text.split("\n"):
         if line.startswith("diff --git"):
             current, header = None, True
-        elif header and line.startswith("+++ b/"):
-            current = line[6:]
-        elif header and line.startswith("--- a/"):
-            current = current or line[6:]
+        elif header and line.startswith("--- "):
+            source = unquote(line[4:].rstrip("\t"))
+            current = source[2:] if source.startswith("a/") else None
+        elif header and line.startswith("+++ "):
+            target = unquote(line[4:].rstrip("\t"))
+            current = target[2:] if target.startswith("b/") else current
         elif line.startswith("@@"):
             header = False
         elif not header and current and line[:1] in ("+", "-"):
@@ -85,6 +112,8 @@ def score(rules, paths, lines, risky_classes, engine):
     for hit in engine.classify(risky_classes, paths, plain):
         setting = rules["classes"].get(hit["name"])
         if setting is None:
+            # A risky class the rules do not map fails closed: the floor does not know what it is worth, so it is high.
+            reasons.append({"rule": hit["name"], "level": "high", "paths": hit["paths"], "lines": hit["lines"] + ["no level for this class in " + RULES]})
             continue
         if isinstance(setting, str):
             setting = {"level": setting}
