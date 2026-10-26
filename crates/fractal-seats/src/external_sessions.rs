@@ -1938,13 +1938,6 @@ fn process_fingerprint(pid: u32, started_at_unix_ms: u128, command: &str) -> Str
     format!("{pid}:{started_at_unix_ms}:{}", digest(command))
 }
 
-fn external_session_id(driver: ExternalDriver, native_id: &str) -> String {
-    format!(
-        "session/external-{}",
-        &digest(&format!("{}:{native_id}", driver.as_str()))[..24]
-    )
-}
-
 // Streaming updates to token/model/completion metadata do not change an existing part.
 // Only message fields that determine its displayed attribution/timing fence the ref.
 fn native_message_digest(id: &[u8], created: Option<i64>, message: &Value) -> String {

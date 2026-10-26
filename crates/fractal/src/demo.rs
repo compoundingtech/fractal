@@ -824,7 +824,7 @@ pub fn play(
     ensure!(
         std::os::unix::net::UnixStream::connect(&config.socket).is_err(),
         "the {name} instance's daemon is running and a demo runs its own: stop it with \
-         st --instance {name} service stop, or play the demo in another instance",
+         fractal --instance {name} service stop, or play the demo in another instance",
         name = instance.name()
     );
     claim_instance(instance, &config_path, &config.state_dir, &cache, reset)?;
