@@ -2320,8 +2320,8 @@ must match the launcher's credential-bearing harness and inherit only that
 harness's credential-directory reference; cross-provider creation is refused.
 The helper retains its own agent identity. Credential files and secret values are never copied into
 arguments or environment variables. Absolute credential-directory references remain
-host-local; replicated action receipts carry only non-authoritative attribution
-labels. Peer-replicated binding claims cannot grant person or credential authority.
+host-local; owner-local action receipts carry only non-authoritative attribution
+labels. Peer-replicated binding and action-result claims cannot grant authority.
 An unowned launcher does not confer person ownership.
 Credential-directory references are local to the launcher's host, so helpers must
 launch on that host. Inheritance also requires kernel-authenticated Unix socket

@@ -12,7 +12,7 @@ pub struct HelperLauncherBinding {
 }
 
 impl HelperLauncherBinding {
-    /// Replicated receipts carry attribution, never host-local credential authority.
+    /// Action receipts carry attribution labels, never credential-directory authority.
     pub fn attribution(&self) -> Value {
         json!({
             "launcher": self.launcher, "person": self.person, "harness": self.harness,
