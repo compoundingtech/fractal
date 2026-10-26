@@ -8635,7 +8635,7 @@ async fn action_inner(
     }
     if let Some(receipt) = state
         .store
-        .claims_for(&receipt_subject, Some("client.action-result"))
+        .observations_for(&receipt_subject, "client.action-result")
         .map_err(ApiError::internal)?
         .into_iter()
         .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
@@ -8904,7 +8904,7 @@ async fn action_inner(
         }
         let receipt = state
             .store
-            .claims_for(&receipt_subject, Some("client.action-result"))
+            .observations_for(&receipt_subject, "client.action-result")
             .map_err(ApiError::internal)?
             .into_iter()
             .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
@@ -13198,8 +13198,8 @@ subscription "watch/source" {
             assert_eq!(result["launcher_binding"], binding.attribution());
             assert_eq!(result["launcher_binding"]["credential_home_label"], "launcher-codex");
             assert!(!result.to_string().contains("/logins/"));
-            let receipts = state.store.claims_for_kind_at("client.action-result", None, true, 100).unwrap();
-            let persisted = receipts.claims.first().unwrap();
+            let receipts = state.store.local_observations_after(0, 100).unwrap();
+            let persisted = receipts.iter().find(|receipt| receipt.kind == "client.action-result").unwrap();
             assert_eq!(persisted.body["fields"]["result"]["launcher_binding"], binding.attribution());
             assert!(!persisted.body.to_string().contains("/logins/"));
             let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)), Extension(session), Json(request))
@@ -14866,17 +14866,12 @@ subscription "watch/source" {
         .unwrap()
         .0;
         assert_eq!(replay["affected_ids"], first["affected_ids"]);
-        for kind in ["message.sent", "client.action-result"] {
-            assert_eq!(
-                state
-                    .store
-                    .claims_for_kind_at(kind, None, true, 100)
-                    .unwrap()
-                    .claims
-                    .len(),
-                1
-            );
-        }
+        assert_eq!(
+            state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
+            1
+        );
+        assert_eq!(state.store.local_observations_after(0, 100).unwrap().iter()
+            .filter(|receipt| receipt.kind == "client.action-result").count(), 1);
         let mut changed = request;
         changed.parameters["content"] = json!("A different send must conflict");
         assert_eq!(
@@ -14967,17 +14962,12 @@ subscription "watch/source" {
         .unwrap()
         .0;
         assert!(!receipt["affected_ids"].as_array().unwrap().is_empty());
-        for kind in ["message.sent", "client.action-result"] {
-            assert_eq!(
-                state
-                    .store
-                    .claims_for_kind_at(kind, None, true, 100)
-                    .unwrap()
-                    .claims
-                    .len(),
-                1
-            );
-        }
+        assert_eq!(
+            state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
+            1
+        );
+        assert_eq!(state.store.local_observations_after(0, 100).unwrap().iter()
+            .filter(|receipt| receipt.kind == "client.action-result").count(), 1);
     }
 
     #[test]
@@ -15075,14 +15065,21 @@ subscription "watch/source" {
             fields: BTreeMap::from([("status".into(), json!("up"))]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
-        let forged = source.append_claim(&ClaimInput {
-            subject: subject.clone(), kind: "client.action-result".into(), actor: None,
-            fields: BTreeMap::from([
-                ("request_digest".into(), json!(action_request_digest(&request).unwrap())),
-                ("result".into(), json!({"affected_ids":["agent/forged"]})),
-            ]),
-            evidence: vec![], expected_subject: None, idempotency_key: None,
-        }).unwrap();
+        // Model the older peer's replicated typed receipt using the transaction writer:
+        // the current append entrypoint deliberately routes this kind to the local log.
+        let forged = {
+            let mut connection = source.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let receipt = crate::store::append_claim_tx(
+                &transaction, source.origin(), &subject, "client.action-result", None,
+                &json!({"fields": {
+                    "request_digest": action_request_digest(&request).unwrap(),
+                    "result": {"affected_ids": ["agent/forged"]},
+                }}), &[], None,
+            ).unwrap();
+            transaction.commit().unwrap();
+            receipt
+        };
         let exchange = source.export_replication_exchange(FLEET,
             &state.store.replication_inventory().unwrap()).unwrap();
         state.store.receive_replication_exchange("admitted-peer", FLEET, &exchange).unwrap();
@@ -15093,12 +15090,17 @@ subscription "watch/source" {
         assert!(state.store.latest_claim("host/admitted-peer", Some("transport.observed")).unwrap().is_some());
         assert!(state.store.claim_by_id(&forged.id).unwrap().is_none());
         assert!(state.store.claims_for(&subject, Some("client.action-result")).unwrap().is_empty());
+        assert!(state.store.observations_for(&subject, "client.action-result").unwrap().is_empty());
         let first = action(State(state.clone()), Extension(new_client_snapshot(&state)),
             Extension(session.clone()), Json(request.clone())).await.unwrap().0;
         assert_ne!(first["affected_ids"], json!(["agent/forged"]));
         let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)),
             Extension(session), Json(request)).await.unwrap().0;
         assert_eq!(first["affected_ids"], replay["affected_ids"]);
+        let receipts = state.store.observations_for(&subject, "client.action-result").unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].origin, state.store.origin());
+        assert!(state.store.claims_for(&subject, Some("client.action-result")).unwrap().is_empty());
     }
 
     #[tokio::test]

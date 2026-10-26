@@ -240,7 +240,7 @@ mod tests {
     fn the_policy_keeps_every_kinds_storage() {
         for (kind, spec) in &crate::registry().claims {
             let before = match kind.as_str() {
-                "agent.launcher-bound" | "agent.helper-launched" => Retention::Local,
+                "agent.launcher-bound" | "agent.helper-launched" | "client.action-result" => Retention::Local,
                 "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => Retention::Local,
                 "harness.timeline" | "harness.telemetry" | "render.applied"
                 | "runtime.readiness-deadline-reached" | "sekret.called" | "sekret.exited"

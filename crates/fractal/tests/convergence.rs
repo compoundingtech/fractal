@@ -77,7 +77,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v8.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v9.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1730,16 +1730,16 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v8 and
-/// schema-valid deployment inputs, seeds 13, 34, 144 and 987 never reach a trim;
-/// every other fixed seed must. Measured across all 17 fixed seeds; claim generation
-/// consumes the same RNG as the schedule. Keep the exact per-seed equality below.
+/// Checkpoints trim in most runs, or the suite is worth little. The last measured
+/// characterization, with corpus v8 and schema-valid deployment inputs, had seeds
+/// 13, 34, 144 and 987 never reach a trim. Recharacterize all 17 fixed seeds for v9:
+/// claim generation consumes the schedule's RNG. Keep the exact per-seed equality.
 const NEVER_TRIMS: &[u64] = &[13, 34, 144, 987];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v8 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v9 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -1953,7 +1953,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v8.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v9.json"
         }))
         .unwrap(),
     )

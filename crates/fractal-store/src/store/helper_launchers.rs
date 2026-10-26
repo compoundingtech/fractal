@@ -84,7 +84,7 @@ fn lifetime_binding_at(connection: &Connection, subject: &str) -> Result<Option<
     // Only bindings whose creation actually reached this selected declaration's own lineage
     // count. A prepublication binding abandoned after a lost CAS must not fence an unrelated seat.
     let mut statement = connection.prepare(
-        "WITH RECURSIVE lineage(id) AS (
+        /* sqlite-large-value: allow-for-now lv-h139bb59bf6e9 owner=fractal_store::store::helper_launchers TODO=trace-statement-and-value-representation */ "WITH RECURSIVE lineage(id) AS (
              SELECT claim_id FROM desired WHERE subject=?1
              UNION
              SELECT predecessor.value FROM lineage
@@ -512,6 +512,43 @@ mod tests {
         append(&store, "agent/node.launcher", "runtime.observed",
             json!({"status":"stopped", "incarnation_id":"launcher-1"}));
         assert!(!store.helper_launcher_alive("agent/node.helper").unwrap());
+    }
+
+    #[test]
+    fn action_receipt_local_cas_is_atomic_and_keeps_normal_retention() {
+        let store = Store::open_memory("node").unwrap();
+        let mut input = ClaimInput {
+            subject: "custom/client/action-local-cas".into(),
+            kind: "client.action-result".into(), actor: None,
+            fields: BTreeMap::from([
+                ("request_digest".into(), json!("digest")),
+                ("result".into(), json!({"affected_ids": []})),
+            ]),
+            evidence: Vec::new(), expected_subject: Some(None), idempotency_key: None,
+        };
+        let barrier = std::sync::Barrier::new(2);
+        let outcomes = std::thread::scope(|scope| {
+            let append = || {
+                barrier.wait();
+                store.append_claim(&input)
+            };
+            let first = scope.spawn(append);
+            let second = scope.spawn(append);
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        let first = outcomes.iter().find_map(|outcome| outcome.as_ref().ok()).unwrap();
+        assert!(first.id.starts_with(LOCAL_OBSERVATION_ID_PREFIX));
+        assert_eq!(outcomes.iter().find_map(|outcome| outcome.as_ref().err()).unwrap().code, "stale-subject");
+        input.expected_subject = Some(Some(first.id.clone()));
+        assert_eq!(store.append_claim(&input).unwrap_err().code, "local-observation-head");
+        assert_eq!(store.observations_for(&input.subject, &input.kind).unwrap().len(), 1);
+        assert!(store.claims_for(&input.subject, Some(&input.kind)).unwrap().is_empty());
+        // This kind is not pinned like launcher bindings: ordinary count retention applies.
+        input.expected_subject = None;
+        store.append_claim(&input).unwrap();
+        assert_eq!(store.trim_local_observations(u128::MAX, 1, 10).unwrap(), 1);
+        assert_eq!(store.observations_for(&input.subject, &input.kind).unwrap().len(), 1);
     }
 
     #[test]

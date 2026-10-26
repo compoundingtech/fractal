@@ -3977,7 +3977,7 @@ impl Store {
         loop {
             let connection = self.connection.write_background();
             let removed = connection.execute(
-                /* sqlite-large-value: allow-for-now lv-ha389fca051ea owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                /* sqlite-large-value: allow-for-now lv-ha799bfe026cb owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                     SELECT id FROM local_observations AS old
                     WHERE observed_at_unix_ms < ?1
                       AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
@@ -4029,7 +4029,7 @@ impl Store {
                     break;
                 };
                 let removed = connection.execute(
-                    /* sqlite-large-value: allow-for-now lv-ha907c5aecc06 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                    /* sqlite-large-value: allow-for-now lv-h7762c849fb0b owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                         SELECT id FROM local_observations
                         WHERE subject=?1 AND kind=?2 AND id<=?3
                           AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
@@ -7978,7 +7978,10 @@ pub fn migrate_local_usage_seen(connection: &Connection) -> Result<()> {
 const USAGE_PUBLISH_INTERVAL_MS: u128 = 5 * 60 * 1000;
 
 pub fn validate_local_observation(input: &ClaimInput) -> Result<(), St3Error> {
-    if input.expected_subject.is_some() {
+    let action_receipt_cas = input.kind == "client.action-result"
+        && input.actor.is_none()
+        && input.expected_subject == Some(None);
+    if input.expected_subject.is_some() && !action_receipt_cas {
         return Err(St3Error::new(
             "local-observation-head",
             "a local observation does not take part in the subject's claim head",
@@ -20614,6 +20617,17 @@ fn append_local_observation_fenced(
         .connection
         .batched(|transaction| {
             check_harness_event_runtime(transaction, &input.subject, event_runtime)?;
+            // Action receipts have an owner-local empty-slot CAS, not a replicated
+            // subject-head fence. Check and insert under the same writer transaction.
+            if input.kind == "client.action-result" && input.expected_subject == Some(None) {
+                let occupied: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM local_observations WHERE subject=?1 AND kind=?2)",
+                    params![input.subject, input.kind], |row| row.get(0),
+                ).map_err(internal)?;
+                if occupied {
+                    return Err(St3Error::new("stale-subject", "the local action receipt slot is occupied"));
+                }
+            }
             insert_local_observation_tx(transaction, &graph.origin, input, now_ms())
         })
         .map_err(|error| St3Error::new("internal", error))?
