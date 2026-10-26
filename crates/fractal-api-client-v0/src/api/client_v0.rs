@@ -8473,7 +8473,7 @@ fn retained_action_receipt(
         return Err(action_idempotency_conflict());
     }
     let resolved = state.store.status_for_claim_kind_at(
-        fractal_schema::harness_questions::RESOLVED, None, false,
+        fractal_schema::harness_questions::RESOLVED, None, false, crate::store::ClaimsReduction::Runtime,
     ).map_err(ApiError::internal)?;
     let now = client_now_ms();
     for subject in resolved.subjects {

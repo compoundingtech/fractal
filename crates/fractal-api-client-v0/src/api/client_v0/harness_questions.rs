@@ -67,7 +67,9 @@ pub async fn list(State(state): State<AppState>, Extension(snapshot): Extension<
     let query = ClientListQuery { limit: query.limit, cursor: query.cursor, ..ClientListQuery::default() };
     let mut items = Vec::new();
     if query.cursor.is_none() {
-        let status = state.store.status_for_claim_kind_at(OBSERVED, None, false).map_err(ApiError::internal)?;
+        let status = state.store.status_for_claim_kind_at(
+            OBSERVED, None, false, crate::store::ClaimsReduction::Runtime,
+        ).map_err(ApiError::internal)?;
         let now = client_now_ms();
         for subject in status.subjects {
             if let Some(question) = state.store.harness_question(&subject.subject, now).map_err(ApiError::internal)? {
