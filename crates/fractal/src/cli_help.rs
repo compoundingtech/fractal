@@ -328,12 +328,17 @@ mod tests {
             let help = command.render_long_help().to_string();
             for line in help.lines() {
                 // These describe real installed compatibility aliases, not product prose.
-                if line.contains("installed Fractal executables")
-                    || line.contains("Install Fractal (st3")
+                if line.contains(
+                    "Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty).",
+                ) || line.contains("Install Fractal (st3 and the st link) and pty")
                 {
                     continue;
                 }
                 for word in line.split_whitespace() {
+                    // The executable override is a protected option, not the product name.
+                    if word == "--st" {
+                        continue;
+                    }
                     let word = word.trim_matches(|c: char| !c.is_alphanumeric());
                     assert!(
                         !matches!(word, "st" | "st3" | "stui" | "Smalltalk" | "SmallTalk"),

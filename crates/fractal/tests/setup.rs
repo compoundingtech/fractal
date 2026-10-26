@@ -844,7 +844,7 @@ fn plain_st_first_run_shows_the_setup_screen_starts_daemon_and_opens_home() {
     });
     let mut output = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(45);
-    // The checklist screen, driven by keys: the machine's name is cleared and typed, "Start st when
+    // The checklist screen, driven by keys: the machine's name is cleared and typed, "Start Fractal when
     // I log in" is unticked, and the one action is pressed. Without any agent installed it ends
     // by itself and the interface opens.
     for (prompt, answer) in [
@@ -1307,7 +1307,7 @@ fn skipping_sets_up_st_and_no_agent() {
     // Name, machine, login box, the Pi row, then the two buttons: Tab to Skip for now.
     let (success, output) = play(
         command,
-        &[("Fractal setup", "\t\t\t\t\t\r"), ("st is set up", "\r")],
+        &[("Fractal setup", "\t\t\t\t\t\r"), ("Fractal is set up", "\r")],
         &mut fixture,
     );
     assert!(success, "{output}");
