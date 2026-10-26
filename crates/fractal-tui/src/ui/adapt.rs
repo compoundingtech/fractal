@@ -1964,7 +1964,7 @@ mod tests {
         assert!(matches!(live.link, Link::Live));
         assert_eq!(
             live.stale,
-            ["live stream: st closed the connection · st answers, reconnecting"]
+            ["live stream: st closed the connection · Fractal answers, reconnecting"]
         );
     }
 
@@ -2273,7 +2273,7 @@ mod tests {
             panic!("{:#?}", items[0].kind);
         };
         assert_eq!(text, "What st says.");
-        assert!(why.contains("st is older"), "{why}");
+        assert!(why.contains("Fractal is older"), "{why}");
         // The gate keeps the actions st offers; the client offers none of its own.
         assert_eq!(items[0].actions, ["review.approve", "review.reject"]);
         assert!(
@@ -2608,7 +2608,7 @@ mod tests {
             .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(legend.contains("This host's st is older"), "{legend}");
+        assert!(legend.contains("This host's Fractal is older"), "{legend}");
     }
 
     #[test]
