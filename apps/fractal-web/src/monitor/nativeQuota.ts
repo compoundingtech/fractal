@@ -1,6 +1,6 @@
 /** Explicit presentation adapter for the canonical st3.client.v0 usage.period projection. */
-import { UsagePeriod } from '@smalltalk/st3-client/schema'
-import type { UsageLimit } from '@smalltalk/st3-client/schema'
+import { UsagePeriod } from '@fractal/client/schema'
+import type { UsageLimit } from '@fractal/client/schema'
 import { Result, Schema } from 'effect'
 
 import type { QuotaFailure } from './model.ts'
@@ -9,7 +9,9 @@ import type { QuotaAccount, QuotaEnvelope, QuotaLimit } from './wire.ts'
 /** Presentation freshness bound, matching the native default account-limits policy. */
 export const NATIVE_LIMIT_FRESHNESS_MS = 60 * 60 * 1000
 const NativeEnvelope = Schema.Struct({
-  api_version: Schema.Literal('st3.client.v0'),
+  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both:
+  // sunset 60 days after the first release shipping the bridge; emitted provenance stays st3.
+  api_version: Schema.Literals(['st3.client.v0', 'fractal.client.v0']),
   value: UsagePeriod,
 })
 

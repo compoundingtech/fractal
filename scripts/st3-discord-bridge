@@ -140,7 +140,7 @@ class Discord:
         request = urllib.request.Request(API + path, method=method,
             data=data,
             headers={'Authorization': 'Bot ' + self.token, 'Content-Type': content_type,
-                     'User-Agent': 'DiscordBot (https://github.com/compoundingtech/smalltalk, 0.1)'})
+                     'User-Agent': 'DiscordBot (https://github.com/compoundingtech/fractal, 0.1)'})
         try:
             with self.opener.open(request, timeout=15) as response:
                 if response.headers.get('X-RateLimit-Remaining') == '0':
@@ -182,7 +182,7 @@ class Discord:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         try:
             # Anonymous CDN download: never send the bot credential to an attachment URL.
-            with opener.open(urllib.request.Request(url, headers={'User-Agent': 'DiscordBot (https://github.com/compoundingtech/smalltalk, 0.1)'}), timeout=15) as response:
+            with opener.open(urllib.request.Request(url, headers={'User-Agent': 'DiscordBot (https://github.com/compoundingtech/fractal, 0.1)'}), timeout=15) as response:
                 data = response.read(IMAGE_LIMIT + 1)
         except (OSError, urllib.error.URLError):
             raise Later('Discord image download did not complete; import remains queued.') from None
@@ -251,9 +251,13 @@ class St:
             if binary:
                 return raw
             value = json.loads(raw)
-            if isinstance(value, dict) and value.get('api_version') in ('st3.v1', 'st3.client.v0'):
+            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
+            # Receive aliases only; retain old sender names until every member accepts them.
+            # Sunset: 60 days after the first release shipping this bridge.
+            if isinstance(value, dict) and value.get('api_version') in ('st3.v1', 'fractal.v1', 'st3.client.v0', 'fractal.client.v0'):
                 return value.get('value')
             return value
+            # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
         except (OSError, http.client.HTTPException, ValueError):
             raise Later('st did not answer; the same delivery key will be retried.') from None
         finally:
@@ -544,7 +548,8 @@ class Bridge:
     def watch_replies(self, wait_ms=5000):
         after = int(self.state.get('outbound_cursor') or '0')
         page = self.st.deliveries(after, wait_ms)
-        if (not isinstance(page, dict) or page.get('contract') != 'st3.adapter.delivery.v0'
+        # TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receiver alias; sunset 60 days after first shipping release.
+        if (not isinstance(page, dict) or page.get('contract') not in ('st3.adapter.delivery.v0', 'fractal.adapter.delivery.v0')
                 or not isinstance(page.get('items'), list) or len(page['items']) > 200
                 or type(page.get('cursor')) is not int or page['cursor'] < after
                 or not isinstance(page.get('host'), str) or not page['host']):

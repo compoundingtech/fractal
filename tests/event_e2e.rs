@@ -9,8 +9,8 @@ use std::sync::{Arc, Barrier, Mutex, mpsc};
 use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
-use st2::event::{self, EventReceiptStatus, RING_CAPACITY};
-use st2::message;
+use fractal_legacy_runner::event::{self, EventReceiptStatus, RING_CAPACITY};
+use fractal_legacy_runner::message;
 
 static EVENT_FAIL_ENV: Mutex<()> = Mutex::new(());
 
@@ -115,6 +115,7 @@ fn completed_event_replay_rejects_changed_supersession_intent() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn durable_successor_failure_retains_replayable_pending_receipt() {
     let _fail_env = EVENT_FAIL_ENV.lock().unwrap();
@@ -697,6 +698,7 @@ fn initial_supersession_authenticates_predecessor_immediately_before_archive() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn predecessor_replacement_after_validation_cannot_forge_archive_receipt() {
     let _fail_env = EVENT_FAIL_ENV.lock().unwrap();
@@ -763,11 +765,11 @@ fn predecessor_replacement_after_validation_cannot_forge_archive_receipt() {
 fn catalog_authoring_and_emit_linearize_without_deadlock() {
     let catalog = tempfile::tempdir().unwrap();
     declare_agent(catalog.path(), "\"running\"", "  stream \"gh-ci\" {}\n");
-    let admission = st2::CatalogLock::shared(catalog.path()).unwrap();
+    let admission = fractal_legacy_runner::CatalogLock::shared(catalog.path()).unwrap();
     let root = catalog.path().to_path_buf();
     let (done_tx, done_rx) = mpsc::channel();
     let author = std::thread::spawn(move || {
-        let result = st2::agent_author::remove_stream(&root, "example-linux.worker", "example-linux", None, "gh-ci");
+        let result = fractal_legacy_runner::agent_author::remove_stream(&root, "example-linux.worker", "example-linux", None, "gh-ci");
         done_tx.send(result).unwrap();
     });
     assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
@@ -803,16 +805,16 @@ fn catalog_authoring_and_emit_linearize_without_deadlock() {
 fn desired_state_authoring_and_emit_linearize_without_deadlock() {
     let catalog = tempfile::tempdir().unwrap();
     declare_agent(catalog.path(), "\"running\"", "  stream \"gh-ci\" {}\n");
-    let admission = st2::CatalogLock::shared(catalog.path()).unwrap();
+    let admission = fractal_legacy_runner::CatalogLock::shared(catalog.path()).unwrap();
     let root = catalog.path().to_path_buf();
     let (done_tx, done_rx) = mpsc::channel();
     let author = std::thread::spawn(move || {
-        let result = st2::agent_author::set_desired_state(
+        let result = fractal_legacy_runner::agent_author::set_desired_state(
             &root,
             "example-linux.worker",
             "example-linux",
             None,
-            st2::agent_author::DesiredStateValue::Suspended,
+            fractal_legacy_runner::agent_author::DesiredStateValue::Suspended,
             Some("maintenance"),
             None,
         );
@@ -893,6 +895,7 @@ fn invalid_archive_receipt_blocks_supersession_before_successor_publication() {
     assert!(archive.join(&predecessor.filename).is_file());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn a_different_event_reconciles_both_pending_crash_windows() {
     let _fail_env = EVENT_FAIL_ENV.lock().unwrap();
@@ -976,6 +979,7 @@ fn a_different_event_reconciles_both_pending_crash_windows() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn pending_reconciliation_rejects_corrupt_and_forged_reserved_files() {
     let _fail_env = EVENT_FAIL_ENV.lock().unwrap();
@@ -1059,6 +1063,7 @@ fn pending_reconciliation_rejects_corrupt_and_forged_reserved_files() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn pending_reconciliation_rejects_a_fifo_without_blocking() {
     use std::ffi::CString;
@@ -1112,6 +1117,7 @@ fn pending_reconciliation_rejects_a_fifo_without_blocking() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn a_different_event_completes_pending_successor_compaction() {
     let _fail_env = EVENT_FAIL_ENV.lock().unwrap();
@@ -1158,6 +1164,7 @@ fn a_different_event_completes_pending_successor_compaction() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn pending_supersession_authenticates_its_predecessor_before_archive() {
     let _fail_env = EVENT_FAIL_ENV.lock().unwrap();
@@ -1209,6 +1216,7 @@ fn pending_supersession_authenticates_its_predecessor_before_archive() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn pending_supersession_accepts_an_authenticated_archive_only_predecessor() {
     let _fail_env = EVENT_FAIL_ENV.lock().unwrap();
@@ -1245,6 +1253,7 @@ fn pending_supersession_accepts_an_authenticated_archive_only_predecessor() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn pending_supersession_recovery_unlinks_a_durably_archived_predecessor() {
     let _fail_env = EVENT_FAIL_ENV.lock().unwrap();
@@ -1281,6 +1290,7 @@ fn pending_supersession_recovery_unlinks_a_durably_archived_predecessor() {
     assert!(!inbox.join(&predecessor.filename).exists());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn archived_pending_event_still_authenticates_a_same_name_inbox_entry() {
     let _fail_env = EVENT_FAIL_ENV.lock().unwrap();
@@ -1330,6 +1340,7 @@ fn archived_pending_event_still_authenticates_a_same_name_inbox_entry() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn pending_supersession_fails_closed_when_predecessor_has_no_receipt() {
     let _fail_env = EVENT_FAIL_ENV.lock().unwrap();
@@ -1560,7 +1571,7 @@ fn event_emit_cli_returns_a_stable_json_receipt_and_ding_marks_the_record() {
     let message = message::list_inbox(&message::inbox_dir(&agent))
         .unwrap()
         .remove(0);
-    let ding = st2::ding::poke_text(catalog.path(), "example-linux", "example-linux.worker", &message);
+    let ding = fractal_legacy_runner::ding::poke_text(catalog.path(), "example-linux", "example-linux.worker", &message);
     assert!(
         ding.starts_with("[PING] » example-linux.worker/gh-ci: CLI proof"),
         "{ding}"

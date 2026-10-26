@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The web app's agent sidebar is now an accessible folder tree with consistent nested indentation and a responsive navigation drawer. Keyboard and pointer resizing agree, and removing a divider during a drag commits its final width without leaking Escape handlers. Main's native two-line agent rows and phone behavior are retained; context information appears only in the row popover. Loaded terminal drawers reopen without a loading fallback.",
+  "replay": {"status": "none", "detail": "No graph replay. Only browser presentation and client-side loading change."},
+  "schema": {"status": "none", "detail": "No storage or wire schema change. The client reads context occupancy from the usage summaries it already receives."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "No gateway, protocol or extension-composition API change. Sidebar search keeps machine:/host: tokens and name, ref and host matching, and reveals matches inside collapsed folders."},
+  "downtime": {"status": "none", "detail": "No downtime; a page reload picks up the new sidebar."},
+  "manual": {"status": "none", "detail": "No deployment migration or extension-composition upgrade is required."},
+  "recovery": {"status": "none", "detail": "Revert the web build to restore the earlier flat sidebar; no stored state needs repair."}
+}
