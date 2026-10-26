@@ -190,9 +190,15 @@ impl std::fmt::Debug for Device {
 
 impl Device {
     pub fn client(&self) -> Result<Client> {
-        let mut client = Client::fabric_loopback(&self.endpoint, &self.session.credential);
-        client.http = transport::client(&self.endpoint, self.allow_public_http)?;
-        client.device_http_policy = Some(self.allow_public_http);
+        let mut client = if self.endpoint.starts_with("fabric:") {
+            Client::fabric(crate::fabric::FabricEndpoint::parse(&self.endpoint)?)
+                .with_credential(&self.session.credential)
+        } else {
+            let mut client = Client::fabric_loopback(&self.endpoint, &self.session.credential);
+            client.http = transport::client(&self.endpoint, self.allow_public_http)?;
+            client.device_http_policy = Some(self.allow_public_http);
+            client
+        };
         if self.signing_key.is_some() {
             client.signing_device = Some(Arc::new(self.clone()));
         }
