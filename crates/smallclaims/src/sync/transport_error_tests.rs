@@ -231,6 +231,8 @@ fn server_emits_one_info_summary_even_for_fast_success_and_incomplete_backend() 
                 server: true,
                 boundaries: Default::default(),
             };
+            timing.record("head-received");
+            timing.record("body-read-complete");
             timing.record("server-ingress");
             let ingress = timing.server_boundaries()[0].unwrap();
             if complete {
@@ -239,7 +241,7 @@ fn server_emits_one_info_summary_even_for_fast_success_and_incomplete_backend() 
                 timing.record("backend-done");
             }
             timing.record("response-headers-ready");
-            timing.summarize_server(if complete { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE });
+            timing.summarize_server(if complete { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, 960_927);
             // A late backend completion or explicit promotion must not emit extra INFO.
             timing.record("backend-done");
             timing.promote();
@@ -248,6 +250,9 @@ fn server_emits_one_info_summary_even_for_fast_success_and_incomplete_backend() 
             let summary = &events[0];
             assert_eq!(summary["correlation_id"], "test-correlation");
             assert_eq!(summary["status"], if complete { "200" } else { "503" });
+            assert!(summary.contains_key("head_received_unix_ms"));
+            assert!(summary.contains_key("body_read_complete_unix_ms"));
+            assert_eq!(summary["request_body_bytes"], "960927");
             assert_eq!(summary["server_ingress_unix_ms"], ingress.unix_ms.to_string());
             assert_eq!(summary["server_ingress_elapsed_us"], ingress.elapsed_us.to_string());
             assert_eq!(summary["backend_done"], complete.to_string());
@@ -256,6 +261,113 @@ fn server_emits_one_info_summary_even_for_fast_success_and_incomplete_backend() 
             assert!(summary.contains_key("response_headers_ready_unix_ms"));
             assert!(summary.contains_key("response_headers_ready_elapsed_us"));
         });
+    }
+}
+
+#[tokio::test]
+async fn exchange_body_observation_counts_bytes_and_logs_incomplete_upload_once() {
+    use futures_util::{StreamExt as _, stream};
+    use tracing::instrument::WithSubscriber as _;
+
+    for outcome in ["complete", "error", "cancelled"] {
+        let capture = SummaryCapture::default();
+        async {
+            let timing = Arc::new(ExchangeTiming::server(&HeaderMap::new()));
+            timing.record("head-received");
+            let first = stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"partial")) });
+            let stream = match outcome {
+                "complete" => first.chain(stream::empty()).boxed(),
+                "error" => first.chain(stream::once(async {
+                    Err(std::io::Error::other("upload interrupted"))
+                })).boxed(),
+                _ => first.chain(stream::pending()).boxed(),
+            };
+            let body = axum::body::Body::new(ExchangeRequestBody {
+                inner: axum::body::Body::from_stream(stream),
+                timing: Arc::clone(&timing),
+                bytes: 0,
+                complete: false,
+                failed: false,
+            });
+            let read = axum::body::to_bytes(body, MAX_EXCHANGE_BYTES);
+            if outcome == "cancelled" {
+                let mut read = Box::pin(read);
+                assert!(futures_util::poll!(read.as_mut()).is_pending());
+                drop(read);
+            } else {
+                let result = read.await;
+                assert_eq!(result.is_ok(), outcome == "complete");
+                if let Ok(bytes) = result {
+                    assert_eq!(bytes.as_ref(), b"partial");
+                    timing.record("server-ingress");
+                    timing.record("response-headers-ready");
+                    timing.summarize_server(StatusCode::OK, bytes.len());
+                }
+            }
+            let events = capture.0.lock().unwrap();
+            assert_eq!(events.len(), 1, "{outcome}: {events:?}");
+            let event = &events[0];
+            assert_eq!(event["request_body_bytes"], "7");
+            assert!(event.contains_key("head_received_unix_ms"));
+            if outcome == "complete" {
+                assert_eq!(event["message"], "replication exchange server summary");
+                assert!(event.contains_key("body_read_complete_unix_ms"));
+            } else {
+                assert_eq!(event["message"], "replication exchange request body incomplete");
+                assert_eq!(event["body_read_error"], (outcome == "error").to_string());
+                assert!(timing.boundary("body-read-complete").is_none());
+                assert!(timing.boundary("server-ingress").is_none());
+            }
+        }.with_subscriber(capture.clone()).await;
+    }
+}
+
+#[tokio::test]
+async fn exchange_middleware_observes_head_before_bytes_extraction() {
+    use axum::body::{Body, Bytes};
+    use axum::extract::Extension;
+    use tower::ServiceExt as _;
+    use tracing::instrument::WithSubscriber as _;
+
+    let capture = SummaryCapture::default();
+    let correlation = uuid::Uuid::now_v7().to_string();
+    let app = Router::new().route(EXCHANGE_PATH, post(
+        |Extension(timing): Extension<Arc<ExchangeTiming>>, body: Bytes| async move {
+            assert!(timing.boundary("head-received").is_some());
+            assert!(timing.boundary("body-read-complete").is_some());
+            timing.record("server-ingress");
+            timing.record("response-headers-ready");
+            timing.summarize_server(StatusCode::OK, body.len());
+            StatusCode::OK
+        },
+    ).layer(axum::middleware::from_fn(observe_exchange_body)));
+    let response = app.clone().oneshot(axum::http::Request::builder()
+        .method("POST").uri(EXCHANGE_PATH)
+        .header(EXCHANGE_CORRELATION_HEADER, &correlation)
+        .body(Body::from("payload")).unwrap())
+        .with_subscriber(capture.clone()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let events = capture.0.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["correlation_id"], correlation);
+    assert_eq!(events[0]["request_body_bytes"], "7");
+    drop(events);
+    for method in ["HEAD", "POST"] {
+        capture.0.lock().unwrap().clear();
+        let response = app.clone().oneshot(axum::http::Request::builder()
+            .method(method).uri(EXCHANGE_PATH)
+            .body(Body::empty()).unwrap())
+            .with_subscriber(capture.clone()).await.unwrap();
+        let events = capture.0.lock().unwrap();
+        if method == "HEAD" {
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert!(events.is_empty(), "empty probe is not an interrupted upload");
+        } else {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["request_body_bytes"], "0");
+            assert!(events[0].contains_key("body_read_complete_unix_ms"));
+        }
     }
 }
 
