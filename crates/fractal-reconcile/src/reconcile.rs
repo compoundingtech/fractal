@@ -7516,7 +7516,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Native drivers must bind before readiness can be established. Publish running
         // authority at launch completion only for the physically observed incarnation
         // owned by this start operation; readiness and restart completion remain separate.
-        let running = if let Some(incarnation) = incarnation.as_deref() {
+        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some()) {
             self.runtime.observe_start(member)?.is_some_and(|observation| {
                 observation.status == "running"
                     && observation.incarnation_id.as_deref() == Some(incarnation)
