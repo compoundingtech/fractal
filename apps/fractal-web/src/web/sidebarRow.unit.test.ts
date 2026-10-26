@@ -146,7 +146,7 @@ describe('controlled native sidebar observations', () => {
     expect(sidebarRowAccessibleName(row())).toBe('Reported name, Idle')
   })
   it('shows unknown counts only for subagent-capable OMP observations', () => {
-    for (const harness of [undefined, 'codex', 'claude-code']) {
+    for (const harness of [undefined, 'codex', 'claude'] as const) {
       expect(row({ harness }).childrenKnown).toBeUndefined()
       expect(sidebarRowAccessibleName(row({ harness }))).toBe('Reported name, Idle')
     }
