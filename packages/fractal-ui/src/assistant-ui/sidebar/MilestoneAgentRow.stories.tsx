@@ -214,8 +214,9 @@ export const TwoLineAndNesting: Story = {
     await expect(leaf!.closest('[role="row"]')!.querySelector('[data-sidebar-disclosure]')).toBeNull()
     await expect(Math.abs(box(root!, 'status').left - box(leaf!, 'status').left)).toBeLessThanOrEqual(0.5)
     await expect(Math.abs(box(root!, 'title').left - box(leaf!, 'title').left)).toBeLessThanOrEqual(0.5)
-    // Name column (title plus subagent count): the same width at the same depth; the title alone is content-sized.
-    await expect(Math.abs(box(root!, 'name').width - box(leaf!, 'name').width)).toBeLessThanOrEqual(0.5)
+    // The trailing slot sizes to its own content (the parent's "!" is wider than nothing), so name columns (title plus
+    // subagent count) are compared by reach: on both rows the name runs right up to its trailing slot, one column gap before it.
+    for (const row of [root!, leaf!]) await expect(Math.abs(box(row, 'trailing').left - box(row, 'name').right - Number.parseFloat(getComputedStyle(row).columnGap))).toBeLessThanOrEqual(0.5)
     await expect(disclosure.width).toBeGreaterThan(0)
     await expect(disclosure.left).toBeGreaterThanOrEqual(root!.closest('[role="row"]')!.getBoundingClientRect().left - 0.5)
     await expect(disclosure.right).toBeLessThanOrEqual(root!.getBoundingClientRect().left + 0.5)
@@ -626,8 +627,8 @@ const countHosts = [
   { key: 'desktop-320', width: 320, narrow: false },
   { key: 'phone-320', width: 320, narrow: true },
 ] as const
-/** A 240px tree nested to depth 8 (a 112px indent): the name column narrows until the count goes bare, then leaves line 1. */
-const deepCounts = [3, 1, 14, undefined, 3, 1, 14, undefined, 3] as const
+/** A 240px tree includes depth 8 and continues to depth 12 so main's content-sized trailing slot exercises every count mode. */
+const deepCounts = [3, 1, 14, undefined, 3, 1, 14, undefined, 3, 1, 14, undefined, 3] as const
 const deepRow = (depth: number): Row => countRow(`deep-${depth}`, `Depth ${depth} · coordinate the long release train`, deepCounts[depth], {
   ...(depth === 0 ? {} : { parentRef: `agent/example-count-deep-${depth - 1}` }),
   children: depth === deepCounts.length - 1 ? [] : [deepRow(depth + 1)],
@@ -727,12 +728,11 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
     const count = deepCounts[depth]
     await expect(tag.textContent).toBe(count === undefined ? '? subagents' : `${count} ${count === 1 ? 'subagent' : 'subagents'}`)
     const name = row.querySelector('[data-row-column="name"]')!.getBoundingClientRect()
-    const time = row.querySelector('[data-row-column="time"]')!.getBoundingClientRect()
-    const signal = row.querySelector('[data-row-column="signal"]')!.getBoundingClientRect()
+    // Last turn and signal share the content-sized trailing slot.
+    const trailing = row.querySelector('[data-row-column="trailing"]')!.getBoundingClientRect()
     const titleBox = titleElement.getBoundingClientRect()
-    const at = `${where} (name ${name.left}–${name.right}px, title ${titleBox.left}–${titleBox.right}px, time from ${time.left}px, signal from ${signal.left}px)`
-    await expect(name.right, `${at}: name column over the time column`).toBeLessThanOrEqual(time.left + 0.5)
-    await expect(name.right, `${at}: name column over the signal column`).toBeLessThanOrEqual(signal.left + 0.5)
+    const at = `${where} (name ${name.left}–${name.right}px, title ${titleBox.left}–${titleBox.right}px, trailing from ${trailing.left}px)`
+    await expect(name.right, `${at}: name column over the trailing slot`).toBeLessThanOrEqual(trailing.left + 0.5)
     await expect(titleBox.left, `${at}: title starts before the name column`).toBeGreaterThanOrEqual(name.left - 0.5)
     await expect(titleBox.right, `${at}: title ends past the name column`).toBeLessThanOrEqual(name.right + 0.5)
     if (getComputedStyle(chip).display === 'none') {
@@ -755,8 +755,7 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
     const tagAt = `${at} tag ${tagBox.left}–${tagBox.right}px, ${compact ? 'compact' : 'full'}`
     await expect(tagBox.left, `${tagAt}: count starts before the name column`).toBeGreaterThanOrEqual(name.left - 0.5)
     await expect(tagBox.right, `${tagAt}: count ends past the name column`).toBeLessThanOrEqual(name.right + 0.5)
-    await expect(tagBox.right, `${tagAt}: count over the time column`).toBeLessThanOrEqual(time.left + 0.5)
-    await expect(tagBox.right, `${tagAt}: count over the signal column`).toBeLessThanOrEqual(signal.left + 0.5)
+    await expect(tagBox.right, `${tagAt}: count over the trailing slot`).toBeLessThanOrEqual(trailing.left + 0.5)
     await expect(tag.scrollWidth, `${tagAt}: count clipped (client ${tag.clientWidth}px)`).toBeLessThanOrEqual(tag.clientWidth + 1)
     await expect(Math.abs(tagBox.left - titleBox.right - 6), `${tagAt}: count not 6px after the title`).toBeLessThanOrEqual(1)
   }
@@ -768,7 +767,7 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
 
 export const SubagentCount: StoryObj<{ scheme: Scheme }> = {
   name: 'Subagent count · after the title · 240/320 desktop and phone',
-  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported and display-only counts with long titles verify the count copy, its placement right after the title, title truncation and one-line fit at 240px and 320px desktop and phone widths, and a 240px tree nested to depth 8 verifies the count goes bare and then leaves line 1 without covering the time or signal columns.' } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported and display-only counts with long titles verify the count copy, placement, title truncation and one-line fit at 240px and 320px desktop and phone widths. A 240px tree includes depth 8 and continues to depth 12 to verify full, bare and hidden count modes without covering the trailing metadata slot.' } },
   args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   render: ({ scheme }) => <SubagentCountMatrix scheme={scheme} />,
   play: subagentCountPlay,
@@ -821,6 +820,149 @@ export const SubagentCountPress: Story = {
     await expect(host).toHaveAttribute('data-subagents', `${counted.ref} ${counted.ref} ${unknown.ref}`)
   },
 }
+/** The first painted background at or above `element`, as relative luminance: overlays are judged by the surface they paint. */
+const paintedLuminance = (element: Element) => {
+  for (let node: Element | null = element; node !== null; node = node.parentElement) {
+    const [red, green, blue, alpha = 1] = getComputedStyle(node).backgroundColor.match(/\d+(\.\d+)?/g)!.map(Number)
+    if (alpha > 0) return (0.2126 * red! + 0.7152 * green! + 0.0722 * blue!) / 255
+  }
+  throw new Error('No painted background above the overlay')
+}
+const contextRow: Row = { ...parent, ref: 'agent/example-context', title: 'Reconcile gateway schema', children: [], context: { _tag: 'Known', usedPercent: 18, usedTokens: 36_000, windowTokens: 200_000, observedAt: storyNow - 60_000 } }
+
+/**
+ * The row's hover card and Reported details dialog in a themed root with no host portal layer, as an app story or a
+ * bare host renders them: both must portal inside the themed surface and paint its scheme, never the document body's.
+ */
+export const NativeOverlaysThemed: StoryObj<{ scheme: Scheme }> = {
+  tags: ['critical'], name: 'Native hover card and details · scheme reaches overlays',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed row with reported context opens the hover card and the Reported details dialog inside a scheme-themed root without a host portal layer, verifying both overlays portal into and paint that scheme.' } },
+  args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
+  render: ({ scheme }) => <main data-testid="overlay-root" data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}>
+    <section aria-label="Sidebar" {...stylex.props(styles.column)}><MilestoneAgentRow row={contextRow} now={storyNow} /></section>
+  </main>,
+  play: async ({ canvasElement }) => {
+    const root = within(canvasElement).getByTestId('overlay-root')
+    const light = root.getAttribute('data-scheme') === 'light'
+    const row = root.querySelector<HTMLElement>('[data-milestone-row]')!
+    await userEvent.hover(row)
+    const card = await waitFor(() => { const element = document.querySelector<HTMLElement>('[data-testid="agent-hover-card"]'); expect(element).not.toBeNull(); return element! })
+    // Portalled inside the themed root, so the theme's tokens resolve on the overlay itself.
+    await expect(root.contains(card)).toBe(true)
+    await expect(paintedLuminance(card) > 0.5).toBe(light)
+    await userEvent.unhover(row)
+    await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
+    await userEvent.click(row.querySelector<HTMLElement>('[data-agent-menu]')!)
+    const menu = await within(document.body).findByRole('menu', { name: `Actions for ${contextRow.title}` })
+    await expect(root.contains(menu)).toBe(true)
+    await userEvent.click(within(menu).getByRole('menuitem', { name: 'Reported agent details' }))
+    const dialog = await within(document.body).findByRole('dialog', { name: `Reported details for ${contextRow.title}` })
+    await expect(root.contains(dialog)).toBe(true)
+    await expect(paintedLuminance(dialog) > 0.5).toBe(light)
+    await expect(dialog.querySelector('[data-context-observation]')).toHaveTextContent('18%')
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(within(document.body).queryByRole('dialog')).toBeNull())
+  },
+}
+export const NativeOverlaysThemedLight: StoryObj<{ scheme: Scheme }> = { ...NativeOverlaysThemed, name: 'Native hover card and details · scheme reaches overlays · light', args: { scheme: 'light' } }
+
+const reachTitle = 'GatewaySchemaReconciliationAcrossEveryHost'
+const reachRows: readonly Row[] = [
+  { ...base, ref: 'agent/example-reach-empty', title: reachTitle },
+  { ...base, ref: 'agent/example-reach-time', title: reachTitle, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 95_000 } },
+  { ...base, ref: 'agent/example-reach-waiting', title: 'Waiting on your answer', status: 'waiting', statusLabel: statuses.waiting.label, needsMe: true, lastTurn: { _tag: 'Known', kind: 'activity', at: storyNow - 30_000 } },
+  { ...base, ref: 'agent/example-reach-needs', title: 'Working but asking', status: 'working', statusLabel: 'Working', needsMe: true },
+]
+
+/** Title reach: an empty trailing slot reserves nothing, hover actions overlay and fade line 2, and the "!" shows only as a sole cue. */
+export const TitleReach: StoryObj<{ scheme: Scheme }> = {
+  tags: ['critical'], name: 'Title reach · empty trailing slot, overlay fade, sole-cue attention',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed long titles with and without a last turn, a waiting needs-you row and a working needs-you row at the default sidebar width verify that the title reaches the row edge when nothing trails it, that the ghost action trigger overlays a fading line 2, and that the attention mark appears only when it is the row\'s sole needs-you cue.' } },
+  args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
+  render: ({ scheme }) => <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}><ThemePortal>
+    <section aria-label="Sidebar" data-host="reach" {...stylex.props(styles.column)}>{reachRows.map(row => <MilestoneAgentRow key={row.ref} row={row} now={storyNow} />)}</section>
+  </ThemePortal></main>,
+  play: async ({ canvasElement }) => {
+    const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-host="reach"] [data-milestone-row]')]
+    const [empty, timed, waiting, needs] = rows
+    const box = (row: Element, column: string) => row.querySelector(`[data-row-column="${column}"]`)!.getBoundingClientRect()
+    // Nothing trails: no trailing slot, and the title ends where line 2 ends.
+    await expect(empty!.querySelector('[data-row-column="trailing"]')).toBeNull()
+    await expect(Math.abs(box(empty!, 'name').right - box(empty!, 'line2').right)).toBeLessThanOrEqual(1)
+    // A last turn takes only its own width: the name column (title plus count) still ends before it, and gains everything the empty row gained.
+    await expect(box(timed!, 'name').right).toBeLessThanOrEqual(box(timed!, 'time').left)
+    await expect(box(empty!, 'name').width - box(timed!, 'name').width).toBeLessThanOrEqual(box(timed!, 'trailing').width + Number.parseFloat(getComputedStyle(timed!).columnGap) + 1)
+    // Waiting already says "Needs you" with its glyph: no third "!" signal. A working row asking for you keeps it, bold.
+    await expect(waiting!.querySelector('[data-row-column="attention"]')).toBeNull()
+    await expect(waiting!.querySelector('[data-row-field="status-label"]')).toHaveTextContent('Needs you')
+    const attention = needs!.querySelector<HTMLElement>('[data-row-column="attention"]')!
+    await expect(attention).toBeVisible()
+    await expect(getComputedStyle(attention).fontWeight).toBe('700')
+    // Hover: the ghost trigger shows over line 2's end, which fades beneath it instead of reserving a column.
+    const trigger = empty!.querySelector<HTMLElement>('[data-agent-menu]')!
+    await expect(getComputedStyle(trigger).opacity).toBe('0')
+    await expect(empty!.querySelector('[data-row-column="line2"]')).not.toHaveAttribute('data-menu-overlay')
+    await userEvent.hover(empty!)
+    await waitFor(() => expect(getComputedStyle(trigger).opacity).toBe('1'))
+    const line2 = empty!.querySelector<HTMLElement>('[data-row-column="line2"]')!
+    await expect(line2).toHaveAttribute('data-menu-overlay', 'true')
+    const mask = getComputedStyle(line2).maskImage || getComputedStyle(line2).getPropertyValue('-webkit-mask-image')
+    await expect(mask).toMatch(/gradient/)
+    await expect(getComputedStyle(trigger).borderTopWidth).toBe('0px')
+    await expect(getComputedStyle(trigger).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+    await expect(Math.abs(box(empty!, 'name').right - line2.getBoundingClientRect().right)).toBeLessThanOrEqual(1)
+    await userEvent.unhover(empty!)
+    await waitFor(() => expect(line2).not.toHaveAttribute('data-menu-overlay'))
+  },
+}
+export const TitleReachLight: StoryObj<{ scheme: Scheme }> = { ...TitleReach, name: 'Title reach · empty trailing slot, overlay fade, sole-cue attention · light', args: { scheme: 'light' } }
+
+/**
+ * Target size follows the pointer, not the width: the same rows at the desktop sidebar width stay dense under a fine
+ * pointer and grow 44px always-visible ghost actions, without hover UI, under a coarse one.
+ */
+export const PointerSizing: StoryObj<{ scheme: Scheme }> = {
+  tags: ['critical'], name: 'Pointer sizing · fine stays dense, coarse grows ghost targets',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed rows at the desktop sidebar width with no narrow host switch fine → coarse → fine through the kit pointer query, verifying dense hover-only actions for fine pointers and 44px always-visible borderless actions with no hover card for coarse ones.' } },
+  beforeEach: servePointerMedia,
+  args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
+  render: ({ scheme }) => <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}><ThemePortal>
+    <section aria-label="Sidebar" data-host="pointer" {...stylex.props(styles.column)}>{[contextRow, stateRows[0]!].map(row => <MilestoneAgentRow key={row.ref} row={row} now={storyNow} />)}</section>
+  </ThemePortal></main>,
+  play: async ({ canvasElement }) => {
+    const row = canvasElement.querySelector<HTMLElement>('[data-host="pointer"] [data-milestone-row]')!
+    const trigger = row.querySelector<HTMLElement>('[data-agent-menu]')!
+    const fine = async () => {
+      await waitFor(() => expect(row).not.toHaveAttribute('data-touch'))
+      await expect(trigger.getBoundingClientRect().width).toBeLessThan(44)
+      await expect(getComputedStyle(trigger).opacity).toBe('0')
+      await expect(Math.abs(row.getBoundingClientRect().height - 48)).toBeLessThanOrEqual(1)
+    }
+    await fine()
+    pointerMedia.emulate(true)
+    await waitFor(() => expect(row).toHaveAttribute('data-touch', 'true'))
+    const target = trigger.getBoundingClientRect()
+    await expect(target.width).toBeGreaterThanOrEqual(44)
+    await expect(target.height).toBeGreaterThanOrEqual(44)
+    await expect(getComputedStyle(trigger).opacity).toBe('1')
+    // A quiet trailing control: no border and no fill at rest.
+    await expect(getComputedStyle(trigger).borderTopWidth).toBe('0px')
+    await expect(getComputedStyle(trigger).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+    // The title stops before the reserved action column.
+    await expect(row.querySelector('[data-row-column="title"]')!.getBoundingClientRect().right).toBeLessThanOrEqual(target.left)
+    // Coarse pointers get no hover UI, even past the hover-intent delay.
+    await userEvent.hover(row)
+    const started = performance.now()
+    do {
+      await expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull()
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    } while (performance.now() - started < 200)
+    await userEvent.unhover(row)
+    pointerMedia.emulate(false)
+    await fine()
+  },
+}
+export const PointerSizingLight: StoryObj<{ scheme: Scheme }> = { ...PointerSizing, name: 'Pointer sizing · fine stays dense, coarse grows ghost targets · light', args: { scheme: 'light' } }
 
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
@@ -837,8 +979,8 @@ const styles = stylex.create({
   clipped: { width: g.sidebarDefault, overflow: 'hidden', transform: 'translateX(0)' },
   width240: { width: '240px' },
   width320: { width: '320px' },
-  // Nine 48px rows, all mounted.
-  deepTree: { height: '520px' },
+  // Thirteen 48px rows, all mounted.
+  deepTree: { height: '760px' },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   // Resolves the surface's own tokens for the tone assertions: soft (neutral states), muted (stale), danger (never stale).
   toneProbe: { position: 'absolute', width: s.zero, height: s.zero, overflow: 'hidden', color: ink.fgSoft, backgroundColor: ink.fgMuted, borderTopColor: tone.dangerFg },
