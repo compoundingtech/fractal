@@ -3849,6 +3849,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         })
     }
 
+    /// Whether this host may answer `subject`'s member fault: it recorded the fault, or the
+    /// seat's declaration places it here.
+    fn member_fault_is_ours(&self, subject: &str) -> Result<bool> {
+        if self.store.member_reconcile_fault_origin(subject)?.as_deref() == Some(self.host.as_str()) {
+            return Ok(true);
+        }
+        Ok(self
+            .store
+            .desired_subject_with_writer(subject)?
+            .and_then(|(desired, _)| desired.member)
+            .is_some_and(|member| member.host == self.host))
+    }
+
     fn record_member_reconcile_result(&self, subject: &str, result: Result<()>) -> Result<()> {
         let previous = self.store.member_reconcile_fault(subject, None)?;
         let (decision, reason) = match result {
@@ -3860,6 +3873,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 ("member-fault", reason)
             }
+            // A member fault is the word of the host that recorded it, or of the host that runs
+            // the seat now. Another peer's clean pass only retired its own leftover process: it
+            // says nothing about the seat, and answering the fault made the two hosts trade
+            // fault and recovery every few seconds while the seat stayed parked.
+            Ok(()) if previous.is_some() && !self.member_fault_is_ours(subject)? => return Ok(()),
             // A pass that returns Ok may have started nothing: the member loop returns early while a
             // start is pending, while a restart waits, or when nothing is due. Only a member seen
             // alive has recovered; for any other, say what the pass did, so an earlier fault does
@@ -24544,6 +24562,44 @@ agent "import/omp/fixture" {{
         let reason = last.body.pointer("/fields/reason").and_then(Value::as_str).unwrap();
         assert!(reason.contains("absent") && reason.contains("nothing was started"), "{reason}");
         assert!(!reason.contains("recovered"), "{reason}");
+    }
+
+    #[test]
+    fn a_peer_that_does_not_run_the_seat_leaves_its_member_fault_alone() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, "version 2\nagent \"seat\" { command \"sleep 100\" }", "seat");
+        let subject = "agent/seat";
+        let reconciler = |host: &str| {
+            Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                host.into(),
+                Arc::new(Notify::new()),
+            )
+        };
+        let (host, peer) = (reconciler("node"), reconciler("peer"));
+        let decisions = || {
+            store
+                .claims_for(subject, Some("runtime.reconcile-decision"))
+                .unwrap()
+                .into_iter()
+                .filter_map(|claim| claim.body.pointer("/fields/decision").and_then(Value::as_str).map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        host.record_member_reconcile_result(subject, Err(anyhow::anyhow!("spawn PTY failed: launcher-incompatible")))
+            .unwrap();
+        // The peer's pass only retired its own leftover process, over and over: the seat is
+        // still parked on its host, and the fault stays, once.
+        for _ in 0..3 {
+            peer.record_member_reconcile_result(subject, Ok(())).unwrap();
+            host.record_member_reconcile_result(subject, Err(anyhow::anyhow!("spawn PTY failed: launcher-incompatible")))
+                .unwrap();
+        }
+        assert_eq!(decisions(), ["member-fault"]);
+        assert!(store.member_reconcile_fault(subject, None).unwrap().is_some());
+        // The host that runs the seat answers it.
+        host.record_member_reconcile_result(subject, Ok(())).unwrap();
+        assert_eq!(decisions(), ["member-fault", "member-pass-clean"]);
     }
 
     #[test]

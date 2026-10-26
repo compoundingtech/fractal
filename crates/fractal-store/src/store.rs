@@ -5252,6 +5252,23 @@ impl Store {
         )
     }
 
+    /// The host that recorded `subject`'s current member fault, when it has one.
+    pub fn member_reconcile_fault_origin(&self, subject: &str) -> Result<Option<String>> {
+        let connection = self.readers.get();
+        Ok(connection
+            .query_row(
+                "SELECT origin, json_extract(body, '$.fields.decision') FROM claims
+                 WHERE subject=?1 AND kind='runtime.reconcile-decision'
+                   AND json_extract(body, '$.fields.key')='member-reconcile'
+                 ORDER BY store_index DESC LIMIT 1",
+                params![subject],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+            .filter(|(_, decision)| decision.as_deref() == Some("member-fault"))
+            .map(|(origin, _)| origin))
+    }
+
     /// The member fault of each of `subjects` that has one at `at_index`, as
     /// `member_reconcile_fault` reads it: one seek per subject rather than a scan of every
     /// reconcile decision the store holds.
