@@ -22,6 +22,9 @@ const DAY: u128 = 24 * HOUR;
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ROWS: usize = 32_000;
 
+mod budget_history;
+pub use budget_history::BudgetSample;
+
 /// GitHub refused a request until a known time: a primary or secondary rate limit. It clears
 /// on its own at `retry_at_unix_ms`.
 #[derive(Debug)]
@@ -179,6 +182,7 @@ struct State {
     rows: Vec<Reservation>,
     attribution: Vec<Attribution>,
     attribution_gap: Option<String>,
+    budget_history: budget_history::History,
     refused: BTreeMap<(String, String), u64>,
     gap: Option<String>,
     limit: Option<usize>,
@@ -535,12 +539,17 @@ fn record_response(rows: &mut Vec<Attribution>, ticket: &Attribution, status: Op
 
 /// Attribute the result without refunding admission. A meter failure must never hide
 /// the actual HTTP result; pending/unknown reservations remain visible as uncertainty.
-pub async fn after_send(ticket: SendReservation, status: Option<u16>) {
+pub async fn after_send(ticket: SendReservation, status: Option<u16>, budget: Option<BudgetSample>) {
     let result = tokio::task::spawn_blocking(move || -> Result<()> {
         let mut held = state().lock()
             .map_err(|_| anyhow::anyhow!("GitHub admission mutex poisoned"))?;
         if held.path.as_ref() != Some(&ticket.path) {
             return Ok(());
+        }
+        if let Some(sample) = budget
+            && let Err(error) = held.budget_history.record(&ticket.path, sample)
+        {
+            tracing::warn!("GitHub budget sample history failed: {error}");
         }
         if held.attribution_gap.is_some() {
             return Ok(());
@@ -617,7 +626,7 @@ pub fn doctor_lines(now: u128) -> Vec<crate::model::DoctorCheck> {
             message: format!("{omitted_count} reservations across {omitted_groups} additional caller/resource groups; full journal retained"),
         });
     }
-    for gap in held.gap.iter().chain(held.attribution_gap.iter()) {
+    for gap in held.gap.iter().chain(held.attribution_gap.iter()).chain(held.budget_history.gap.iter()) {
         lines.push(crate::model::DoctorCheck {
             name: "github-requests/admission".into(),
             status: "warn".into(),
@@ -752,7 +761,7 @@ mod tests {
         let ticket = before_send(path.clone(), Some("observer/test".into()), "core".into(),
             EndpointClass::Checks, Some(1)).await.unwrap().unwrap();
         let spent = std::fs::read(&path).unwrap();
-        after_send(ticket, Some(304)).await;
+        after_send(ticket, Some(304), None).await;
         assert_eq!(std::fs::read(&path).unwrap(), spent);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
         let mut held = State { path: Some(path.clone()), rows: read(&path, now).unwrap(), ..State::default() };
@@ -773,11 +782,11 @@ mod tests {
         // Make the attribution rename fail after admission has already committed.
         std::fs::remove_file(attribution_path(&path)).unwrap();
         std::fs::create_dir(attribution_path(&path)).unwrap();
-        after_send(ticket, Some(200)).await;
+        after_send(ticket, Some(200), None).await;
         assert_eq!(std::fs::read(&path).unwrap(), spent);
         let ticket = before_send(path.clone(), Some("observer/test".into()), "core".into(),
             EndpointClass::Checks, Some(2)).await.unwrap().unwrap();
-        after_send(ticket, Some(304)).await;
+        after_send(ticket, Some(304), None).await;
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
         assert_eq!(read(&path, now).unwrap().iter().map(|r| r.count).sum::<u64>(), 2);
     }

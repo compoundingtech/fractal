@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "none",
-    "detail": "No tables, indexes or migrations."
+    "detail": "No tables, indexes or migrations. A separate optional budget-history JSON sidecar retains bounded 48-hour resource-specific provider header samples; the authoritative admission ledger is unchanged."
   },
   "rules": {
     "status": "changed",
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Observer state can report error_code local-observer-budget and a local next-slot reason. Provider rate-limited remains unchanged. Older binaries read an unknown code as unreachable; rollout directly from any preceding binary requires no intermediate version."
+    "detail": "Observer state can report error_code local-observer-budget and a local next-slot reason. Provider rate-limited remains unchanged. Older binaries read an unknown code as unreachable and ignore the diagnostic budget-history sidecar; rollout directly from any preceding binary requires no intermediate version."
   },
   "downtime": {
     "status": "none",

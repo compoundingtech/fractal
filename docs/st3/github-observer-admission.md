@@ -52,6 +52,16 @@ inside a send. A reservation can still correspond to no
 completed HTTP request when a connection fails, so the ledger remains a
 conservative attempt ceiling rather than proof of exact provider debits.
 
+Provider header history is separate: `STATE/github-admission.json.budget-history.json`
+retains the first actual `limit`, `used`, `remaining`, and reset sample for each
+resource/reset/minute, for up to 48 hours and at most 8,192 samples. These retain
+provider units: core requests and GraphQL points are never added together or
+inferred from each other's request counts. Sampling adds no HTTP request and
+publishes only a new minute/reset sample, not every response. The ring uses the
+existing bounded private-file publication path; corrupt history is not silently
+overwritten. A history I/O gap is visible in doctor and never changes admission
+or the actual HTTP outcome. The enforced reservation window remains 61 minutes.
+
 Counters are coalesced per minute/caller/resource, including unscoped traffic:
 a100000-call unscoped flood in one minute occupies one row and cannot consume
 the observer quota or fill its row allowance. Whole-minute expiry is conservative

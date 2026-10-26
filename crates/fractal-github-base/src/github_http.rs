@@ -464,9 +464,22 @@ async fn send_once(
     if let Some(reservation) = reservation {
         crate::github_admission::after_send(
             reservation, result.as_ref().ok().map(|response| response.status().as_u16()),
+            result.as_ref().ok().and_then(|response| budget_sample(response.headers())),
         ).await;
     }
     result
+}
+
+fn budget_sample(headers: &reqwest::header::HeaderMap) -> Option<crate::github_admission::BudgetSample> {
+    let number = |name: &str| headers.get(name)?.to_str().ok()?.parse::<u64>().ok();
+    Some(crate::github_admission::BudgetSample {
+        at_unix_ms: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).ok()?.as_millis(),
+        resource: headers.get("x-ratelimit-resource")?.to_str().ok()?.to_owned(),
+        limit: number("x-ratelimit-limit")?,
+        used: number("x-ratelimit-used")?,
+        remaining: number("x-ratelimit-remaining")?,
+        reset_at_unix_ms: u128::from(number("x-ratelimit-reset")?).saturating_mul(1_000),
+    })
 }
 
 async fn send_authorized_with<F>(
@@ -561,6 +574,24 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn budget_header_samples_preserve_graphql_point_units() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("x-ratelimit-resource", "graphql"), ("x-ratelimit-limit", "5000"),
+            ("x-ratelimit-used", "37"), ("x-ratelimit-remaining", "4963"),
+            ("x-ratelimit-reset", "1793053049"),
+        ] {
+            headers.insert(reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(), value.parse().unwrap());
+        }
+        let sample = budget_sample(&headers).unwrap();
+        assert_eq!(sample.resource, "graphql");
+        assert_eq!(sample.used, 37);
+        assert_eq!(sample.reset_at_unix_ms, 1_793_053_049_000);
+        headers.remove("x-ratelimit-used");
+        assert!(budget_sample(&headers).is_none(), "never invent provider usage");
+    }
 
     #[tokio::test]
     async fn authorized_destination_body_and_header_validation_refuses_before_the_rpc() {
