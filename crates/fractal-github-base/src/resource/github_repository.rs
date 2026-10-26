@@ -3753,7 +3753,7 @@ mod tests {
         github.open_pull_requests(json!([opened]));
         let since = "2026-09-10T00:00:00Z";
         github.route(
-            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(&since)),
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),
             json!([
                 // An old issue closed; a merged pull request; a new pull request; a new issue.
                 issue(1, "2026-09-10T01:00:00Z", json!({"state": "closed", "state_reason": "completed"})),
@@ -3845,7 +3845,7 @@ mod tests {
         github.route("/repos/acme/garden", json!({"id": 7}));
         let since = "2026-09-10T00:00:00Z";
         github.route(
-            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(&since)),
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),
             json!([]),
         );
         let comment = |id: u64, number: u64, at: &str| {
@@ -3855,7 +3855,7 @@ mod tests {
                 "created_at": at, "updated_at": at})
         };
         github.route(
-            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(&since)),
+            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),
             json!([
                 comment(92, 8, "2026-09-10T05:02:00Z"),
                 comment(91, 8, "2026-09-10T05:01:00Z"),
