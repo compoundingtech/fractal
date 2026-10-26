@@ -3520,7 +3520,7 @@ impl Ui {
                 glasses.save();
             }
             Err(error) if current => self.flash(format!(
-                "st did not keep a space yet ({error}); Fractal TUI will try again"
+                "Fractal did not keep a space yet ({error}); the Fractal terminal UI will try again"
             )),
             Err(_) => {}
         }

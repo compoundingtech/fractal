@@ -4746,7 +4746,7 @@ fn cli_main() -> ExitCode {
         return match actor_contract::print(*effective) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                stderr_message("st", format_args!("actor-contract: {error:#}"));
+                eprintln!("{} actor-contract: {error:#}", ClientMessage::for_output(false).diagnostic_prefix("st"));
                 ExitCode::FAILURE
             }
         };
@@ -4757,7 +4757,7 @@ fn cli_main() -> ExitCode {
         return match fractal_daemon::tiles::cli::run(args) {
             Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
             Err(error) => {
-                stderr_message("st", format_args!("tiles: {error:#}"));
+                eprintln!("{} tiles: {error:#}", ClientMessage::for_output(false).diagnostic_prefix("st"));
                 ExitCode::FAILURE
             }
         };

@@ -129,6 +129,38 @@ pub fn offline_grace() -> std::time::Duration {
     })
 }
 
+/// Render shared presentation prose without changing its serialized spelling.
+pub(super) fn human_presentation(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match text {
+        "st" => Cow::Borrowed("Fractal"),
+        "a step is ready; st has not said which agent takes it" => {
+            Cow::Borrowed("a step is ready; Fractal has not said which agent takes it")
+        }
+        "st keeps this open and starts other missions when something happens" => {
+            Cow::Borrowed("Fractal keeps this open and starts other missions when something happens")
+        }
+        "st does not say: an older st, or one that has not read its agents yet" => {
+            Cow::Borrowed("Fractal does not say: an older version, or one that has not read its agents yet")
+        }
+        "st names a card this client does not know: answer it with st alerts." => {
+            Cow::Borrowed("Fractal names a card this client does not know: answer it with fractal alerts.")
+        }
+        "st does not say what this is: this host's st is older, or has not presented it yet. Answer it with st alerts." => {
+            Cow::Borrowed("Fractal does not say what this is: this host's Fractal is older, or has not presented it yet. Answer it with fractal alerts.")
+        }
+        _ => {
+            if let Some(reason) = text.strip_prefix("Its st channel is not attached, so its mail is held") {
+                Cow::Owned(format!("Its Fractal channel is not attached, so its mail is held{reason}"))
+            } else if let Some(state) = text.strip_suffix(" · st does not say") {
+                Cow::Owned(format!("{state} · Fractal does not say"))
+            } else {
+                Cow::Borrowed(text)
+            }
+        }
+    }
+}
+
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let restarting = extras
         .offline_since
@@ -1008,6 +1040,25 @@ pub fn conversation(timeline: &[fractal_client::TimelineEntry], names: &BTreeMap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn human_presentation_keeps_shared_model_spelling_out_of_the_terminal() {
+        let word = fractal_ui_model::missions::Word::Watching;
+        assert_eq!(word.explain(), "st keeps this open and starts other missions when something happens");
+        assert_eq!(
+            human_presentation(word.explain()),
+            "Fractal keeps this open and starts other missions when something happens"
+        );
+        assert_eq!(human_presentation("st"), "Fractal");
+        assert_eq!(human_presentation("blocked · st does not say"), "blocked · Fractal does not say");
+        assert_eq!(
+            human_presentation("Its st channel is not attached, so its mail is held (reason)"),
+            "Its Fractal channel is not attached, so its mail is held (reason)"
+        );
+        // User-authored text and stable IDs are not product presentation.
+        assert_eq!(human_presentation("please run st"), "please run st");
+        assert_eq!(human_presentation("agent/st/assistant"), "agent/st/assistant");
+    }
 
     #[test]
     fn retired_agent_card_shows_pending_mail_custodian_in_plain_words() {
@@ -2598,7 +2649,7 @@ mod tests {
         })]);
         let seat = &agents(&model, &[])[0];
         assert_eq!((seat.state, seat.reported.as_deref()), (AgentState::Unknown, Some("running")));
-        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older st");
+        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older Fractal");
         let world = world(&model, "person/avery", &Extras::default());
         let legend = super::super::screens::agents_list(&world, "⠋", 80)
             .legend
@@ -2606,7 +2657,7 @@ mod tests {
             .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(legend.contains("This host's st is older"), "{legend}");
+        assert!(legend.contains("This host's Fractal is older"), "{legend}");
     }
 
     #[test]
@@ -2637,7 +2688,7 @@ mod tests {
         assert!(!subagents[0].age.is_empty());
         assert!(
             subagents[1].age.is_empty(),
-            "st did not say when it started"
+            "Fractal did not say when it started"
         );
     }
 

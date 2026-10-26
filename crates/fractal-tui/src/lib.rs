@@ -399,7 +399,7 @@ async fn no_longer_asked(client: &Client, source: &str) -> String {
             format!("This review is no longer asked: the step is {state}")
         }
         Some(state) => format!(
-            "This review is no longer asked: the step is {state}; a new card appears if st asks again"
+            "This review is no longer asked: the step is {state}; a new card appears if Fractal asks again"
         ),
         None => {
             "This review is no longer asked: it was answered, or what it reviewed moved on".into()
@@ -822,7 +822,7 @@ impl Args {
 
 /// What `st ui --classic` says now that spaces are Fractal TUI's only layout.
 const CLASSIC_GONE: &str =
-    "The classic layout is gone: run plain `fractal ui`, or `fractal ui --space NAME` to open a named space";
+    "The classic layout is gone: run plain `fractal tui`, or `fractal tui --space NAME` to open a named space";
 
 /// `st ui open`: ask this person's terminal interface on this machine to show a subject, and
 /// say plainly what happened.
@@ -831,8 +831,8 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
     let pane = ui::requests::pane_for(&open.subject).map_err(anyhow::Error::msg)?;
     let person = configured_person()?
         .filter(|person| person.starts_with("person/") && person.len() > 7)
-        .context("fractal ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config")?;
-    let dir = ui::requests::dir(&person).context("fractal ui open needs a state directory: set HOME")?;
+        .context("fractal tui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config")?;
+    let dir = ui::requests::dir(&person).context("fractal tui open needs a state directory: set HOME")?;
     let place = match (open.split, open.below) {
         (false, _) => Place::Tab,
         (true, false) => Place::Right,
@@ -871,7 +871,7 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
             open.subject
         ),
         Some(Answer::NotFound) => anyhow::bail!(
-            "st has no {}: nothing was opened. Check the name with fractal agents ls or fractal missions ls",
+            "Fractal has no {}: nothing was opened. Check the name with fractal agents ls or fractal missions ls",
             open.subject
         ),
         None => anyhow::bail!(
@@ -906,7 +906,7 @@ pub fn run(mut options: Args) -> Result<()> {
         return ui::run_demo(&args);
     }
     if !io::stdout().is_terminal() {
-        anyhow::bail!("fractal ui needs an interactive terminal");
+        anyhow::bail!("fractal tui needs an interactive terminal");
     }
     let _quality_session = ui::slo::Session::start();
     let stopping = Arc::new(AtomicBool::new(false));
@@ -939,7 +939,7 @@ pub fn run(mut options: Args) -> Result<()> {
         person
             .as_deref()
             .is_some_and(|person| person.starts_with("person/") && person.len() > 7),
-        "fractal ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config"
+        "fractal tui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config"
     );
     let (clients, cache_path) = match &profile {
         Some(profile) => {
@@ -1027,7 +1027,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains("plain `fractal ui`") && error.contains("`fractal ui --space NAME`"),
+            error.contains("plain `fractal tui`") && error.contains("`fractal tui --space NAME`"),
             "{error}"
         );
     }
