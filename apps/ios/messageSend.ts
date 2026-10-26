@@ -10,7 +10,7 @@
 //
 // Only a refusal that guarantees nothing was applied (a stale fence, `rate-limited`,
 // `applied: "none"`) is tried again with a new request.
-import { notApplied, outcomeUnknown } from '../../clients/typescript/st3-client';
+import { notApplied, outcomeUnknown } from '../../clients/typescript/fractal-client';
 
 export type SendPorts<R> = {
   send(request: R): Promise<unknown>;

@@ -1,16 +1,20 @@
 import { RegistryContext, useAtomValue } from '@effect/atom-react'
-/** Shared derivations over generated rows, installed once per data source. */
-import type { Agent as AgentRow, Attention, Mission } from '@smalltalk/st3-client/schema'
+/** Shared derivations over SDK-decoded and generated rows, installed once per data source. */
+import type { Attention, Mission } from '@fractal/client/schema'
+import type { DecodedAgent as AgentRow } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { createContext, type ReactNode, useContext } from 'react'
 import * as React from 'react'
 
+import { HumanClockProvider, useClockLabel } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 import type { MissionView } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import { createProjections } from './projections.ts'
-import { type Agent, type DataSource, type Feed, type Fleet, observed } from './source.ts'
+import { askingAgentRefs, attentionAboutAgent, currentMissionIds } from './asking.ts'
+import { type Agent, type DataSource, type Feed, type Fleet, type RosterDecode, decodedRoster, observed } from './source.ts'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
+import { createObservedClock, type ObservedClock } from './observedClock.ts'
 
 /** Navigable observations plus the actual availability of each independently followed family. */
 export interface SubjectIndex {
@@ -26,6 +30,7 @@ export interface SubjectIndex {
 
 interface DerivedData {
   readonly source: DataSource
+  readonly observedClock: Atom.Atom<ObservedClock>
   readonly fleet: Atom.Atom<Feed<Fleet>>
   readonly missions: Atom.Atom<Feed<readonly MissionView[]>>
   readonly subjects: Atom.Atom<readonly SubjectSummary[]>
@@ -33,6 +38,7 @@ interface DerivedData {
   readonly agent: (ref: string) => Atom.Atom<Feed<Agent | undefined>>
   readonly agentRow: (ref: string) => Atom.Atom<Feed<AgentRow | undefined>>
   readonly agentAttention: (ref: string) => Atom.Atom<Feed<readonly Attention[]>>
+  readonly askingAgents: Atom.Atom<ReadonlySet<string>>
   readonly terminalConnected: (ref: string) => Atom.Atom<boolean | undefined>
 }
 const derive = (source: DataSource) => {
@@ -118,22 +124,22 @@ const derive = (source: DataSource) => {
   const agentAttention = Atom.family((ref: string) =>
     Atom.make((get) => {
       const row = get(agentRow(ref))
-      const missionIds = new Set<string>(
-        row._tag === 'Observed' ? row.value?.current_work?.map((work) => work.mission_id) : [],
-      )
+      const missionIds = currentMissionIds(row._tag === 'Observed' ? row.value : undefined)
       return mapFeed({
         feed: get(source.attention),
-        map: (cards) =>
-          cards.filter(
-            (card) =>
-              card.state === 'open' &&
-              (card.source_id === ref ||
-                card.requester_id === ref ||
-                (card.mission_id !== undefined && missionIds.has(card.mission_id))),
-          ),
+        map: (cards) => cards.filter((card) => attentionAboutAgent({ card, ref, missionIds })),
       })
     }).pipe(Atom.withEquality<Feed<readonly Attention[]>>((a, b) => sameFeed(a, b, sameItems))),
   )
+  // One roster-wide pass; an absent family contributes nothing rather than inventing asks.
+  const askingAgents = Atom.make((get) => {
+    const rows = get(source.agents)
+    const cards = get(source.attention)
+    return askingAgentRefs({
+      rows: rows._tag === 'Observed' ? rows.value : [],
+      attention: cards._tag === 'Observed' ? cards.value : [],
+    })
+  }).pipe(Atom.withEquality<ReadonlySet<string>>((a, b) => a.size === b.size && [...a].every((ref) => b.has(ref))))
   const terminalConnected = Atom.family((ref: string) =>
     Atom.make((get) => {
       const feed = get(fleet)
@@ -145,6 +151,7 @@ const derive = (source: DataSource) => {
   )
   return {
     source,
+    observedClock: createObservedClock(source),
     fleet,
     missions,
     subjects,
@@ -152,6 +159,7 @@ const derive = (source: DataSource) => {
     agent,
     agentRow,
     agentAttention,
+    askingAgents,
     terminalConnected,
   }
 }
@@ -199,9 +207,13 @@ export const DataSourceProvider = ({
     value = derive(source)
     derived.set(source, value)
   }
+  const clock = React.useMemo(() => ({
+    now: () => registry.get(source.now),
+    subscribe: (onTick: () => void) => registry.subscribe(source.now, onTick),
+  }), [registry, source.now])
   return (
     <RegistryContext.Provider value={registry}>
-      <DataContext.Provider value={value}>{children}</DataContext.Provider>
+      <DataContext.Provider value={value}><HumanClockProvider clock={clock}>{children}</HumanClockProvider></DataContext.Provider>
     </RegistryContext.Provider>
   )
 }
@@ -252,6 +264,10 @@ export const useTerminalSync = (ref: string): FeedSyncObservation | undefined =>
 export const useGrants = () => useAtomValue(useDataSource().grants)
 /** Observe the fleet projected from agent rows. */
 export const useFleet = () => useAtomValue(useData().fleet)
+const noRosterDecode = Atom.make<RosterDecode>(decodedRoster)
+/** SDK decode evidence for the roster; a source without it decodes every row. */
+export const useRosterDecode = (): RosterDecode =>
+  useAtomValue(useDataSource().rosterDecode ?? noRosterDecode)
 /** Select only fleet fields that affect a collection's membership/order, not row presentation. */
 export const useFleetSelection = <T,>({
   select,
@@ -283,6 +299,8 @@ export const useAgentRowSelection = <T,>({
 /** Only open cards about this agent or its current missions notify its information surfaces. */
 export const useAgentAttention = (ref: string): Feed<readonly Attention[]> =>
   useAtomValue(useData().agentAttention(ref))
+/** Agent refs st reports as waiting for an answer: an ask-tool question or open attention. */
+export const useAskingAgents = (): ReadonlySet<string> => useAtomValue(useData().askingAgents)
 /** Badge/count projections ignore unrelated card metadata while detail readers keep native cards. */
 export const useAgentAttentionSelection = <T,>({
   ref,
@@ -338,3 +356,19 @@ export const useEnvelope = (ref: string) => useAtomValue(useDataSource().envelop
 export const useEvents = () => useAtomValue(useDataSource().events)
 /** Observe the source clock. */
 export const useNow = (): number => useAtomValue(useDataSource().now)
+/** Capture fallback observation timestamps without subscribing the containing content tree. */
+export const useNowSnapshot = (): number => useContext(RegistryContext).get(useDataSource().now)
+/**
+ * Re-render once the source clock reaches `at`. Ticks before it only re-check a leaf clock label,
+ * so a panel pairing this with useNowSnapshot renders at its next visible change, not every tick.
+ * The pending label names its deadline: React keeps a re-render only when a hook's value changed.
+ */
+export const useClockDeadline = (at: number | undefined): void => {
+  useClockLabel(now => at === undefined ? '' : now >= at ? 'due' : String(at))
+}
+const pausedAt = (clock: ObservedClock): number | undefined => clock._tag === 'Paused' ? clock.now : undefined
+/** Frozen presentation time on transport loss, without substituting it for data freshness; undefined while live. */
+export const usePausedNow = (): number | undefined => useAtomValue(useData().observedClock, pausedAt)
+const clockState = (clock: ObservedClock): ObservedClock['_tag'] => clock._tag
+export const useObservedClockState = (): ObservedClock['_tag'] =>
+  useAtomValue(useData().observedClock, clockState)

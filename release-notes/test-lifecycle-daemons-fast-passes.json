@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The mission-cancellation and broken-gate integration tests run their isolated daemon at the fastest supported reconcile pass cap (600 a minute), as the reconcile unit tests do, instead of waiting out the default 30 a minute.",
+  "replay": {"status": "none", "detail": "Test-only change; no claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to run these tests at the default pass cap."}
+}

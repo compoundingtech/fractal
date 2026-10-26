@@ -5,11 +5,11 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import SegmentedControl from '@react-native-segmented-control/segmented-control';
 import { quality } from '../qualityNative';
 import { saidRows, type SaidRow } from '../conversationSearch';
-import { AGENT_LEGEND, agentGlyph, agentRows, agentSections, agentTreeLines, filterAgentRows, harnessColor, UNMANAGED_GROUP, type AgentRowView, type TreeLine } from '../agentsView';
+import { AGENT_LEGEND, agentGlyph, agentRows, OLDER_ST_NOTE, agentSections, agentTreeLines, filterAgentRows, harnessColor, UNMANAGED_GROUP, type AgentRowView, type TreeLine } from '../agentsView';
 import { Banners, Empty, StatusLine, useDebugScroll, useListsOnFocus, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu, type MenuAction } from '../menu';
 import type { RootParams } from '../navigation';
-import { sessionDetail } from '@smalltalk/st3-views';
+import { sessionDetail } from '@fractal/views';
 import { useStore } from '../store';
 import { theme } from '../theme';
 import { Button, Legend, ListRow, Note, Screen, SectionHeader, T } from '../ui';
@@ -89,6 +89,7 @@ export function AgentsScreen() {
       />)}
     </View> : null}
     {truncated.agents ? <Note tone="warning">More agents exist beyond these 200.</Note> : null}
+    {rows.some(row => row.reported) ? <Note>{OLDER_ST_NOTE}</Note> : null}
     <Legend entries={legend} />
     <View style={{ paddingHorizontal: 12 }}><Button label="past sessions" onPress={() => navigation.navigate('History')} /></View>
   </View>;

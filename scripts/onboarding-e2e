@@ -61,7 +61,7 @@ while time.monotonic()<deadline:
   # Never answer passwords or provider login requests.
   if b"\x1b[?1049h" in raw and b" working" in plain and not frame:
    frame=True; frame_at=time.monotonic()
- focused=bool(re.search(rb"Message Smalltalk Assistant[ \t]*\xc2\xb7[ \t]*type or click",plain))
+ focused=bool(re.search(rb"Message Fractal Assistant[ \t]*\xc2\xb7[ \t]*type or click",plain))
  if frame and not navigated and (not request.get("expect_assistant") or focused or time.monotonic()-frame_at>=request.get("assistant_focus_timeout",15)):
   initial_screen=plain.decode(errors="replace"); assistant_focused=focused
   os.write(master,b"\x0b"); time.sleep(0.2); os.write(master,b"home"); time.sleep(0.2); os.write(master,b"\r")
@@ -142,7 +142,7 @@ class Machine:
                 "stderr":(e.stderr or b"").decode(errors="replace"),"seconds":round(time.monotonic()-start,3)}
 
     def send(self, data, path):
-        r=command(self.prefix()+["bash","-c","mkdir -p ~/smalltalk-install; cat > "+shlex.quote(path)],input=data,timeout=60)
+        r=command(self.prefix()+["bash","-c","mkdir -p ~/fractal-install; cat > "+shlex.quote(path)],input=data,timeout=60)
         if r.returncode: raise RuntimeError(r.stderr.decode(errors="replace"))
 
     def start(self):
@@ -293,6 +293,14 @@ class Run:
         try: return unwrap(json.loads(r["stdout"]))
         except ValueError: return None
 
+    def require_initial_roster(self):
+        # Health/socket startup is not roster readiness. No polling or implicit CLI wait.
+        r=self.execute("Initial history roster publication",shlex.join(["curl","--silent","--show-error","--fail","--unix-socket",f"/run/user/{self.m.uid}/st3.sock","http://localhost/v1/client/agents?history=true&min_cut=0&limit=200"]),timeout=15)
+        if r["exit"]: raise RuntimeError("initial roster publication failed")
+        payload=json.loads(r["stdout"])
+        if payload.get("snapshot",{}).get("store_index",-1)<0:
+            raise RuntimeError("daemon omitted the served roster cut")
+
     def pty(self,title,argv,**options):
         request=json.dumps({"argv":argv,"timeout":55,**options})
         r=self.execute(title,shlex.join(["python3","-c",PTY_PROBE,request]),timeout=65)
@@ -305,11 +313,11 @@ class Run:
         if not self.check("guest-release",f'VERSION_ID="{self.m.ubuntu}"' in r["stdout"],"actual guest matches requested Ubuntu release"): return False
         tools=self.execute("No developer tools or harnesses", "for t in gh cargo rustc mold sccache nix claude codex opencode pi omp; do command -v \"$t\" || true; done")
         self.check("clean-tool-path",not tools["stdout"].strip(),"no gh, developer tools or provider binaries initially installed")
-        self.m.send(self.archive.read_bytes(),"/home/ada/smalltalk-install/candidate.tar.gz")
+        self.m.send(self.archive.read_bytes(),"/home/ada/fractal-install/candidate.tar.gz")
         pkg=self.metadata["package"]
-        r=self.execute("Extract verified archive", "set -e\ncd ~/smalltalk-install\nsha256sum candidate.tar.gz\ntar -xzf candidate.tar.gz\ncat "+shlex.quote(pkg+"/BUILD.json"))
+        r=self.execute("Extract verified archive", "set -e\ncd ~/fractal-install\nsha256sum candidate.tar.gz\ntar -xzf candidate.tar.gz\ncat "+shlex.quote(pkg+"/BUILD.json"))
         if not self.check("archive-extracted",r["exit"]==0 and r["stdout"].split()[0]==self.metadata["sha256"],"copied bytes match recorded archive; BUILD.json captured"): return False
-        self.pkg="/home/ada/smalltalk-install/"+pkg
+        self.pkg="/home/ada/fractal-install/"+pkg
         self.st=self.pkg+"/bin/st"
         if baseline:
             r=self.execute("Guide installer",shlex.join([self.pkg+"/install.sh","--bin-dir","/home/ada/.local/bin"]))
@@ -371,8 +379,8 @@ class Run:
             r=self.execute("Seed existing store",shlex.join(argv))
             if not self.check("seed-store",r["exit"]==0,"first setup creates real state before the second run"): return
             source='version 2\nmission "fixture/fleet-existing" state="ready" {\n goal "Preserve an existing fleet run."\n step "hold" { assigned-to "person/ada" goal "Manual fixture hold." }\n}\n'
-            self.m.send(source.encode(),"/home/ada/smalltalk-install/existing.kdl")
-            r=self.cli("Publish existing fleet mission","apply","/home/ada/smalltalk-install/existing.kdl","--as","person/ada")
+            self.m.send(source.encode(),"/home/ada/fractal-install/existing.kdl")
+            r=self.cli("Publish existing fleet mission","apply","/home/ada/fractal-install/existing.kdl","--as","person/ada")
             if not self.check("existing-mission-published",r["exit"]==0,"unrelated mission published to the existing store"): return
             r=self.cli("Start existing fleet run","missions","start","fixture/fleet-existing","--id","fixture-existing","--as","person/ada")
             if not self.check("existing-fleet-run",r["exit"]==0,"real unrelated run exists before setup repeats"): return
@@ -384,7 +392,7 @@ class Run:
             if scenario=="both":
                 self.check("harness-choice",p.get("answers",[]).count("Which harness")==1,"several harnesses ask one choice; scripted selection is Claude")
             if scenario=="assistant-lifecycle":
-                self.check("assistant-ui-focus",p.get("assistant_focused",False),"focused Message Smalltalk Assistant type-or-click composer hint appeared before navigation")
+                self.check("assistant-ui-focus",p.get("assistant_focused",False),"focused Message Fractal Assistant type-or-click composer hint appeared before navigation")
         else:
             r=self.execute("Setup flags",shlex.join(argv)); ok=r["exit"]==0; text=self.output(r)
         if not self.check("setup-success",ok,"real candidate setup completed"): return
@@ -488,12 +496,12 @@ class Run:
             with tarfile.open(bundle,"w") as t:
                 for name in ("stub-claude.py","stub-codex.py","stubmodel.py","codex-schemas"):
                     t.add(fixtures/name,arcname=name)
-            self.m.send(bundle.read_bytes(),"/home/ada/smalltalk-install/fixtures.tar")
-        self.execute("Native provider fixture install","mkdir -p ~/.local/lib/onboarding-stubs ~/.local/bin; tar -xf ~/smalltalk-install/fixtures.tar -C ~/.local/lib/onboarding-stubs")
+            self.m.send(bundle.read_bytes(),"/home/ada/fractal-install/fixtures.tar")
+        self.execute("Native provider fixture install","mkdir -p ~/.local/lib/onboarding-stubs ~/.local/bin; tar -xf ~/fractal-install/fixtures.tar -C ~/.local/lib/onboarding-stubs")
         adapter=Path(__file__).resolve().parent/"onboarding-fixtures/claude.py"
         if not adapter.is_file(): raise RuntimeError("harness scenarios require scripts/onboarding-fixtures/claude.py")
-        self.m.send(adapter.read_bytes(),"/home/ada/smalltalk-install/claude-adapter.py")
-        self.execute("Claude plugin/dialog adapter","cp ~/smalltalk-install/claude-adapter.py ~/.local/lib/onboarding-stubs/claude-adapter.py")
+        self.m.send(adapter.read_bytes(),"/home/ada/fractal-install/claude-adapter.py")
+        self.execute("Claude plugin/dialog adapter","cp ~/fractal-install/claude-adapter.py ~/.local/lib/onboarding-stubs/claude-adapter.py")
         harnesses=["claude","codex"] if scenario=="both" else ["claude" if scenario.startswith("claude-") else "codex"]
         for h in harnesses:
             entry="claude-adapter.py" if h=="claude" else "stub-codex.py"
@@ -506,13 +514,13 @@ class Run:
             self.check("fixture-policy",r["exit"]==0 and readable["exit"]==0,"candidate policy helper succeeds and ordinary user can read its fragment")
 
     def harness_checks(self,scenario):
-        """Prove the native driver without depending on the future built-in Smalltalk Assistant."""
+        """Prove the native driver without depending on the future built-in Fractal Assistant."""
         harness="claude" if scenario.startswith("claude-") or scenario=="both" else "codex"
         subject="agent/fixture/onboarding-harness"
         r=self.execute("Disposable workspace","mkdir -p ~/fixture-workspace")
         if not self.check("fixture-workspace",r["exit"]==0,"private workspace created for the explicit test seat"): return
         r=self.cli("Create disposable provider seat","agents","new","fixture/onboarding-harness","--harness",harness,"--workspace","/home/ada/fixture-workspace",timeout=35)
-        if not self.check("fixture-seat-start",r["exit"]==0,"explicit "+harness+" seat starts without built-in Smalltalk Assistant"):
+        if not self.check("fixture-seat-start",r["exit"]==0,"explicit "+harness+" seat starts without built-in Fractal Assistant"):
             self.cli("Stop failed fixture seat","agents","stop",subject,"--as","person/ada")
             return
         try:
@@ -551,6 +559,7 @@ class Run:
     def onboarding_checks(self,scenario):
         if scenario=="no-harness":
             self.check("no-harness-explained",bool(re.search(r"(no .*harness|no .*provider|install (claude|codex)|harness.*not .*found)","\n".join(c["stdout"]+c["stderr"] for c in self.commands if c["title"]=="Setup flags"),re.I)),"wizard explains that no provider is installed")
+            self.require_initial_roster()
             seats=self.json_cli("All seats without a harness","agents","ls","--all")
             runs=self.json_cli("All missions without a harness","missions","ls","--all")
             self.check("no-harness-no-seat",isinstance(seats,dict) and isinstance(seats.get("items"),list) and not any(s["id"]=="agent/st/assistant" for s in seats["items"]),"no assistant created without a harness; daemon list succeeds")
@@ -621,7 +630,7 @@ class Run:
         original,ready=self.wait_seat(subject)
         if not self.check("lifecycle-original-seat",ready,"assistant running before stop/cancel"): return
         previous=seat_incarnation(original)
-        r=self.cli("Stop built-in Smalltalk Assistant","agents","stop",subject,"--as","person/ada")
+        r=self.cli("Stop built-in Fractal Assistant","agents","stop",subject,"--as","person/ada")
         stopped,ready=self.wait_seat(subject,stopped=True)
         if not self.check("assistant-stopped",r["exit"]==0 and ready,"explicit stop leaves assistant stopped and non-actionable in history"): return
         r=self.cli("Cancel original onboarding run","missions","cancel","mission-run/st/onboarding","--reason","fixture","--as","person/ada")
@@ -725,7 +734,7 @@ def main():
     parser.add_argument("--image",help="prebuilt Docker image implementing the embedded clean-systemd recipe")
     parser.add_argument("--fixtures",type=Path,default=Path(__file__).resolve().parent/"st3-boot-canaries")
     parser.add_argument("--strict-release",action="store_true")
-    parser.add_argument("--harness-only",action="store_true",help="test a disposable native-driver seat without requiring the built-in Smalltalk Assistant or onboarding")
+    parser.add_argument("--harness-only",action="store_true",help="test a disposable native-driver seat without requiring the built-in Fractal Assistant or onboarding")
     parser.add_argument("--require-wrap-up",action="store_true",help="also require mission completion; basic native fixtures only read and claim")
     parser.add_argument("--mission-timeout",type=int,default=90)
     parser.add_argument("--no-reboot",action="store_true")

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Chrome controls use React Aria input modality to paint focus rings. The drawer returns focus to its opening control without a ring after pointer dismissal, while keyboard focus keeps its ring.",
+  "replay": {"status": "none", "detail": "The application does not replay graph data."},
+  "schema": {"status": "none", "detail": "Storage and wire schemas do not change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules do not change."},
+  "compatibility": {"status": "none", "detail": "Chrome controls use the existing React Aria focus contract instead of an experimental browser focus option."},
+  "downtime": {"status": "none", "detail": "The operator can reload the web application without service interruption."},
+  "manual": {"status": "none", "detail": "The operator does not need an upgrade step."},
+  "recovery": {"status": "none", "detail": "The operator can restore the previous web build without persistent state repair."}
+}

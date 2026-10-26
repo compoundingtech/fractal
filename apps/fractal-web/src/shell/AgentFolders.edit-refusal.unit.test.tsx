@@ -2,7 +2,7 @@
 import type * as FoldersClient from '../folders/client.ts'
 import type { FolderState } from '../folders/client.ts'
 import type { DataSource } from '../data/source.ts'
-import { ActionRefused } from '@st3/sdk/effect'
+import { ActionRefused } from '@fractal/sdk/effect'
 import { Effect } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -18,12 +18,12 @@ const { editFolders } = await vi.hoisted(async () => {
   return { editFolders: Atom.make<FolderState>({ doc: { folders: {}, placements: {} }, phase: 'connecting', edit: () => Promise.reject(new Error('The test edit port has not been bound.')) }) }
 })
 vi.mock('../folders/client.ts', async (importOriginal) => ({ ...await importOriginal<typeof FoldersClient>(), folders: editFolders }))
-vi.mock('@stylexjs/stylex', () => {
+vi.mock('@stylexjs/stylex', async () => {
   type Applied = string | false | null | undefined | readonly Applied[]
   const classes = (value: Applied): readonly string[] => typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(classes) : []
   return {
+    ...await import('../testStylex.ts'),
     create: (styles: Readonly<Record<string, unknown>>) => Object.fromEntries(Object.entries(styles).map(([key, value]) => [key, typeof value === 'function' ? () => `stylex:${key}` : `stylex:${key}`])),
-    defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'test-animation',
     props: (...styles: readonly Applied[]) => ({ className: classes(styles).join(' ') }),
   }
 })
