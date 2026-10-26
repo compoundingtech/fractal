@@ -15,7 +15,7 @@ mission and fleet details without blocking keys. A private, actor-and-endpoint-s
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
-Install the repo's `.#st3` Nix package and run `ST3_PERSON=person/<your-id> fractal` in a terminal
+Install the repo's `.#fractal` Nix package and run `ST3_PERSON=person/<your-id> fractal` in a terminal
 with a running st3 daemon. For source development, use
 `ST3_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
 the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
