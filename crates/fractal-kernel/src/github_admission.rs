@@ -132,9 +132,19 @@ struct Reservation {
     resource: String,
     observer: bool,
     count: u64,
-    #[serde(default)]
+}
+
+// This sidecar is diagnostic only. Never extend Reservation: rollback binaries
+// deny unknown fields in the admission ledger.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Attribution {
+    at: u128,
+    caller: String,
+    resource: String,
+    observer: bool,
+    count: u64,
     endpoint: EndpointClass,
-    #[serde(default)]
     response: ResponseClass,
 }
 
@@ -142,13 +152,15 @@ struct Reservation {
 #[derive(Debug)]
 pub struct SendReservation {
     path: std::path::PathBuf,
-    row: Reservation,
+    row: Attribution,
 }
 
 #[derive(Default)]
 struct State {
     path: Option<std::path::PathBuf>,
     rows: Vec<Reservation>,
+    attribution: Vec<Attribution>,
+    attribution_gap: Option<String>,
     refused: BTreeMap<(String, String), u64>,
     gap: Option<String>,
     limit: Option<usize>,
@@ -175,6 +187,7 @@ pub fn configure(path: std::path::PathBuf, limit: Option<usize>) {
                 held.rows = rows;
                 held.path = Some(path);
                 held.gap = None;
+                load_attribution(&mut held, now);
             }
             Err(error) => {
                 held.path = None;
@@ -184,14 +197,14 @@ pub fn configure(path: std::path::PathBuf, limit: Option<usize>) {
     }
 }
 
-fn read(path: &Path, now: u128) -> Result<Vec<Reservation>> {
+fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
     {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("open GitHub admission ledger"),
     };
     let metadata = file.metadata()?;
@@ -205,6 +218,11 @@ fn read(path: &Path, now: u128) -> Result<Vec<Reservation>> {
         bytes.len() as u64 <= MAX_BYTES,
         "GitHub admission ledger exceeds byte bound"
     );
+    Ok(Some(bytes))
+}
+
+fn read(path: &Path, now: u128) -> Result<Vec<Reservation>> {
+    let Some(bytes) = read_bytes(path)? else { return Ok(Vec::new()) };
     let rows: Vec<Reservation> = serde_json::from_slice(&bytes)
         .context("decode GitHub admission ledger; no empty-ledger recovery was used")?;
     ensure!(
@@ -229,7 +247,55 @@ fn read(path: &Path, now: u128) -> Result<Vec<Reservation>> {
         .collect())
 }
 
-fn publish(path: &Path, rows: &[Reservation]) -> Result<()> {
+fn attribution_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".attribution.json");
+    name.into()
+}
+
+fn read_attribution(path: &Path, now: u128) -> Result<Vec<Attribution>> {
+    let Some(bytes) = read_bytes(&attribution_path(path))? else { return Ok(Vec::new()) };
+    let mut rows: Vec<Attribution> = serde_json::from_slice(&bytes)?;
+    ensure!(rows.len() <= MAX_ROWS, "GitHub attribution exceeds row bound");
+    ensure!(
+        rows.iter().all(|r| r.at <= now.saturating_add(DAY)
+            && !r.caller.is_empty() && r.caller.len() <= 512 && r.count > 0
+            && matches!(r.resource.as_str(), "core" | "graphql" | "search")),
+        "invalid GitHub attribution"
+    );
+    for row in &mut rows {
+        row.at = row.at.min(now);
+    }
+    rows.retain(|r| now.saturating_sub(r.at) < HOUR + MINUTE);
+    Ok(rows)
+}
+
+fn load_attribution(held: &mut State, now: u128) {
+    held.attribution.clear();
+    held.attribution_gap = None;
+    let Some(path) = &held.path else { return };
+    match read_attribution(path, now) {
+        Ok(rows) => held.attribution = rows,
+        Err(error) => held.attribution_gap = Some(format!("GitHub response attribution: {error}")),
+    }
+}
+
+fn record_pending(rows: &mut Vec<Attribution>, ticket: &Attribution, now: u128) -> Result<()> {
+    rows.retain(|r| now.saturating_sub(r.at) < HOUR + MINUTE);
+    if let Some(pending) = rows.iter_mut().find(|r| {
+        r.at == ticket.at && r.caller == ticket.caller && r.resource == ticket.resource
+            && r.observer == ticket.observer && r.endpoint == ticket.endpoint
+            && r.response == ResponseClass::Pending
+    }) {
+        pending.count = pending.count.checked_add(1).context("attribution bucket overflow")?;
+    } else {
+        ensure!(rows.len() < MAX_ROWS, "GitHub attribution exceeds row bound");
+        rows.push(ticket.clone());
+    }
+    Ok(())
+}
+
+fn publish<T: Serialize>(path: &Path, rows: &[T]) -> Result<()> {
     ensure!(
         rows.len() <= MAX_ROWS,
         "GitHub admission ledger exceeds row bound"
@@ -295,7 +361,7 @@ fn admit(
     observer: bool,
     now: u128,
     limit: Option<usize>,
-) -> Result<Reservation> {
+) -> Result<Attribution> {
     ensure!(
         !caller.is_empty() && caller.len() <= 512,
         "invalid GitHub admission caller"
@@ -326,7 +392,6 @@ fn admit(
     let minute = now / MINUTE * MINUTE;
     if let Some(row) = rows.iter_mut().find(|r| {
         r.at == minute && r.caller == caller && r.resource == resource && r.observer == observer
-            && r.endpoint == endpoint && r.response == ResponseClass::Pending
     }) {
         row.count = row
             .count
@@ -339,11 +404,9 @@ fn admit(
             resource: resource.into(),
             observer,
             count: 1,
-            endpoint,
-            response: ResponseClass::Pending,
         });
     }
-    Ok(Reservation {
+    Ok(Attribution {
         at: minute,
         caller: caller.into(),
         resource: resource.into(),
@@ -382,12 +445,24 @@ pub async fn before_send(
             if held.path.as_ref() != Some(&path) {
                 held.rows = read(&path, now)?;
                 held.path = Some(path.clone());
+                load_attribution(&mut held, now);
             }
             let mut rows = held.rows.clone();
             let row = admit(&mut rows, &caller, &resource, endpoint, observer, now, limit)?;
             publish(&path, &rows)?;
             held.rows = rows;
             held.gap = None;
+            // The authoritative reservation is already committed. Attribution
+            // failure must not turn a safely admitted request into a refusal.
+            if held.attribution_gap.is_none() {
+                let attribution_result = (|| {
+                    record_pending(&mut held.attribution, &row, now)?;
+                    publish(&attribution_path(&path), &held.attribution)
+                })();
+                if let Err(error) = attribution_result {
+                    held.attribution_gap = Some(format!("GitHub response attribution: {error}"));
+                }
+            }
             Ok(Some(SendReservation { path: path.clone(), row }))
         })();
         if let Err(error) = &result {
@@ -420,8 +495,8 @@ pub async fn before_send(
     result
 }
 
-fn record_response(rows: &mut Vec<Reservation>, ticket: &Reservation, status: Option<u16>) {
-    let same_bucket = |r: &Reservation| {
+fn record_response(rows: &mut Vec<Attribution>, ticket: &Attribution, status: Option<u16>) {
+    let same_bucket = |r: &Attribution| {
         r.at == ticket.at && r.caller == ticket.caller && r.resource == ticket.resource
             && r.observer == ticket.observer && r.endpoint == ticket.endpoint
     };
@@ -450,14 +525,16 @@ pub async fn after_send(ticket: SendReservation, status: Option<u16>) {
         if held.path.as_ref() != Some(&ticket.path) {
             return Ok(());
         }
-        let mut rows = held.rows.clone();
+        if held.attribution_gap.is_some() {
+            return Ok(());
+        }
+        let mut rows = held.attribution.clone();
         record_response(&mut rows, &ticket.row, status);
-        if let Err(error) = publish(&ticket.path, &rows) {
-            held.path = None;
-            held.gap = Some(format!("GitHub response attribution: {error}"));
+        if let Err(error) = publish(&attribution_path(&ticket.path), &rows) {
+            held.attribution_gap = Some(format!("GitHub response attribution: {error}"));
             return Err(error);
         }
-        held.rows = rows;
+        held.attribution = rows;
         Ok(())
     }).await;
     if !matches!(result, Ok(Ok(()))) {
@@ -486,6 +563,13 @@ pub fn doctor_lines(now: u128) -> Vec<crate::model::DoctorCheck> {
         if now.saturating_sub(r.at) < HOUR + MINUTE {
             let entry = counts.entry((r.caller.clone(), r.resource.clone())).or_default();
             entry.count += u128::from(r.count);
+        }
+    }
+    for r in &held.attribution {
+        if now.saturating_sub(r.at) < HOUR + MINUTE {
+            let Some(entry) = counts.get_mut(&(r.caller.clone(), r.resource.clone())) else {
+                continue;
+            };
             if r.response == ResponseClass::Http304 {
                 entry.conditional += u128::from(r.count);
             }
@@ -497,18 +581,26 @@ pub fn doctor_lines(now: u128) -> Vec<crate::model::DoctorCheck> {
     }
     let omitted_groups = counts.len().saturating_sub(127);
     let omitted_count = counts.values().skip(127).map(|entry| entry.count).sum::<u128>();
-    let mut lines = counts.into_iter().take(127).map(|((caller, resource), Usage { count, conditional, attribution })| crate::model::DoctorCheck {
+    let mut lines = counts.into_iter().take(127).map(|((caller, resource), Usage { count, conditional, mut attribution })| {
+        // An older binary may have admitted requests without writing the sidecar.
+        // Never let stale diagnostic counts subtract more than the ledger spent.
+        let attributed = attribution.values().sum::<u128>();
+        if attributed < count {
+            *attribution.entry((EndpointClass::Unknown, ResponseClass::Unknown)).or_default() += count - attributed;
+        }
+        let conditional = if attributed <= count { conditional } else { 0 };
+        crate::model::DoctorCheck {
         name: format!("github-requests/admitted/{caller}/{resource}"),
-        status: if held.gap.is_some() { "warn" } else { "pass" }.into(),
+        status: if held.gap.is_some() || held.attribution_gap.is_some() || attributed > count { "warn" } else { "pass" }.into(),
         message: format!("{count} durable request reservations in the conservative 61-minute window; {conditional} conditional 304 responses (not charged to primary quota); {} possible quota requests (includes pending/legacy/failed sends; actual provider charge unknown); endpoint/response counts: {attribution:?}; {} admission refusals/meter failures since start; observer aggregate/per-caller limit {:?}/{resource}/hour (None=meter-only); GraphQL points unknown; unscoped callers metered but uncapped", count - conditional, held.refused.get(&(caller.clone(),resource.clone())).copied().unwrap_or(0), held.limit),
-    }).collect::<Vec<_>>();
+    }}).collect::<Vec<_>>();
     if omitted_groups > 0 {
         lines.push(crate::model::DoctorCheck {
             name: "github-requests/admitted/other".into(), status: "pass".into(),
             message: format!("{omitted_count} reservations across {omitted_groups} additional caller/resource groups; full journal retained"),
         });
     }
-    if let Some(gap) = &held.gap {
+    for gap in held.gap.iter().chain(held.attribution_gap.iter()) {
         lines.push(crate::model::DoctorCheck {
             name: "github-requests/admission".into(),
             status: "warn".into(),
@@ -546,13 +638,11 @@ mod tests {
     }
 
     #[test]
-    fn old_ledger_defaults_to_unknown_without_losing_reservations() {
+    fn old_ledger_retains_reservations_without_attribution() {
         let rows: Vec<Reservation> = serde_json::from_str(
             r#"[{"at":60000,"caller":"observer/test","resource":"core","observer":true,"count":17}]"#,
         ).unwrap();
         assert_eq!(rows[0].count, 17);
-        assert_eq!(rows[0].endpoint, EndpointClass::Unknown);
-        assert_eq!(rows[0].response, ResponseClass::Unknown);
         let roundtrip: Vec<Reservation> =
             serde_json::from_slice(&serde_json::to_vec(&rows).unwrap()).unwrap();
         assert_eq!(roundtrip[0].count, 17);
@@ -563,6 +653,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("ledger");
         let mut rows = Vec::new();
+        let mut attribution = Vec::new();
         let now = 10_020_000;
         let statuses = [
             (Some(200), ResponseClass::Http200),
@@ -581,20 +672,97 @@ mod tests {
                     &mut rows, "observer/test", "core", EndpointClass::Checks,
                     true, now, None,
                 ).unwrap();
-                record_response(&mut rows, &ticket, status);
-                assert!(rows.iter().any(|r| r.response == expected));
+                record_pending(&mut attribution, &ticket, now).unwrap();
+                record_response(&mut attribution, &ticket, status);
+                assert!(attribution.iter().any(|r| r.response == expected));
             }
         }
         // A canceled send has no completion and remains conservatively pending.
-        admit(&mut rows, "observer/test", "core", EndpointClass::Checks, true, now, None).unwrap();
+        let ticket = admit(&mut rows, "observer/test", "core", EndpointClass::Checks, true, now, None).unwrap();
+        record_pending(&mut attribution, &ticket, now).unwrap();
         publish(&path, &rows).unwrap();
-        let rows = read(&path, now).unwrap();
-        assert_eq!(rows.len(), 9);
-        assert_eq!(rows.iter().map(|r| r.count).sum::<u64>(), 19);
-        assert_eq!(rows.iter().filter(|r| r.response == ResponseClass::Http304)
+        let spent = std::fs::read(&path).unwrap();
+        publish(&attribution_path(&path), &attribution).unwrap();
+        let attribution = read_attribution(&path, now).unwrap();
+        assert_eq!(read(&path, now).unwrap().len(), 1);
+        assert_eq!(read(&path, now).unwrap()[0].count, 19);
+        assert_eq!(std::fs::read(&path).unwrap(), spent);
+        assert_eq!(attribution.len(), 9);
+        assert_eq!(attribution.iter().map(|r| r.count).sum::<u64>(), 19);
+        assert_eq!(attribution.iter().filter(|r| r.response == ResponseClass::Http304)
             .map(|r| r.count).sum::<u64>(), 2);
-        assert_eq!(rows.iter().filter(|r| r.response == ResponseClass::ClientError)
+        assert_eq!(attribution.iter().filter(|r| r.response == ResponseClass::ClientError)
             .map(|r| r.count).sum::<u64>(), 4);
+    }
+
+    #[test]
+    fn attributed_writes_remain_readable_by_old_strict_reservation_reader() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        #[serde(deny_unknown_fields)]
+        struct OldReservation {
+            at: u128,
+            caller: String,
+            resource: String,
+            observer: bool,
+            count: u64,
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("github-admission.json");
+        let now = 10_020_000;
+        let mut rows = Vec::new();
+        let mut attribution = Vec::new();
+        for endpoint in [EndpointClass::Checks, EndpointClass::Pulls] {
+            let ticket = admit(&mut rows, "observer/test", "core", endpoint, true, now, Some(2)).unwrap();
+            publish(&path, &rows).unwrap();
+            record_pending(&mut attribution, &ticket, now).unwrap();
+            record_response(&mut attribution, &ticket, Some(304));
+            publish(&attribution_path(&path), &attribution).unwrap();
+        }
+        let old: Vec<OldReservation> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(old, vec![OldReservation {
+            at: now, caller: "observer/test".into(), resource: "core".into(),
+            observer: true, count: 2,
+        }]);
+        let mut restarted = read(&path, now).unwrap();
+        assert!(admit(&mut restarted, "observer/test", "core", EndpointClass::Checks, true, now, Some(2)).is_err());
+    }
+
+    #[tokio::test]
+    async fn corrupt_attribution_does_not_refuse_enforced_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("github-admission.json");
+        std::fs::write(attribution_path(&path), b"broken").unwrap();
+        let ticket = before_send(path.clone(), Some("observer/test".into()), "core".into(),
+            EndpointClass::Checks, Some(1)).await.unwrap().unwrap();
+        let spent = std::fs::read(&path).unwrap();
+        after_send(ticket, Some(304)).await;
+        assert_eq!(std::fs::read(&path).unwrap(), spent);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        let mut held = State { path: Some(path.clone()), rows: read(&path, now).unwrap(), ..State::default() };
+        load_attribution(&mut held, now);
+        assert!(held.attribution_gap.is_some());
+        assert!(held.attribution.is_empty());
+        assert_eq!(held.rows[0].count, 1);
+        assert!(admit(&mut held.rows, "observer/test", "core", EndpointClass::Checks, true, now, Some(1)).is_err());
+    }
+
+    #[tokio::test]
+    async fn attribution_publication_failure_leaves_http_result_and_admission_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("github-admission.json");
+        let ticket = before_send(path.clone(), Some("observer/test".into()), "core".into(),
+            EndpointClass::Checks, Some(2)).await.unwrap().unwrap();
+        let spent = std::fs::read(&path).unwrap();
+        // Make the attribution rename fail after admission has already committed.
+        std::fs::remove_file(attribution_path(&path)).unwrap();
+        std::fs::create_dir(attribution_path(&path)).unwrap();
+        after_send(ticket, Some(200)).await;
+        assert_eq!(std::fs::read(&path).unwrap(), spent);
+        let ticket = before_send(path.clone(), Some("observer/test".into()), "core".into(),
+            EndpointClass::Checks, Some(2)).await.unwrap().unwrap();
+        after_send(ticket, Some(304)).await;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        assert_eq!(read(&path, now).unwrap().iter().map(|r| r.count).sum::<u64>(), 2);
     }
 
     #[test]
@@ -691,8 +859,6 @@ mod tests {
                 resource: "core".into(),
                 observer: true,
                 count: 1,
-                endpoint: EndpointClass::Unknown,
-                response: ResponseClass::Unknown,
             })
             .collect::<Vec<_>>();
         publish(&path, &rows).unwrap();
@@ -848,8 +1014,6 @@ mod tests {
                 resource: "core".into(),
                 observer: true,
                 count: 1,
-                endpoint: EndpointClass::Unknown,
-                response: ResponseClass::Unknown,
             }],
         )
         .unwrap();

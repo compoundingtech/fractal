@@ -107,11 +107,19 @@ watches. These behaviors have dedicated regression coverage.
 Repository item and comment cursors advance only to returned `updated_at`
 timestamps, not the polling clock, so idle polls keep stable request URLs.
 GitHub documents `since` as exclusive: requests subtract one second from the
-stored watermark and deduplicate overlap by item/comment identity and update
-time. The cursor retains only boundary versions. When the ten-page read budget
-is exhausted, it saves the exact next Link URL; continuation must not rebuild
-page offsets against an advanced watermark. Optional cursor fields default on
-old records; no storage version change, migration or backfill is required.
+stored watermark and deduplicate overlap by identity, update time and content
+digest, so a second edit within one timestamp second is not dropped. The cursor
+retains boundary versions during ordinary polls. When a read exceeds ten pages,
+it freezes the starting watermark, retains sweep versions and saves exact Link
+continuations. Before advancing the watermark it revalidates from that starting
+point until two complete ordered page-version sequences agree. This recovers
+rows shifted into already-read pages; repeated shifts require further sweeps.
+Each poll still reads at most ten pages per listing. Continuous collection churn
+can defer watermark advancement: REST offset pagination cannot give an atomic
+snapshot. Sweep bookkeeping uses fixed-size rolling digests; deduplication keeps
+the identities needed for the active sweep and prunes only after commit.
+Optional cursor fields default on old records; no storage version change,
+migration or backfill is required.
 
 Cold caches, changed URLs and endpoints without ETags still need ordinary
 responses. Authenticated idle revalidations return 304 and preserve full bodies
@@ -119,15 +127,23 @@ and pagination links. Cache warmup after restart is not quota-free.
 
 ## Bounded admission attribution
 
-Existing minute/caller/resource rows also carry closed endpoint and response
-classes, never raw URLs or query strings. Repository, issues and issue-comments
-are separate classes. Responses distinguish 200, conditional 304, other success,
-redirect, client/server errors and transport errors. Legacy rows default to
-unknown without losing reservations. Doctor reports the endpoint/status counts,
-conditional 304 hits and conservatively possible quota-bearing reservations.
-The local cap still includes 304s: provider quota and local admission are not the
-same meter. Completed sends add a durable attribution publication; failures of
-that publication expose a gap without replacing the original HTTP response.
+`STATE/github-admission.json` keeps the original strict reservation shape:
+`at`, `caller`, `resource`, `observer`, and `count`. Closed endpoint and response
+classes live only in the separate, bounded
+`STATE/github-admission.json.attribution.json` diagnostic sidecar, never in the
+admission ledger and never as raw URLs or query strings. Repository, issues and
+issue-comments are separate classes. Responses distinguish 200, conditional 304,
+other success, redirect, client/server errors and transport errors. Reservations
+without sidecar attribution remain unknown without losing spent admission.
+Doctor reports endpoint/status counts, conditional 304 hits and conservatively
+possible quota-bearing reservations. The local cap still includes 304s: provider
+quota and local admission are not the same meter. Only the original ledger
+controls admission safety. Pending and completed sends publish attribution
+separately; sidecar read/write failures expose a diagnostic gap without blocking
+HTTP or replacing its response. Rollback binaries never read the sidecar and can
+still decode every reservation written by this version; no ledger migration or
+deletion is needed, and requests admitted by older binaries appear as unknown
+attribution after upgrading again.
 
 ## Shared-token fleet budget: design only
 

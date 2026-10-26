@@ -64,11 +64,11 @@ const ITEM_MENTIONS: usize = 50;
 /// How far behind the local clock a first watermark starts, for clock skew with GitHub.
 const WATERMARK_SKEW: Duration = Duration::from_secs(5 * 60);
 
-/// What a repository observer remembers between polls. Each watermark is the newest `updated_at`
-/// returned. Requests overlap it by one second, making GitHub's exclusive `since` inclusive at
-/// its timestamp precision. Idle polls keep the same URL and ETag. Version maps deduplicate the
-/// overlap by identity and update time and retain only that boundary. Older cursors default the
-/// maps and safely replay their first overlap.
+/// Repository listing watermarks overlap by one second, making GitHub's exclusive `since`
+/// inclusive at its timestamp precision. Idle polls keep the same URL and ETag. Version maps
+/// deduplicate identity/update-time/content and retain the timestamp boundary, or the whole
+/// active sweep until two complete ordered page-version sequences agree. Older cursors default
+/// the maps and safely replay their first overlap.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RepositoryCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,21 +76,90 @@ pub struct RepositoryCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comments_since: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    items_next: Option<String>,
+    items_scan: Option<ListingScan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    comments_next: Option<String>,
+    comments_scan: Option<ListingScan>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub seen: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    item_versions: BTreeMap<String, String>,
+    item_versions: BTreeMap<String, ItemVersion>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    comment_versions: BTreeMap<String, String>,
+    comment_versions: BTreeMap<String, ItemVersion>,
     /// Open identities, and closed items awaiting their final detail read. Subject numbers
     /// stay at their original locations even when GitHub's node now lives elsewhere.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     identities: BTreeMap<String, ItemIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ItemVersion {
+    at: String,
+    digest: String,
+}
+
+/// Freeze the committed watermark until two complete, freshly revalidated sweeps
+/// have identical ordered page versions. Offset pagination is not a snapshot.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct ListingScan {
+    next: Option<String>,
+    newest: Option<String>,
+    digest: String,
+    previous: Option<String>,
+}
+
+struct ContentDigest(Sha256);
+
+impl std::io::Write for ContentDigest {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn content_digest(value: &Value) -> String {
+    let mut digest = ContentDigest(Sha256::new());
+    serde_json::to_writer(&mut digest, value)
+        .expect("JSON values serialize to an infallible digest writer");
+    hex::encode(digest.0.finalize())
+}
+
+fn finish_listing(
+    scan: &mut Option<ListingScan>,
+    watermark: &mut Option<String>,
+    listing: &GithubListing,
+) -> bool {
+    let newest = newest_updated_at(&listing.values);
+    if scan.is_none() && !listing.truncated {
+        *watermark = newest.into_iter().chain(watermark.take()).max()
+            .or_else(|| Some(watermark_now()));
+        return false;
+    }
+    let progress = scan.get_or_insert_with(ListingScan::default);
+    progress.newest = newest.into_iter().chain(progress.newest.take()).max();
+    for version in &listing.versions {
+        let mut digest = Sha256::new();
+        digest.update(b"github-listing-page");
+        digest.update(progress.digest.as_bytes());
+        digest.update(version.as_bytes());
+        progress.digest = hex::encode(digest.finalize());
+    }
+    progress.next.clone_from(&listing.next);
+    if listing.truncated {
+        return true;
+    }
+    if progress.previous.as_ref() != Some(&progress.digest) {
+        progress.previous = Some(std::mem::take(&mut progress.digest));
+        return true;
+    }
+    *watermark = progress.newest.take().into_iter().chain(watermark.take()).max();
+    *scan = None;
+    false
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1169,7 +1238,7 @@ fn inclusive_since(since: &str) -> String {
 }
 
 fn changed_versions<'a>(
-    versions: &'a mut BTreeMap<String, String>,
+    versions: &'a mut BTreeMap<String, ItemVersion>,
     values: &'a [Value],
 ) -> impl Iterator<Item = &'a Value> + 'a {
     values.iter().filter(move |value| {
@@ -1180,17 +1249,18 @@ fn changed_versions<'a>(
             return true;
         };
         let id = id.to_string();
-        if versions.get(&id).is_some_and(|known| known == at) {
+        let digest = content_digest(value);
+        if versions.get(&id).is_some_and(|known| known.at == at && known.digest == digest) {
             return false;
         }
-        versions.insert(id, at.to_owned());
+        versions.insert(id, ItemVersion { at: at.to_owned(), digest });
         true
     })
 }
 
-fn retain_boundary(versions: &mut BTreeMap<String, String>, since: Option<&str>) {
+fn retain_boundary(versions: &mut BTreeMap<String, ItemVersion>, since: Option<&str>) {
     if let Some(since) = since {
-        versions.retain(|_, at| at.as_str() >= since);
+        versions.retain(|_, version| version.at.as_str() >= since);
     }
 }
 
@@ -1269,12 +1339,12 @@ pub async fn observe_at(
             }
             Some(since) => github_listing(
                 &client,
-                cursor.items_next.take().unwrap_or_else(|| format!(
+                cursor.items_scan.as_mut().and_then(|scan| scan.next.take()).unwrap_or_else(|| format!(
                     "{base}/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100",
                     since = inclusive_since(since),
                 )),
                 token,
-                cache_for,
+                if cursor.items_scan.is_some() { Duration::ZERO } else { cache_for },
                 LISTING_PAGES,
                 true,
             )
@@ -1354,13 +1424,10 @@ pub async fn observe_at(
                 }
             }
         }
-        cursor.items_since = newest_updated_at(&listing.values)
-            .into_iter()
-            .chain(watermark.clone())
-            .max()
-            .or_else(|| Some(watermark_now()));
-        retain_boundary(&mut cursor.item_versions, cursor.items_since.as_deref());
-        cursor.items_next = listing.next;
+        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing);
+        if cursor.items_scan.is_none() {
+            retain_boundary(&mut cursor.item_versions, cursor.items_since.as_deref());
+        }
 
         // A reaction changes no `updated_at`, so reactions on open items come from the open
         // listing. A first poll already read it.
@@ -1399,12 +1466,12 @@ pub async fn observe_at(
                 Some(since) => {
                     let comments = github_listing(
                         &client,
-                        cursor.comments_next.take().unwrap_or_else(|| format!(
+                        cursor.comments_scan.as_mut().and_then(|scan| scan.next.take()).unwrap_or_else(|| format!(
                             "{base}/issues/comments?sort=updated&direction=asc&since={since}&per_page=100",
                             since = inclusive_since(&since),
                         )),
                         token,
-                        cache_for,
+                        if cursor.comments_scan.is_some() { Duration::ZERO } else { cache_for },
                         LISTING_PAGES,
                         true,
                     )
@@ -1417,12 +1484,10 @@ pub async fn observe_at(
                             merge(&mut items, item);
                         }
                     }
-                    cursor.comments_since = newest_updated_at(&comments.values)
-                        .into_iter()
-                        .chain(Some(since))
-                        .max();
-                    retain_boundary(&mut cursor.comment_versions, cursor.comments_since.as_deref());
-                    cursor.comments_next = comments.next;
+                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments);
+                    if cursor.comments_scan.is_none() {
+                        retain_boundary(&mut cursor.comment_versions, cursor.comments_since.as_deref());
+                    }
                 }
             }
             // Reactions on comments come from the newest hundred comments.
@@ -3297,6 +3362,14 @@ mod tests {
             let requests = github.take_requests();
             assert!(requests.iter().any(|request| request == &format!("GET {issues} HTTP/1.1")));
             assert!(requests.iter().any(|request| request == &format!("GET {comments} HTTP/1.1")));
+            github.route(issues, json!([issue(1, at, json!({"title": "edited within the same second"})), issue(2, at, json!({}))]));
+            let edited = observe_at(request(&["comments"], updated.cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(items(&edited.facts, "issues").len(), 1);
+            assert_eq!(item(&edited.facts, "issues", 1)["title"], "edited within the same second");
+            let quiet = observe_at(request(&["comments"], edited.cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(quiet.facts, json!({"repository_id": 7}));
         }).await;
     }
 
@@ -3332,19 +3405,100 @@ mod tests {
             .await.unwrap();
         assert_eq!(items(&first.facts, "issues").len(), 1000);
         let cursor = RepositoryCursor::parse(first.cursor.as_deref());
-        assert!(cursor.items_next.as_deref().unwrap().ends_with("&page=11"));
-        assert!(cursor.comments_next.as_deref().unwrap().ends_with("&page=11"));
+        assert!(cursor.items_scan.as_ref().unwrap().next.as_deref().unwrap().ends_with("&page=11"));
+        assert!(cursor.comments_scan.as_ref().unwrap().next.as_deref().unwrap().ends_with("&page=11"));
         github.take_requests();
         let continued = observe_at(request(&["comments"], first.cursor.as_deref(), None), &base, Some(&token))
             .await.unwrap();
         assert_eq!(items(&continued.facts, "issues").len(), 100);
         assert_eq!(item(&continued.facts, "issues", 1100)["recent_comments"][0]["id"], 1100);
         let cursor = RepositoryCursor::parse(continued.cursor.as_deref());
-        assert!(cursor.items_next.is_none());
-        assert!(cursor.comments_next.is_none());
+        assert!(cursor.items_scan.as_ref().unwrap().next.is_none());
+        assert!(cursor.comments_scan.as_ref().unwrap().next.is_none());
         let requests = github.take_requests();
         assert_eq!(requests.len(), 3, "continuations do not replay the first ten pages");
         assert_eq!(requests.iter().filter(|request| request.contains("&page=11 ")).count(), 2);
+        let replay = observe_at(request(&["comments"], continued.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(replay.facts, json!({"repository_id": 7}));
+        let reconciled = observe_at(request(&["comments"], replay.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        let cursor = RepositoryCursor::parse(reconciled.cursor.as_deref());
+        assert!(cursor.items_scan.is_none());
+        assert!(cursor.comments_scan.is_none());
+    }
+
+    #[tokio::test]
+    async fn shifted_pages_reconcile_from_the_start_before_committing_the_watermark() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let at = "2026-09-10T00:00:00Z";
+        let starts = [
+            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+            "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+        ];
+        let routes = |moved: u64| {
+            let ids: Vec<_> = ((moved + 1)..=1100).chain(1..=moved).collect();
+            for (kind, start) in starts.iter().enumerate() {
+                for (index, ids) in ids.chunks(100).enumerate() {
+                    let page = index + 1;
+                    let path = if page == 1 { (*start).to_owned() } else { format!("{start}&page={page}") };
+                    let values: Vec<_> = ids.iter().map(|&id| {
+                        let updated = if id <= moved { format!("2026-09-10T00:00:0{id}Z") } else { at.to_owned() };
+                        if kind == 0 {
+                            issue(id, &updated, json!({}))
+                        } else {
+                            json!({"id": id, "issue_url": format!("https://api.github.com/repos/acme/garden/issues/{id}"),
+                                "html_url": format!("https://github.com/acme/garden/issues/{id}#issuecomment-{id}"),
+                                "user": {"login": "fern"}, "body": "hello", "created_at": at, "updated_at": updated})
+                        }
+                    }).collect();
+                    github.route(&path, json!(values));
+                    if page < 11 {
+                        github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+                    }
+                }
+            }
+        };
+        routes(0);
+        let token = GithubAuth::test("shifted-pages-token");
+        let cursor = json!({"items_since": at, "comments_since": at}).to_string();
+        let poll = |cursor| {
+            let mut request = request(&["comments"], cursor, None);
+            // Continuation/reconciliation must revalidate despite the ordinary cache TTL.
+            request.every_ms = Some(120_000);
+            observe_at(request, &base, Some(&token))
+        };
+        let first = poll(Some(&cursor)).await.unwrap();
+        routes(1); // ID1001 moves into page10; page11 skips it and sees updated ID1.
+        let tail = poll(first.cursor.as_deref()).await.unwrap();
+        let cursor = RepositoryCursor::parse(tail.cursor.as_deref());
+        assert_eq!(cursor.items_since.as_deref(), Some(at));
+        assert_eq!(cursor.comments_since.as_deref(), Some(at));
+        let repaired = poll(tail.cursor.as_deref()).await.unwrap();
+        assert_eq!(item(&repaired.facts, "issues", 1001)["recent_comments"][0]["id"], 1001);
+        routes(2); // Another shift during reconciliation must require another stable sweep.
+        let mut latest = poll(repaired.cursor.as_deref()).await.unwrap();
+        assert_eq!(RepositoryCursor::parse(latest.cursor.as_deref()).items_since.as_deref(), Some(at));
+        let mut complete = false;
+        for _ in 0..6 {
+            github.take_requests();
+            latest = poll(latest.cursor.as_deref()).await.unwrap();
+            let requests = github.take_requests();
+            for start in starts {
+                assert!(requests.iter().filter(|request| request.starts_with(&format!("GET {start}"))).count() <= 10);
+            }
+            let cursor = RepositoryCursor::parse(latest.cursor.as_deref());
+            if cursor.items_scan.is_none() && cursor.comments_scan.is_none() {
+                assert_eq!(cursor.items_since.as_deref(), Some("2026-09-10T00:00:02Z"));
+                assert_eq!(cursor.comments_since.as_deref(), Some("2026-09-10T00:00:02Z"));
+                complete = true;
+                break;
+            }
+            assert_eq!(cursor.items_since.as_deref(), Some(at));
+            assert_eq!(cursor.comments_since.as_deref(), Some(at));
+        }
+        assert!(complete, "stable page versions eventually commit both watermarks");
     }
 
     #[test]
@@ -3358,7 +3512,7 @@ mod tests {
         assert_eq!(changed_versions(&mut versions, &updated).count(), 2);
         retain_boundary(&mut versions, Some("2026-09-10T00:00:01Z"));
         assert_eq!(versions.len(), 1);
-        assert_eq!(versions["1"], "2026-09-10T00:00:01Z");
+        assert_eq!(versions["1"].at, "2026-09-10T00:00:01Z");
     }
 
     #[tokio::test]
