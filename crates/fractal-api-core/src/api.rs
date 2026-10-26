@@ -4213,7 +4213,7 @@ pub fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
             item["actions"] = json!([]);
             let p = &item["action_parameters"]["custom.reply"];
             let command = [
-                "fractal", "subject", "reply", item["source_id"].as_str().unwrap_or_default(),
+                "st", "subject", "reply", item["source_id"].as_str().unwrap_or_default(),
                 "--registration", p["registration"].as_str().unwrap_or_default(),
                 "--revision", p["revision"].as_str().unwrap_or_default(),
                 "--episode", p["episode"].as_str().unwrap_or_default(),
@@ -6978,7 +6978,7 @@ fn stale_attention_check(items: &[crate::model::AttentionItemView], now: u128) -
         name: "attention-age".into(),
         status: "warn".into(),
         message: format!(
-            "{} alerts and faults have been open for more than a day; `fractal alerts ls --as PERSON` shows how to close a person's alert, and a fault closes at its source: {}",
+            "{} alerts and faults have been open for more than a day; `st alerts ls --as PERSON` shows how to close a person's alert, and a fault closes at its source: {}",
             stale.len(),
             listed.join("; ")
         ),
@@ -7222,7 +7222,7 @@ fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
             name: "held-mail".into(),
             status: "warn".into(),
             message: format!(
-                "silent mail unread for over a day (at most 128 oldest subjects per check): {}; read it with `fractal conversations ls --as SEAT`",
+                "silent mail unread for over a day (at most 128 oldest subjects per check): {}; read it with `st conversations ls --as SEAT`",
                 seats
                     .iter()
                     .map(|(seat, count, oldest)| format!(
@@ -7321,7 +7321,7 @@ fn terminal_exec_gates_check(store: &Store) -> anyhow::Result<DoctorCheck> {
             "no unresolved field gates wait on execs that ended without a restart".into()
         } else {
             format!(
-                "stuck gates: {}; inspect `fractal missions show RUN`",
+                "stuck gates: {}; inspect `st missions show RUN`",
                 stuck.join("; ")
             )
         },
@@ -7720,7 +7720,7 @@ fn doctor_report_with_operation_drift(
             message: if state.state_dir.join("left-fleet.json").is_file() {
                 "this node is intentionally local-only after leaving its fleet".into()
             } else {
-                "no fleet is configured; use fractal fleet create or fractal fleet join to connect this node"
+                "no fleet is configured; use st fleet create or st fleet join to connect this node"
                     .into()
             },
         }),
@@ -7893,7 +7893,7 @@ fn doctor_report_with_operation_drift(
                     } else {
                         format!(
                             "graph diverged from {}: the same envelopes project a different \
-                             graph, which exchanges cannot fix (fractal replication status); ",
+                             graph, which exchanges cannot fix (st replication status); ",
                             diverged.join(", ")
                         )
                     },
@@ -8012,7 +8012,7 @@ fn doctor_report_with_operation_drift(
             )
             .map_err(ApiError::internal)?;
             if pending > 0 {
-                blocked.push(format!("{pending} current-seat messages older than 10s lack a recipient graph read receipt ({accepted} accepted native handoffs); this does not prove that a legacy channel failed to consume them. Inspect `fractal conversations status MESSAGE`"));
+                blocked.push(format!("{pending} current-seat messages older than 10s lack a recipient graph read receipt ({accepted} accepted native handoffs); this does not prove that a legacy channel failed to consume them. Inspect `st conversations status MESSAGE`"));
             }
             checks.push(DoctorCheck {
                 name: "message-delivery".into(),
@@ -8306,7 +8306,7 @@ async fn refuse_while_leaving(
         let _ = axum::body::to_bytes(request.into_body(), 1 << 20).await;
         return ApiError::bad(St3Error::new(
             "fleet-leaving",
-            "this node is leaving its fleet and accepts no new writes; `fractal fleet leave --cancel` stops the leave",
+            "this node is leaving its fleet and accepts no new writes; `st fleet leave --cancel` stops the leave",
         ))
         .into_response();
     }
@@ -8551,7 +8551,7 @@ fn suspension_target(
     {
         return Err(ApiError::bad(St3Error::new(
             "rollout-in-progress",
-            "the seat has a rollout; inspect it or retry with fractal agents rollout",
+            "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
     }
     let status = state
@@ -8663,7 +8663,7 @@ pub fn request_suspend(
     {
         return Err(ApiError::bad(St3Error::new(
             "rollout-in-progress",
-            "the seat has a rollout; inspect it or retry with fractal agents rollout",
+            "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
     }
     let (current, member, token) = suspension_target(state, &subject)?;

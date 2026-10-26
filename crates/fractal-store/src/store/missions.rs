@@ -718,7 +718,7 @@ impl Store {
         for reference in &intent.document_refs {
             let Some((name, hash)) = reference.rsplit_once('@') else {
                 blockers.push(format!(
-                    "document `{reference}` has no selected binding; run `fractal documents put` first"
+                    "document `{reference}` has no selected binding; run `st documents put` first"
                 ));
                 continue;
             };
@@ -733,7 +733,7 @@ impl Store {
                 .is_some();
             if !exists {
                 blockers.push(format!(
-                    "missing document `{reference}`; run `fractal documents put` first"
+                    "missing document `{reference}`; run `st documents put` first"
                 ));
                 continue;
             }

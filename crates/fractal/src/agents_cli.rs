@@ -322,7 +322,8 @@ pub(super) async fn run_agents(
                         return Ok(());
                     }
                     println!(
-                        "{subject} is declared by {run}; `fractal agents restart {subject}` relaunches it"
+                        "{subject} is declared by {run}; `{command} agents restart {subject}` relaunches it",
+                        command = if json_output { "st" } else { "fractal" }
                     );
                     return Ok(());
                 }
@@ -756,7 +757,7 @@ async fn agent_start_declaration(
             {
                 return Err(fractal_daemon::St3Error::new(
                     "start-suspended",
-                    format!("`{subject}` is {}; use `fractal agents resume {subject}` to resume its recorded native session",
+                    format!("`{subject}` is {}; use `st agents resume {subject}` to resume its recorded native session",
                         suspension.phase),
                 ).into());
             }

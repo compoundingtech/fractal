@@ -11,7 +11,7 @@ const LANE_RECENT_LIMIT: usize = 20;
 fn lane_not_found(argument: &str) -> St3Error {
     St3Error::new(
         "lane-not-found",
-        format!("no open lane matches `{argument}`; `fractal lanes ls` lists them"),
+        format!("no open lane matches `{argument}`; `st lanes ls` lists them"),
     )
 }
 

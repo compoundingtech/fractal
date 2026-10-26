@@ -2080,7 +2080,7 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
     );
     let message = refused.to_string();
     assert!(
-        message.contains("fractal agents stop") && message.contains("fractal agents start"),
+        message.contains("st agents stop") && message.contains("st agents start"),
         "{message}"
     );
     assert!(

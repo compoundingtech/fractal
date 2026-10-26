@@ -4007,16 +4007,17 @@ fn pty_attach_accepts_an_explicit_nested_override() {
 fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
     let actor = "agent/worker";
     assert_eq!(
+        // Agent-only continuations deliberately keep the executable available in agent seats.
         wait_interruption_reason(actor, true, &[], &["message/new".into()]),
         Some(
-            "the wait stopped because agent/worker has a new message: message/new. Run `fractal conversations ls`"
+            "the wait stopped because agent/worker has a new message: message/new. Run `st conversations ls`"
                 .into()
         )
     );
     assert_eq!(
         wait_interruption_reason(actor, true, &["step-run/new".into()], &[]),
         Some(
-            "the wait stopped because agent/worker has ready work: step-run/new. Run `fractal work ls`"
+            "the wait stopped because agent/worker has ready work: step-run/new. Run `st work ls`"
                 .into()
         )
     );
@@ -4028,7 +4029,7 @@ fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
             &["message/new".into()]
         ),
         Some(
-            "the wait stopped because agent/worker has ready work: step-run/new. Run `fractal work ls`"
+            "the wait stopped because agent/worker has ready work: step-run/new. Run `st work ls`"
                 .into()
         )
     );
@@ -8116,4 +8117,10 @@ fn native_identity_rename_allows_generated_idempotency_key() {
         panic!("expected identity rename");
     };
     assert_eq!(args.idempotency_key, None);
+}
+
+#[test]
+fn github_watch_continuation_keeps_the_agent_executable() {
+    assert_eq!(gh_unwatch_hint("compoundingtech/fractal#3909"),
+        "To stop: st gh unwatch compoundingtech/fractal#3909");
 }

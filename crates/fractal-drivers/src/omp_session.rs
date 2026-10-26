@@ -702,7 +702,7 @@ mod tests {
             let observed = crate::driver_diagnostic::read(&crate::driver_diagnostic::path(&agent_dir));
             assert!(matches!(observed, crate::driver_diagnostic::Observed::Failure(failure)
                 if failure.reason == crate::driver_diagnostic::Reason::AdmissionNativeConsumption));
-            assert!(error.to_string().contains("fractal admission override omp"));
+            assert!(error.to_string().contains("st admission override omp"));
             // A person's exact-build exception permits the real launch path without replacing
             // the refused measurement. This exercises the shipped asset and selected state root.
             let hooks = crate::hooks::verify_installed().unwrap();

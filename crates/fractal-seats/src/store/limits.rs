@@ -232,7 +232,7 @@ impl LimitsStore for Store {
                 "active accounts have current weekly evidence, or use a harness without weekly limits".into()
             } else {
                 format!(
-                    "{}. Unavailable evidence is not below the limit. Automatic stops wait for fresh weekly evidence; inspect the provider login and quota reporting. The last source reading remains visible in `fractal usage --json`.",
+                    "{}. Unavailable evidence is not below the limit. Automatic stops wait for fresh weekly evidence; inspect the provider login and quota reporting. The last source reading remains visible in `st usage --json`.",
                     issues.into_iter().collect::<Vec<_>>().join("; ")
                 )
             },

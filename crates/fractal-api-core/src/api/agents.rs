@@ -102,7 +102,7 @@ pub async fn restart_agent(
     {
         return Err(ApiError::bad(St3Error::new(
             "rollout-in-progress",
-            "the seat has a rollout; inspect it or retry with fractal agents rollout",
+            "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
     }
     if crate::suspension::current(&state.store, &subject)
@@ -111,7 +111,7 @@ pub async fn restart_agent(
     {
         return Err(ApiError::bad(St3Error::new(
             "restart-suspended",
-            "the seat is suspended; resume it with `fractal agents resume`. If resume refuses an authored session selection, use `fractal agents stop` then `fractal agents start`; this ends the suspension and launches the declaration without preserving the suspended session",
+            "the seat is suspended; resume it with `st agents resume`. If resume refuses an authored session selection, use `st agents stop` then `st agents start`; this ends the suspension and launches the declaration without preserving the suspended session",
         )));
     }
     let status = state
@@ -174,7 +174,7 @@ pub async fn restart_agent(
     {
         return Err(ApiError::bad(St3Error::new(
             "restart-fresh-session-no-handoff",
-            "a fresh session starts from the seat's handoff: write it with `fractal agents handoff write`, or mark the current one current with `fractal agents handoff ready`, then restart again",
+            "a fresh session starts from the seat's handoff: write it with `st agents handoff write`, or mark the current one current with `st agents handoff ready`, then restart again",
         )));
     }
     let defer = actor == subject

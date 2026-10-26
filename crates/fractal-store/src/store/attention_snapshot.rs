@@ -533,7 +533,7 @@ impl Store {
                 message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
                 title: format!("st cannot reconcile {source}"),
                 detail: format!(
-                    "{scope}: {}. Inspect with `fractal subject show {source}`.",
+                    "{scope}: {}. Inspect with `st subject show {source}`.",
                     claim.body["fields"]["reason"].as_str().unwrap_or_default()
                 ),
                 mission: None,
@@ -609,14 +609,14 @@ impl Store {
         let mission = run.mission.strip_prefix("mission/").unwrap_or(&run.mission);
         let remedy = if status == "failed" {
             format!(
-                "`fractal work retry {} --reason \"...\"` runs round {} after you address the cause; `fractal missions cancel {} --reason \"...\"` ends the run.",
+                "`st work retry {} --reason \"...\"` runs round {} after you address the cause; `st missions cancel {} --reason \"...\"` ends the run.",
                 view.subject,
                 view.attempt.saturating_add(1),
                 run.subject
             )
         } else {
             format!(
-                "st cannot retry a cancelled step. Correct the mission, then end this run with `fractal missions cancel {} --reason \"...\"` if it still runs, and start a new one with `fractal missions start {mission}`.",
+                "st cannot retry a cancelled step. Correct the mission, then end this run with `st missions cancel {} --reason \"...\"` if it still runs, and start a new one with `st missions start {mission}`.",
                 run.subject
             )
         };

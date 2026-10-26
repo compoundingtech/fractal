@@ -716,7 +716,7 @@ impl Gateway {
             .map_err(|error| error.to_string())?;
         let Some((_, node, key)) = registered else {
             return Err(format!(
-                "{person} has registered no daemon key; run `fractal sekrets enable` from a login session"
+                "{person} has registered no daemon key; run `st sekrets enable` from a login session"
             ));
         };
         if !smallclaims::fleet::verify_signature(

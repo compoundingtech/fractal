@@ -4352,7 +4352,7 @@ async fn custom_subject_contract_pagination_and_paired_person_reply() {
     for card in legacy["value"]["items"].as_array().unwrap() {
         assert_eq!(card["attention_kind"], "agent-request");
         assert_eq!(card["actions"], serde_json::json!([]));
-        assert!(card["detail"].as_str().unwrap().contains("fractal subject reply"));
+        assert!(card["detail"].as_str().unwrap().contains("st subject reply"));
         assert!(card["detail"].as_str().unwrap().contains("--episode 'garden question; keep'"));
     }
     // Model the pre-extension closed enums: the entire page remains readable.

@@ -346,7 +346,7 @@ fn macos_permission_guidance(executable: &Path) -> String {
 2. Add the st executable and enable it.\n\
 3. Open System Settings > Privacy & Security > Developer Tools.\n\
 4. Add the st executable and enable it.\n\
-5. Run `fractal service restart` after an approval changes.\n\
+5. Run `st service restart` after an approval changes.\n\
 macOS assigns service-owned file and developer access to st, not to the terminal that installed it.\n\
 A launchd property list cannot grant these approvals.\n",
         executable.display()

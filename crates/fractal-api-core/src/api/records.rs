@@ -632,7 +632,7 @@ fn review_owner(state: &AppState, target: &str) -> Result<String, ApiError> {
     }
     Err(unknown(format!(
         "`{target}` names no step run, mission run, loop or attention card; \
-         `fractal alerts ls --as PERSON` lists the reviews waiting"
+         `st alerts ls --as PERSON` lists the reviews waiting"
     )))
 }
 

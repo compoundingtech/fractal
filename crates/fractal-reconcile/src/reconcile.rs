@@ -2109,7 +2109,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         reviewer: "person/operator".into(),
                         title,
                         reason: format!(
-                            "On {}, {}. Builds and the claim store fail once a filesystem fills. Free space there, for example by removing the `target/` directories of finished worktrees with `cargo clean`; `df -h PATH` and `fractal doctor` show what is left. This item closes once each filesystem has 4 GiB and 4% free.",
+                            "On {}, {}. Builds and the claim store fail once a filesystem fills. Free space there, for example by removing the `target/` directories of finished worktrees with `cargo clean`; `df -h PATH` and `st doctor` show what is left. This item closes once each filesystem has 4 GiB and 4% free.",
                             self.host,
                             low.join("; ")
                         ),
@@ -2164,7 +2164,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 reviewer: "person/operator".into(),
                 title: RECONCILER_FAILING_TITLE.into(),
                 reason: format!(
-                    "{cause}. Nothing on {} advances until a pass succeeds. Check the host with `fractal doctor` and the daemon's log; `fractal service restart` restarts the daemon. This item closes after the next successful pass.",
+                    "{cause}. Nothing on {} advances until a pass succeeds. Check the host with `st doctor` and the daemon's log; `st service restart` restarts the daemon. This item closes after the next successful pass.",
                     self.host
                 ),
                 severity: "error".into(),
@@ -6325,7 +6325,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let episode = format!("stop-deferred:{}", diagnostic.id);
         let detail = format!(
-            "`{}` still runs after `{}` became terminal: {reason}. Its stop has been deferred for at least 15 minutes. Read or archive the retained mail, or complete or hand off the other run's work, to let the pending stop proceed. To end the seat explicitly, run `fractal agents stop {} --as ACTOR`; that ends its driver and children even if mail or work remains. This fault clears when retention ends or the runtime stops.",
+            "`{}` still runs after `{}` became terminal: {reason}. Its stop has been deferred for at least 15 minutes. Read or archive the retained mail, or complete or hand off the other run's work, to let the pending stop proceed. To end the seat explicitly, run `st agents stop {} --as ACTOR`; that ends its driver and children even if mail or work remains. This fault clears when retention ends or the runtime stops.",
             subject.subject, run.subject, subject.subject,
         );
         self.store.record_runtime_failure(
@@ -8145,7 +8145,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .unwrap_or_else(|| "person/operator".into()),
                             title: "A self-restart is still waiting for its turn to end".into(),
                             reason: format!(
-                                "{} requested restart {} at {}ms and has not reported a fresh idle, quiescent boundary for 30 minutes. The restart remains pending and is never forced. Inspect its harness; to interrupt explicitly, run `fractal agents restart {} --now --as PERSON_OR_AGENT`.",
+                                "{} requested restart {} at {}ms and has not reported a fresh idle, quiescent boundary for 30 minutes. The restart remains pending and is never forced. Inspect its harness; to interrupt explicitly, run `st agents restart {} --now --as PERSON_OR_AGENT`.",
                                 subject.subject, request.id, request.accepted_at_unix_ms, subject.subject,
                             ),
                             severity: "warning".into(),
@@ -16640,7 +16640,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             detail.push_str(&format!("\n\nOutput:\n{}", output.trim_end()));
         }
         detail.push_str(&format!(
-            "\n\nThe work waits; st does not fail it for a broken gate. Revise the mission with a gate that answers (exit 0 to pass, 1 for not yet): `fractal work revise {} FILE --as ACTOR --reason TEXT`. A revision that changes only gates keeps the work already submitted and checks the revised gates.",
+            "\n\nThe work waits; st does not fail it for a broken gate. Revise the mission with a gate that answers (exit 0 to pass, 1 for not yet): `st work revise {} FILE --as ACTOR --reason TEXT`. A revision that changes only gates keeps the work already submitted and checks the revised gates.",
             stage.run
         ));
         let mut targets = vec![
@@ -25773,7 +25773,7 @@ mission "proof" state="ready" {{
             assert!(item.detail.contains("on host `node`"), "{}", item.detail);
             assert!(item.detail.contains(expected), "{}", item.detail);
             assert!(item.detail.contains(output.trim()), "{}", item.detail);
-            assert!(item.detail.contains("fractal work revise"), "{}", item.detail);
+            assert!(item.detail.contains("st work revise"), "{}", item.detail);
             // A person's broken gate is not also an agent's fault.
             assert!(
                 store
@@ -31921,7 +31921,7 @@ mission "alert-exhaustion" state="ready" {
         assert_eq!(attention[0].kind, "fault");
         assert!(attention[0].targets.contains(&run.subject));
         assert!(
-            attention[0].detail.contains("`fractal work retry step-run/"),
+            attention[0].detail.contains("`st work retry step-run/"),
             "{}",
             attention[0].detail
         );
@@ -32335,7 +32335,7 @@ mission "waiting" state="ready" {
             .find(|message| message.title.as_deref() == Some("Fault: Automatic review failed"))
             .unwrap();
         assert!(
-            note.content.contains("`fractal work retry step-run/"),
+            note.content.contains("`st work retry step-run/"),
             "{}",
             note.content
         );
@@ -32579,9 +32579,9 @@ mission "stopping" state="ready" {{
         assert_eq!(first.targets, vec![loop_run.clone(), run.subject.clone()]);
         for expected in [
             format!("Loop `{loop_run}` stopped in round 3"),
-            format!("`fractal work retry {step} --reason"),
+            format!("`st work retry {step} --reason"),
             "runs round 4".into(),
-            format!("`fractal missions cancel {} --reason", run.subject),
+            format!("`st missions cancel {} --reason", run.subject),
         ] {
             assert!(first.detail.contains(&expected), "{}", first.detail);
         }
@@ -32652,7 +32652,7 @@ mission "stopping" state="ready" {{
         for expected in [
             "stopped in round 1: the loop round mission had a structural failure.",
             "st cannot retry a cancelled step.",
-            "`fractal missions start stopping`",
+            "`st missions start stopping`",
         ] {
             assert!(items[0].detail.contains(expected), "{}", items[0].detail);
         }
@@ -33891,7 +33891,7 @@ mission "held-stop" state="ready" {
         assert!(
             faults[0]
                 .detail
-                .contains(&format!("fractal agents stop {seat} --as ACTOR"))
+                .contains(&format!("st agents stop {seat} --as ACTOR"))
         );
         assert!(
             store
@@ -35144,7 +35144,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert!(
             items[0]
                 .detail
-                .contains(&format!("`fractal doctor` on {}", store.origin())),
+                .contains(&format!("`st doctor` on {}", store.origin())),
             "{}",
             items[0].detail
         );
@@ -35264,7 +35264,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].title, "st cannot reconcile daemon/node");
         assert!(first[0].detail.contains("the disk is full"));
-        assert!(first[0].detail.contains("`fractal subject show daemon/node`"));
+        assert!(first[0].detail.contains("`st subject show daemon/node`"));
 
         // A new cause replaces the item.
         fail("the database is locked");
@@ -35332,7 +35332,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         for expected in [
             "On node, `/state` has 1.0 GiB of 100.0 GiB free (1.0%).",
             "`cargo clean`",
-            "`fractal doctor`",
+            "`st doctor`",
             "closes once each filesystem has 4 GiB and 4% free",
         ] {
             assert!(first[0].detail.contains(expected), "{}", first[0].detail);

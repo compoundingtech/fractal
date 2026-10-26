@@ -416,7 +416,7 @@ fn linux_report(observations: &[PtyObservation]) -> (&'static str, String) {
     let (_, own_unit) = slice_and_leaf(&own);
     if !own_unit.ends_with(".service") {
         problems.push(format!(
-            "the daemon runs in {own_unit}, outside a service unit; `fractal service install` runs it at weight {LIVE_WEIGHT}"
+            "the daemon runs in {own_unit}, outside a service unit; `st service install` runs it at weight {LIVE_WEIGHT}"
         ));
     }
     let weight = |file: &str| {

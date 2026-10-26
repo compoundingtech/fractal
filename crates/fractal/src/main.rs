@@ -4973,6 +4973,7 @@ fn record_daemon_commands(args: &UpArgs) {
 #[tokio::main]
 async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     let native_driver = matches!(&cli.command, Command::Driver(_));
+    let agent_continuation = matches!(&cli.command, Command::Wait { .. } | Command::Gh { .. });
     if native_driver {
         fractal_daemon::telemetry::local_only();
     }
@@ -5011,6 +5012,11 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
             } else {
                 doctor_cli::human_outage_message(&error)
                     .unwrap_or_else(|| plain_error(&error))
+            };
+            let message = if native_driver || agent_continuation {
+                std::borrow::Cow::Borrowed(message.as_str())
+            } else {
+                presentation::human_command_hints(&message)
             };
             eprintln!("st: {message}");
             if refused_command(&error) {
@@ -5687,6 +5693,10 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
     format!("{}{agent}  {state}{until}{title}", text("thread"))
 }
 
+fn gh_unwatch_hint(thread: &str) -> String {
+    format!("To stop: st gh unwatch {thread}")
+}
+
 async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, json: bool) -> Result<()> {
     match command {
         GhCommand::Watch(args) => {
@@ -5708,7 +5718,7 @@ async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, jso
             println!(
                 "Each new comment or review that this seat did not post, each time the required checks on its head turn pass or fail, and its close or merge wake this seat once."
             );
-            println!("To stop: fractal gh unwatch {thread}");
+            println!("{}", gh_unwatch_hint(thread));
         }
         GhCommand::Unwatch(args) => {
             let outcome: Value = client
@@ -10121,13 +10131,13 @@ fn wait_interruption_reason(
 ) -> Option<String> {
     if !ready.is_empty() {
         return Some(format!(
-            "the wait stopped because {actor} has ready work: {}. Run `fractal work ls`",
+            "the wait stopped because {actor} has ready work: {}. Run `st work ls`",
             ready.join(", ")
         ));
     }
     if !unread.is_empty() {
         return Some(format!(
-            "the wait stopped because {actor} has a new message: {}. Run `fractal conversations ls`",
+            "the wait stopped because {actor} has a new message: {}. Run `st conversations ls`",
             unread.join(", ")
         ));
     }
@@ -10448,7 +10458,7 @@ async fn doctor_request<T: serde::de::DeserializeOwned>(
         }
         Err(error) if fractal_daemon::client::daemon_unreachable(&error).is_some() => {
             if json_output {
-                let message = doctor_cli::human_outage_message(&error)
+                let message = doctor_cli::outage_message(&error)
                     .unwrap_or_else(|| plain_error(&error));
                 print_value(&json!({"status": "fail", "checks": [{
                     "name": "daemon", "status": "fail", "message": message
@@ -10551,7 +10561,7 @@ async fn run_doctor(
             println!("{status}\tstartup\t{}", startup.summary());
         }
         for check in &report.checks {
-            println!("{}\t{}\t{}", check.status, check.name, check.message);
+            println!("{}\t{}\t{}", check.status, check.name, presentation::human_command_hints(&check.message));
         }
         print!("{}", render_performance(&report.performance));
     }
