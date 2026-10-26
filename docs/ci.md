@@ -1540,11 +1540,10 @@ branch deletion after merge. Check the live settings against the file with `gh-c
 nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/fractal --file .github/repo-settings.json
 ```
 
-A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no deletion, no update and
-no force push, an empty bypass list, creation open (CI and agents create records). Its enforcement is turned off only by
-`scripts/evidence-gc --lock-config`, around its own tag deletions, logged and relocked in a `finally`; see
-[gate evidence](st3/gate-evidence.md#garbage-collection-and-the-size-of-the-namespace). `gh-check-settings` reports it
-as drifted during that window.
+A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no update and no force push,
+an empty bypass list, creation open (CI and agents create records) and deletion open, so `scripts/evidence-gc` deletes
+dead trees with its host's own login; see
+[gate evidence](st3/gate-evidence.md#garbage-collection-and-the-size-of-the-namespace).
 
 `st/ci` is no longer required. Its producer on the fleet's machines is retired after the first
 pull request has merged through the queue.
