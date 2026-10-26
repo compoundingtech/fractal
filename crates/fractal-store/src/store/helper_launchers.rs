@@ -329,7 +329,7 @@ mod tests {
             claim.actor.as_deref(), &claim.body, &claim.predecessors)).unwrap();
         assert_eq!(classify_replicated_claim_with_registry(claim, fractal_schema::registry())
             .err().unwrap().code, "invalid-replicated-claim");
-        let _ = store.import_replication("peer", &replication);
+        assert_eq!(store.import_replication("peer", &replication).unwrap_err().code, "invalid-replicated-claim");
         assert!(store.claim_by_id(&replication.batches[0].claims[0].id).unwrap().is_none());
         assert!(store.helper_launcher_binding(&desired.subject).unwrap().is_none());
         assert_eq!(store.agent_person(&desired.subject).unwrap(), None);
@@ -388,7 +388,7 @@ mod tests {
         let helper = helper();
         let desired = helper.subjects.values().next().unwrap();
         store.bind_helper_launcher(desired, "create-helper", "agent/node.launcher", "codex").unwrap();
-        let claim = store.latest_claim(&desired.subject, Some("agent.launcher-bound")).unwrap().unwrap();
+        let claim = store.observations_for(&desired.subject, "agent.launcher-bound").unwrap().pop().unwrap();
         let forged = ClaimInput {
             subject: desired.subject.clone(), kind: claim.kind,
             actor: Some("agent/node.launcher".into()),
