@@ -1,1 +1,9 @@
 record 0c0a8336a46542ce77a4f1681ead0b186f80c9d6 linux-gate 1 fleet/ci 2026-10-26T05:27:07Z
+record 0f8bb7399600de59b5bc92f0d1b696f0344c72e1 ci-script-tests 0 fleet/ci 2026-10-26T05:32:20Z
+record 311307eb3711656a4ac4d752480938712d3bfdff typescript-client 0 fleet/ci 2026-10-26T05:34:22Z
+record 3b9c5a3af6374d8d7ba52593bcb62a4cded948d7 genie-freshness 0 fleet/ci 2026-10-26T05:30:44Z
+record 754ba3e874a3b098a87ac6458173841ca46a6433 linux-clippy 1 fleet/ci 2026-10-26T05:31:31Z
+record 82d677e73c3366006225898873ad423a04384620 linux-tests 0 fleet/ci 2026-10-26T05:44:42Z
+record 93be3a3e02fd4c7d0e95bf2f2ac0b4eda49d2bcf linux-tests-shard-2 100 fleet/ci 2026-10-26T05:45:43Z
+record 95df6fbe52d4ce2d492351fe60b74bf112e4abe4 linux-gate 1 fleet/ci 2026-10-26T05:46:50Z
+record fecb3ec81800272bfa2abe032026ffdad2390a06 linux-fleet-compat 0 fleet/ci 2026-10-26T05:32:16Z
