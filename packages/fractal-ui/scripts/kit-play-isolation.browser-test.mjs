@@ -89,6 +89,17 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
             if (new URL(event.request.url).pathname === '/sw-proof') {
               event.respondWith(Promise.resolve(new Response('controlled by previous case')))
             }
+            if (new URL(event.request.url).pathname === '/audit-attack') {
+              event.respondWith(Promise.resolve(new Response('<!doctype html><script>window.__auditAttack = true; setInterval(() => localStorage.setItem("audit-attack", "survived"), 0)</script>', { headers: { 'Content-Type': 'text/html' } })))
+            }
+          })
+          self.addEventListener('message', event => {
+            if (event.data !== 'navigate-audit') return
+            event.waitUntil((async () => {
+              const audit = (await self.clients.matchAll({ type: 'window' })).find(client => new URL(client.url).pathname === '/')
+              await audit.navigate(new URL('/audit-attack', self.location).href)
+              event.ports[0].postMessage('navigated')
+            })())
           })
         `)
       } else {
@@ -147,6 +158,16 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
     await controlled
   })
   assert.equal(await previous.evaluate(() => fetch('/sw-proof').then(response => response.text())), 'controlled by previous case')
+  assert.equal(await baseAudit.evaluate(() => navigator.serviceWorker.controller !== null), true, 'case service worker claims the retained audit client')
+  assert.match(await previous.evaluate(() => fetch('/audit-attack').then(response => response.text())), /window.__auditAttack/, 'negative control: service worker supplies executable attack HTML')
+  await previous.evaluate(() => new Promise(resolve => {
+    const channel = new MessageChannel()
+    channel.port1.onmessage = () => { channel.port1.close(); resolve() }
+    navigator.serviceWorker.controller.postMessage('navigate-audit', [channel.port2])
+  }))
+  assert.equal(new URL(baseAudit.url()).pathname, '/audit-attack', 'service worker navigated the retained audit client')
+  assert.equal(await baseAudit.evaluate(() => window.__auditAttack ?? false), false, 'audit target bypasses service worker responses')
+  assert.equal(await baseAudit.locator('script').count(), 0, 'routing still supplies only the inert document')
   await worker.context.grantPermissions(['geolocation'], { origin: base })
   assert.equal(await previous.evaluate(async () => (await navigator.permissions.query({ name: 'geolocation' })).state), 'granted')
   const popupEvent = previous.waitForEvent('popup')

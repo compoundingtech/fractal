@@ -64,6 +64,11 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
         let probe = auditPages.get(origin)
         if (!probe) {
           probe = await context.newPage()
+          // A case service worker can claim and navigate this client. Routing
+          // alone does not intercept SW responses, so bypass it on this target
+          // before any navigation. Every audit document remains script-free.
+          const probeClient = await context.newCDPSession(probe)
+          await probeClient.send('Network.setBypassServiceWorker', { bypass: true })
           await probe.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }))
           await probe.goto(origin)
           auditPages.set(origin, probe)
