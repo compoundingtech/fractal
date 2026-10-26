@@ -12150,6 +12150,15 @@ async fn renamed_agent_restart_and_native_report_resolve_aliases_before_lookup()
         if claim_id.is_null() { claim_id = claim["id"].clone(); }
         assert_eq!(claim["id"], claim_id);
     }
+    state.store.append_claim(&ClaimInput {
+        subject: "agent/example-restart-original/worker".into(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({
+            "status":"running", "incarnation_id":"native-incarnation",
+        })).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
     let mut report_id = Value::Null;
     for (subject, actor) in [
         ("agent/example-restart-renamed/worker", "agent/example-restart-original/worker"),

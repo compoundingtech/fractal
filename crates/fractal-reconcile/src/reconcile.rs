@@ -7513,7 +7513,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        let mut starting = member_fields(member, "starting", incarnation.as_deref(), false);
+        // Native drivers must bind before readiness can be established. Publish running
+        // authority at launch completion only for the physically observed incarnation
+        // owned by this start operation; readiness and restart completion remain separate.
+        let running = if let Some(incarnation) = incarnation.as_deref() {
+            self.runtime.observe_start(member)?.is_some_and(|observation| {
+                observation.status == "running"
+                    && observation.incarnation_id.as_deref() == Some(incarnation)
+            }) && self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+                .as_deref() == Some(operation_id)
+        } else {
+            false
+        };
+        let mut starting = member_fields(
+            member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
+        );
         if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
             && let Some(from) = actual_field(&previous, "restarting_from")
         {
