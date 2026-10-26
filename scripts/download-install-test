@@ -169,4 +169,10 @@ exec "{real}" "$@"
     assert result.returncode == 0 and 'Installed st3' in result.stdout and result.stderr == '', result
     assert sorted(p.name for p in legacy_bin.iterdir()) == ['RELEASE.json', 'pty', 'st', 'st3', 'st3-migrate', 'stui']
     assert '/download/v0.3.17/smalltalk-x86_64-unknown-linux-gnu.tar.gz' in (root / 'requests').read_text()
+    # Even a retained archive without its own guard cannot replace Nix-owned commands.
+    (legacy_bin / 'st3').unlink()
+    (legacy_bin / 'st3').symlink_to('/nix/store/missing-fractal/bin/st3')
+    result = install('--tag', 'v0.3.17', '--bin-dir', str(legacy_bin), '--no-run')
+    assert result.returncode != 0 and 'Nix-owned path' in result.stderr, result
+    assert (legacy_bin / 'st3').readlink() == Path('/nix/store/missing-fractal/bin/st3')
 print('Download installer integrity, visible install, launch and platform controls passed')

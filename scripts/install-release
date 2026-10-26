@@ -33,7 +33,7 @@ bin_dir=${bin_dir:-${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}
 # Check each hop: a Home Manager link can be dangling, and must still remain owned
 # by its package manager.
 refuse_nix_path() {
-  local path=$1 target parent hops=0
+  local path=$1 target parent resolved hops=0
   while :; do
     case "$path" in
       /nix/store/*|*/.nix-profile|*/.nix-profile/*|*/profiles/home-manager|*/profiles/home-manager/*|*/profiles/per-user/*)
@@ -41,11 +41,10 @@ refuse_nix_path() {
         exit 1 ;;
     esac
     parent=$(dirname "$path")
-    if [[ -d $parent ]]; then path="$(cd "$parent" && pwd -P)/$(basename "$path")"; fi
-    case "$path" in /nix/store/*)
-      printf 'install: refusing to overwrite Nix-owned path %s. Upgrade through the Home Manager configuration that owns this installation: https://fractal.how/docs/reference/home-manager\n' "$1" >&2
-      exit 1 ;;
-    esac
+    if [[ -d $parent ]]; then
+      resolved="$(cd "$parent" && pwd -P)/$(basename "$path")"
+      if [[ $resolved != "$path" ]]; then path=$resolved; continue; fi
+    fi
     [[ -L $path ]] || break
     ((hops+=1))
     [[ $hops -le 40 ]] || { printf 'install: cannot resolve installation link %s\n' "$1" >&2; exit 1; }

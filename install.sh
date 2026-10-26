@@ -33,6 +33,35 @@ case "$base" in
     http://127.0.0.1:*|http://localhost:*) protocol=https,http ;;
     *) printf 'install: release downloads need HTTPS\n' >&2; exit 2 ;;
 esac
+# Retained archives predate the package installer's ownership check. Keep this
+# preflight here too, so choosing an older tag cannot overwrite a Nix installation.
+refuse_nix_path() (
+    path=$1
+    hops=0
+    while :; do
+        case "$path" in
+            /nix/store/*|*/.nix-profile|*/.nix-profile/*|*/profiles/home-manager|*/profiles/home-manager/*|*/profiles/per-user/*)
+                printf 'install: refusing to overwrite Nix-owned path %s. Upgrade through the Home Manager configuration that owns this installation: https://fractal.how/docs/reference/home-manager\n' "$1" >&2
+                exit 1 ;;
+        esac
+        parent=$(dirname "$path")
+        if [ -d "$parent" ]; then
+            resolved="$(cd "$parent" && pwd -P)/$(basename "$path")"
+            if [ "$resolved" != "$path" ]; then path=$resolved; continue; fi
+        fi
+        [ -L "$path" ] || break
+        hops=$((hops + 1))
+        [ "$hops" -le 40 ] || { printf 'install: cannot resolve installation link %s\n' "$1" >&2; exit 1; }
+        link=$(readlink "$path")
+        case "$link" in /*) path=$link ;; *) path="$(dirname "$path")/$link" ;; esac
+    done
+)
+for name in st3 st pty fractal; do refuse_nix_path "$bin_dir/$name"; done
+if [ "$target" = aarch64-apple-darwin ]; then
+    install_home=${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME:-$HOME}}
+    app=${FRACTAL_MACOS_APP_PATH-${ST_MACOS_APP_PATH:-$install_home/Applications/SmallTalk.app}}
+    refuse_nix_path "$app"
+fi
 # Pin latest before downloading either asset, so the receipt and checksum name
 # the same release even when a new daily release is published during installation.
 if [ -z "$tag" ]; then
