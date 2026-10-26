@@ -72,6 +72,9 @@ pub(crate) fn inside_word(before: &str, after: &str) -> bool {
     joined_before || joined_after
 }
 
+/// A page's Markdown as drawn at one width.
+type Rendered = Rc<Vec<Line<'static>>>;
+
 #[derive(Default)]
 pub(crate) struct Documents {
     views: HashMap<String, DocumentView>,
@@ -89,7 +92,7 @@ pub(crate) struct Documents {
     chosen: HashMap<String, usize>,
     /// Each page's Markdown as drawn, by reference and width: a frame copies it rather than
     /// rendering the whole document again, so typing elsewhere stays as quick with a page shown.
-    rendered: RefCell<HashMap<(String, usize), Rc<Vec<Line<'static>>>>>,
+    rendered: RefCell<HashMap<(String, usize), Rendered>>,
 }
 
 fn list_key(prefix: Option<&str>) -> String {
