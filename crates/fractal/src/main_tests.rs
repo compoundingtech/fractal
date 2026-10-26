@@ -3752,6 +3752,27 @@ fn provider_capacity_backoff_is_bounded_deterministic_and_increases() {
     );
 }
 
+/// The model at capacity is retried whatever the turn shows; a 429 or a failing connection only
+/// once the seat is idle, since an active turn is still its harness's own to retry.
+#[test]
+fn a_provider_retry_is_owed_for_capacity_and_for_an_idle_rate_limit_or_connection() {
+    use fractal_drivers::harness_state::Activity;
+    assert_eq!(
+        provider_retry_cause(Activity::Idle, Some("providerCapacity")),
+        Some("providerCapacity")
+    );
+    for cause in ["rateLimited", "connection"] {
+        assert_eq!(provider_retry_cause(Activity::Idle, Some(cause)), Some(cause));
+        assert_eq!(provider_retry_cause(Activity::Active, Some(cause)), None, "{cause}");
+        assert_eq!(provider_retry_cause(Activity::Ended, Some(cause)), None, "{cause}");
+    }
+    assert_eq!(provider_retry_cause(Activity::Idle, Some("usageLimit")), None);
+    assert_eq!(provider_retry_cause(Activity::Idle, None), None);
+    let (waiting, exhausted) = provider_retry_reasons("rateLimited");
+    assert!(waiting.contains("429") && waiting.contains("resume this session"));
+    assert!(exhausted.contains("retry limit"));
+}
+
 #[test]
 fn context_occupancy_alone_is_not_reported_as_zero_tokens() {
     let mut page = fixture_product_page(&["session"], false);

@@ -383,6 +383,15 @@ fn codex_error_class(
     Some((reason, class, word.to_string()))
 }
 
+/// The HTTP status a single-key `CodexErrorInfo` object carries, such as
+/// `{"responseTooManyFailedAttempts":{"httpStatusCode":429}}`.
+fn codex_http_status(error_info: Option<&Value>) -> Option<u64> {
+    let Some(Value::Object(map)) = error_info else {
+        return None;
+    };
+    map.values().next()?.get("httpStatusCode")?.as_u64()
+}
+
 /// The `CodexErrorInfo` word that names a rejected provider credential.
 ///
 /// It is the 401/invalid-credential arm of Codex's own closed error vocabulary and is distinct
@@ -1187,8 +1196,9 @@ impl CodexInboxDelivery {
     /// Let a standing turn error name itself in the observed record.
     ///
     /// The delivery-relevant [`CodexObservedState`] is untouched: a hold still blocks delivery,
-    /// and a terminal turn still permits `turn/start`. Once a retryable connection turn is proven
-    /// ended, its thread can accept another turn, so the incarnation remains idle with its cause.
+    /// and a terminal turn still permits `turn/start`. Once a connection-class turn (a dropped
+    /// stream, or a 429 Codex stopped retrying) is proven ended, its thread can accept another
+    /// turn, so the incarnation remains idle with its cause: `connection` or `rateLimited`.
     ///
     /// The rule is that the CAUSE outranks the ACTIVITY. `active` with no reason, `ended` with the
     /// bare word `systemError`, and every hold reason describe what kind of work the thread
@@ -1210,16 +1220,17 @@ impl CodexInboxDelivery {
         {
             return observation;
         }
-        // `systemError` describes the failed turn, not the app-server's lifetime. A typed
-        // retryable connection failure can start a new turn on the same thread (Codex 0.160.1).
-        // While Codex still owns an active retry or a hold, leave the activity alone.
+        // `systemError` describes the failed turn, not the app-server's lifetime. A turn that
+        // failed on a typed connection cause, including a 429 after Codex used up its own few
+        // retries, leaves a thread that takes the next turn (Codex 0.160.1): the incarnation stays
+        // idle with its cause, and st's provider backoff resumes it. While Codex still owns an
+        // active retry or a hold, leave the activity alone.
         if matches!(
             observed,
             CodexObservedState::TerminalError {
                 reason: CodexTerminalError::SystemError,
             }
         ) && error.reason == driver_diagnostic::Reason::TurnConnection
-            && error.will_retry
         {
             observation.state = Activity::Idle;
         }
@@ -1272,6 +1283,15 @@ impl CodexInboxDelivery {
                     // The credential arm. `observe_provider_auth` owns it from `turn/completed`,
                     // where the same rejection arrives with the turn's own typed result.
                     return false;
+                };
+                // A connection-class failure whose last HTTP status was 429 is the provider
+                // refusing for now, which a reader acts on differently from a broken network.
+                let word = if reason == driver_diagnostic::Reason::TurnConnection
+                    && codex_http_status(error.get("codexErrorInfo")) == Some(429)
+                {
+                    "rateLimited"
+                } else {
+                    word
                 };
                 // Codex 0.160.1 reduces an exhausted responseStreamDisconnected retry to
                 // `other` on its final error notification. That generic frame does not refute

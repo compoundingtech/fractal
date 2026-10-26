@@ -3998,15 +3998,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .get("incarnation_id")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let same_capacity_session =
-                self.store
-                    .current_harness(&subject.subject)?
-                    .is_some_and(|harness| {
-                        harness.incarnation_id == incarnation
-                            && harness.state == "idle"
-                            && harness.reason.as_deref() == Some("providerCapacity")
-                    });
-            if !same_capacity_session {
+            // What refused the turn, read from the seat's current reason: the model at capacity,
+            // a 429 the harness stopped retrying, or a failing connection.
+            let cause = self
+                .store
+                .current_harness(&subject.subject)?
+                .filter(|harness| harness.incarnation_id == incarnation && harness.state == "idle")
+                .and_then(|harness| harness.reason)
+                .filter(|reason| matches!(reason.as_str(), "providerCapacity" | "rateLimited" | "connection"));
+            let Some(cause) = cause.as_deref() else {
                 self.store.append_claim(&ClaimInput {
                     subject: subject.subject.clone(),
                     kind: "publication.operation".into(),
@@ -4028,7 +4028,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })?;
                 self.signal_changed();
                 continue;
-            }
+            };
             let attempt = fields
                 .get("retry_attempt")
                 .and_then(Value::as_u64)
@@ -4049,7 +4049,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     (
                         "content".into(),
                         Value::String(format!(
-                            "The provider-capacity backoff elapsed.{work_context} Resume in this existing session; do not create a replacement worker."
+                            "The {} backoff elapsed.{work_context} Resume in this existing session; do not create a replacement worker.",
+                            match cause {
+                                "rateLimited" => "rate-limit (429 Too Many Requests)",
+                                "connection" => "provider-connection",
+                                _ => "provider-capacity",
+                            }
                         )),
                     ),
                     (
@@ -4059,7 +4064,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     (
                         "title".into(),
                         Value::String(format!(
-                            "Provider capacity retry {attempt}"
+                            "{} retry {attempt}",
+                            match cause {
+                                "rateLimited" => "Rate limit",
+                                "connection" => "Provider connection",
+                                _ => "Provider capacity",
+                            }
                         )),
                     ),
                     ("in_reply_to".into(), Value::Null),
@@ -45298,6 +45308,93 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
                 .unwrap()
                 .is_some(),
             "the stale retry must be durably consumed"
+        );
+    }
+
+    /// A 429 the harness stopped retrying is backed off and resumed in the same session, as the
+    /// model at capacity is; a seat that has since moved on is not resumed again.
+    #[test]
+    fn a_due_rate_limit_retry_resumes_the_same_session_until_the_seat_recovers() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+agent "worker" { workspace "/tmp"; command "true"; restart "never" }
+"#,
+            "rate-limit-worker",
+        );
+        let append = |kind: &str, fields: Value, key: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: "agent/node.worker".into(),
+                    kind: kind.into(),
+                    actor: Some("agent/node.worker".into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(key.into()),
+                })
+                .unwrap()
+        };
+        let diagnostic = |attempt: u64, key: &str| {
+            append(
+                "harness.diagnostic",
+                serde_json::json!({"severity": "warning", "status": "waiting",
+                    "code": "provider-capacity",
+                    "reason": "the provider answered 429 Too Many Requests",
+                    "incarnation_id": "worker-one", "retry_attempt": attempt,
+                    "retry_after_unix_ms": 0}),
+                key,
+            )
+        };
+        append(
+            "runtime.observed",
+            serde_json::json!({"status": "running", "runtime_id": "worker", "incarnation_id": "worker-one"}),
+            "rate-limit-runtime",
+        );
+        append(
+            "harness.observed",
+            serde_json::json!({"state": "idle", "driver": "codex", "incarnation_id": "worker-one", "reason": "rateLimited"}),
+            "rate-limited-harness",
+        );
+        let first = diagnostic(1, "rate-limit-diagnostic-1");
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let desired = store.desired_subjects().unwrap();
+        reconciler
+            .reconcile_provider_capacity_retries(&desired)
+            .unwrap();
+        let messages = store.messages(Some("agent/node.worker"), true).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0].content.contains("429 Too Many Requests")
+                && messages[0].content.contains("existing session"),
+            "{}",
+            messages[0].content
+        );
+        assert!(messages[0].tags.contains(&format!("diagnostic-claim:{}", first.id)));
+
+        // The resumed turn went through: a later due retry for this incarnation is not sent.
+        append(
+            "harness.observed",
+            serde_json::json!({"state": "idle", "driver": "codex", "incarnation_id": "worker-one", "reason": null}),
+            "recovered-harness",
+        );
+        let later = diagnostic(2, "rate-limit-diagnostic-2");
+        reconciler
+            .reconcile_provider_capacity_retries(&desired)
+            .unwrap();
+        assert_eq!(store.messages(Some("agent/node.worker"), true).unwrap().len(), 1);
+        assert!(
+            store
+                .operation_claim(&provider_capacity_retry_key(&later.id))
+                .unwrap()
+                .is_some(),
+            "the retry a recovered seat no longer needs is durably consumed"
         );
     }
 
