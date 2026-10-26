@@ -760,6 +760,97 @@ pub fn record_mailbox_fence_check(caller: MailboxFenceCaller, elapsed: Duration)
     MAILBOX_FENCE_DURATION.record(elapsed.as_secs_f64(), &attributes);
 }
 
+static GITHUB_RESPONSES: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3.github")
+            .u64_counter("st.github.responses")
+            .with_description("Observer HTTP responses, split into non-304 and conditional 304 responses")
+            .with_unit("{response}")
+            .build()
+    });
+
+/// Response counts, not admission reservations or GraphQL point costs. The daemon's
+/// `host.name` resource attribute supplies the host; repository names come only from
+/// standing observer subjects, never from request URLs or credentials.
+pub fn github_response(repository: &str, resource: String, not_modified: bool) {
+    if !metrics_enabled() {
+        return;
+    }
+    record_github_response_metric(&GITHUB_RESPONSES, repository, resource, not_modified);
+}
+
+fn record_github_response_metric(
+    counter: &opentelemetry::metrics::Counter<u64>,
+    repository: &str,
+    resource: String,
+    not_modified: bool,
+) {
+    counter.add(1, &[
+        KeyValue::new("github.repository", repository.to_owned()),
+        KeyValue::new("github.resource", resource),
+        KeyValue::new("github.response.kind", if not_modified { "not_modified" } else { "charged" }),
+    ]);
+}
+
+#[cfg(test)]
+mod github_response_metrics {
+    use super::*;
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::{
+        InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        data::{AggregatedMetrics, MetricData},
+    };
+
+    #[test]
+    fn github_response_counter_splits_conditional_hits_by_repository_and_resource() {
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_resource(opentelemetry_sdk::Resource::builder_empty()
+                .with_attribute(KeyValue::new("host.name", "example-host")).build())
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        let counter = provider.meter("st3.github").u64_counter("st.github.responses").build();
+        for (repo, resource, not_modified) in [
+            ("acme/garden", "core", false),
+            ("acme/garden", "core", false),
+            ("acme/garden", "core", true),
+            ("acme/garden", "graphql", false),
+            ("acme/orchid", "core", true),
+        ] {
+            record_github_response_metric(&counter, repo, resource.into(), not_modified);
+        }
+        provider.force_flush().unwrap();
+        let metrics = exporter.get_finished_metrics().unwrap();
+        let mut counts = std::collections::BTreeMap::new();
+        for batch in &metrics {
+            assert_eq!(batch.resource().get(&opentelemetry::Key::from_static_str("host.name")),
+                Some(opentelemetry::Value::from("example-host")));
+            for metric in batch.scope_metrics().flat_map(|scope| scope.metrics()) {
+                let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                    panic!("response metric must be a u64 counter");
+                };
+                assert!(sum.is_monotonic());
+                for point in sum.data_points() {
+                    let attributes = point.attributes().map(|kv| (kv.key.as_str(), kv.value.to_string()))
+                        .collect::<std::collections::BTreeMap<_, _>>();
+                    counts.insert((
+                        attributes["github.repository"].clone(),
+                        attributes["github.resource"].clone(),
+                        attributes["github.response.kind"].clone(),
+                    ), point.value());
+                }
+            }
+        }
+        assert_eq!(counts, std::collections::BTreeMap::from([
+            (("acme/garden".into(), "core".into(), "charged".into()), 2),
+            (("acme/garden".into(), "core".into(), "not_modified".into()), 1),
+            (("acme/garden".into(), "graphql".into(), "charged".into()), 1),
+            (("acme/orchid".into(), "core".into(), "not_modified".into()), 1),
+        ]));
+        provider.shutdown().unwrap();
+    }
+}
+
 
 /// Request totals stay on the SERVER span, without sub-millisecond noise.
 pub fn record_writer_wait(server: &tracing::Span, (wait_ms, ops): (f64, u64)) {

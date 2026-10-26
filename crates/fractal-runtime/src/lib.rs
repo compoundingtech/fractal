@@ -17,6 +17,7 @@ mod priority;
 mod process;
 mod procfs;
 mod pty;
+mod pty_launcher;
 #[path = "../../pty-launch-environment.rs"]
 mod pty_launch_environment;
 

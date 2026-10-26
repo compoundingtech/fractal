@@ -232,7 +232,8 @@ const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) =>
   await expect(handle.textContent).not.toContain('!')
   await expect(port.querySelector('[data-row-field="question"]')).toHaveTextContent('Pick hover scope')
   await expect(port.querySelector('[data-row-column="attention"]')).toBeNull()
-  await expect(port.querySelector('[data-row-column="signal"]')!.textContent).toBe('')
+  // An empty signal reserves no slot at all.
+  await expect(port.querySelector('[data-row-column="signal"]')).toBeNull()
   // Waiting without a handle shows the question alone.
   const docs = designedRow(canvasElement, 'Refresh the API docs')
   await expect(docs.querySelector('[data-q-handle]')).toBeNull()

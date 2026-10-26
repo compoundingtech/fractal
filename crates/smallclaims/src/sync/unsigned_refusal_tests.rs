@@ -111,6 +111,28 @@ async fn an_unsigned_success_still_fails_authentication() {
 }
 
 #[tokio::test]
+async fn an_invalid_hmac_preserves_auth_failure_display_with_timing_metadata() {
+    let error = answered_error(|request: Bytes| {
+        let body = serde_json::to_vec(&PeerResponse::new(
+            PEER, 0, serde_json::json!({}),
+        )).unwrap();
+        let headers = FleetAuth::test(FLEET, &[8; 32])
+            .response_headers_for(
+                EXCHANGE_PATH, PEER, &body, &FleetAuth::body_digest(&request),
+            ).unwrap();
+        let mut response = (AnswerStatus::OK, body).into_response();
+        response.headers_mut().extend(headers);
+        response
+    }).await;
+    // dial_peer classifies this display as auth-failed, not down.
+    assert_eq!(error.to_string(), "the replication signature does not match");
+    let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+    assert_eq!(failure.phase, ReplicationFailurePhase::Verify);
+    assert_eq!(failure.client_stage, Some(crate::replication::ReplicationClientStage::HeadersReceived));
+    assert!(failure.correlation_id.is_some());
+}
+
+#[tokio::test]
 async fn a_signed_refusal_retains_only_allowlisted_machine_diagnostics() {
     let error = answered_error(|request: Bytes| {
         let body = serde_json::to_vec(&PeerResponse::new(

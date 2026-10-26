@@ -74,6 +74,29 @@ class CiLocalWeb(unittest.TestCase):
             self.assertEqual(call['umask'], 0o022)
         self.assertEqual(list((self.home / '.cache/ci-local').glob('web.*')), [], 'the scratch is removed afterwards')
 
+    def test_on_a_host_with_build_admission_the_plays_wait_for_a_heavy_slot_and_take_their_share_of_the_cores(self):
+        admission = self.wrappers / 'build-admission'
+        admission.write_text('#!/usr/bin/env bash\nexec "$@"\n')
+        admission.chmod(0o755)
+        (self.home / '.config').mkdir(parents=True, exist_ok=True)
+        (self.home / '.config/cargo-heavy-slots').write_text('2\n')
+        done, calls = self.run_web(KIT_PLAY_WORKERS='99')  # the caller's own value never reaches the plays
+        self.assertEqual(done.returncode, 0, done.stderr)
+        env = calls[-1]['env']
+        self.assertEqual(env['KIT_PLAY_ADMISSION_BIN'], str(admission))
+        self.assertEqual(env['KIT_PLAY_WORKERS'], str(max(1, len(os.sched_getaffinity(0)) // 2)))
+        # The admission program reads its limits and queue under the account's home, which the stages' HOME hides.
+        self.assertEqual(env['BUILD_ADMISSION_CONFIG'], f'{self.home}/.config/build-admission')
+        self.assertEqual(env['BUILD_ADMISSION_STATE'], f'{self.home}/.local/state/st3/operations')
+
+    def test_without_build_admission_the_plays_run_as_ci_runs_them(self):
+        done, calls = self.run_web(KIT_PLAY_WORKERS='99')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        env = calls[-1]['env']
+        self.assertEqual(env['KIT_PLAY_ADMISSION_BIN'], '')
+        self.assertEqual(env['KIT_PLAY_WORKERS'], str(len(os.sched_getaffinity(0))))  # one heavy slot when the host names none
+        self.assertNotIn('BUILD_ADMISSION_CONFIG', env)
+
     def test_the_host_watchman_service_is_named_by_its_socket(self):
         user = subprocess.run(['id', '-un'], capture_output=True, text=True, check=True).stdout.strip()
         state = self.home / '.local/state/watchman' / f'{user}-state'

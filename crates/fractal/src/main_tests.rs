@@ -2445,6 +2445,15 @@ fn every_cli_command_has_a_valid_help_surface() {
                 "{} contains legacy product wording: {line}",
                 path.join(" ")
             );
+            if !line.trim_start().starts_with("Usage:") {
+                assert!(
+                    !line.split_whitespace().any(|word| {
+                        matches!(word.trim_matches(['`', '.', ',', ';', ':']), "seat" | "seats" | "seat's" | "Seat" | "Seats")
+                    }),
+                    "{} contains legacy agent terminology: {line}",
+                    path.join(" ")
+                );
+            }
         }
         let subcommands = command.get_subcommands().cloned().collect::<Vec<_>>();
         for subcommand in subcommands {
@@ -2469,6 +2478,28 @@ fn every_cli_command_has_a_valid_help_surface() {
     let command = Cli::command();
     command.clone().debug_assert();
     visit(&command, &["fractal".into()]);
+}
+
+#[test]
+fn web_help_hides_only_its_unsupported_inherited_global_options() {
+    let command = cli_command();
+    let globals = command.get_arguments()
+        .filter(|argument| argument.is_global_set())
+        .collect::<Vec<_>>();
+    assert_eq!(globals.len(), 7);
+    let web = command.find_subcommand("web").unwrap();
+    for argument in globals {
+        let id = argument.get_id().as_str();
+        assert!(web.get_arguments().find(|arg| arg.get_id().as_str() == id).unwrap().is_hide_set(), "{id}");
+    }
+    let mut setup = command.find_subcommand("setup").unwrap().clone();
+    assert!(setup.render_long_help().to_string().contains("--endpoint"));
+    let mut web = web.clone();
+    let help = web.render_long_help().to_string();
+    assert!(help.contains("--state-dir"));
+    assert!(help.contains("--help"));
+    assert!(!help.contains("--endpoint"));
+    assert!(!help.contains("--instance"));
 }
 
 #[test]
@@ -2654,6 +2685,8 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
 fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     #[cfg(test)]
     const SCHEDULES_SOURCE: &str = include_str!("schedules_cli.rs");
+    #[cfg(test)]
+    const DEPLOY_SOURCE: &str = include_str!("deploy_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -2661,6 +2694,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
+        ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
         ("driver", /* sqlite-large-value: allow-for-now lv-he57a4ce28014 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
         ("fleet", /* sqlite-large-value: allow-for-now lv-hc13a087df895 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
