@@ -1,0 +1,9 @@
+record 032615eae7fb8920afcea5ca993539cda43286fb genie-freshness 0 fleet/ci 2026-10-26T08:09:56Z
+record 0b0bac863e3ff2867bff70f65f653d3d04077bc1 ci-script-tests 0 fleet/ci 2026-10-26T08:11:33Z
+record 2d5101e0629b98942f9930babadb904f4b02ffac fractal-web 0 fleet/ci 2026-10-26T08:19:21Z
+record 33f78bc52aba50fd6459a80d27e13c8db731635d linux-fleet-compat 0 fleet/ci 2026-10-26T08:11:41Z
+record 524df7b984e420a6d5950aa31c7c4268276abdfb linux-tests 0 fleet/ci 2026-10-26T08:24:31Z
+record a8da51bb3a9f0abf7ee15db34cfd7b35b9692255 typescript-client 0 fleet/ci 2026-10-26T08:13:27Z
+record ce094e00e8a8aabfeeb28b987537385f84db8c51 linux-clippy 0 fleet/ci 2026-10-26T08:10:25Z
+record ceddc84ca1fa474af485f3ae142d6af4f04a730c linux-gate 1 fleet/ci 2026-10-26T08:33:23Z
+record e2172c530698426c5ecc022b7ec13853e32e516f fractal-web 0 fleet/ci 2026-10-26T08:33:26Z
