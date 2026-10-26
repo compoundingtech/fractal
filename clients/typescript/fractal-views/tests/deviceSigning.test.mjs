@@ -53,6 +53,11 @@ assert.match(signatureRefusal('device-key-not-enrolled', 'phone'), /pair the pho
 assert.equal(signatureRefusal('stale-fence'), null);
 
 assert.match(signatureRefusal('device-key-not-enrolled'), /pair the device again/);
+assert.equal(signatureRefusal('device-signature-replayed'), 'Fractal already has a message signed with this one-time number; send it again as a new message');
+assert.equal(signatureRefusal('device-key-not-enrolled', 'phone'), 'Fractal does not know this phone\'s signing key; pair the phone again');
+assert.equal(signatureRefusal('device-signature-invalid'), 'Fractal could not verify this device\'s signature on the message');
+assert.equal(signatureRefusal('device-signature-format'), 'Fractal expects a different signature format; this app or Fractal needs an update');
+assert.equal(signatureRefusal('device-signature-signer'), 'this device signs as a different person than it is paired as; pair it again');
 
 // A long message signs its preview, the hash and the length of the whole text.
 assert.ok(vectors.cases.some(vector => vector.name === 'long'), 'the shared vectors have a long case');
