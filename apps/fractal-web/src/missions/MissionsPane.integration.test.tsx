@@ -32,7 +32,7 @@ it('lists missions by word with who must act, folds away st\'s own, and opens a 
   const root = createRoot(container)
   const onOpenAgent = vi.fn()
   await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
-  expect(container.textContent).toContain('Loading missions…')
+  expect(container.querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading missions')
   data.agents = { _tag: 'Observed', value: [{ id: 'agent/example/builder', name: 'builder', state: 'running', fault: Option.none(), next_work_id: Option.none(), upcoming_work_ids: [], current_work: [] }], freshness: 'live' }
   data.missions = { _tag: 'Observed', freshness: 'live', value: [
     mission('mission/example/build', 'Build the site', 'running', [step('compile', 'claimed', 'agent/example/builder'), step('ship', 'pending')]),
@@ -46,6 +46,7 @@ it('lists missions by word with who must act, folds away st\'s own, and opens a 
   await act(async () => (container.querySelector('li > button') as HTMLElement).click())
   await act(async () => [...container.querySelectorAll('button')].find((each) => each.textContent === 'Show all (1 more)')!.click())
   expect([...container.querySelectorAll('li > button')].map((row) => row.textContent?.includes('st loop'))).toContain(true)
+  expect(container.textContent).toContain('Hide settled and Fractal’s own')
   const detail = container.querySelector('[aria-label="Fix the parser steps"]')!
   expect(detail.textContent).toContain('a step has an owner who is not moving')
   expect(detail.textContent).toContain('Do parse')

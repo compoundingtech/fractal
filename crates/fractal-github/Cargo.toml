@@ -1,0 +1,32 @@
+[package]
+name = "fractal-github"
+version = "0.1.0"
+edition = "2024"
+description = "The GitHub domain: the git change index and service, repository subjects, and seat watches"
+license = "MIT"
+
+[features]
+# Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
+test-support = ["fractal-evidence/test-support"]
+
+[dependencies]
+fractal-evidence = { path = "../fractal-evidence" }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+getrandom = "0.3"
+hex = "0.4"
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+smallclaims = { path = "../smallclaims" }
+tempfile = "3"
+tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+fractal_github_self = { package = "fractal-github", path = ".", features = ["test-support"] }
+smallclaims = { path = "../smallclaims", features = ["test-support"] }
+tokio = { version = "1", features = ["test-util"] }
