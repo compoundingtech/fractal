@@ -104,6 +104,12 @@ class CiLocal(unittest.TestCase):
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_HEAVY_SLOTS='1', BUILD_ADMISSION_STATE='/elsewhere')
         self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
 
+    def test_the_stages_build_without_debug_info_as_ci_does(self):
+        done, calls = self.run_local('mail-redelivery-canaries', CARGO_PROFILE_TEST_DEBUG='1')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for call in calls:
+            self.assertEqual((call['env'].get('CARGO_PROFILE_DEV_DEBUG'), call['env'].get('CARGO_PROFILE_TEST_DEBUG')), ('0', '0'))
+
     def test_the_stages_run_in_a_home_of_their_own_without_the_account_s_variables(self):
         done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2',
                                      RUSTC_WRAPPER='/nix/store/x-sccache/bin/sccache', CARGO_BUILD_RUSTC_WRAPPER='sccache')
