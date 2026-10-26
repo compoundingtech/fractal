@@ -79,6 +79,7 @@ export type ActionResult = {
   action_id: Id;
   affected_ids: Array<Id>;
   arrangement_revision?: Revision;
+  harness_answer?: HarnessAnswerResult;
   kind: "action-result";
   operation_id: Id;
   snapshot_id: Id;
@@ -1546,6 +1547,8 @@ export type ErrorCode = (
   | "invalid-document-reference"
   | "document-not-synced"
   | "internal"
+  | "invalid-answer"
+  | "not-answerable"
  | string);
 
 export type ErrorEnvelope = {
@@ -1630,6 +1633,37 @@ export type GlassTab = {
 
 export type GoldenResourceSet = Array<Resource>;
 
+export type HarnessAnswerInput = {
+  positions: Array<number>;
+};
+
+export type HarnessAnswerParameters = {
+  answers: {
+  [key: string]: HarnessAnswerInput;
+};
+  question: string;
+};
+
+export type HarnessAnswerResult = {
+  resolution: HarnessQuestionResolution;
+  status: ("accepted" | "already_resolved" | string);
+};
+
+export type HarnessInvalidAnswerDetails = {
+  reason: HarnessInvalidAnswerReason;
+};
+
+export type HarnessInvalidAnswerReason = 
+  "unknown_option"
+  | "too_many"
+  | "required_missing"
+  | "empty_single"
+  | "too_long"
+  | "unknown_question"
+  | "other_not_allowed"
+  | "note_not_allowed"
+;
+
 export type HarnessInventory = {
   agent_id: string;
   collection: "files" | "skills" | "skill-commands" | "slash-commands";
@@ -1665,9 +1699,54 @@ export type HarnessInventoryQuery = {
   session_id: string;
 };
 
+export type HarnessNotAnswerableDetails = {
+  reason: "adapter_missing" | "adapter_unavailable";
+};
+
 export type HarnessPhase = {
   name: string;
   tasks: Array<HarnessTask>;
+};
+
+export type HarnessQuestion = ResourceHeader & {
+  agent: AgentId;
+  answer: HarnessQuestionAnswerability;
+  id?: string;
+  kind: "harness-question";
+  native_id: string;
+  observed_at: number;
+  questions: Array<HarnessQuestionItem>;
+  resolution: (HarnessQuestionResolution | null);
+  runtime_incarnation: string;
+  session: string;
+};
+
+export type HarnessQuestionAnswerability = {
+  reason?: HarnessQuestionAnswerabilityReason;
+  state: ("available" | "unavailable" | string);
+};
+
+export type HarnessQuestionAnswerabilityReason = ("adapter_missing" | "adapter_unavailable" | "resolved" | string);
+
+export type HarnessQuestionItem = {
+  id: string;
+  multi: boolean;
+  options: number;
+  required: boolean;
+};
+
+export type HarnessQuestionResolution = {
+  answers: {
+  [key: string]: HarnessResolvedAnswer;
+};
+  resolved_at: number;
+  revision: Revision;
+  status: ("answered" | "answered_elsewhere" | "expired" | "cancelled" | string);
+};
+
+export type HarnessResolvedAnswer = {
+  positions: Array<number>;
+  timed_out: boolean;
 };
 
 export type HarnessTask = {
@@ -2490,7 +2569,7 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
+export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
 
 export type ResourceHeader = {
   id: Id;
@@ -3687,6 +3766,7 @@ export type ActionRequest =
   reason?: string;
 }; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'custom.reply'; parameters: CustomReplyParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'harness.answer'; parameters: HarnessAnswerParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.approve'; parameters: {
   anchor_id?: Id;
   detail?: string;

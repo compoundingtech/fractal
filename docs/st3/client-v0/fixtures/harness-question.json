@@ -1,0 +1,35 @@
+{
+  "api_version": "st3.client.v0",
+  "request_id": "request/alex-question",
+  "snapshot": {
+    "id": "snapshot/fixture/42/abcd",
+    "host_id": "host/fixture",
+    "store_index": 42,
+    "projection_version": "client-projection.v0",
+    "created_at": "2026-10-26T10:00:00.000Z"
+  },
+  "value": {
+    "kind": "harness-question",
+    "id": "harness-question/00ca25ee5d0da6af852c81a5ee4949df",
+    "revision": "claim/ada-observed",
+    "updated_at": "2026-10-26T10:00:00.000Z",
+    "agent": "agent/ada",
+    "session": "ada-session",
+    "native_id": "sha256:093544282caa361e7931d2489d0ec671003b50e9cb1d8e7cf2d600d25e9595eb",
+    "runtime_incarnation": "ada-incarnation-1",
+    "questions": [
+      {
+        "id": "q0",
+        "options": 2,
+        "multi": false,
+        "required": true
+      }
+    ],
+    "observed_at": 1793008800000,
+    "resolution": null,
+    "answer": {
+      "state": "unavailable",
+      "reason": "adapter_missing"
+    }
+  }
+}

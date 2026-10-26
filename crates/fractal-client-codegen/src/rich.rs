@@ -36,6 +36,7 @@ const KEYWORDS: &[&str] = &[
     "format",
     "contains",
     "propertyNames",
+    "maxProperties",
     "maxItems",
     "uniqueItems",
     "x-st-ref",
@@ -1059,6 +1060,10 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
         Some(schema) => Some(emit(schema, cx)?),
     };
     let mut checks = vec![];
+    if let Some(max) = object.get("maxProperties") {
+        let max = max.as_u64().context("maximum object property count")?;
+        checks.push(format!("Schema.makeFilter((o: object) => Object.keys(o).length <= {max}, {{ expected: \"at most {max} properties\" }})"));
+    }
     if let Some(conditions) = object.get("x-st-conditions") {
         for condition in conditions.as_array().context("object conditions")? {
             let condition = condition.as_object().context("object condition")?;
@@ -1836,6 +1841,26 @@ mod tests {
         unsupported["$defs"]["Entry"]["allOf"][1]["then"]["properties"]["tags"] =
             json!({ "uniqueItems": true });
         assert!(models(&unsupported).is_err());
+    }
+
+    #[test]
+    fn harness_answer_maps_preserve_key_vocabulary_and_property_bound() {
+        let schema = json!({"x-st-integers": "json-safe", "$defs": {
+            "Answers": {
+                "type": "object", "maxProperties": 16,
+                "propertyNames": {"type": "string", "pattern": "^(q([0-9]|1[0-5])|sha256:[0-9a-f]{64})$"},
+                "additionalProperties": {"type": "object", "additionalProperties": false,
+                    "required": ["positions"], "properties": {
+                        "positions": {"type": "array", "maxItems": 64, "uniqueItems": true,
+                            "items": {"type": "integer", "minimum": 0, "maximum": 63}}
+                    }}
+            }
+        }});
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("Object.keys(o).length <= 16"));
+        assert!(generated.contains("Object.keys(o).every(Schema.is("));
+        assert!(generated.contains("Schema.isMaxLength(64)"));
+        assert!(generated.contains("Schema.isUnique()"));
     }
 
     #[test]
