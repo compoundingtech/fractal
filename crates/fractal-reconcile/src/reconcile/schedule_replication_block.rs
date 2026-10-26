@@ -236,9 +236,24 @@ mission "orchard" state="ready" {
             requester: None, mode: Some("run".into()), inputs: BTreeMap::new(),
             idempotency_key: "active-orchard".into(),
         }).unwrap();
+        let request = store.append_claim(&ClaimInput {
+            subject: schedule.subject.clone(), kind: "schedule.work-requested".into(), actor: None,
+            fields: BTreeMap::from([
+                ("revision".into(), Value::String(store.selected_desired_revision(&schedule.subject).unwrap().unwrap())),
+                ("occurrence".into(), Value::from(0)),
+                ("mission".into(), Value::String("mission/orchard".into())),
+                ("mission_revision".into(), Value::String(run.revision)),
+                ("workspace".into(), Value::String(root.path().display().to_string())),
+                ("inputs".into(), serde_json::json!({})),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("requested-orchard".into()),
+        }).unwrap();
         store.append_claim(&ClaimInput {
             subject: schedule.subject.clone(), kind: "schedule.work-started".into(), actor: None,
-            fields: BTreeMap::from([("mission_run".into(), Value::String(run.subject))]),
+            fields: BTreeMap::from([
+                ("request".into(), Value::String(request.id)),
+                ("mission_run".into(), Value::String(run.subject)),
+            ]),
             evidence: vec![], expected_subject: None, idempotency_key: Some("started-orchard".into()),
         }).unwrap();
         assert!(store.schedule_has_active_started_run(&schedule.subject).unwrap());
