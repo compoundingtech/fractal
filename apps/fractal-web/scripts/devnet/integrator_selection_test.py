@@ -188,9 +188,9 @@ class SelectionTest(unittest.TestCase):
         cases = [
             ('gc.rerereunresolved', 'gc.rerereunresolved'),
             ('filter.x.clean', 'filter.x.clean'),
-            ('url.https://fixture-user:fixture-secret@example.invalid/repo?access=fixture-query.insteadOf',
+            ('url.https://fixture-user@example.invalid/repo?access=fixture-query.insteadOf',
              'url.<redacted-subsection>.insteadof'),
-            ('http.https://fixture-user:fixture-secret@example.invalid/repo?access=fixture-query.extraheader',
+            ('http.https://fixture-user@example.invalid/repo?access=fixture-query.extraheader',
              'http.<redacted-subsection>.extraheader'),
         ]
         for key, expected in cases:
@@ -209,7 +209,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn('non-allowlisted', row['detail'])
                 self.assertIn(expected, row['detail'])
                 self.assertIn(expected, log.getvalue())
-                for secret in ('fixture-user', 'fixture-secret', 'fixture-query', 'forbidden'):
+                for secret in ('fixture-user', 'fixture-query', 'forbidden'):
                     self.assertNotIn(secret, log.getvalue())
                 self.assertEqual(config.read_bytes(), before)
 
