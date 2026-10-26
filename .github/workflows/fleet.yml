@@ -3485,7 +3485,7 @@ jobs:
         continue-on-error: true
         env:
           GATE_JOB: fractal-web
-          KIT_SHARD_COUNT: ${{ needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '2' || '1' }}
+          KIT_SHARD_COUNT: ${{ needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '4' || '1' }}
           KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}
           KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'commit' || 'all' }}
           APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}
@@ -4012,7 +4012,7 @@ jobs:
     name: fractal-web-execution
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '{"shard":[0,1]}' || '{"shard":[0]}') }}
+      matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '{"shard":[0,1,2,3]}' || '{"shard":[0]}') }}
     needs: [fractal-web-changes, genie-freshness, evidence-gate-fractal-web]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success') }}
     runs-on: ubuntu-latest
@@ -4109,7 +4109,7 @@ jobs:
           CI_WEB_SHELL_KEY: ${{ steps.web-shell-key.outputs.key }}
           KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}
           KIT_SHARD_INDEX: ${{ matrix.shard }}
-          KIT_SHARD_COUNT: ${{ needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '2' || '1' }}
+          KIT_SHARD_COUNT: ${{ needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '4' || '1' }}
           KIT_RECEIPT_DIRECTORY: "${{ runner.temp }}/kit-play-receipts"
           KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'commit' || 'all' }}
           KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' }}
@@ -4161,7 +4161,7 @@ jobs:
           STEP_CHECK: fractal-web
           STEP_COMMAND: '["bash","scripts/ci-fractal-web"]'
           STEP_OUTCOMES: '{"run":"${{ steps.run.outcome }}"}'
-          STEP_INPUTS: '{"kit_shard":"${{ matrix.shard }}","kit_shard_count":"${{ needs.fractal-web-changes.outputs.kit-inputs == ''true'' && github.event_name != ''pull_request'' && ''2'' || ''1'' }}","kit_play_set":"${{ github.event_name == ''pull_request'' && ''commit'' || ''all'' }}","app_test_set":"${{ github.event_name == ''pull_request'' && ''related'' || ''all'' }}"}'
+          STEP_INPUTS: '{"kit_shard":"${{ matrix.shard }}","kit_shard_count":"${{ needs.fractal-web-changes.outputs.kit-inputs == ''true'' && github.event_name != ''pull_request'' && ''4'' || ''1'' }}","kit_play_set":"${{ github.event_name == ''pull_request'' && ''commit'' || ''all'' }}","app_test_set":"${{ github.event_name == ''pull_request'' && ''related'' || ''all'' }}"}'
           GATE_SKIP: ${{ needs.evidence-gate-fractal-web.outputs.skip == 'true' }}
           PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
@@ -4276,7 +4276,7 @@ jobs:
         run: node packages/fractal-ui/scripts/kit-play-cost.mjs "$RUNNER_TEMP/kit-play-receipts"
       - name: Require every kit shard and exact full-index coverage
         if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
-        run: node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" 2
+        run: node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" 4
       - name: Report job cache coverage
         if: always()
         shell: bash

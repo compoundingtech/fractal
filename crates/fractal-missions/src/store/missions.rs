@@ -1247,6 +1247,10 @@ pub trait MissionsStore {
     fn mission_specs_for_runs(&self, runs: &[String]) -> Result<BTreeMap<String, MissionSpec>>;
     /// The mission behind each of these runs, in one read.
     fn run_missions(&self, runs: &[String]) -> Result<BTreeMap<String, String>>;
+    /// A run's header and the state of every step of its current generation, for what the run
+    /// waits on: one primary-key read of the run and a range of `step_runs_run_index`. It reads
+    /// no claims, so its cost is the run's own steps, never the store's history.
+    fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>>;
     /// Return every current published mission definition, including definitions with no runs.
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>>;
     /// The definitions of the missions that have no run, as `mission_definitions` reads them,
@@ -2073,6 +2077,43 @@ impl MissionsStore for Store {
             })?
             .collect::<rusqlite::Result<_>>()
             .map_err(Into::into)
+    }
+
+    fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>> {
+        let run = run.strip_prefix("mission-run/").unwrap_or(run);
+        let connection = self.readers.get();
+        let header = connection
+            .query_row(
+                "SELECT mission_id, status, current_generation_id FROM mission_runs WHERE id=?1",
+                [run],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            )
+            .optional()?;
+        let Some((mission, status, generation)) = header else {
+            return Ok(None);
+        };
+        let steps = connection
+            .prepare_cached(
+                "SELECT subject, step_path, title, status, updated_at_unix_ms FROM step_runs
+                 WHERE run_id=?1 AND generation_id=?2 ORDER BY step_path",
+            )?
+            .query_map([run, generation.as_str()], |row| {
+                Ok(crate::waiting_on::RunStep {
+                    subject: row.get(0)?,
+                    path: row.get(1)?,
+                    title: row.get(2)?,
+                    status: row.get(3)?,
+                    updated_at_unix_ms: row.get::<_, String>(4)?.parse().unwrap_or_default(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(crate::waiting_on::RunSteps {
+            run: format!("mission-run/{run}"),
+            mission: format!("mission/{mission}"),
+            status,
+            generation: format!("run-generation/{generation}"),
+            steps,
+        }))
     }
 
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>> {

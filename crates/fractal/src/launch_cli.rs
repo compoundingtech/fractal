@@ -375,6 +375,14 @@ pub(super) async fn run_launch(
     Ok(())
 }
 
+/// The `quiet_after_ms` query a `--quiet` duration asks for, or none for the daemon's default.
+fn quiet_query(quiet: Option<&str>) -> Result<String> {
+    Ok(match quiet {
+        Some(quiet) => format!("?quiet_after_ms={}", fractal_daemon::graph::parse_duration(quiet, true)?),
+        None => String::new(),
+    })
+}
+
 pub(super) async fn run_mission_view(
     client: &Client,
     endpoint: &Endpoint,
@@ -450,6 +458,20 @@ pub(super) async fn run_mission_view(
                 json_output,
                 &format!("fractal missions ls{history}"),
             )
+        }
+        MissionViewCommand::WaitingOn { run, quiet } => {
+            let path = format!(
+                "/v1/mission-runs/{}/waiting-on{}",
+                urlencoding::encode(&run),
+                quiet_query(quiet.as_deref())?
+            );
+            let view: fractal_daemon::waiting_on::RunWaitingOn = client.get(&path).await?;
+            if json_output {
+                print_value(&serde_json::to_value(&view)?, true)
+            } else {
+                print!("{}", crate::waiting_on_cli::render_run_waiting_on(&view));
+                Ok(())
+            }
         }
         MissionViewCommand::Show(args) => {
             notice_ignored_read_actor(args.ignored_actor.as_deref());

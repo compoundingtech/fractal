@@ -131,9 +131,14 @@ const DEADLINE_SOURCE_RETRY_MS: u128 = 5_000;
 // draws no graph change, and a pass used to read every running seat's screen.
 const SCREEN_POLL_EVERY_MS: u128 = 10_000;
 
-/// When a seat's retention was last checked, why the seat is held (if it is), and what the
-/// check read.
-type SeatRetention = (u128, Option<String>, BTreeSet<String>);
+/// Why a seat is held (if it is), and what the retention check read.
+type SeatRetention = (Option<String>, BTreeSet<String>);
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read a seat's retention answer from the store.
+    static SEAT_RETENTION_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 // A seat kept running past its run is checked again this soon for unread mail and other work.
 // Reading a conversation message does not wake the reconciler, so this check is what lets the
@@ -1202,6 +1207,8 @@ pub struct Reconciler<R = NativeRuntime> {
     /// When the fault stage last sent faults to their owning agents.
     fault_delivery: Mutex<Option<u128>>,
     fault_delivery_every_ms: u128,
+    /// The wall time of the last fault snapshot, which spaces the next delivery.
+    fault_snapshot_ms: std::sync::atomic::AtomicU64,
     /// The claim the subagent stage starts its next look from; see `SubagentSweep::low_water`.
     subagent_low_water: Mutex<u64>,
     /// How long run cleanup waits for its runtimes to stop before the run ends without them.
@@ -1344,6 +1351,7 @@ impl Reconciler<NativeRuntime> {
             disk_check_every_ms: DISK_CHECK_EVERY_MS,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: FAULT_DELIVERY_EVERY_MS,
+            fault_snapshot_ms: Default::default(),
             screen_poll_every_ms: SCREEN_POLL_EVERY_MS,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
@@ -1505,6 +1513,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             disk_check_every_ms: 0,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: 0,
+            fault_snapshot_ms: Default::default(),
             screen_poll_every_ms: 0,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
@@ -1773,6 +1782,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 false
                             }
                         };
+                        this.incremental.finish_pass(now_ms().saturating_sub(started));
                         Some((before != smallclaims::touched::writes(), failed, started))
                     }).await;
                     if let Some(outcome) = outcome { break outcome; }
@@ -2042,19 +2052,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         }
         let now = now_ms();
+        // The snapshot rebuilds every fault in the fleet. Where that is slow, deliver at most
+        // every ten times its wall time (up to ten minutes) rather than every 30 seconds.
+        let every = match self.fault_delivery_every_ms {
+            0 => 0,
+            every => crate::incremental::cost_scaled_interval(
+                every,
+                u128::from(self.fault_snapshot_ms.load(std::sync::atomic::Ordering::Relaxed)),
+                FAULT_DELIVERY_MAX_MS,
+            ),
+        };
         {
             let mut last = self
                 .fault_delivery
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if let Some(at) = *last
-                && now.saturating_sub(at) < self.fault_delivery_every_ms
+                && now.saturating_sub(at) < every
             {
                 // A fault raised since then still reaches its agent without another change.
-                self.arm_restart(
-                    "stage/faults",
-                    at.saturating_add(self.fault_delivery_every_ms),
-                );
+                self.arm_restart("stage/faults", at.saturating_add(every));
                 return Ok(());
             }
             *last = Some(now);
@@ -2065,6 +2082,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             phase.items(faults.len());
             faults
         };
+        self.fault_snapshot_ms.store(
+            u64::try_from(now_ms().saturating_sub(now)).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         for fault in faults {
             let Some(owner) = fault.owner.as_deref() else {
                 continue;
@@ -14374,28 +14395,48 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Why a run-owned stop must wait for `seat`: it holds a message nobody has read, or work in a
     /// run other than the one that is ending. The stop declaration stays, so the seat stops once
-    /// both are gone. Read at most every [`SEAT_RETENTION_CHECK_MS`] per seat.
+    /// both are gone. The answer is read again only when something it read changed: a seat with
+    /// thousands of messages costs a view of each one, so a held seat's 60 s recheck only wakes the
+    /// pass that notices a change.
     fn seat_retention(&self, seat: &str, owner_run: &str) -> Result<Option<String>> {
         if !seat.starts_with("agent/") {
             return Ok(None);
         }
         let now = now_ms();
-        if let Some((at, reason, reads)) = self
+        let item = format!("retain:{seat}");
+        let cached = self
             .seat_retention
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(seat)
-            && now.saturating_sub(*at) < SEAT_RETENTION_CHECK_MS
-        {
-            // The cached answer stands until the next check, and depends on what that check read.
-            for key in reads {
-                smallclaims::touched::note_read(|| key.clone());
+            .filter(|_| !self.incremental.needs(&item, now))
+            .cloned();
+        let reason = match cached {
+            // The cached answer stands while nothing it read changed, and depends on those reads.
+            Some((reason, reads)) => {
+                for key in reads {
+                    smallclaims::touched::note_read(|| key);
+                }
+                reason
             }
-            if reason.is_some() {
-                smallclaims::touched::note_due(at.saturating_add(SEAT_RETENTION_CHECK_MS));
-            }
-            return Ok(reason.clone());
+            None => self.read_seat_retention(seat, owner_run, &item)?,
+        };
+        if reason.is_some() {
+            smallclaims::touched::note_due(now.saturating_add(SEAT_RETENTION_CHECK_MS));
+            self.arm_restart(&item, now.saturating_add(SEAT_RETENTION_CHECK_MS));
         }
+        Ok(reason)
+    }
+
+    /// Read `seat`'s retention answer and remember it, with what it read, as incremental `item`.
+    fn read_seat_retention(
+        &self,
+        seat: &str,
+        owner_run: &str,
+        item: &str,
+    ) -> Result<Option<String>> {
+        #[cfg(test)]
+        SEAT_RETENTION_READS.with(|count| count.set(count.get() + 1));
         let (reason, reads) = smallclaims::touched::record(|| -> Result<Option<String>> {
             let unread = self
                 .store
@@ -14422,16 +14463,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
         });
         let reason = reason?;
+        self.incremental.evaluated(item, reads.clone(), None);
         self.seat_retention
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(seat.to_owned(), (now, reason.clone(), reads));
-        if reason.is_some() {
-            self.arm_restart(
-                &format!("retain:{seat}"),
-                now.saturating_add(SEAT_RETENTION_CHECK_MS),
-            );
-        }
+            .insert(seat.to_owned(), (reason.clone(), reads));
         Ok(reason)
     }
 
@@ -17755,6 +17791,7 @@ fn permanent_observation_error(code: &str) -> bool {
 const DISK_CHECK_EVERY_MS: u128 = 30_000;
 /// How often a host sends new faults to the agents it runs.
 const FAULT_DELIVERY_EVERY_MS: u128 = 30_000;
+const FAULT_DELIVERY_MAX_MS: u128 = 10 * 60_000;
 
 type DiskProbe = Arc<dyn Fn(&Path) -> std::io::Result<crate::disk::DiskSpace> + Send + Sync>;
 const RECONCILER_FAILING_TITLE: &str = "The reconciler is failing";
@@ -34078,6 +34115,26 @@ version 2
             desired.subject == format!("agent/{run_id}/worker") && desired.kind == "stop"
         }));
 
+        // While nothing the answer read changes, the held seat's minute rechecks reuse it: a
+        // seat's mailbox is not read again, however many messages it holds.
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        let start = now_ms();
+        SEAT_RETENTION_READS.with(|count| count.set(0));
+        for minute in 1..=3 {
+            smallclaims::store::set_thread_clock(Some(
+                start + minute * (SEAT_RETENTION_CHECK_MS + 1_000),
+            ));
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(SEAT_RETENTION_READS.with(std::cell::Cell::get), 0);
+        assert!(runtime.stops.lock().unwrap().is_empty());
+
         // Once the message is read the stop goes ahead.
         for (kind, status) in [
             ("message.staged", "staged"),
@@ -34096,7 +34153,6 @@ version 2
                 })
                 .unwrap();
         }
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
     }
@@ -34174,7 +34230,6 @@ version 2
         store
             .set_step_state(&elsewhere[0], "completed", None)
             .unwrap();
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
         assert!(store.fault_items(None).unwrap().is_empty());
@@ -34425,7 +34480,6 @@ mission "held-stop" state="ready" {
                 })
                 .unwrap();
         }
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
         assert!(store.fault_items(None).unwrap().is_empty());

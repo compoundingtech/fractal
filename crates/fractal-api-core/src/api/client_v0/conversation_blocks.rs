@@ -889,6 +889,9 @@ pub fn prepare_one(
 
 /// Keep negotiated data out of legacy relayed clients without changing their known enum.
 pub fn legacy(value: &mut Value, session: &ClientSession) {
+    if let Some(items) = value.get_mut("items").and_then(Value::as_array_mut) {
+        for item in items { conversation_participants::legacy_item(item, session); }
+    }
     if !session.conversation_delivery_links
         && let Some(items) = value.get_mut("items").and_then(Value::as_array_mut)
     {
