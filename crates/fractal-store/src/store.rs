@@ -5832,11 +5832,19 @@ impl Store {
             return slo_breaches::fact(&self.readers.get(), subject);
         }
         let connection = self.readers.get();
-        // The actual state folds only this subject's append-only claims, so the subject's newest
-        // claim identifies it. A write elsewhere in the graph must not make every reconcile pass
-        // re-read and re-parse the history of every stopped runtime.
+        // The actual state folds only this subject's append-only actual-state claims, so the newest
+        // of those identifies it. A write elsewhere in the graph, or a harness report the fold
+        // skips (a busy seat writes one every turn), must not re-read and re-parse its history.
         let newest: u64 = connection
-            .prepare_cached("SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1")?
+            .prepare_cached(
+                format!(
+                    "SELECT COALESCE(MAX(claims.store_index), 0)
+                     FROM claims INDEXED BY claims_subject_kind_index
+                     WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
+                       AND claims.kind NOT LIKE 'harness.%'"
+                )
+                .as_str(),
+            )?
             .query_row(/* sqlite-large-value: allow-for-now lv-h2b7668e3f927 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?;
         if let Some((_, value)) = self.fractal
             .actual_cache

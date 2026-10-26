@@ -2975,6 +2975,26 @@ fn the_actual_cache_follows_each_subjects_newest_claim() {
         "an unrelated write must not refold this subject's history"
     );
 
+    // A harness report on the subject is not folded, so it does not refold the history either.
+    store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([("state".into(), Value::String("idle".into()))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+    assert_eq!(
+        store.latest_actual_value(subject).unwrap().unwrap()["status"],
+        "stopped"
+    );
+    assert_eq!(ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get), 0);
+    assert_eq!(cached(&store).unwrap(), before);
+
     let running = observe(subject, "running");
     assert_eq!(
         store.latest_actual_value(subject).unwrap().unwrap()["status"],
