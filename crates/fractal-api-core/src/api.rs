@@ -119,6 +119,7 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
@@ -812,6 +813,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route(
             "/v1/mission-runs/{run}/report-to",
             post(runs::set_mission_run_report),
+        )
+        .route(
+            "/v1/mission-runs/{run}/waiting-on",
+            get(waiting_on::get_run_waiting_on),
         )
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
