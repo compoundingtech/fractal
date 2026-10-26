@@ -1,0 +1,7 @@
+{
+  "status": "capture-pending",
+  "cliVersions": { "claude-code": "2.1.306", "codex": "0.163.0" },
+  "versionObservedOn": "2026-10-26",
+  "capturedOn": null,
+  "reason": "Authenticated sanctioned capture launch is required; no CLI frames have been fabricated."
+}
