@@ -2180,7 +2180,7 @@ pub fn mission_kdl(world: &World, id: Option<&str>, width: usize) -> Doc {
         }
         None => doc.wrap(
             &[run(
-                "st does not send mission declarations to clients yet. Until it does, read it with: st missions show",
+                "st does not send mission declarations to clients yet. Until it does, read it with: fractal missions show",
                 theme::dim(),
             )],
             width,

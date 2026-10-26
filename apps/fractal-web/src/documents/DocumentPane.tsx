@@ -60,7 +60,7 @@ export const DocumentPane = ({
         ) : state._tag === 'Unavailable' ? (
           <p role="status" {...stylex.props(styles.notice)}>{state.detail}</p>
         ) : state._tag === 'Binary' ? (
-          <p role="status" {...stylex.props(styles.notice)}>This document is not text ({state.size} bytes). Read it with st documents get {state.reference}.</p>
+          <p role="status" {...stylex.props(styles.notice)}>This document is not text ({state.size} bytes). Read it with fractal documents get {state.reference}.</p>
         ) : (
           <div {...stylex.props(styles.column)}><Markdown text={state.text} renderInlineReference={reference} /></div>
         )}

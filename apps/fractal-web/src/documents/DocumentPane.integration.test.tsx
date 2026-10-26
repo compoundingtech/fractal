@@ -89,4 +89,16 @@ describe('DocumentPane', () => {
     act(() => root.unmount())
     container.remove()
   })
+
+  it('names the fractal command when a document is not text, and keeps the reference', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    data.read.mockResolvedValue({ _tag: 'Binary', reference: `doc/photo@${hash}`, size: 3 })
+    const container = document.createElement('div')
+    document.body.append(container)
+    const root = createRoot(container)
+    await act(async () => root.render(<DocumentPane name="doc/photo" onOpen={() => {}} />))
+    expect(container.textContent).toContain(`This document is not text (3 bytes). Read it with fractal documents get doc/photo@${hash}.`)
+    act(() => root.unmount())
+    container.remove()
+  })
 })

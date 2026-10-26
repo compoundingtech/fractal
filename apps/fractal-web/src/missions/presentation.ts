@@ -113,7 +113,7 @@ export const presentMission = ({
                           : 'done'
   const owner = (step: Step, stepWordValue: StepWord): Who => {
     if (stepWordValue === 'needs_you') return { kind: 'you', label: 'you' }
-    if (step.agentless === true) return { kind: 'st', label: 'st' }
+    if (step.agentless === true) return { kind: 'st', label: 'Fractal' }
     const seat = seatOf(step)
     return seat === undefined ? { kind: 'nobody', label: 'nobody yet' } : { kind: 'agent', agent: seat, label: label(seat) }
   }
@@ -154,7 +154,7 @@ export const presentMission = ({
   const who: Who =
     word === 'decision' ? { kind: 'you', label: 'you' }
       : ['working', 'queued', 'unstaffed', 'stalled', 'failed'].includes(word) && whoSeat !== undefined ? { kind: 'agent', agent: whoSeat, label: label(whoSeat) }
-        : open.length > 0 && open.every((step) => step.agentless === true) ? { kind: 'st', label: 'st' }
+        : open.length > 0 && open.every((step) => step.agentless === true) ? { kind: 'st', label: 'Fractal' }
           : { kind: 'nobody', label: 'nobody' }
   const latest = (mission.run_details ?? []).at(-1)
   const settled = latest === undefined ? undefined : Option.getOrUndefined(latest.outcome)

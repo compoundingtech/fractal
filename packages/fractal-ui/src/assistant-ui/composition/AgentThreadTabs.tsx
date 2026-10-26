@@ -169,8 +169,8 @@ const styles = stylex.create({
   panel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
   note: { display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0, paddingBlock: s.md, paddingInline: s.lg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   noteText: { flex: '1 1 0', minWidth: 0, color: ink.fgSoft },
-  // The 11/16 tag: 1px border, r6, no fill, muted ink.
-  tag: { display: 'inline-flex', alignItems: 'center', flexShrink: 0, marginInlineStart: 'auto', paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap' },
+  // The 11/16 tag uses soft ink to retain 4.5:1 contrast on the selected drawer row.
+  tag: { display: 'inline-flex', alignItems: 'center', flexShrink: 0, marginInlineStart: 'auto', paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap' },
   drawer: { display: 'flex', flexDirection: 'column', width: g.drawerDefault, flexShrink: 0, minHeight: 0, overflowY: 'auto', backgroundColor: surface.raised, color: ink.fg, borderLeftWidth: g.hairline, borderLeftStyle: 'solid', borderLeftColor: border.border },
   // On a phone the drawer covers the conversation instead of squeezing it.
   drawerNarrow: { position: 'absolute', insetBlock: 0, insetInlineEnd: 0, width: '100%', borderLeftWidth: 0 },
