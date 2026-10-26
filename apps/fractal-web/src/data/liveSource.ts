@@ -40,6 +40,7 @@ import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
+import { BrowserSt3Platform } from './sdk-browser/platform.ts'
 import { mergeOutboxItems } from './outbox.ts'
 import {
   initialFeedSync,
@@ -67,6 +68,7 @@ import {
 import { gatewaySubjectReads, SubjectReadPort, subjectReaderFromAtom } from './subjectReadPort.ts'
 import { gatewaySessionTraceLayer } from './stSessionTrace.ts'
 import { sessionTrace, type SessionTraceProvider } from './sessionTrace.ts'
+import { gatewayNativeDetails } from './nativeDetailsSource.ts'
 
 /** Open/silent subscriptions have no SDK idle deadline. Bound only the first roster snapshot;
  * transport failures trigger the published fallback immediately instead of waiting this long. */
@@ -126,11 +128,14 @@ const terminalUnavailable = (error: AttachFailure): Feed<never> => {
 /** Connect retained workbench projections through one SDK runtime and frame writer. */
 export const liveSource = ({
   options,
+  adoptEarlyCollections = false,
   telemetryLayer,
   ux,
   sessionTraceLayer,
 }: {
   readonly options: St3Options
+  /** The live page opts in; replay and other retained sources never take a page-global socket. */
+  readonly adoptEarlyCollections?: boolean
   /** Browser root owns sampling and observers; the SDK shares its scoped tracer/exporter. */
   readonly telemetryLayer?: Layer.Layer<never> | undefined
   readonly ux?: () => UxTelemetry
@@ -150,6 +155,7 @@ export const liveSource = ({
   const noGrants: Grants = {
     actions: 'ungranted',
     messageSend: 'ungranted',
+    attachmentUpload: 'ungranted',
     terminalInput: 'ungranted',
   }
   setDebug('Wf.socketErrors', 0)
@@ -164,7 +170,7 @@ export const liveSource = ({
   setDebug('Wf.freshnessConsumers', 0)
   const client = new FractalClient({
     baseUrl,
-    // Remove the browser receiver workaround after smalltalk#1040 / #1247 lands.
+    // Remove the browser receiver workaround after Fractal #1040 / #1247 lands.
     fetchImpl: fetch,
   })
   const registry = AtomRegistry.make()
@@ -184,6 +190,7 @@ export const liveSource = ({
     discovery: client,
     registry,
   })
+  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
     St3Live({
       ...options,
@@ -247,6 +254,7 @@ export const liveSource = ({
         options.onDiagnostics?.(event)
       },
     }).pipe(
+      Layer.provide(BrowserSt3Platform({ adoptEarlyCollections })),
       Layer.provideMerge(Metric.enableRuntimeMetricsLayer),
       Layer.merge(Layer.succeed(SubjectReadPort, subjectReads)),
       Layer.merge(sessionTraceLayer ?? gatewaySessionTraceLayer(client).pipe(
@@ -770,7 +778,7 @@ export const liveSource = ({
   const conversationFamily = Atom.family((ref: string): RetainedConversation => {
     const timeline = new LiveTimeline()
     // A Sent row retires only when its identity-correlated server content is in the window.
-    // Until smalltalk#1977 provides owner-side read-after-send visibility, an absent row on
+    // Until Fractal #1977 provides owner-side read-after-send visibility, an absent row on
     // even a later replace page proves nothing; outbox and key aliases share this feed's lifetime.
     const pending = new Map<string, PendingSend>()
     // st deduplicates a key by its whole request except the fence. Each key's first action
@@ -1089,6 +1097,7 @@ export const liveSource = ({
             actions:
               allowed.has('message.send') || allowed.has('work.done') ? 'granted' : 'ungranted',
             messageSend: allowed.has('message.send') ? 'granted' : 'ungranted',
+            attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
           })
         }),
@@ -1114,6 +1123,7 @@ export const liveSource = ({
     source: {
       mode: 'live',
       subjectReads,
+      nativeDetails,
       label: 'gateway',
       gateway: new URL(baseUrl).host,
       now: wallClock,
@@ -1145,6 +1155,7 @@ export const liveSource = ({
       resources,
       terminal,
       terminalInterest: (ref) => retainTerminal(ref).interest,
+      prefetchTerminal: (ref) => retainTerminal(ref).prefetch(),
       retryTerminal: (ref) => {
         const entry = terminalFamily(ref)
         const feed = registry.get(entry.atom)

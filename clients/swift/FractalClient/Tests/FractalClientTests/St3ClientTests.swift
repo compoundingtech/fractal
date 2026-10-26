@@ -184,7 +184,7 @@ final class FractalClientTests: XCTestCase {
 
     func testWireBridgeKeepsActionSenderVersionBytes() throws {
         XCTAssertEqual(fractalClientAPIVersion, "st3.client.v0")
-        XCTAssertEqual(fractalClientTerminalSubprotocol, "st3.client.terminal.v0")
+        XCTAssertEqual(fractalClientTerminalSubprotocol, "fractal.client.terminal.v0")
         let request = try ActionRequest.workRetry(id: "work/example",
             idempotencyKey: "retry/example", fence: Fence(snapshotID: "snapshot/example"),
             parameters: WorkRetryParameters(targetID: "work/example", reason: "Retry requested"))
@@ -364,6 +364,19 @@ final class FractalClientTests: XCTestCase {
         guard case .error = timeline.items[9].body else { return XCTFail("error body lost") }
     }
 
+    func testNativeDeliveryLinksAreOptionalAndSurviveEncoding() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/timeline-delivery-links.json"))
+        let envelope = try JSONDecoder().decode(Envelope<TimelinePage>.self, from: data)
+        XCTAssertEqual(envelope.value.items[0].delivers, "message/fixture-delivery")
+        XCTAssertNil(envelope.value.items[1].delivers)
+        for entry in envelope.value.items {
+            let again = try JSONDecoder().decode(TimelineEntry.self, from: JSONEncoder().encode(entry))
+            XCTAssertEqual(again.delivers, entry.delivers)
+        }
+    }
+
     func testExactAgentCollectionFramesDecodeRowsRemovalsAndRetryability() throws {
         let json = #"{"kind":"snapshot","id":"details","collection":"agents","items":[{"id":"agent/example/worker","kind":"agent","revision":"r1","updated_at":"2026-10-04T08:00:00Z","name":"Worker","state":"idle","reachability":"up","runtime_ids":[],"under":[]}],"order":["agent/example/worker"],"has_more":false}"#
         let frame = try JSONDecoder().decode(AgentCollectionFrame.self, from: Data(json.utf8))
@@ -513,6 +526,10 @@ final class FractalClientTests: XCTestCase {
         XCTAssertEqual(requests.map { $0.url?.path }, [
             "/v1/client/conversations/example/stream", "/v1/client/collections/stream",
             "/v1/client/collections/stream", "/v1/client/terminals/example/stream",
+        ])
+        XCTAssertEqual(requests.map { $0.value(forHTTPHeaderField: "Sec-WebSocket-Protocol") }, [
+            "fractal.client.conversation.v0", "fractal.client.collections.v0",
+            "fractal.client.collections.v0", "fractal.client.terminal.v0, fractal.cap.test-capability",
         ])
         for request in requests {
             XCTAssertEqual(request.url?.scheme, "wss")

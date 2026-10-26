@@ -64,7 +64,7 @@ pub const HISTOGRAMS: [&str; 11] = [
     "send_ack_ms",
     "send_visible_ms",
 ];
-/// Starting guesses, to revisit after one week. Shared with st3-views/slo.ts.
+/// Starting guesses, to revisit after one week. Shared with fractal-views/slo.ts.
 pub const TARGETS: [(&str, f64); 14] = [
     ("panics_max", 0.0),
     ("silent_exits_per_100_active_hours_lt", 1.0),
@@ -496,7 +496,7 @@ impl Draw {
     }
 }
 pub fn print_history() {
-    println!("Local stui quality: retained hours (milliseconds; '-' means no samples)");
+    println!("Local Fractal TUI quality: retained hours (milliseconds; '-' means no samples)");
     let mut rows = directory()
         .map(|dir| {
             files(&dir)

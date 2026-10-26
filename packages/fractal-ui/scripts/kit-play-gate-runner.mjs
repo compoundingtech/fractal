@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { playWorkers } from './kit-play-workers.mjs'
 import { readFile, stat, mkdir, writeFile, appendFile } from 'node:fs/promises'
 import { resolve, sep, extname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -8,6 +9,18 @@ import { storyIdsFromIndex } from './kit-play-index.mjs'
 import { commitSetCases, fullCases, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
 import { shardStories } from './kit-play-shards.mjs'
+import { readinessTimings, summarizeTimings } from './kit-play-timings.mjs'
+export function assertStrictEvidence(records, id, a11y) {
+  if (records.length !== 1 || records[0].finished.length !== 1) {
+    throw new Error('expected exactly one completed strict story record')
+  }
+  const { payload } = records[0].finished[0]
+  if (payload.storyId !== id || payload.status !== 'success') throw new Error('storyFinished evidence is not a successful completion of the requested story')
+  const reports = (payload.reporters ?? []).filter(report => report.type === 'a11y')
+  if (a11y === 'on' && !(reports.length === 1 && reports[0].status === 'passed')) throw new Error(`a11y on: expected one passed a11y report, got ${JSON.stringify(reports)}`)
+  if (a11y === 'off' && reports.length) throw new Error(`a11y off: axe still ran: ${JSON.stringify(reports)}`)
+}
+
 
 // The CLI always supplies the reviewed source policy; fixture tests may inject theirs directly.
 export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES }) {
@@ -63,20 +76,11 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   const busyMilliseconds = () => cpus().reduce((sum, { times }) => sum + times.user + times.nice + times.sys + times.irq, 0)
   const busyStarted = busyMilliseconds(), loadStarted = loadavg()
   const rows = []
-  const workers = Math.min(6, availableParallelism())
+  const workers = playWorkers(process.env, availableParallelism())
   let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError
   await mkdir(outputDirectory, { recursive: true })
   const writeReceipt = async () => {
     const elapsedSeconds = (performance.now() - started) / 1000
-    const phaseTotals = new Map()
-    for (const row of rows) {
-      for (const [name, value] of Object.entries(row.timings ?? {})) {
-        if (!Number.isFinite(value)) continue
-        const previous = phaseTotals.get(name) ?? { sum: 0, count: 0 }
-        phaseTotals.set(name, { sum: previous.sum + value, count: previous.count + 1 })
-      }
-    }
-    const phaseMeanMilliseconds = Object.fromEntries([...phaseTotals].map(([name, { sum, count }]) => [name, sum / count]))
     const overBudget = maxSeconds !== null && elapsedSeconds > maxSeconds
     const receipt = {
       pass: !fatalError && !overBudget && (shardCount > 1 ? fullIds : ids).length > 0 && rows.length === expectedCases && rows.every(row => row.pass),
@@ -94,7 +98,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
       elapsedSeconds, fatalError, rows: rows.toSorted((a, b) => a.id.localeCompare(b.id) || a.scheme.localeCompare(b.scheme) || a.width - b.width),
       effectiveWorkerSecondsPerCase: rows.length ? elapsedSeconds * workers / rows.length : null,
       meanCaseSeconds: rows.length ? rows.reduce((sum, row) => sum + row.elapsedSeconds, 0) / rows.length : null,
-      phaseMeanMilliseconds,
+      ...summarizeTimings(rows),
     }
     await writeFile(join(outputDirectory, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n')
     const { rows: _rows, ...summary } = receipt
@@ -153,15 +157,17 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
         row.timings.navigationToDomMilliseconds = domLoaded - guardReady
         row.timings.readinessAfterDomMilliseconds = storyReady - domLoaded
         await guard.check()
-        if (!guard.records.every(record => record.finished.every(event => event.payload.storyId === id))) {
-          throw new Error('storyFinished evidence belongs to a different story')
+        const timing = guard.records.find(record => record.timing?.finished?.storyId === id)?.timing
+        if (timing) {
+          const phase = name => timing.phases.find(mark => mark.storyId === id && mark.phase === name)?.at
+          const a11yMark = name => timing.a11y.find(mark => mark.storyId === id && mark.phase === name)?.at
+          Object.assign(row.timings, readinessTimings({
+            dom: timing.dom, playing: phase('playing'), played: phase('played'),
+            completing: phase('completing'), finished: timing.finished.at, observed: timing.observed,
+            a11yStart: a11yMark('start'), a11yEnd: a11yMark('end'),
+          }, a11y === 'on'))
         }
-        // With a11y on, every finished story carries a passed axe report; with it off, none.
-        for (const { payload } of guard.records.flatMap(record => record.finished)) {
-          const reports = (payload.reporters ?? []).filter(report => report.type === 'a11y')
-          if (a11y === 'on' && !(reports.length === 1 && reports[0].status === 'passed')) throw new Error(`a11y on: expected one passed a11y report, got ${JSON.stringify(reports)}`)
-          if (a11y === 'off' && reports.length) throw new Error(`a11y off: axe still ran: ${JSON.stringify(reports)}`)
-        }
+        assertStrictEvidence(guard.records, id, a11y)
         row.timings.assertionsMilliseconds = performance.now() - storyReady
         row.pass = true
       } catch (error) {
@@ -169,6 +175,8 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
         row.events = await page.evaluate(() => window.__dt10StrictEvents ?? []).catch(() => [])
       } finally {
         row.strict = guard.records
+        const probes = await page.evaluate(() => window.__kitFilterBenchmark ?? []).catch(() => [])
+        if (probes.length) row.filterBenchmark = probes
         // Keep the original elapsed definition (before page.close) for comparison.
         row.elapsedSeconds = (performance.now() - caseStarted) / 1000
         const closeStarted = performance.now()

@@ -64,25 +64,109 @@ const ITEM_MENTIONS: usize = 50;
 /// How far behind the local clock a first watermark starts, for clock skew with GitHub.
 const WATERMARK_SKEW: Duration = Duration::from_secs(5 * 60);
 
-/// What a repository observer remembers between polls. Each watermark is the newest `updated_at`
-/// a listing has returned, so a listing's URL stays the same, and its conditional request free,
-/// until something changes. Each digest names the listing version whose items were already
-/// returned, so an unchanged listing returns nothing to record. A cursor from an older build
-/// names neither, and its first poll reads every open item.
+/// Bound immediate reconciliation; persistent churn must not create a one-second hot loop.
+const IMMEDIATE_RECONCILIATION_SWEEPS: u8 = 2;
+
+/// Repository listing watermarks overlap by one second, making GitHub's exclusive `since`
+/// inclusive at its timestamp precision. Idle polls keep the same URL and ETag. Version maps
+/// deduplicate identity/update-time/content and retain the timestamp boundary, or the whole
+/// active sweep until two complete ordered page-version sequences agree. Older cursors default
+/// the maps and safely replay their first overlap.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RepositoryCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items_since: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comments_since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    items_scan: Option<ListingScan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    comments_scan: Option<ListingScan>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub seen: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    item_versions: BTreeMap<String, ItemVersion>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    comment_versions: BTreeMap<String, ItemVersion>,
     /// Open identities, and closed items awaiting their final detail read. Subject numbers
     /// stay at their original locations even when GitHub's node now lives elsewhere.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     identities: BTreeMap<String, ItemIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ItemVersion {
+    at: String,
+    digest: String,
+}
+
+/// Freeze the committed watermark until two complete, freshly revalidated sweeps
+/// have identical ordered page versions. Offset pagination is not a snapshot.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct ListingScan {
+    next: Option<String>,
+    newest: Option<String>,
+    digest: String,
+    previous: Option<String>,
+    #[serde(default)]
+    unstable_sweeps: u8,
+}
+
+struct ContentDigest(Sha256);
+
+impl std::io::Write for ContentDigest {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn content_digest(value: &Value) -> String {
+    let mut digest = ContentDigest(Sha256::new());
+    serde_json::to_writer(&mut digest, value)
+        .expect("JSON values serialize to an infallible digest writer");
+    hex::encode(digest.0.finalize())
+}
+
+fn finish_listing(
+    scan: &mut Option<ListingScan>,
+    watermark: &mut Option<String>,
+    listing: &GithubListing,
+) -> bool {
+    let newest = newest_updated_at(&listing.values);
+    if scan.is_none() && !listing.truncated {
+        *watermark = newest.into_iter().chain(watermark.take()).max()
+            .or_else(|| Some(watermark_now()));
+        return false;
+    }
+    let progress = scan.get_or_insert_with(ListingScan::default);
+    progress.newest = newest.into_iter().chain(progress.newest.take()).max();
+    for version in &listing.versions {
+        let mut digest = Sha256::new();
+        digest.update(b"github-listing-page");
+        digest.update(progress.digest.as_bytes());
+        digest.update(version.as_bytes());
+        progress.digest = hex::encode(digest.finalize());
+    }
+    progress.next.clone_from(&listing.next);
+    if listing.truncated {
+        return true;
+    }
+    if progress.previous.as_ref() != Some(&progress.digest) {
+        progress.previous = Some(std::mem::take(&mut progress.digest));
+        progress.unstable_sweeps = progress.unstable_sweeps
+            .saturating_add(1).min(IMMEDIATE_RECONCILIATION_SWEEPS);
+        return progress.unstable_sweeps < IMMEDIATE_RECONCILIATION_SWEEPS;
+    }
+    *watermark = progress.newest.take().into_iter().chain(watermark.take()).max();
+    *scan = None;
+    false
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1152,6 +1236,41 @@ fn newest_updated_at<'a>(values: impl IntoIterator<Item = &'a Value>) -> Option<
         .map(str::to_owned)
 }
 
+/// GitHub documents `since` as exclusive. Include updates arriving later in the same second.
+fn inclusive_since(since: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(since)
+        .ok()
+        .and_then(|at| at.checked_sub_signed(chrono::Duration::seconds(1)))
+        .map_or_else(|| since.to_owned(), |at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
+fn changed_versions<'a>(
+    versions: &'a mut BTreeMap<String, ItemVersion>,
+    values: &'a [Value],
+) -> impl Iterator<Item = &'a Value> + 'a {
+    values.iter().filter(move |value| {
+        let Some(id) = value.get("id").or_else(|| value.get("node_id")).or_else(|| value.get("number")) else {
+            return true;
+        };
+        let Some(at) = value.get("updated_at").and_then(Value::as_str) else {
+            return true;
+        };
+        let id = id.to_string();
+        let digest = content_digest(value);
+        if versions.get(&id).is_some_and(|known| known.at == at && known.digest == digest) {
+            return false;
+        }
+        versions.insert(id, ItemVersion { at: at.to_owned(), digest });
+        true
+    })
+}
+
+fn retain_boundary(versions: &mut BTreeMap<String, ItemVersion>, since: Option<&str>) {
+    if let Some(since) = since {
+        versions.retain(|_, version| version.at.as_str() >= since);
+    }
+}
+
 pub async fn observe_at(
     request: ObservationRequest,
     api_base: &str,
@@ -1227,11 +1346,12 @@ pub async fn observe_at(
             }
             Some(since) => github_listing(
                 &client,
-                format!(
-                    "{base}/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"
-                ),
+                cursor.items_scan.as_mut().and_then(|scan| scan.next.take()).unwrap_or_else(|| format!(
+                    "{base}/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100",
+                    since = inclusive_since(since),
+                )),
                 token,
-                cache_for,
+                if cursor.items_scan.is_some() { Duration::ZERO } else { cache_for },
                 LISTING_PAGES,
                 true,
             )
@@ -1245,7 +1365,7 @@ pub async fn observe_at(
                 .insert("open-reactions".into(), listing_digest(&listing));
         }
         if !cursor.already_seen("items", listing_digest(&listing)) {
-            for issue in &listing.values {
+            for issue in changed_versions(&mut cursor.item_versions, &listing.values) {
                 let mut item = listed_item(issue, fields, watermark.as_deref());
                 if (fields.contains("pull_requests") || fields.contains("issues"))
                     && let (Some(id), Some(number)) = (
@@ -1311,11 +1431,10 @@ pub async fn observe_at(
                 }
             }
         }
-        cursor.items_since = newest_updated_at(&listing.values)
-            .into_iter()
-            .chain(watermark.clone())
-            .max()
-            .or_else(|| Some(watermark_now()));
+        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing);
+        if cursor.items_scan.is_none() {
+            retain_boundary(&mut cursor.item_versions, cursor.items_since.as_deref());
+        }
 
         // A reaction changes no `updated_at`, so reactions on open items come from the open
         // listing. A first poll already read it.
@@ -1354,29 +1473,28 @@ pub async fn observe_at(
                 Some(since) => {
                     let comments = github_listing(
                         &client,
-                        format!(
-                            "{base}/issues/comments?sort=updated&direction=asc&since={since}&per_page=100"
-                        ),
+                        cursor.comments_scan.as_mut().and_then(|scan| scan.next.take()).unwrap_or_else(|| format!(
+                            "{base}/issues/comments?sort=updated&direction=asc&since={since}&per_page=100",
+                            since = inclusive_since(&since),
+                        )),
                         token,
-                        cache_for,
+                        if cursor.comments_scan.is_some() { Duration::ZERO } else { cache_for },
                         LISTING_PAGES,
                         true,
                     )
                     .await?;
                     more |= comments.truncated;
                     if !cursor.already_seen("comments", listing_digest(&comments)) {
-                        for item in comments
-                            .values
-                            .iter()
+                        for item in changed_versions(&mut cursor.comment_versions, &comments.values)
                             .filter_map(|comment| listed_comment(comment, fields))
                         {
                             merge(&mut items, item);
                         }
                     }
-                    cursor.comments_since = newest_updated_at(&comments.values)
-                        .into_iter()
-                        .chain(Some(since))
-                        .max();
+                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments);
+                    if cursor.comments_scan.is_none() {
+                        retain_boundary(&mut cursor.comment_versions, cursor.comments_since.as_deref());
+                    }
                 }
             }
             // Reactions on comments come from the newest hundred comments.
@@ -1579,11 +1697,15 @@ pub async fn observe_at(
             &client, &base, &repository, token, cache_for, now_ms() as u64,
         ).await;
     }
+    // Once either listing exhausts its reconciliation burst, throttle the observation,
+    // including pagination in the other listing. Keep every frozen watermark and cursor.
+    let reconcile_backoff = [&cursor.items_scan, &cursor.comments_scan].into_iter()
+        .flatten().any(|scan| scan.unstable_sweeps >= IMMEDIATE_RECONCILIATION_SWEEPS);
     Ok(ProviderObservation {
         facts: Value::Object(facts),
         cursor: Some(serde_json::to_string(&cursor)?),
-        // A listing longer than one read continues at once.
-        next_check_unix_ms: now_ms().saturating_add(if more {
+        // Large listings continue immediately only while the reconciliation burst permits it.
+        next_check_unix_ms: now_ms().saturating_add(if more && !reconcile_backoff {
             super::PROVIDER_CONTINUE_MS
         } else {
             300_000
@@ -2565,6 +2687,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_or_short_workspace_ci_listing_fails_the_read_and_a_quiet_one_does_not() {
+        use super::super::github_workflows::workspace_ci_runs;
+        let (github, base) = FakeGithub::start().await;
+        let base = format!("{base}/repos/acme/garden");
+        let now = chrono::Utc::now();
+        let since = (now - chrono::TimeDelta::days(1)).format("%Y-%m-%d");
+        let listing = |filter: &str| format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?{filter}&created=%3E%3D{since}&per_page=100");
+        let newest = |filter: &str| format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?{filter}&per_page=1");
+        let (pulls, groups) = ("event=pull_request&status=success", "event=merge_group&status=completed");
+        // The created= filter answers nothing for pull requests, but their newest run is from today.
+        github.route(&listing(pulls), json!({"total_count": 0, "workflow_runs": []}));
+        github.route(&listing(groups), json!({"total_count": 0, "workflow_runs": []}));
+        github.route(&newest(pulls), json!({"total_count": 9, "workflow_runs": [{"id": 1, "created_at": now.to_rfc3339()}]}));
+        github.route(&newest(groups), json!({"total_count": 9, "workflow_runs": [{"id": 2, "created_at": "2020-01-01T00:00:00Z"}]}));
+        let client = reqwest::Client::new();
+        let auth = GithubAuth::test("fixture-auth");
+        let now_ms = now.timestamp_millis() as u64;
+        let error = workspace_ci_runs(&client, &base, "acme/garden", &auth, Duration::ZERO, now_ms).await.unwrap_err();
+        assert!(error.to_string().contains("listed no event=pull_request&status=success runs"), "{error}");
+        // Newest runs from before the window: the empty listing is a quiet day.
+        github.route(&newest(pulls), json!({"total_count": 9, "workflow_runs": [{"id": 1, "created_at": "2020-01-01T00:00:00Z"}]}));
+        let quiet = workspace_ci_runs(&client, &base, "acme/garden", &auth, Duration::ZERO, now_ms).await.unwrap();
+        assert!(quiet.runs.is_empty());
+        // A listing short of its own total fails too.
+        github.route(&listing(pulls), json!({"total_count": 2, "workflow_runs": [{"id": 3, "created_at": now.to_rfc3339()}]}));
+        let error = workspace_ci_runs(&client, &base, "acme/garden", &auth, Duration::ZERO, now_ms).await.unwrap_err();
+        assert!(error.to_string().contains("listed 1 event=pull_request&status=success runs") && error.to_string().contains("of the 2"), "{error}");
+    }
+
+    #[tokio::test]
     async fn runs_in_the_last_hour_have_their_artifacts_listed_once_for_flaky_tests() {
         use super::super::github_workflows::{read_flaky, WorkspaceCi, WorkspaceRun};
         let (github, base) = FakeGithub::start().await;
@@ -2776,7 +2928,7 @@ mod tests {
                 .contains("pullRequests(")
         );
         github.take_requests();
-        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-10T00:00:00Z&per_page=100", json!([
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100", json!([
             issue(1, "2026-09-11T00:00:00Z", json!({"node_id": "I_orchid", "state": "closed", "state_reason": "completed"})),
             issue(2, "2026-09-11T00:00:00Z", json!({"node_id": "PR_orchid", "state": "closed", "pull_request": {"merged_at": "2026-09-11T00:00:00Z"},
                 "html_url": "https://github.com/acme/garden/pull/2"}))
@@ -2807,7 +2959,7 @@ mod tests {
                 .iter()
                 .any(|request| request.starts_with("POST"))
         );
-        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-11T00:00:00Z&per_page=100", json!([]));
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-10T23:59:59Z&per_page=100", json!([]));
         age_pull_request_check(&base, PULL_REQUEST_CHECK_INTERVAL);
         let final_read = observe_at(
             request(
@@ -2889,7 +3041,7 @@ mod tests {
             .await
             .unwrap();
         github.take_requests();
-        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-10T00:00:00Z&per_page=100", json!([]));
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100", json!([]));
         github.resolved_nodes(json!([{"id": "I_orchid", "state": "OPEN", "number": 77,
             "url": "https://github.com/acme/greenhouse/issues/77"}]));
         age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
@@ -3062,7 +3214,7 @@ mod tests {
                 .count(),
             2
         );
-        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-10T00:00:00Z&per_page=100", json!([]));
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100", json!([]));
         age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
         observe_at(
             request(
@@ -3174,6 +3326,249 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stable_idle_urls_revalidate_and_same_second_updates_are_not_missed() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let at = "2026-09-10T00:00:00Z";
+        let issues = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        let comments = "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        let comment = |id: u64, number: u64| json!({
+            "id": id, "issue_url": format!("https://api.github.com/repos/acme/garden/issues/{number}"),
+            "html_url": format!("https://github.com/acme/garden/issues/{number}#issuecomment-{id}"),
+            "user": {"login": "fern"}, "body": "hello", "created_at": at, "updated_at": at,
+        });
+        github.route(issues, json!([issue(1, at, json!({}))]));
+        github.route(comments, json!([comment(91, 1)]));
+        // An old cursor has no version maps: upgrades need no migration or backfill.
+        let cursor = json!({"items_since": at, "comments_since": at}).to_string();
+        let token = GithubAuth::test("boundary-token");
+        let spender = "observer/stable-boundary".to_owned();
+        spend_as(spender.clone(), async {
+            let first = observe_at(request(&["comments"], Some(&cursor), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(item(&first.facts, "issues", 1)["recent_comments"][0]["id"], 91);
+            github.take_requests();
+            let idle = observe_at(request(&["comments"], first.cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(idle.facts, json!({"repository_id": 7}));
+            assert_eq!(idle.cursor, first.cursor);
+            let requests = std::mem::take(&mut *github.requests.lock());
+            assert_eq!(requests.len(), 3);
+            assert!(requests.iter().all(|request| request.to_ascii_lowercase().contains("if-none-match:")));
+            let usage = github_usage_report().spenders.into_iter()
+                .find(|report| report.spender == spender).unwrap();
+            assert_eq!(usage.not_modified, 3, "every idle endpoint returned 304");
+
+            // GitHub's since is exclusive. Both new records share the previous watermark's
+            // second, but the overlap includes them. Already emitted IDs must not replay.
+            github.route(issues, json!([issue(1, at, json!({})), issue(2, at, json!({}))]));
+            github.route(comments, json!([comment(91, 1), comment(92, 2)]));
+            let updated = observe_at(request(&["comments"], idle.cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(items(&updated.facts, "issues").len(), 1);
+            assert_eq!(item(&updated.facts, "issues", 2)["recent_comments"][0]["id"], 92);
+            let next = RepositoryCursor::parse(updated.cursor.as_deref());
+            assert_eq!(next.items_since.as_deref(), Some(at));
+            assert_eq!(next.comments_since.as_deref(), Some(at));
+            let requests = github.take_requests();
+            assert!(requests.iter().any(|request| request == &format!("GET {issues} HTTP/1.1")));
+            assert!(requests.iter().any(|request| request == &format!("GET {comments} HTTP/1.1")));
+            github.route(issues, json!([issue(1, at, json!({"title": "edited within the same second"})), issue(2, at, json!({}))]));
+            let edited = observe_at(request(&["comments"], updated.cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(items(&edited.facts, "issues").len(), 1);
+            assert_eq!(item(&edited.facts, "issues", 1)["title"], "edited within the same second");
+            let quiet = observe_at(request(&["comments"], edited.cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(quiet.facts, json!({"repository_id": 7}));
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn inclusive_overlap_continues_past_a_full_boundary_second() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let at = "2026-09-10T00:00:00Z";
+        let issue_start = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        let comment_start = "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        for start in [issue_start, comment_start] {
+            for page in 1..=11 {
+                let path = if page == 1 { start.to_owned() } else { format!("{start}&page={page}") };
+                let values: Vec<_> = (0..100).map(|offset| {
+                    let id = (page - 1) * 100 + offset + 1;
+                    if start == issue_start {
+                        issue(id, at, json!({}))
+                    } else {
+                        json!({"id": id, "issue_url": format!("https://api.github.com/repos/acme/garden/issues/{id}"),
+                            "html_url": format!("https://github.com/acme/garden/issues/{id}#issuecomment-{id}"),
+                            "user": {"login": "fern"}, "body": "hello", "created_at": at, "updated_at": at})
+                    }
+                }).collect();
+                github.route(&path, json!(values));
+                if page < 11 {
+                    github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+                }
+            }
+        }
+        let token = GithubAuth::test("pagination-boundary-token");
+        let cursor = json!({"items_since": at, "comments_since": at}).to_string();
+        let first = observe_at(request(&["comments"], Some(&cursor), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(items(&first.facts, "issues").len(), 1000);
+        let cursor = RepositoryCursor::parse(first.cursor.as_deref());
+        assert!(cursor.items_scan.as_ref().unwrap().next.as_deref().unwrap().ends_with("&page=11"));
+        assert!(cursor.comments_scan.as_ref().unwrap().next.as_deref().unwrap().ends_with("&page=11"));
+        github.take_requests();
+        let continued = observe_at(request(&["comments"], first.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(items(&continued.facts, "issues").len(), 100);
+        assert_eq!(item(&continued.facts, "issues", 1100)["recent_comments"][0]["id"], 1100);
+        let cursor = RepositoryCursor::parse(continued.cursor.as_deref());
+        assert!(cursor.items_scan.as_ref().unwrap().next.is_none());
+        assert!(cursor.comments_scan.as_ref().unwrap().next.is_none());
+        let requests = github.take_requests();
+        assert_eq!(requests.len(), 3, "continuations do not replay the first ten pages");
+        assert_eq!(requests.iter().filter(|request| request.contains("&page=11 ")).count(), 2);
+        let replay = observe_at(request(&["comments"], continued.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(replay.facts, json!({"repository_id": 7}));
+        let reconciled = observe_at(request(&["comments"], replay.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        let cursor = RepositoryCursor::parse(reconciled.cursor.as_deref());
+        assert!(cursor.items_scan.is_none());
+        assert!(cursor.comments_scan.is_none());
+    }
+
+    #[tokio::test]
+    async fn shifted_pages_reconcile_from_the_start_before_committing_the_watermark() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let at = "2026-09-10T00:00:00Z";
+        let starts = [
+            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+            "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+        ];
+        let routes = |moved: u64| {
+            let ids: Vec<_> = ((moved + 1)..=1100).chain(1..=moved).collect();
+            for (kind, start) in starts.iter().enumerate() {
+                for (index, ids) in ids.chunks(100).enumerate() {
+                    let page = index + 1;
+                    let path = if page == 1 { (*start).to_owned() } else { format!("{start}&page={page}") };
+                    let values: Vec<_> = ids.iter().map(|&id| {
+                        let updated = if id <= moved { format!("2026-09-10T00:00:0{id}Z") } else { at.to_owned() };
+                        if kind == 0 {
+                            issue(id, &updated, json!({}))
+                        } else {
+                            json!({"id": id, "issue_url": format!("https://api.github.com/repos/acme/garden/issues/{id}"),
+                                "html_url": format!("https://github.com/acme/garden/issues/{id}#issuecomment-{id}"),
+                                "user": {"login": "fern"}, "body": "hello", "created_at": at, "updated_at": updated})
+                        }
+                    }).collect();
+                    github.route(&path, json!(values));
+                    if page < 11 {
+                        github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+                    }
+                }
+            }
+        };
+        routes(0);
+        let token = GithubAuth::test("shifted-pages-token");
+        let cursor = json!({"items_since": at, "comments_since": at}).to_string();
+        let poll = |cursor: Option<String>| {
+            let mut request = request(&["comments"], cursor.as_deref(), None);
+            // Continuation/reconciliation must revalidate despite the ordinary cache TTL.
+            request.every_ms = Some(120_000);
+            observe_at(request, &base, Some(&token))
+        };
+        let first = poll(Some(cursor)).await.unwrap();
+        routes(1); // ID1001 moves into page10; page11 skips it and sees updated ID1.
+        let tail = poll(first.cursor.clone()).await.unwrap();
+        let cursor = RepositoryCursor::parse(tail.cursor.as_deref());
+        assert_eq!(cursor.items_since.as_deref(), Some(at));
+        assert_eq!(cursor.comments_since.as_deref(), Some(at));
+        let repaired = poll(tail.cursor.clone()).await.unwrap();
+        assert_eq!(item(&repaired.facts, "issues", 1001)["recent_comments"][0]["id"], 1001);
+        routes(2); // Another shift during reconciliation must require another stable sweep.
+        let mut latest = poll(repaired.cursor.clone()).await.unwrap();
+        assert_eq!(RepositoryCursor::parse(latest.cursor.as_deref()).items_since.as_deref(), Some(at));
+        let mut complete = false;
+        for _ in 0..6 {
+            github.take_requests();
+            latest = poll(latest.cursor.clone()).await.unwrap();
+            let requests = github.take_requests();
+            for start in starts {
+                assert!(requests.iter().filter(|request| request.starts_with(&format!("GET {start}"))).count() <= 10);
+            }
+            let cursor = RepositoryCursor::parse(latest.cursor.as_deref());
+            if cursor.items_scan.is_none() && cursor.comments_scan.is_none() {
+                assert_eq!(cursor.items_since.as_deref(), Some("2026-09-10T00:00:02Z"));
+                assert_eq!(cursor.comments_since.as_deref(), Some("2026-09-10T00:00:02Z"));
+                complete = true;
+                break;
+            }
+            assert_eq!(cursor.items_since.as_deref(), Some(at));
+            assert_eq!(cursor.comments_since.as_deref(), Some(at));
+        }
+        assert!(complete, "stable page versions eventually commit both watermarks");
+    }
+
+    #[tokio::test]
+    async fn continuously_changing_sweeps_fall_back_to_normal_polling_without_committing() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let at = "2026-09-10T00:00:00Z";
+        let start = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        for page in 1..=11 {
+            let path = if page == 1 { start.to_owned() } else { format!("{start}&page={page}") };
+            github.route(&path, json!([issue(page, at, json!({}))]));
+            if page < 11 {
+                github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+            }
+        }
+        let token = GithubAuth::test("continuous-churn-token");
+        let mut cursor = Some(json!({"items_since": at}).to_string());
+        for sweep in 0..6 {
+            // Every new sweep sees a different page version, even within one timestamp second.
+            github.route(start, json!([issue(1, at, json!({"title": format!("edit {sweep}")}))]));
+            for part in 0..2 {
+                let before = now_ms();
+                let observation = observe_at(request(&["issues"], cursor.as_deref(), None), &base, Some(&token))
+                    .await.unwrap();
+                let state = RepositoryCursor::parse(observation.cursor.as_deref());
+                assert_eq!(state.items_since.as_deref(), Some(at));
+                assert!(state.items_scan.is_some(), "never force-commit an unstable sweep");
+                if sweep >= 2 || (sweep == 1 && part == 1) {
+                    assert!(observation.next_check_unix_ms >= before + 300_000,
+                        "exhausted bursts use the ordinary provider deadline, not a one-second continuation");
+                    assert_eq!(state.items_scan.as_ref().unwrap().unstable_sweeps, IMMEDIATE_RECONCILIATION_SWEEPS);
+                }
+                cursor = observation.cursor;
+            }
+        }
+        // Backoff keeps enough state to converge later; it is not an error or forced commit.
+        for _ in 0..2 {
+            let observation = observe_at(request(&["issues"], cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            cursor = observation.cursor;
+        }
+        assert!(RepositoryCursor::parse(cursor.as_deref()).items_scan.is_none());
+    }
+
+    #[test]
+    fn overlap_deduplicates_by_identity_and_updated_at_and_discards_old_versions() {
+        let mut versions = BTreeMap::new();
+        let first = vec![issue(1, "2026-09-10T00:00:00Z", json!({}))];
+        assert_eq!(changed_versions(&mut versions, &first).count(), 1);
+        assert_eq!(changed_versions(&mut versions, &first).count(), 0);
+        let updated = vec![issue(1, "2026-09-10T00:00:01Z", json!({})),
+            issue(2, "2026-09-10T00:00:00Z", json!({}))];
+        assert_eq!(changed_versions(&mut versions, &updated).count(), 2);
+        retain_boundary(&mut versions, Some("2026-09-10T00:00:01Z"));
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions["1"].at, "2026-09-10T00:00:01Z");
+    }
+
+    #[tokio::test]
     async fn one_poll_emits_each_declared_data_type_and_an_unchanged_repository_emits_nothing() {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7}));
@@ -3250,11 +3645,11 @@ mod tests {
         // GraphQL is asked again only because a check is still pending, and not within a minute
         // of the last read.
         github.take_requests();
-        let since = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-04T00:00:00Z&per_page=100";
+        let since = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-03T23:59:59Z&per_page=100";
         github.route(since, json!([]));
         let comments = format!(
             "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={}&per_page=100",
-            cursor.comments_since.as_deref().unwrap()
+            inclusive_since(cursor.comments_since.as_deref().unwrap())
         );
         github.route(&comments, json!([]));
         let second = spend_as(
@@ -3358,7 +3753,7 @@ mod tests {
         github.open_pull_requests(json!([opened]));
         let since = "2026-09-10T00:00:00Z";
         github.route(
-            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"),
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),
             json!([
                 // An old issue closed; a merged pull request; a new pull request; a new issue.
                 issue(1, "2026-09-10T01:00:00Z", json!({"state": "closed", "state_reason": "completed"})),
@@ -3371,7 +3766,7 @@ mod tests {
         );
         let comments_since = "2026-09-10T00:00:00Z";
         github.route(
-            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={comments_since}&per_page=100"),
+            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={comments_since}&per_page=100", comments_since = inclusive_since(comments_since)),
             json!([
                 {"id": 91, "issue_url": "https://api.github.com/repos/acme/garden/issues/8",
                  "html_url": "https://github.com/acme/garden/pull/8#issuecomment-91",
@@ -3450,7 +3845,7 @@ mod tests {
         github.route("/repos/acme/garden", json!({"id": 7}));
         let since = "2026-09-10T00:00:00Z";
         github.route(
-            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"),
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),
             json!([]),
         );
         let comment = |id: u64, number: u64, at: &str| {
@@ -3460,7 +3855,7 @@ mod tests {
                 "created_at": at, "updated_at": at})
         };
         github.route(
-            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={since}&per_page=100"),
+            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),
             json!([
                 comment(92, 8, "2026-09-10T05:02:00Z"),
                 comment(91, 8, "2026-09-10T05:01:00Z"),
@@ -3864,9 +4259,7 @@ mod tests {
             .items_since
             .unwrap();
         github.route(
-            &format!(
-                "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"
-            ),
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(&since)),
             json!([]),
         );
         github.open_pull_requests(json!([open_pull(2, &"a".repeat(40), "SUCCESS")]));
@@ -3906,9 +4299,7 @@ mod tests {
             .items_since
             .unwrap();
         github.route(
-            &format!(
-                "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"
-            ),
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(&since)),
             json!([issue(
                 3,
                 "2026-09-20T00:00:00Z",
@@ -3961,9 +4352,7 @@ mod tests {
         let since = RepositoryCursor::parse(first.cursor.as_deref())
             .items_since
             .unwrap();
-        let listing = format!(
-            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"
-        );
+        let listing = format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(&since));
         // A new head: the REST listing shows the pull request changed.
         github.route(
             &listing,

@@ -8,7 +8,7 @@ import StFabricRust
 
 public class StFabricModule: Module {
   private let bridge = FabricBridge()
-  private let queue = DispatchQueue(label: "smalltalk.fabric")
+  private let queue = DispatchQueue(label: "fractal.fabric")
 
   public func definition() -> ModuleDefinition {
     Name("StFabric")
@@ -33,7 +33,7 @@ public class StFabricModule: Module {
 
 private final class FabricBridge {
   // This key is separate from the device bearer and P-256 action-signing key.
-  private let service = "com.compoundingtech.smalltalk.fabric-proof"
+  private let service = "com.compoundingtech.fractal.fabric-proof"
   private let account = "iroh-secret-v1"
   // The path monitor runs only while a bridge is open (a monitor cannot restart once cancelled, so each
   // dial makes its own). An app that never chose fabric never starts one.

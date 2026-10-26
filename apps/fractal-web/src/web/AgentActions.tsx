@@ -67,7 +67,7 @@ export const AgentActions = ({ agent }: { readonly agent: Pick<Agent, 'ref' | 'n
     const sent: Promise<AgentControlResult> = row.key === 'interrupt' ? port.interrupt(agent.ref) : port.control(agent.ref, row.key)
     void sent.then((result) => {
       setBusy(false)
-      setStatus(result._tag === 'Sent' ? `${row.label} ${agent.name}: asked st` : result.detail)
+      setStatus(result._tag === 'Sent' ? `${row.label} ${agent.name}: asked Fractal` : result.detail)
     })
   }
   return (

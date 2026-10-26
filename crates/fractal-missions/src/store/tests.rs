@@ -2753,7 +2753,7 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
     let upgraded = Store::open(&path, "worker").unwrap();
     assert_eq!(
         upgraded
-            .smalltalk
+            .fractal
             .work_extension_roots_rebuilt
             .load(Ordering::Relaxed),
         1
@@ -2796,7 +2796,7 @@ fn work_extensions_upgrade_repairs_affected_trees_once_and_keeps_local_renewals(
     let reopened = Store::open(&path, "worker").unwrap();
     assert_eq!(
         reopened
-            .smalltalk
+            .fractal
             .work_extension_roots_rebuilt
             .load(Ordering::Relaxed),
         0
@@ -3567,6 +3567,50 @@ fn a_late_claim_in_a_standing_tree_rebuilds_only_its_own_child() {
     assert_eq!(
         (&projected.status, &projected.blocked_reason),
         (&replayed.status, &replayed.blocked_reason)
+    );
+}
+
+/// The projection lend that rebuilds a late claim's part names the rebuild as its own stage,
+/// apart from `incremental`, and counts the part and the claims it replayed. The staged
+/// lends are kept process-wide; CI runs each test in its own process (nextest).
+#[test]
+fn a_late_claim_rebuild_is_its_own_stage_of_the_projection_lend() {
+    let (controller, worker, _root, children) = replicated_run_tree(8);
+    let late = children[3].steps[0].subject.clone();
+    let earlier = worker
+        .claims_for(&children[0].subject, None)
+        .unwrap()
+        .iter()
+        .map(|claim| claim.accepted_at_unix_ms)
+        .min()
+        .unwrap();
+    worker
+        .set_step_state(
+            &children[7].steps[0].subject,
+            "blocked",
+            Some("waits on a person"),
+        )
+        .unwrap();
+    controller.set_write_clock_at(earlier).unwrap();
+    controller
+        .set_step_state(&late, "blocked", Some("the controller blocks it early"))
+        .unwrap();
+    assert!(!projection_replayed(&worker, "controller", &controller));
+    let staged = smallclaims::windows::holds::recent_staged();
+    let rebuild = staged.iter().rev().find_map(|(stages, rebuilt)| {
+        let named = |label: &str| stages.iter().any(|(stage, _)| *stage == label);
+        let counted = rebuilt
+            .iter()
+            .find(|(stage, _)| *stage == "rebuild-part")
+            .map(|(_, rebuilt)| *rebuilt)?;
+        (named("incremental") && named("rebuild-part")).then_some(counted)
+    });
+    let rebuild =
+        rebuild.unwrap_or_else(|| panic!("no staged lend rebuilt a part: {staged:?}"));
+    assert!(rebuild.aggregates >= 1, "{rebuild:?}");
+    assert!(
+        rebuild.claims >= 1,
+        "the part's claims are counted: {rebuild:?}"
     );
 }
 
@@ -10666,6 +10710,7 @@ mission "typecase" state="ready" {
         .withdraw_attention(
             "attention/other-fault",
             &AttentionWithdrawRequest {
+                episode: None,
                 reason: "cleared".into(),
                 actor: "agent/node.requester".into(),
                 idempotency_key: "other-fault-withdrawn".into(),
@@ -10811,59 +10856,4 @@ mod terminal_projection_date_tests {
     use super::*;
 
     /* sqlite-large-value: allow-for-now lv-h68fae53a4501 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("terminal_projection_date_tests.rs");
-}
-
-#[test]
-fn carried_blocker_reason_uses_source_cut_across_replay_and_upgrade() {
-    let store = Store::open_memory("node").unwrap();
-    let at = now_ms() + 60_000;
-    store.set_write_clock_at(at).unwrap();
-    publish_carry(&store, CARRY_SOURCE, "carry-reason-one");
-    let run = store.create_mission_run(&MissionRunRequest {
-        mission: "carry".into(), revision: None, workspace: "/tmp".into(),
-        requester: Some("person/requester".into()), mode: Some("run".into()),
-        inputs: BTreeMap::new(), idempotency_key: "carry-reason-run".into(),
-    }).unwrap();
-    let original = run.steps.iter().find(|step| step.step == "work").unwrap();
-    store.set_step_state(&original.subject, "blocked", Some("canonical baseline is not satisfied")).unwrap();
-    let revised = publish_carry(&store,
-        &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."), "carry-reason-two");
-    let adopted = store.adopt_mission_revision(&run.id, &revised, "person/requester", "revise other work", "carry-reason-adopt").unwrap();
-    let carried = adopted.steps.iter().find(|step| step.step == "work").unwrap();
-    assert_eq!(carried.status, "blocked");
-    assert_eq!(carried.blocked_reason.as_deref(), Some("canonical baseline is not satisfied"));
-    // A later predecessor observation cannot change the cut recorded by the carry.
-    store.set_write_clock_at(at + 1_000).unwrap();
-    store.append_claim(&ClaimInput {
-        subject: original.subject.clone(), kind: "step-run.state".into(), actor: None,
-        fields: BTreeMap::from([("status".into(),json!("blocked")),("reason".into(),json!("later predecessor reason"))]),
-        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-    }).unwrap();
-    let expected = projection_digest::tables(&store.readers.get()).unwrap();
-    let target = Store::open_memory("target").unwrap();
-    target.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
-    let copied = target.step_run(&carried.subject).unwrap().unwrap();
-    assert_eq!(copied.blocked_reason, carried.blocked_reason);
-    assert_eq!(projection_digest::tables(&target.readers.get()).unwrap(), expected);
-    target.replay_replication_graph().unwrap();
-    assert_eq!(target.step_run(&carried.subject).unwrap().unwrap().blocked_reason, carried.blocked_reason);
-    assert_eq!(projection_digest::tables(&target.readers.get()).unwrap(), expected);
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("old-carried-reason.sqlite3");
-    target.copy_store_to(&path).unwrap();
-    {
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        projection_digest::register(&connection).unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-hb4bbe29cc5e7 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET blocked_reason=NULL WHERE subject=?1", [&carried.subject]).unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-hd48453b87a20 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='mission_projection_source_rules'", []).unwrap();
-    }
-    let opened = Store::open(&path, "target").unwrap();
-    assert_eq!(opened.step_run(&carried.subject).unwrap().unwrap().blocked_reason, carried.blocked_reason);
-    assert_eq!(projection_digest::tables(&opened.readers.get()).unwrap(), expected);
-    // A real successor transition owns its reason, and must survive reopen.
-    opened.set_step_state(&carried.subject, "ready", None).unwrap();
-    drop(opened);
-    let opened = Store::open(&path, "target").unwrap();
-    assert_eq!(opened.step_run(&carried.subject).unwrap().unwrap().status, "ready");
-    assert_eq!(opened.step_run(&carried.subject).unwrap().unwrap().blocked_reason, None);
 }

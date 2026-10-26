@@ -1,4 +1,4 @@
-//! The part of `api::client_v0::assistant` that moved up from st3-api.
+//! The part of `api::client_v0::assistant` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use rusqlite::OptionalExtension as _;
@@ -407,7 +407,7 @@ mod tests {
                 match peer {
                     0 => { request.extensions_mut().insert(super::super::super::BoundAgent("agent/example-worker".into())); }
                     1 => { request.extensions_mut().insert(super::super::super::LocalPeer {
-                        pid: 7, ancestor: Some("agent/example-worker".into()),
+                        pid: 7, peer_process: None, ancestor: Some("agent/example-worker".into()),
                     }); }
                     _ => { request.extensions_mut().insert(super::super::super::NativeDeliveryPeer {
                         agent: "agent/example-worker".into(), transport: "omp-channel", pid: 7, archives_inbox: false,
@@ -417,7 +417,7 @@ mod tests {
             }
             let mut owner_request = Request::builder().uri(path)
                 .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap();
-            owner_request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, ancestor: None });
+            owner_request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
             let response = app.clone().oneshot(owner_request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{path}");
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();

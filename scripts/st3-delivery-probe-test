@@ -1019,7 +1019,10 @@ agent "operations/amber" {{
                 config = {"host": node.name, "agent": f"agent/probe/{node.name}",
                           "binary": str(node.binary), "socket": str(node.endpoint),
                           "state_dir": str(node.root / "probe"), "reviewer": "person/eval",
-                          "interval_ms": 12_000, "deadline_ms": deadline_ms,
+                          # Probes follow each other quickly; each one keeps the full deadline. With
+                          # 12 s between them the outage alert and the recovery each waited one more
+                          # interval.
+                          "interval_ms": 2_000, "deadline_ms": deadline_ms,
                           "peers": [{"host": other.name, "agent": f"agent/probe/{other.name}"}]}
                 if agent_alert:
                     config["alert_agent"] = "agent/operations/amber"

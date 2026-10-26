@@ -145,7 +145,7 @@ async fn a_history_gap_exits_six_with_an_explicit_continuation_command() {
     assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
     assert!(stderr(&output).contains("retained floor 30, frontier 50"));
     assert!(
-        stderr(&output).contains("st trace show 'host/follow-fixture' --after-index 50 --follow")
+        stderr(&output).contains("fractal trace show 'host/follow-fixture' --after-index 50 --follow")
     );
     assert!(!stderr(&output).contains("follow gap:"));
     assert!(output.stdout.is_empty());

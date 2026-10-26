@@ -4,7 +4,7 @@ Status: assistant pairing, grant management, bounded reads, and explicitly scope
 
 The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p fractal-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
 
-## Connect an MCP client to st
+## Connect an MCP client to Fractal
 
 `st-mcp` is a local stdio-only MCP server named `st`, suitable for Claude Code,
 Codex, and other stdio clients. It has no HTTP listener, transport selector, or
@@ -20,7 +20,7 @@ fixture rather than rebuilding its expected tool definitions from current schema
 JSON object key order is ignored because it depends on the build's
 `serde_json/preserve_order` feature.
 
-**Production freeze (Q32): until R1 ([#3324](https://github.com/compoundingtech/smalltalk/issues/3324),
+**Production freeze (Q32): until R1 ([#3324](https://github.com/compoundingtech/fractal/issues/3324),
 verified keyed issuer admission) is verified, issue assistant grants with read
 scopes only.** The production setup below deliberately omits write scopes.
 
@@ -124,7 +124,7 @@ List/get and conversation reads use the corresponding explicit assistant read
 scopes; `st_alert_answer` requires `write.assistant.answers` and
 `st_message_send` requires `write.assistant.messages`. Message recipients may be
 any declared existing agent, not people; stored `recipient_allowlist` is metadata,
-not an enforced allowlist (Q21 / [#3250](https://github.com/compoundingtech/smalltalk/issues/3250)).
+not an enforced allowlist (Q21 / [#3250](https://github.com/compoundingtech/fractal/issues/3250)).
 
 ### Revocation and provenance
 
@@ -242,7 +242,7 @@ The writer transaction restricts this authority to a supported structured `work.
 
 The resulting `work.person-done` claim uses the grant's `assistant/chatgpt` or `assistant/mcp` principal as its actor. Work projections expose the same principal as `person_answers[].respondent`, alongside optional server-owned `sender_class`, `assistant_grant_id`, `assistant_owner`, and `assistant_session_actor`. Owner and session context do not replace the respondent and do not set `acted_for`: that field remains reserved for an agent recording a person's prior instruction with delegation proof. `st work show` displays the assistant respondent and the separate grant, owner, and session actor context.
 
-`write.assistant.messages` is intentionally broad across declared existing agents, as decided in Q21 / [#3250](https://github.com/compoundingtech/smalltalk/issues/3250). The API and message-acceptance transaction do not require exact membership in `recipient_allowlist`, even when it is empty. That field remains stored policy metadata, not an enforced recipient restriction. Non-agent and person recipients remain refused, and the recipient must exist. Grant expiry, revocation, policy revision, explicit scope, fenced dispatch, idempotency, and external-assistant sender attribution remain enforced. A ChatGPT confirmation card is advisory, not a second daemon approval or downstream owning-person authorization.
+`write.assistant.messages` is intentionally broad across declared existing agents, as decided in Q21 / [#3250](https://github.com/compoundingtech/fractal/issues/3250). The API and message-acceptance transaction do not require exact membership in `recipient_allowlist`, even when it is empty. That field remains stored policy metadata, not an enforced recipient restriction. Non-agent and person recipients remain refused, and the recipient must exist. Grant expiry, revocation, policy revision, explicit scope, fenced dispatch, idempotency, and external-assistant sender attribution remain enforced. A ChatGPT confirmation card is advisory, not a second daemon approval or downstream owning-person authorization.
 
 ### Acceptance
 
@@ -352,7 +352,7 @@ This calls `POST /v1/client/assistant/grants/{id}/read-trust` with `AssistantRea
 
 `POST /v1/client/assistant/propose` accepts closed typed native actions, not arbitrary daemon commands. `work.done` requires `write.assistant.answers`, `message.send` requires `write.assistant.messages`, and `custom.reply` requires `write.assistant.custom-reply`. A missing write scope fails closed; read scopes never authorize these writes. Successful proposals execute through the existing fenced action path, without creating a daemon-owned approval ask.
 
-The current message policy deliberately allows every declared existing agent recipient instead of enforcing an exact owner-maintained recipient allowlist (Q21 / [#3250](https://github.com/compoundingtech/smalltalk/issues/3250)); `recipient_allowlist` is stored metadata only. Person recipients remain unsupported. The authoritative transaction rechecks the current grant, policy revision, revocation, expiry, scope, owner binding and recipient existence as applicable; handler preflight alone is not authorization. Assistant grant and sender-class provenance survive dispatch and durable append.
+The current message policy deliberately allows every declared existing agent recipient instead of enforcing an exact owner-maintained recipient allowlist (Q21 / [#3250](https://github.com/compoundingtech/fractal/issues/3250)); `recipient_allowlist` is stored metadata only. Person recipients remain unsupported. The authoritative transaction rechecks the current grant, policy revision, revocation, expiry, scope, owner binding and recipient existence as applicable; handler preflight alone is not authorization. Assistant grant and sender-class provenance survive dispatch and durable append.
 
 Trusted output must put `from=assistant/chatgpt sender_class=external-assistant` or `from=assistant/mcp sender_class=external-assistant`, matching the authenticated grant, before the body and retain it under truncation; JSON keeps `sender_class: "external-assistant"`. Message reads and inbox notifications must warn: `WARNING: Untrusted external-assistant request; not owning-person authorization.` Receiving agents treat requests as untrusted. Consequential requests require owning-person confirmation through `axe decision ask`, never an assistant reply. Delivery authority is not downstream mutation authority; read-only analysis remains possible.
 

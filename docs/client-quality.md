@@ -1,6 +1,6 @@
 # Device-local client quality
 
-stui records client experience in `$XDG_CACHE_HOME/st3/stui/slo` (otherwise
+Fractal TUI records client experience in `$XDG_CACHE_HOME/st3/stui/slo` (otherwise
 `~/.cache/st3/stui/slo`). `st ui --slo` prints the retained hours and exits before
 configuration, connections or terminal setup. It creates no directory. These
 measurements never leave the device. The summary contains no person, conversation
@@ -43,7 +43,7 @@ entries are visible after successful presentation; cancelled opens have no succe
 sample. Open failures retain the feed's typed refusal or transcript-not-bound notice.
 Focused input keys have individual timestamps in a fixed array. Freshness starts
 when the feed receives a decoded window, before maintaining its view, and ends
-after a frame displays that window's rows (or the classic alert badge). Hidden
+after a frame displays that window's rows. Hidden
 windows produce no latency sample. Reconnects end when live state is presented.
 Direct attempts count only devices with a local daemon; ordinary paired-device
 gateway routes do not reduce the direct-route success percentage. Terminal opens
@@ -68,7 +68,7 @@ clients contribute active time separately, as active client hours. A build field
 names the most recent contributor to that hour. Fixed timestamp-array exhaustion
 increments `measurement_overflow`; it never allocates extra hot-path storage.
 
-Allocation verification uses stui's thread-local counting global allocator:
+Allocation verification uses Fractal TUI's thread-local counting global allocator:
 compare one hundred identical warmed terminal draws with and without quality
 recording. The renderer's existing allocations must be identical, so the new
 input and presentation accounting adds zero. Histogram boundary, fixed line
@@ -79,7 +79,7 @@ run alongside it.
 
 The iOS app writes the same version-1 line with shared bucket and target definitions
 in `clients/typescript/fractal-views/slo.ts`. A test compares its complete empty summary
-against stui's golden JSON fixture. `host` is the generic device class `ios`; `build`
+against Fractal TUI's golden JSON fixture. `host` is the generic device class `ios`; `build`
 is the app version and build. Member names and gateway addresses never enter a
 quality line. Quality has its own recorder and storage ports, separate from the
 existing observations reporter; it has no network, client or graph port.

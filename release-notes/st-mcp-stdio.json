@@ -7,11 +7,11 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "The claim registry assistant subject pattern expands from assistant/chatgpt[/session/assistant-grant/ID] to assistant/{chatgpt|mcp}[/session/assistant-grant/ID], changing the registry digest from 264f8c8f4252e828035e93e3964e65047678d8c0c3d2233026a71c767600c3a6 to 921b65fe6121e068a183eb384c79ca5a8b6699be3b52b6f53c1ed99d195e13d2. SCHEMA_NAME remains st3.v1 and storage schema remains 20 -> 20; no SQL tables, columns, indexes, claim kinds or claim fields are added by MCP. These digests include the current main registry at ad4e414c31. Client-v0 adds assistant/mcp to principal/session contracts. Missing historical grant principal means ChatGPT only; explicit invalid or null principals are refused."
+    "detail": "The claim registry assistant subject pattern expands from assistant/chatgpt[/session/assistant-grant/ID] to assistant/{chatgpt|mcp}[/session/assistant-grant/ID], changing the registry digest from 8e7ccde6e5aa6baf1abc62c3edd764e2cd5d54ac5a3e051e3c27506f2b485db7 to c7ff9a92287f2eda551d43d62c91da0007b4747f7297b0b9fca8685b6c1cd782. SCHEMA_NAME remains st3.v1 and storage schema remains 20 -> 20; no SQL tables, columns, indexes, claim kinds or claim fields are added by MCP. These digests include the current main registry at bbbebfdb56. Client-v0 adds assistant/mcp to principal/session contracts. Missing historical grant principal means ChatGPT only; explicit invalid or null principals are refused."
   },
   "rules": {
     "status": "changed",
-    "detail": "Assistant subject admission now recognizes assistant/mcp while preserving exact grant-principal attribution. The schema registry digest changes with the subject pattern, but checkpoint RULES_VERSION remains 19 -> 19 and rules_digest remains 70a3bb7af2d2273fcd0f910de867afe7d1e4ce1b3740254661145490ecff83b2. Coordinate member upgrades before issuing MCP grants or replicating MCP actions: older members do not recognize the new principal and must not be treated as compatible merely because storage and checkpoint rules numbers are unchanged."
+    "detail": "Assistant subject admission now recognizes assistant/mcp while preserving exact grant-principal attribution. The schema registry digest changes with the subject pattern, but checkpoint RULES_VERSION remains 20 -> 20 and rules_digest remains 25e39e4e636038b058884567d3095ef4765a9f2bd026d25fe6196d0614ec99d0. Coordinate member upgrades before issuing MCP grants or replicating MCP actions: older members do not recognize the new principal and must not be treated as compatible merely because storage and checkpoint rules numbers are unchanged."
   },
   "compatibility": {
     "status": "changed",

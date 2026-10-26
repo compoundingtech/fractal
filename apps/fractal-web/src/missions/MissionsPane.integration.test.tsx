@@ -46,6 +46,7 @@ it('lists missions by word with who must act, folds away st\'s own, and opens a 
   await act(async () => (container.querySelector('li > button') as HTMLElement).click())
   await act(async () => [...container.querySelectorAll('button')].find((each) => each.textContent === 'Show all (1 more)')!.click())
   expect([...container.querySelectorAll('li > button')].map((row) => row.textContent?.includes('st loop'))).toContain(true)
+  expect(container.textContent).toContain('Hide settled and Fractal’s own')
   const detail = container.querySelector('[aria-label="Fix the parser steps"]')!
   expect(detail.textContent).toContain('a step has an owner who is not moving')
   expect(detail.textContent).toContain('Do parse')

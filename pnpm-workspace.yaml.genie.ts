@@ -3,7 +3,7 @@ import { diagnosticsPackages, workspaceMembers } from './package.json.genie.ts'
 
 export const diagnosticsSourceInputs = projectPnpmSourceInputs({
   packages: diagnosticsPackages,
-  repoName: 'smalltalk',
+  repoName: 'fractal',
 })
 
 // The shared native-build denylist names packages this lock does not contain; `ignoreScripts`
@@ -14,7 +14,7 @@ const { allowBuilds: _sharedDenylist, ...pnpmPolicy } = commonPnpmPolicySettings
 // layout Expo's Metro resolver already relies on; workspace packages are linked, not injected.
 export default pnpmWorkspaceYaml.root({
   packages: diagnosticsPackages,
-  repoName: 'smalltalk',
+  repoName: 'fractal',
   extraMembers: workspaceMembers,
   ...pnpmPolicy,
   overrides: {

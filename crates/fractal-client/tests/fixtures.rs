@@ -17,6 +17,54 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
+fn shared_error_sentences_preserve_machine_values_and_match_human_clients() {
+    #[derive(serde::Deserialize)]
+    struct Case {
+        kind: String,
+        code: Option<String>,
+        message: String,
+        plain: String,
+        human: String,
+    }
+    let cases: Vec<Case> = serde_json::from_str(include_str!(
+        "../../../fixtures/clients/plain-errors-v1.json"
+    )).unwrap();
+    for case in cases {
+        let code: Option<ErrorCode> = case.code.as_ref()
+            .map(|code| serde_json::from_value(serde_json::json!(code)).unwrap());
+        if case.kind == "api" {
+            assert_eq!(plain_message(code.as_ref(), &case.message), case.plain);
+            assert_eq!(human_message(code.as_ref(), &case.message), case.human);
+        }
+        let error = if case.kind == "transport" {
+            ClientError::Transport(case.message.clone())
+        } else if let Some(code) = code {
+            let envelope: ErrorEnvelope = serde_json::from_value(serde_json::json!({
+                "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                "request_id": "request/parity", "code": case.code,
+                "message": case.message, "retryable": false,
+                "details": if case.kind == "applied-unknown" {
+                    serde_json::json!({"applied": "unknown"})
+                } else { serde_json::json!({}) },
+            })).unwrap();
+            ClientError::Api(code, case.message.clone(), Box::new(envelope))
+        } else {
+            continue;
+        };
+        let before = match &error {
+            ClientError::Api(_, _, envelope) => Some(serde_json::to_value(envelope).unwrap()),
+            _ => None,
+        };
+        assert_eq!(error.plain(), case.plain, "{} {:?}", case.kind, case.code);
+        assert_eq!(error.human(), case.human, "{} {:?}", case.kind, case.code);
+        if let ClientError::Api(_, message, envelope) = &error {
+            assert_eq!(message, &case.message);
+            assert_eq!(serde_json::to_value(envelope).unwrap(), before.unwrap());
+        }
+    }
+}
+
+#[test]
 fn assistant_timeline_round_trip_preserves_read_side_wire_contract() {
     let schema: serde_json::Value = serde_json::from_str(include_str!(
         "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
@@ -727,7 +775,7 @@ fn runtime_publication_error_messages_preserve_retryability() {
         (ErrorCode::RuntimeListNotReady, true,
             "st is still preparing the runtime list; try again shortly"),
         (ErrorCode::RuntimeListEnded, false,
-            "the runtime list stopped updating; restart st"),
+            "the runtime list stopped updating; restart fractal"),
     ] {
         let envelope = serde_json::from_value(serde_json::json!({
             "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
@@ -808,6 +856,28 @@ fn relay_omission_fixture_round_trips_without_inventing_nonnullable_fields() {
         "items":raw["value"]["items"], "next_cursor":"conversation-cursor/relay/next"});
     let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
     assert_eq!(serde_json::to_value(typed).unwrap(), changes);
+}
+
+#[path = "support/legacy_delivery_entry.rs"]
+mod legacy_delivery_entry;
+
+#[test]
+fn delivery_link_round_trip_survives_the_typed_owner_relay_and_old_codec_ignores_it() {
+    let bytes = fixture("timeline-delivery-links.json");
+    let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let typed: Envelope<TimelinePage> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(typed.value.items[0].delivers.as_deref(), Some("message/fixture-delivery"));
+    assert!(typed.value.items[1].delivers.is_none());
+    assert_eq!(serde_json::to_value(&typed).unwrap(), raw);
+    let changes = serde_json::json!({"kind":"conversation-changes", "session_id":raw["value"]["session_id"],
+        "items":raw["value"]["items"], "next_cursor":"conversation-cursor/delivery/next"});
+    let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), changes);
+    for item in raw["value"]["items"].as_array().unwrap() {
+        let old: legacy_delivery_entry::TimelineEntry = serde_json::from_value(item.clone()).unwrap();
+        let mut expected = item.clone(); expected.as_object_mut().unwrap().remove("delivers");
+        assert_eq!(serde_json::to_value(old).unwrap(), expected);
+    }
 }
 
 /// Contract shape only: these fixtures carry placeholder pins and an intentionally invalid

@@ -28,7 +28,7 @@ as a compatibility surface frozen by its test
 The frame bytes are those of v0.2.30. A version banner alone is not an artifact
 checksum; record the built adapter and tested member binary hashes when testing.
 
-Smalltalk references were inspected at commit
+Fractal references were inspected at commit
 `0c6b10d044f6a8a3b051639b55f53522cc9a9b11`. Relative links describe that checkout;
 recheck them when implementing against a newer main.
 

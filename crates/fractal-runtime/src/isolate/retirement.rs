@@ -17,9 +17,20 @@ impl PopulationEvents {
     }
 
     fn populated(&mut self) -> Result<bool> {
-        self.0.rewind()?;
+        // Once the scope empties, systemd removes its cgroup, and kernfs then fails this held
+        // descriptor with ENODEV. The descriptor is bound to the exact cgroup opened before the
+        // signal, and the kernel removes a cgroup only when it is empty (rmdir of a populated one
+        // is EBUSY), so its removal is empty evidence. Any other error still fails.
+        let removed = |error: &std::io::Error| error.raw_os_error() == Some(libc::ENODEV);
+        match self.0.rewind() {
+            Err(error) if removed(&error) => return Ok(false),
+            result => result?,
+        }
         let mut events = String::new();
-        (&mut self.0).take(65537).read_to_string(&mut events)?;
+        match (&mut self.0).take(65537).read_to_string(&mut events) {
+            Err(error) if removed(&error) => return Ok(false),
+            result => result?,
+        };
         is_populated(&events)
     }
 
@@ -116,11 +127,15 @@ fn is_populated(events: &str) -> Result<bool> {
 
 impl ScopeRetirementProof {
     pub fn validate(&self, expected_unit: &str) -> Result<()> {
+        self.validate_ending(expected_unit, false)
+    }
+
+    fn validate_ending(&self, expected_unit: &str, allow_server: bool) -> Result<()> {
         ensure!(
             self.version == 1
                 && self.unit == expected_unit
                 && self.unit.starts_with("st3-")
-                && !self.unit.starts_with("st3-pty-server-")
+                && (allow_server || !self.unit.starts_with("st3-pty-server-"))
                 && self.unit.ends_with(".scope")
                 && self.unit.len() <= 256
                 && self
@@ -177,7 +192,7 @@ fn properties(unit: &str, output: &str) -> Result<ScopeRetirementProof> {
         "work scope load state is unverified"
     );
     if proof.load_state == "not-found" {
-        proof.validate(unit)?;
+        proof.validate_ending(unit, true)?;
     } else {
         group_path(unit, &proof.control_group)?;
     }
@@ -218,6 +233,15 @@ fn observe(unit: &str) -> Result<ScopeRetirementProof> {
         });
     }
     Ok(proof)
+}
+
+/// Read-only ending evidence for an already operation-bound work or server scope.
+pub(crate) fn observe_closed_scope(unit: &str) -> Result<Option<ScopeRetirementProof>> {
+    if mode() != Isolation::Scope {
+        return Ok(None);
+    }
+    let proof = observe(unit)?;
+    Ok(proof.validate_ending(unit, true).is_ok().then_some(proof))
 }
 
 /// Independent physical worker only. The same original request is checked

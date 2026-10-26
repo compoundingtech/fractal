@@ -144,6 +144,24 @@ pub async fn fleet_redeem(
                 admitted_claim,
                 first,
             } => {
+                if let Some(node_id) = &request.node_id {
+                    store.verify_fleet_pairing_admission(
+                        &request.name,
+                        &request.member_key,
+                        node_id,
+                    )?;
+                }
+                let membership = store.fleet_membership()?;
+                let sponsor_endpoints = match membership.state(store.origin()) {
+                    crate::fleet::MemberState::Current(member) => member.endpoints.clone(),
+                    _ => Vec::new(),
+                };
+                let sponsor_node_id = sponsor_endpoints.iter().find_map(|endpoint| {
+                    (endpoint["transport"] == "fabric")
+                        .then(|| endpoint["node"].as_str())
+                        .flatten()
+                        .map(str::to_owned)
+                });
                 let fleet_id =
                     fleet_id.ok_or_else(|| anyhow::anyhow!("this node is not in a fleet"))?;
                 let fabric_protocol = crate::config::FleetFile::load(&state_dir)?
@@ -158,6 +176,8 @@ pub async fn fleet_redeem(
                         "anchor_key": store.fleet_anchor()?,
                         "fleet_id": fleet_id,
                         "fabric_protocol": fabric_protocol,
+                        "sponsor_endpoints": sponsor_endpoints,
+                        "sponsor_node_id": sponsor_node_id,
                     }),
                     first,
                 )
@@ -260,6 +280,53 @@ pub async fn fleet_leave_state(
         )));
     }
     Ok(Json(snapshot))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetPairingAdmission {
+    request: smallclaims::fleet::handshake::JoinRequest,
+    node_id: String,
+}
+
+/// Carry signed admission data for the external adapter; never program Fabric policy here.
+pub async fn fleet_pairing_admission(
+    State(state): State<AppState>,
+    Json(request): Json<FleetPairingAdmission>,
+) -> Result<Json<smallclaims::fleet::handshake::JoinResponse>, ApiError> {
+    let fleet_id = state.fleet_id.as_deref().ok_or_else(|| {
+        ApiError::bad(St3Error::new("not-in-a-fleet", "this node is not in a fleet"))
+    })?;
+    let sponsor_key = state.store.member_public_key().ok_or_else(|| {
+        ApiError::internal(anyhow::anyhow!("this fleet has no member signing key"))
+    })?;
+    let http = reqwest::Client::builder()
+        .unix_socket(smallclaims::sync::leave_state_socket(&state.state_dir))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(ApiError::internal)?;
+    let response = http
+        .post("http://localhost/v1/internal/fleet/pairing-admission")
+        .json(&json!({
+            "request": request.request,
+            "node_id": request.node_id,
+            "expected_fleet_id": fleet_id,
+            "expected_sponsor_key": sponsor_key,
+        }))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(ApiError::internal)?
+        .json::<smallclaims::fleet::handshake::JoinResponse>()
+        .await
+        .map_err(ApiError::internal)?;
+    if response.sponsor_key != sponsor_key {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "pairing admission belongs to a different fleet incarnation"
+        )));
+    }
+    signal_changed(&state);
+    Ok(Json(response))
 }
 
 /// What doctor's fleet-admission check reports as admitted before this node knew better, for
