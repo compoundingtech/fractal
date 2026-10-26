@@ -18,7 +18,8 @@ prints `already signed`, so re-running on an unchanged tree is near instant (wit
 the remote has it too); --rerun runs it anyway. It tells you how far behind the base the branch is.
 The command always runs in a clean worktree of that commit, never
 in this checkout, so untracked or ignored files here cannot change the result. The worktree is one of a small pool of persistent
-ones per repository (~/.cache/st-test/<hash of the git common dir>/tree-N, one flock each, so no two runs share one), reset to the
+ones per repository (~/.cache/st-test/<hash of the git common dir>/tree-N, one flock each, so no two runs share one; waiters are served in the build host's
+cargo-priority order, then arrival), reset to the
 commit and stripped of untracked and ignored files (except the megarepo members, node_modules and target/compat-baselines) before every run: the same path every time keeps cargo's fingerprints and
 sccache's absolute-path keys valid, so a second run is warm. Nothing is linked in from here: when the tree
 has a megarepo.lock, its members are materialized under repos/ first, with the command CI's `megarepoApplyStep` runs
@@ -64,7 +65,9 @@ import argparse
 import base64
 import codecs
 import concurrent.futures
+import contextlib
 import fcntl
+import fnmatch
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -139,7 +142,7 @@ BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
 TARGET_MAX_GB = 80.0
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
-POOL_WAIT_SECONDS = 5
+POOL_WAIT_SECONDS = 1  # how often a waiter looks at the tree queue again
 # Ignored inputs a pool tree keeps between runs (git clean -e): the megarepo members, the installed dependencies and the downloaded
 # compat baselines cost minutes to materialize, install and download again. They are not tracked files, so the tree stays exact.
 POOL_KEEP = ('/repos/', 'node_modules/', '/target/compat-baselines/')
@@ -335,6 +338,15 @@ def gate_commit(base):
                 result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
     GATE_TREE[key] = result
     return result
+
+
+def fetch_base(base):
+    """The base's commit at its current tip: a remote-tracking base (origin/main) is fetched first, since main moves; the lag and the
+    policy are read at that tip."""
+    remote, _, branch = base.partition('/')
+    if branch:
+        git('fetch', '-q', remote, branch)
+    return text(git('rev-parse', '--verify', '-q', base + '^{commit}'))
 
 
 def target_commit(base):
@@ -703,22 +715,77 @@ def evict_to_cap(base, limit_gb, keep=None):
         print(f'st-test: pool is {total:.1f} GB, over {limit_gb:g} GB, and every other tree is in use', file=sys.stderr)
 
 
-def acquire_tree(root, size):
-    """(n, lock): the lowest free tree of the pool, held by an flock until the lock is closed; waits while every tree is in use."""
+PRIORITY_AGING_SECONDS, PRIORITY_FLOOR = 120, 5  # the cargo shim's rank aging: a waiting ticket's rank improves by 1 per 120 s, never below 5 (ranks under 5 never age)
+
+
+def priority_rank(environment=None):
+    """The caller's rank in the build host's priority file (lines 'RANK GLOB', first glob matching ST_AGENT; lower is served first), as the cargo shim
+    reads it: CARGO_PRIORITY_FILE or ~/.config/cargo-priority; 50 when unlisted or unreadable."""
+    environment = os.environ if environment is None else environment
+    caller = environment.get('ST_AGENT', '')
+    path = environment.get('CARGO_PRIORITY_FILE') or str(Path.home() / '.config/cargo-priority')
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        fields = line.split('#')[0].split()
+        if caller and len(fields) >= 2 and fields[0].isdigit() and fnmatch.fnmatchcase(caller, fields[1]):
+            return int(fields[0])
+    return 50
+
+
+def tree_queue(queue, now_ns):
+    """The live tickets waiting for a pool tree (name RANK.NANOS.PID), best first: the shim's order, effective rank (aged) then arrival. A ticket
+    whose process is gone is removed."""
+    found = []
+    for name in os.listdir(queue):
+        try:
+            rank, nanos, pid = (int(part) for part in name.split('.'))
+        except ValueError:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            with contextlib.suppress(OSError):
+                os.unlink(queue / name)
+            continue
+        except PermissionError:
+            pass
+        effective = rank if rank < PRIORITY_FLOOR else max(PRIORITY_FLOOR, rank - (now_ns - nanos) // (PRIORITY_AGING_SECONDS * 10**9))
+        found.append((effective, nanos, name))
+    return sorted(found)
+
+
+def acquire_tree(root, size, rank=None):
+    """(n, lock): the lowest free tree of the pool, held by an flock until the lock is closed; waits while every tree is in use.
+    Waiters queue in the build host's order, not by a race to the next free tree (2026-10-26: the CPU P0 builder, rank 3, waited two hours while
+    rank-50 runs took each tree as it came free): each takes a ticket in queue/ and only the best live ticket tries the trees."""
     root.mkdir(parents=True, exist_ok=True)
+    queue = root / 'queue'
+    queue.mkdir(exist_ok=True)
+    ticket = queue / f'{priority_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
+    ticket.touch()
     waited = False
-    while True:
-        for n in range(size):
-            lock = open(root / f'tree-{n}.lock', 'w')
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return n, lock
-            except BlockingIOError:
-                lock.close()
-        if not waited:
-            print(f'st-test: all {size} pool trees are in use; waiting for one', file=sys.stderr)
-            waited = True
-        time.sleep(POOL_WAIT_SECONDS)
+    try:
+        while True:
+            order = tree_queue(queue, time.time_ns())
+            ahead = next((i for i, (_, _, name) in enumerate(order) if name == ticket.name), 0)
+            if ahead == 0:
+                for n in range(size):
+                    lock = open(root / f'tree-{n}.lock', 'w')
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return n, lock
+                    except BlockingIOError:
+                        lock.close()
+            if not waited:
+                print(f'st-test: all {size} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
+                waited = True
+            time.sleep(POOL_WAIT_SECONDS)
+    finally:
+        with contextlib.suppress(OSError):
+            ticket.unlink()
 
 
 def is_pool_tree(directory):
@@ -1497,6 +1564,9 @@ def main(argv):
     POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
     scrub_git_environment()
     scrub_seat_environment()
+    # The build host's finish-first admission order: every stage of this run carries one run name and start time, so once
+    # the run has had a heavy admission its later stages are served by the run's start instead of queueing behind runs that began after it.
+    os.environ['ADMISSION_RUN'] = f'st-test-{os.getpid()}@{time.time_ns()}'
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--check', action='append', default=[], metavar='NAME', help='only this check (repeatable)')
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
@@ -1546,10 +1616,8 @@ def main(argv):
 
     # A run's times count from here (the base fetch, the pool tree, the members and the notes fetch are part of what a run costs).
     started_wall, started = time.time(), time.monotonic()
-    remote, _, branch = args.base.partition('/')
-    if branch:
-        git('fetch', '-q', remote, branch)  # the base moves; the lag and the policy are read at its current tip
-    base_commit = text(git('rev-parse', '--verify', '-q', args.base + '^{commit}'))
+    remote = args.base.partition('/')[0]
+    base_commit = fetch_base(args.base)
     if args.status:
         commit, why_merge = gate_commit(args.base)
         if why_merge:
@@ -1602,25 +1670,31 @@ def main(argv):
     with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
         os.chmod(scratch, 0o700)
         (Path(scratch) / 'pid').write_text(str(os.getpid()))
-        tools = {}
-        for name in BASE_SCRIPTS:
-            path = Path(scratch) / name
-            path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
-            path.chmod(0o700)
-            tools[name] = str(path)
         directory = Path(scratch) / 'tree'
         pool_trees, tree_lock, tree_target, n = pool_size(), None, None, None
         try:
             if pool_trees:
-                commit, root = target_commit(args.base), pool_root()
-                if gate_commit(args.base)[1]:
-                    print(f'st-test: {gate_commit(args.base)[1]}', flush=True)
+                root = pool_root()
+                target_commit(args.base)  # a branch that does not merge with the base fails now, not after the wait for a tree
                 n, tree_lock = acquire_tree(root, pool_trees)
+                # The wait for a tree can take hours, and main moves meanwhile: the base is fetched again and the commit to sign chosen at
+                # its tip now, so what is signed is only as old as the run itself (2026-10-26: a run that waited 1h50m signed a merge with a
+                # main that had already moved a protected file, and the push was refused).
+                base_commit = fetch_base(args.base)
+                commit, why_merge = gate_commit(args.base)
+                if why_merge:
+                    print(f'st-test: {why_merge}', flush=True)
                 if pool_max_gb():
                     evict_to_cap(pool_base(), pool_max_gb(), keep=(root, n))
                 directory, tree_target = prepare_tree(root, n, commit), root / f'target-{n}'
             else:
                 directory, commit = target_worktree(args.base, scratch)
+            tools = {}
+            for name in BASE_SCRIPTS:  # from the base as it is now, after any wait for a tree
+                path = Path(scratch) / name
+                path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
+                path.chmod(0o700)
+                tools[name] = str(path)
             lag = behind(args.base)
             tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
             lane_base = branch_point(commit, base_commit)
