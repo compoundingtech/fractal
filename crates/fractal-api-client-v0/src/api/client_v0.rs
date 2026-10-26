@@ -14953,6 +14953,55 @@ subscription "watch/source" {
     }
 
     #[tokio::test]
+    async fn admitted_peer_action_receipt_cannot_occupy_local_cas_subject() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let source = Store::open_memory("admitted-peer").unwrap();
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        source.bind_fleet(FLEET).unwrap();
+        state.store.bind_fleet(FLEET).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let request = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(), id: "action/peer-cas".into(),
+            action_type: "agent.create".into(), idempotency_key: "peer-cas-key".into(),
+            fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+            parameters: json!({"name":"peer-cas-helper", "harness":"codex", "workspace":root.path()}),
+        };
+        let digest = hex::encode(Sha256::digest(
+            format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
+        let subject = format!("custom/client/action-{}", &digest[..32]);
+        source.append_claim(&ClaimInput {
+            subject: "host/admitted-peer".into(), kind: "transport.observed".into(), actor: None,
+            fields: BTreeMap::from([("status".into(), json!("up"))]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let forged = source.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: "client.action-result".into(), actor: None,
+            fields: BTreeMap::from([
+                ("request_digest".into(), json!(action_request_digest(&request).unwrap())),
+                ("result".into(), json!({"affected_ids":["agent/forged"]})),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let exchange = source.export_replication_exchange(FLEET,
+            &state.store.replication_inventory().unwrap()).unwrap();
+        state.store.receive_replication_exchange("admitted-peer", FLEET, &exchange).unwrap();
+        let admission = state.store.validate_replication_backlog().unwrap();
+        assert!(admission.valid > 0, "the peer must be admitted, not merely received");
+        assert!(admission.invalid > 0, "the peer action receipt must be rejected");
+        state.store.project_replication_backlog().unwrap();
+        assert!(state.store.latest_claim("host/admitted-peer", Some("transport.observed")).unwrap().is_some());
+        assert!(state.store.claim_by_id(&forged.id).unwrap().is_none());
+        assert!(state.store.claims_for(&subject, Some("client.action-result")).unwrap().is_empty());
+        let first = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session.clone()), Json(request.clone())).await.unwrap().0;
+        assert_ne!(first["affected_ids"], json!(["agent/forged"]));
+        let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session), Json(request)).await.unwrap().0;
+        assert_eq!(first["affected_ids"], replay["affected_ids"]);
+    }
+
+    #[tokio::test]
     async fn legacy_action_receipt_replay_conflicts_without_execution() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());

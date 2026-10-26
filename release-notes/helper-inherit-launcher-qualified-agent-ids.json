@@ -7,5 +7,5 @@
   "compatibility": { "status": "changed", "detail": "agents new and lifecycle commands normalize bare and agent/-qualified subjects exactly once; short names retain host scoping. New server-only client.action-result receipts replay normally. Keys with legacy custom.client.action-result receipts fail closed before dispatch with legacy-action-receipt-untrusted, regardless of actor; inspect the original outcome before choosing another key. No claims are rewritten." },
   "downtime": { "status": "none", "detail": "No additional downtime or live migration is required." },
   "manual": { "status": "none", "detail": "No manual migration is required. Use the created subject returned by the CLI for later commands." },
-  "recovery": { "status": "changed", "detail": "Helper inherit-launcher associations are bound to the launcher's runtime incarnation rather than treating a later launcher runtime as the same launch." }
+  "recovery": { "status": "changed", "detail": "Helper associations bind the launcher's exact runtime incarnation, not a later replacement. Peer client.action-result receipts are rejected before projection so they cannot occupy local action receipt CAS subjects." }
 }

@@ -13887,9 +13887,9 @@ pub fn classify_replicated_claim_with_registry(
     claim: &ClaimRecord,
     registry: &fractal_schema::Registry,
 ) -> Result<ReplicatedClaimAdmission, St3Error> {
-    if matches!(claim.kind.as_str(), "agent.launcher-bound" | "agent.helper-launched") {
+    if matches!(claim.kind.as_str(), "agent.launcher-bound" | "agent.helper-launched" | "client.action-result") {
         return Err(St3Error::new("invalid-replicated-claim",
-            "helper launcher authority and launch history are host-local and cannot replicate"));
+            "helper launcher authority, launch history, and client action receipts cannot be admitted from peers"));
     }
     if !registry.claims.contains_key(&claim.kind) && !fractal_schema::is_custom_claim_kind(&claim.kind)
     {

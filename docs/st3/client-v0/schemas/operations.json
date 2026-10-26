@@ -220,7 +220,7 @@
       "resources.observation-complete": "primary-observation-state-or-delivery-operation; terminal-refusal"
     },
     "durable_exceptions": {
-      "client.actions": "custom.client.action-result-receipt",
+      "client.actions": "server-only-client.action-result-receipt; legacy-custom.client.action-result-refused-before-dispatch-with-409-legacy-action-receipt-untrusted",
       "message.send": "deterministic-message-subject",
       "work.ask": "deterministic-person-ask-identity",
       "claims.append": "operation-identity-and-checkpoint-tombstones"
