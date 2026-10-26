@@ -62,6 +62,7 @@ class Review(unittest.TestCase):
         self.git("config", "user.name", "t")
         for name in ("risky-classes.json", "review-risk.json"):
             self.write(f".st/{name}", (ROOT / ".st" / name).read_text())
+        self.write("scripts/classify-risk", (ROOT / "scripts" / "classify-risk").read_text())
         self.write("docs/review.md", "# The review standard\n\nA fixture standing in for docs/review.md.\n")
         self.write("src/a.txt", "one\n")
         self.write("src/b.txt", "two\n")
@@ -121,8 +122,8 @@ class Review(unittest.TestCase):
         self.assertTrue(verdict["standard"].startswith("sha256:"))
 
     def test_the_final_risk_is_the_higher_score_and_the_model_cannot_lower_the_floor(self):
-        self.write(".st/evidence-policy.json", "{}\n")
-        self.commit("touch the policy")
+        self.write(".st/crate-cut.json", "{}\n")
+        self.commit("touch a config file")
         self.say(answer(level="low"))
         done, verdict = self.review()
         self.assertEqual(done.returncode, 0, done.stderr)

@@ -287,6 +287,7 @@ def main():
     parser.add_argument("--previous", type=Path, help="an earlier verdict to read only the difference from (default: the record)")
     parser.add_argument("--round", type=int)
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--rules-from-checkout", action="store_true", help="score the risk floor with the checkout's own rules: only for the change that introduces them")
     parser.add_argument("--no-record", action="store_true", help="do not append the verdict to the review record")
     args = parser.parse_args()
     repo = args.repo.resolve()
@@ -312,7 +313,7 @@ def review(args, repo):
     if not paths:
         raise Failed("the head has no change against main")
     patch = patch_ids(repo, merge_base, head, paths)
-    floor_run = subprocess.run([sys.executable, str(HERE / "review-risk"), merge_base, head, "--repo", str(repo)], text=True, capture_output=True)
+    floor_run = subprocess.run([sys.executable, str(HERE / "review-risk"), base, head, "--repo", str(repo), *(["--rules-from-checkout"] if args.rules_from_checkout else [])], text=True, capture_output=True)
     if floor_run.returncode:
         raise Failed(f"review-risk: {floor_run.stderr.strip()}")
     deterministic = json.loads(floor_run.stdout)
