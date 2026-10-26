@@ -341,14 +341,16 @@ async fn deprecated_aliases_dispatch_identically_for_all_eleven_tools() {
 async fn http_tools_list_advertises_only_canonical_names() {
     let response = http_router(disconnected_adapter()).oneshot(
         Request::builder().method("POST").uri("/mcp")
+            .header("host", "localhost")
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
             .header("mcp-protocol-version", "2025-03-26")
             .body(Body::from(json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}).to_string()))
             .unwrap()
     ).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
     let result: Value = serde_json::from_slice(&bytes).unwrap();
     let published = result["result"]["tools"].as_array().unwrap();
     assert_eq!(published.len(), 11);
