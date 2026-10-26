@@ -2028,6 +2028,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "agent.launcher-bound", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("agents"), true, &[],
+        ),
+        (
             "agent.retired",
             &["agent"],
             WritePolicy::SystemOnly,
@@ -3350,6 +3354,15 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("preserved_incarnation", string()),
             ("request", FieldSpec { required: true, ..object() }),
         ],
+        "agent.launcher-bound" => &[
+            ("launcher", required_reference_to(&["agent"])),
+            ("person", reference_to(&["person"])),
+            ("harness", required_string()),
+            ("credential_home", required_string()),
+            ("incarnation", required_string()),
+            ("creation_key", required_string()),
+            ("desired_digest", required_string()),
+        ],
         "agent.retired" => &[
             ("reason", required_string()),
             ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
@@ -3559,6 +3572,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("code", string()),
             ("blocking", array()),
             ("harness", string()),
+            ("credential_home", string()),
+            ("credential_homes", object()),
+            ("launcher_binding", object()),
             ("native_session_id", string()),
         ],
         "runtime.observed" => &[

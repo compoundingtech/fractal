@@ -3159,6 +3159,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                             });
                             self.runtime.observe_exec(&member.runtime_id)?
                         };
+                        if !self.store.helper_launcher_alive(&subject.subject)? {
+                            self.reconcile_runtime_stop(
+                                &subject.subject,
+                                &member.runtime_id,
+                                member.terminal,
+                                observed.as_ref().and_then(|o| o.incarnation_id.as_deref()),
+                                member.shutdown_timeout_ms,
+                                observed.as_ref(),
+                            )?;
+                            return Ok(());
+                        }
                         if member.lifecycle == MemberLifecycle::TerminalBound {
                             if let Some(incarnation) =
                                 self.reconcile_terminal_binding(subject, member, observed.as_ref())?
@@ -7046,6 +7057,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         );
         self.store.owned_desired_guard(subject)?;
         // A self-restart released at its quiet boundary is as explicit as an immediate one.
+        anyhow::ensure!(
+            self.store.helper_launcher_alive(&subject.subject)?,
+            "the helper's launcher run has ended"
+        );
         let explicit_retry = request.is_some_and(|request| {
             matches!(
                 request.body["fields"]["action"].as_str(),
@@ -7415,6 +7430,28 @@ impl<R: RuntimeControl> Reconciler<R> {
             ),
             ("reason".into(), Value::String(reason.into())),
         ]);
+        if let Some(harness) = crate::accounts::harness_driver(&subject.desired)
+            && let Some(variable) = crate::accounts::login_environment_name(harness)
+            && let Some(directory) = prepared.launch_member.environment.get(variable)
+        {
+            fields.insert("harness".into(), Value::String(harness.into()));
+            fields.insert("credential_home".into(), Value::String(directory.clone()));
+        }
+        if subject.kind == "agent"
+            && matches!(crate::accounts::harness_driver(&subject.desired), Some("claude" | "codex"))
+        {
+            let mut credential_homes = BTreeMap::new();
+            for harness in ["claude", "codex"] {
+                credential_homes.insert(
+                    harness,
+                    self.launch_credential_home(harness, &prepared.launch_member)?,
+                );
+            }
+            fields.insert("credential_homes".into(), serde_json::to_value(credential_homes)?);
+        }
+        if let Some(binding) = self.store.helper_launcher_binding(&subject.subject)? {
+            fields.insert("launcher_binding".into(), serde_json::to_value(binding)?);
+        }
         if let Some(operation) = member.environment.get(crate::rollout::OPERATION_ENV) {
             fields.insert("rollout_operation".into(), serde_json::json!(operation));
         }
@@ -7502,6 +7539,25 @@ impl<R: RuntimeControl> Reconciler<R> {
             .map(|account| account.name.clone())
     }
 
+
+    /// Resolve only a credential-directory reference, never the files inside it.
+    fn launch_credential_home(&self, harness: &str, launch: &MemberSpec) -> Result<String> {
+        let variable = crate::accounts::login_environment_name(harness)
+            .context("the harness requires a credential-home variable")?;
+        let home = launch.environment.get("HOME").map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+        let inherited = std::env::var(variable).ok();
+        let directory = launch.environment.get(variable).or(inherited.as_ref());
+        let directory = if let Some(directory) = directory {
+            crate::accounts::expand_login(directory, home.as_deref())
+                .context("credential home requires HOME")?
+        } else {
+            home.context("a harness credential home requires HOME")?
+                .join(if harness == "claude" { ".claude" } else { ".codex" })
+        };
+        Ok(directory.to_string_lossy().into_owned())
+    }
+
     /// Point a seat whose harness block binds an account (or a pool) at that account's login
     /// directory, and name the account so the seat's usage and limits are read against it. A seat
     /// with no binding keeps the harness's default login: nothing here touches its environment.
@@ -7513,6 +7569,20 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<()> {
         crate::environment::remove_aliases(&mut launch.environment, "ST3_ACCOUNT");
         if subject.kind != "agent" {
+            return Ok(());
+        }
+        if let Some(binding) = self.store.helper_launcher_binding(&subject.subject)? {
+            anyhow::ensure!(
+                self.store.helper_launcher_alive(&subject.subject)?,
+                "the helper's credential binding ended with its launcher run"
+            );
+            anyhow::ensure!(
+                crate::accounts::harness_driver(&subject.desired) == Some(binding.harness.as_str()),
+                "a helper cannot change its launcher's bound harness"
+            );
+            let variable = crate::accounts::login_environment_name(&binding.harness)
+                .context("the helper's harness has no credential home")?;
+            launch.environment.insert(variable.into(), binding.credential_home);
             return Ok(());
         }
         let Some(binding) = crate::accounts::harness_binding(&subject.desired) else {
@@ -18792,6 +18862,7 @@ pub mod tests {
     mod slo_breach_flow_tests;
     mod gate_on_demand;
     mod github_watch_selection;
+    mod helper_launcher;
     mod incremental_deadlines;
     #[cfg(test)]
     mod schedule_standby_parent;

@@ -2295,6 +2295,32 @@ its usual new-agent directory. The host creates missing agent workspaces. OpenCo
 `effort`. Message text is nonempty, at most 64 KiB, and uses the native harness startup argument.
 An existing active seat requires a different name; a stopped seat may be deliberately recreated.
 
+Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
+emitted exactly once. Short names retain the usual host qualification.
+
+When the authenticated caller is an agent and the requested harness is Claude or
+Codex, the new agent is a run-owned helper. The server records an
+`agent.launcher-bound` receipt with the authenticated launcher, its person owner
+(if known), the selected declaration, the exact launcher runtime incarnation, and
+the requested harness's credential-directory reference. The helper retains its
+own agent identity. Only the directory path is shared; credential files and
+secret values are not copied into claims, arguments, or environment variables.
+An unowned launcher does not confer person ownership.
+Credential-directory references are local to the launcher's host, so helpers
+must launch on that host. Older account-bound launcher incarnations without an
+effective credential-directory receipt must be relaunched before creating a
+helper; Fractal does not guess an account or substitute another login directory.
+
+Reconciliation stops a helper when that exact launcher incarnation ends.
+Spawning and restarting refuse an ended binding, including after a daemon
+restart; the credential reference is no longer usable for a new launch.
+Restarting the launcher ends its helpers: the new incarnation must create them
+again. Historical binding receipts remain for attribution.
+
+This is a Fractal lifecycle bound, not native process containment: while the
+daemon is unavailable, a helper can outlive its launcher until reconciliation
+resumes. This is the same limitation as other runtime tasks.
+
 `repo` is an existing repository's absolute path on the selected host. It adds the existing
 `checkout` declaration and creates the agent workspace as a worktree. `base` defaults to
 `origin/main`; `branch` defaults to the simple agent name with Git-invalid characters replaced

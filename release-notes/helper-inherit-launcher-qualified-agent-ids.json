@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Normalize qualified CLI agent IDs and support helper inherit-launcher bindings (Q411)",
+  "replay": { "status": "none", "detail": "No historical agent subjects are renamed or rewritten." },
+  "schema": { "status": "none", "detail": "Launcher bindings use existing extension storage; no schema migration is required." },
+  "rules": { "status": "changed", "detail": "Q411 helper inherit-launcher derives the launcher association from the authenticated agent session, not client-supplied ownership metadata." },
+  "compatibility": { "status": "changed", "detail": "agents new accepts team/worker and agent/team/worker as the same subject without doubling agent/. Short names retain host scoping, including when supplied with agent/. Agent lifecycle commands also normalize already-qualified subjects exactly once. Existing subjects are unchanged." },
+  "downtime": { "status": "none", "detail": "No additional downtime or live migration is required." },
+  "manual": { "status": "none", "detail": "No manual migration is required. Use the created subject returned by the CLI for later commands." },
+  "recovery": { "status": "changed", "detail": "Helper inherit-launcher associations are bound to the launcher's runtime incarnation rather than treating a later launcher runtime as the same launch." }
+}
