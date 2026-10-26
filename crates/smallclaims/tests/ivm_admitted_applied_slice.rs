@@ -2157,3 +2157,1210 @@ fn full_prune_accounting_includes_physical_writer_return() {
         "required prune accounting is unavailable: build with test-support and require this exact name with positive SQL/VM counts; missing instrumentation is not a passed or omitted prerequisite"
     );
 }
+
+// These two-consumer controls exercise the library's journal deletion directly.
+// Images remain retained: there is no multiconsumer image-prune policy here.
+const JOURNAL_FOLLOWER: &str = "fixture.journal-follower";
+
+struct JournalFollower;
+impl Operator for JournalFollower {
+    fn name(&self) -> &'static str {
+        JOURNAL_FOLLOWER
+    }
+    fn source(&self) -> &'static str {
+        SOURCE
+    }
+    fn fingerprint(&self) -> &'static str {
+        "fixture.journal-follower.v1"
+    }
+    fn create_schema(&self, _: &Connection) -> Result<()> {
+        // Ledger already owns the shared namespace-keyed tables; add no DDL.
+        Ok(())
+    }
+    fn apply(&self, tx: &Transaction<'_>, ns: &Namespace, rows: &[Mutation]) -> Result<bool> {
+        Ledger.apply(tx, ns, rows)
+    }
+    fn validate_publication(&self, tx: &Transaction<'_>, ns: &Namespace) -> Result<()> {
+        Ledger.validate_publication(tx, ns)
+    }
+    fn reclaim(&self, tx: &Transaction<'_>, ns: &Namespace, rows: usize) -> Result<bool> {
+        Ledger.reclaim(tx, ns, rows)
+    }
+}
+
+type JournalOutput = (String, String, String, String);
+
+#[derive(Debug, PartialEq)]
+struct JournalConsumerState {
+    // namespace, applied revision, stored prefix-ready, generation, status, error
+    root: (Option<String>, u64, bool, u64, u64, Option<String>),
+    // phase, applied revision, queued rows/bytes, pages, extracted/applied rows, cursor, error
+    job: (
+        String,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        Vec<u8>,
+        Option<String>,
+    ),
+    coverage: Option<u64>,
+    output: Vec<JournalOutput>,
+    // All physical metadata columns, including unchanged binding/limit/time fields.
+    root_row: Vec<Sql>,
+    job_row: Vec<Sql>,
+}
+
+fn journal_metadata_row(db: &Connection, query: &str, key: &str) -> Result<Vec<Sql>> {
+    let mut statement = db.prepare(query)?;
+    let columns = statement.column_count();
+    ensure!((1..=32).contains(&columns), "fixture metadata column bound");
+    Ok(statement.query_row([key], |row| {
+        (0..columns).map(|column| row.get(column)).collect()
+    })?)
+}
+
+struct JournalConsumers {
+    slice: Slice,
+    follower: String,
+}
+
+impl JournalConsumers {
+    fn fixture(publish_follower: bool) -> Result<(tempfile::TempDir, Self)> {
+        let (root, mut slice) = fixture()?;
+        slice.installer = Installer::new(vec![Box::new(Ledger), Box::new(JournalFollower)])?;
+        let follower = {
+            let mut writer = slice.store.connection.write_background();
+            let tx = writer.transaction()?;
+            slice.check(&tx)?;
+            ensure!(
+                slice.installer.position(&tx, SOURCE)?.revision == 0,
+                "two-consumer setup requires empty admitted source"
+            );
+            let job = slice.installer.start(
+                &tx,
+                JOURNAL_FOLLOWER,
+                Limits {
+                    page_rows: PAGE_ROWS,
+                    page_bytes: PAGE_BYTES,
+                    pending_rows: PENDING_ROWS,
+                    pending_bytes: JOURNAL_BYTES,
+                    total_rows: TOTAL_ROWS,
+                    callback_ms: 1000,
+                    lifetime_ms: 60000,
+                },
+                0,
+            )?;
+            tx.commit()?;
+            job
+        };
+        let pair = Self { slice, follower };
+        let scan = pair.slice.read(|db| {
+            pair.slice.check(db)?;
+            pair.slice.installer.prepare_scan(
+                db,
+                &ScanPage {
+                    job: pair.follower.clone(),
+                    expected_cursor: vec![],
+                    next_cursor: vec![],
+                    position: pair.slice.installer.position(db, SOURCE)?,
+                    rows: vec![],
+                    finished: true,
+                },
+                limits(),
+            )
+        })?;
+        assert_eq!(pair.slice.publish(&scan)?, Outcome::Progress);
+        if publish_follower {
+            let page = pair.capture(JOURNAL_FOLLOWER, true)?.reduce()?;
+            assert_eq!(pair.slice.publish(&page)?, Outcome::Published);
+        }
+        assert_ne!(pair.follower, pair.slice.manifest.job);
+        Ok((root, pair))
+    }
+
+    fn namespace(&self, view: &str) -> Result<&str> {
+        match view {
+            VIEW => Ok(&self.slice.manifest.job),
+            JOURNAL_FOLLOWER => Ok(&self.follower),
+            _ => bail!("unknown fixture journal consumer"),
+        }
+    }
+
+    fn state_at(&self, db: &Connection, view: &str) -> Result<JournalConsumerState> {
+        let ns = self.namespace(view)?;
+        let root = db.query_row(
+            "SELECT namespace,revision,ready,generation,status_revision,error
+             FROM main.ivm_install_roots WHERE view=?1",
+            [view],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )?;
+        let job = db.query_row(
+            "SELECT phase,applied_revision,queued_rows,queued_bytes,pages,extracted_rows,
+             applied_rows,cursor,error FROM main.ivm_install_jobs WHERE id=?1",
+            [ns],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            },
+        )?;
+        let coverage = db.query_row(
+            "SELECT (SELECT through FROM main.slice_coverage WHERE namespace=?1)",
+            [ns],
+            |r| r.get(0),
+        )?;
+        let output = db
+            .prepare(
+                "SELECT claim_id,subject,kind,digest FROM main.slice_output
+             WHERE namespace=?1 ORDER BY claim_id LIMIT 33",
+            )?
+            .query_map([ns], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ensure!(output.len() <= 32, "two-consumer output oracle bound");
+        let state = JournalConsumerState {
+            root,
+            job,
+            coverage,
+            output,
+            root_row: journal_metadata_row(
+                db,
+                "SELECT * FROM main.ivm_install_roots WHERE view=?1",
+                view,
+            )?,
+            job_row: journal_metadata_row(
+                db,
+                "SELECT * FROM main.ivm_install_jobs WHERE id=?1",
+                ns,
+            )?,
+        };
+        if let Some(actual) = &state.root.0 {
+            ensure!(actual == ns, "consumer namespace replaced");
+        }
+        Ok(state)
+    }
+
+    fn state(&self, view: &str) -> Result<JournalConsumerState> {
+        self.slice.read(|db| {
+            self.slice.check(db)?;
+            self.state_at(db, view)
+        })
+    }
+
+    fn current_output(&self, view: &str) -> Result<Vec<JournalOutput>> {
+        self.slice.read(|db| {
+            self.slice.check(db)?;
+            let status = self.slice.installer.status(db, view)?;
+            ensure!(status.ready, "consumer is not current");
+            let state = self.state_at(db, view)?;
+            ensure!(
+                state.root.1 == status.source.revision
+                    && state.coverage == Some(status.source.revision),
+                "consumer current coverage differs"
+            );
+            Ok(state.output)
+        })
+    }
+
+    fn capture(&self, view: &str, active_job: bool) -> Result<OwnedPage> {
+        self.slice.read(|db| {
+            self.slice.check(db)?;
+            let mut prepared = if active_job {
+                ensure!(view == JOURNAL_FOLLOWER, "unexpected fixture active job");
+                self.slice
+                    .installer
+                    .prepare_catch_up(db, &self.follower, limits())?
+            } else {
+                self.slice.installer.prepare_live_bounded(
+                    db,
+                    view,
+                    limits(),
+                    PAGE_ROWS,
+                    PAGE_ROWS * REFERENCE_BYTES,
+                )?
+            };
+            ensure!(
+                prepared.rows().len() <= PAGE_ROWS,
+                "consumer input fanout bound"
+            );
+            prepared.capture_tables(db, &["slice_output", "slice_coverage"])?;
+            let mut images = Vec::new();
+            let mut bytes = 0usize;
+            for row in prepared.rows() {
+                smallclaims::read_budget::check()?;
+                let reference = row.new.as_ref().context("consumer input missing image")?;
+                ensure!(
+                    row.old.is_none() && reference["table"] == "claims" && reference["side"] == 1,
+                    "unsupported consumer mutation"
+                );
+                let revision = reference["revision"]
+                    .as_u64()
+                    .context("bad consumer revision")?;
+                let key: Value = serde_json::from_str(&row.key)?;
+                let index = key[1][0].as_u64().context("bad consumer primary key")?;
+                ensure!(key[0] == "claims" && index > 0, "unexpected consumer key");
+                let (id, subject, kind, body, size): (i64, i64, i64, i64, i64) = db.query_row(
+                    "SELECT octet_length(claim_id),octet_length(subject),octet_length(kind),
+                     octet_length(body),bytes FROM main.slice_images WHERE revision=?1",
+                    [revision],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )?;
+                ensure!(
+                    (1..=128).contains(&id)
+                        && (0..=256).contains(&subject)
+                        && (0..=128).contains(&kind)
+                        && body >= 0
+                        && 8 + id + subject + kind + body == size
+                        && size <= IMAGE_BYTES as i64,
+                    "consumer image width/counter invalid"
+                );
+                bytes = bytes
+                    .checked_add(size as usize)
+                    .context("consumer byte overflow")?;
+                ensure!(bytes <= PAGE_BYTES, "consumer page bytes exceeded");
+                let image = db.query_row(
+                    "SELECT store_index,claim_id,subject,kind,body FROM main.slice_images
+                     WHERE revision=?1",
+                    [revision],
+                    |r| {
+                        Ok(Image {
+                            store_index: r.get(0)?,
+                            id: r.get(1)?,
+                            subject: r.get(2)?,
+                            kind: r.get(3)?,
+                            body: r.get(4)?,
+                        })
+                    },
+                )?;
+                ensure!(
+                    image.store_index == index,
+                    "consumer image/reference mismatch"
+                );
+                images.push(image);
+            }
+            self.slice.check(db)?;
+            Ok(OwnedPage {
+                prepared,
+                images,
+                bytes,
+            })
+        })
+    }
+
+    fn publish_live(&self, view: &str) -> Result<()> {
+        let page = self.capture(view, false)?.reduce()?;
+        self.slice.publish(&page)?;
+        Ok(())
+    }
+
+    fn prune_journal(&self) -> Result<usize> {
+        let mut writer = self.slice.store.connection.write_background();
+        let tx = writer.transaction()?;
+        self.slice.check(&tx)?;
+        // Only production code chooses a minimum and deletes references; no image deletion.
+        let removed = self.slice.installer.prune_journal(&tx, SOURCE, PAGE_ROWS)?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    fn cancel_follower(&self) -> Result<()> {
+        let mut writer = self.slice.store.connection.write_background();
+        let tx = writer.transaction()?;
+        self.slice.check(&tx)?;
+        self.slice.installer.cancel(&tx, &self.follower)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+// This oracle changes only journal rows/counters in an independently copied full snapshot.
+// It never supplies a cutoff to the library, and images remain intentionally retained.
+fn expected_journal_after(
+    before: &RetentionState,
+    remaining: Vec<RetainedReference>,
+) -> Result<RetentionState> {
+    let mut expected = before.clone();
+    let mut bytes = 0u64;
+    for reference in &remaining {
+        ensure!(
+            reference.payload.len() <= REFERENCE_BYTES
+                && reference.bytes == reference.payload.len() as u64,
+            "two-consumer reference byte oracle"
+        );
+        bytes += reference.payload.len() as u64;
+    }
+    expected.source.2 = remaining.len() as u64;
+    expected.source.3 = bytes;
+    expected.journal = remaining;
+    Ok(expected)
+}
+
+fn expected_journal_output(
+    native: &[(String, String, String, String)],
+) -> Result<Vec<JournalOutput>> {
+    native
+        .iter()
+        .map(|(id, subject, kind, body)| {
+            let body: Value = serde_json::from_str(body)?;
+            let canonical = smallclaims::hash::canonical_json_text(&body)?;
+            Ok((
+                id.clone(),
+                subject.clone(),
+                kind.clone(),
+                hex::encode(Sha256::digest(canonical.as_bytes())),
+            ))
+        })
+        .collect()
+}
+
+#[test]
+fn production_journal_prune_keeps_slowest_installed_consumer_prefix() -> Result<()> {
+    let (_directory, pair) = JournalConsumers::fixture(true)?;
+    for n in 0..32 {
+        append(&pair.slice, &format!("note/two-consumers-{n:02}"))?;
+    }
+    pair.publish_live(VIEW)?;
+    pair.publish_live(VIEW)?;
+    pair.publish_live(JOURNAL_FOLLOWER)?;
+    let before = pair.slice.retention_state()?;
+    before.assert_complete_output()?;
+    let slow = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(before.root.0, 32);
+    assert_eq!(slow.root.1, 16);
+    assert!(slow.root.2); // Stored live prefix still pins, even though it is not current.
+    assert_eq!(slow.coverage, Some(16));
+    assert_eq!(slow.output.len(), 16);
+    assert!(
+        !pair
+            .slice
+            .read(|db| Ok(pair.slice.installer.status(db, JOURNAL_FOLLOWER)?.ready))?
+    );
+    assert!(pair.current_output(JOURNAL_FOLLOWER).is_err());
+    assert_eq!(pair.prune_journal()?, 16);
+    let remaining = before
+        .journal
+        .iter()
+        .filter(|r| r.revision > 16)
+        .cloned()
+        .collect();
+    let pinned = expected_journal_after(&before, remaining)?;
+    assert_eq!(pair.slice.retention_state()?, pinned);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+    // A fast-view/source-head cutoff would wrongly remove the remaining16 on this second call.
+    assert_eq!(pair.prune_journal()?, 0);
+    assert_eq!(pair.slice.retention_state()?, pinned);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+    pair.publish_live(JOURNAL_FOLLOWER)?;
+    let complete = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(complete.root.1, 32);
+    assert_eq!(complete.coverage, Some(32));
+    let native = expected_journal_output(&before.native)?;
+    assert_eq!(pair.current_output(VIEW)?, native);
+    assert_eq!(pair.current_output(JOURNAL_FOLLOWER)?, native);
+    assert_eq!(pair.prune_journal()?, 16);
+    assert_eq!(
+        pair.slice.retention_state()?,
+        expected_journal_after(&before, vec![])?
+    );
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, complete);
+    assert_eq!(pair.prune_journal()?, 0);
+    Ok(())
+}
+
+#[test]
+fn production_journal_prune_pins_active_job_until_explicit_cancel() -> Result<()> {
+    let (_directory, pair) = JournalConsumers::fixture(false)?;
+    for n in 0..32 {
+        append(&pair.slice, &format!("note/active-follower-{n:02}"))?;
+    }
+    pair.publish_live(VIEW)?;
+    pair.publish_live(VIEW)?;
+    let before = pair.slice.retention_state()?;
+    before.assert_complete_output()?;
+    let active = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(active.job.0, "catchup");
+    assert_eq!(active.job.1, 0);
+    assert_eq!(active.job.2, 32);
+    assert!(active.root.0.is_none() && !active.root.2);
+    assert!(pair.current_output(JOURNAL_FOLLOWER).is_err());
+    // Ignoring an active job without a published root would delete16 here, rather than zero.
+    assert_eq!(pair.prune_journal()?, 0);
+    assert_eq!(pair.slice.retention_state()?, before);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, active);
+    let stale = pair.capture(JOURNAL_FOLLOWER, true)?.reduce()?;
+    let ready_primary = pair.state(VIEW)?;
+    assert!(ready_primary.root.2 && ready_primary.root.0.is_some());
+    pair.cancel_follower()?; // Only this explicit committed cancel releases the job pin.
+    let stopped = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(stopped.job.0, "stopped");
+    assert!(stopped.root.0.is_none() && !stopped.root.2);
+    assert_eq!(
+        pair.state(VIEW)?,
+        ready_primary,
+        "cancel must not remove the other's ready root"
+    );
+    assert_eq!(pair.slice.retention_state()?, before);
+    assert!(pair.slice.publish(&stale).is_err());
+    assert_eq!(
+        pair.slice.retention_state()?,
+        before,
+        "stale publication changed journal counters or native state"
+    );
+    assert_eq!(
+        pair.state(JOURNAL_FOLLOWER)?,
+        stopped,
+        "stale publication changed follower rows"
+    );
+    assert_eq!(pair.state(VIEW)?, ready_primary);
+    let remaining = before
+        .journal
+        .iter()
+        .filter(|r| r.revision > 16)
+        .cloned()
+        .collect();
+    // Leaving a cancelled job in the minimum would incorrectly keep this count at zero.
+    assert_eq!(pair.prune_journal()?, 16);
+    assert_eq!(
+        pair.slice.retention_state()?,
+        expected_journal_after(&before, remaining)?
+    );
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, stopped);
+    assert_eq!(pair.prune_journal()?, 16);
+    assert_eq!(
+        pair.slice.retention_state()?,
+        expected_journal_after(&before, vec![])?
+    );
+    assert_eq!(pair.state(VIEW)?, ready_primary);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, stopped);
+    assert!(pair.slice.publish(&stale).is_err());
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, stopped);
+    assert_eq!(
+        pair.slice.retention_state()?,
+        expected_journal_after(&before, vec![])?
+    );
+    assert_eq!(
+        pair.current_output(VIEW)?,
+        expected_journal_output(&before.native)?
+    );
+    assert!(pair.current_output(JOURNAL_FOLLOWER).is_err());
+    assert_eq!(pair.prune_journal()?, 0);
+    Ok(())
+}
+
+#[test]
+fn production_journal_prune_outer_rollback_preserves_both_consumers() -> Result<()> {
+    let (_directory, pair) = JournalConsumers::fixture(true)?;
+    for n in 0..32 {
+        append(&pair.slice, &format!("note/journal-rollback-{n:02}"))?;
+    }
+    pair.publish_live(VIEW)?;
+    pair.publish_live(VIEW)?;
+    pair.publish_live(JOURNAL_FOLLOWER)?;
+    let before = pair.slice.retention_state()?;
+    before.assert_complete_output()?;
+    let fast = pair.state(VIEW)?;
+    let slow = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(before.source.0, 32);
+    assert_eq!(before.journal.len(), 32);
+    assert_eq!(before.images.len(), 32);
+    assert_eq!(fast.root.1, 32);
+    assert!(fast.root.2 && fast.root.0.is_some());
+    assert_eq!(slow.root.1, 16);
+    assert!(slow.root.2 && slow.root.0.is_some());
+    assert_ne!(fast.root.0, slow.root.0);
+    assert_eq!(slow.coverage, Some(16));
+    assert_eq!(slow.output.len(), 16);
+    assert!(
+        !pair
+            .slice
+            .read(|db| Ok(pair.slice.installer.status(db, JOURNAL_FOLLOWER)?.ready))?
+    );
+    assert!(pair.current_output(JOURNAL_FOLLOWER).is_err());
+    let native = expected_journal_output(&before.native)?;
+    assert_eq!(pair.current_output(VIEW)?, native);
+
+    // Expected rows and bytes come from copied original payloads, not the prune result.
+    let remaining = before
+        .journal
+        .iter()
+        .filter(|r| r.revision > 16)
+        .cloned()
+        .collect();
+    let pinned = expected_journal_after(&before, remaining)?;
+    let witness = {
+        let mut writer = pair.slice.store.connection.write_background();
+        ensure!(
+            writer.is_autocommit(),
+            "journal rollback inherited a transaction"
+        );
+        let tx = writer.transaction()?;
+        pair.slice.check(&tx)?;
+        assert_eq!(
+            pair.slice.installer.prune_journal(&tx, SOURCE, PAGE_ROWS)?,
+            16
+        );
+        let source: (u64, bool, u64, u64) = tx.query_row(
+            "SELECT revision,available,journal_rows,journal_bytes
+             FROM main.ivm_install_sources WHERE name=?1",
+            [SOURCE],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        let journal = tx
+            .prepare(
+                "SELECT revision,payload,bytes FROM main.ivm_install_journal
+                 WHERE source=?1 ORDER BY revision LIMIT 33",
+            )?
+            .query_map([SOURCE], |r| {
+                Ok(RetainedReference {
+                    revision: r.get(0)?,
+                    payload: r.get(1)?,
+                    bytes: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ensure!(journal.len() <= 32, "journal rollback witness row bound");
+        for reference in &journal {
+            // TEXT is already copied by rusqlite: this is only an oracle width bound.
+            ensure!(
+                reference.payload.len() <= REFERENCE_BYTES
+                    && reference.bytes == reference.payload.len() as u64,
+                "journal rollback witness payload byte oracle"
+            );
+        }
+        // A no-op prune cannot pass these changed-rowset AND changed-counter assertions.
+        assert_eq!(source, pinned.source);
+        assert_eq!(journal, pinned.journal);
+        assert_ne!(source, before.source);
+        assert_ne!(journal, before.journal);
+        assert_eq!(pair.state_at(&tx, VIEW)?, fast);
+        assert_eq!(pair.state_at(&tx, JOURNAL_FOLLOWER)?, slow);
+        // Separate checked WAL readers must still see the committed original state.
+        assert_eq!(pair.slice.retention_state()?, before);
+        assert_eq!(pair.state(VIEW)?, fast);
+        assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+        tx.rollback()?;
+        ensure!(
+            writer.is_autocommit(),
+            "journal rollback left an active writer"
+        );
+        (source, journal)
+    }; // Return the physical writer loan before checking the rolled-back committed state.
+    assert_eq!(witness.0, pinned.source);
+    assert_eq!(witness.1, pinned.journal);
+    let restored = pair.slice.retention_state()?;
+    restored.assert_complete_output()?;
+    assert_eq!(restored, before);
+    assert_eq!(pair.state(VIEW)?, fast);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+    assert!(pair.current_output(JOURNAL_FOLLOWER).is_err());
+
+    // Predetermined committing arm after successful rollback; never retry an unexpected error.
+    assert_eq!(pair.prune_journal()?, 16);
+    assert_eq!(pair.slice.retention_state()?, pinned);
+    assert_eq!(pair.state(VIEW)?, fast);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+    // With B still at16, a fast-root cutoff would wrongly delete the remaining16 here.
+    assert_eq!(pair.prune_journal()?, 0);
+    assert_eq!(pair.slice.retention_state()?, pinned);
+    assert_eq!(pair.state(VIEW)?, fast);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+    pair.publish_live(JOURNAL_FOLLOWER)?; // Consume the original retained references17..32.
+    let complete = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(complete.root.1, 32);
+    assert!(complete.root.2);
+    assert_eq!(complete.coverage, Some(32));
+    assert_eq!(pair.current_output(VIEW)?, native);
+    assert_eq!(pair.current_output(JOURNAL_FOLLOWER)?, native);
+    assert_eq!(pair.prune_journal()?, 16);
+    let drained = expected_journal_after(&before, vec![])?;
+    assert_eq!(pair.slice.retention_state()?, drained);
+    assert_eq!(pair.state(VIEW)?, fast);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, complete);
+    assert_eq!(pair.prune_journal()?, 0);
+    assert_eq!(pair.slice.retention_state()?, drained);
+    assert_eq!(pair.state(VIEW)?, fast);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, complete);
+    Ok(())
+}
+
+#[test]
+fn production_journal_prune_refused_commit_preserves_both_consumers() -> Result<()> {
+    let (_directory, pair) = JournalConsumers::fixture(true)?;
+    for n in 0..32 {
+        append(&pair.slice, &format!("note/journal-refusal-{n:02}"))?;
+    }
+    pair.publish_live(VIEW)?;
+    pair.publish_live(VIEW)?;
+    pair.publish_live(JOURNAL_FOLLOWER)?;
+    let before = pair.slice.retention_state()?;
+    before.assert_complete_output()?;
+    let fast = pair.state(VIEW)?;
+    let slow = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(before.source.0, 32);
+    assert_eq!(before.journal.len(), 32);
+    assert_eq!(before.images.len(), 32);
+    assert_eq!(fast.root.1, 32);
+    assert!(fast.root.2 && fast.root.0.is_some());
+    assert_eq!(slow.root.1, 16);
+    assert!(slow.root.2 && slow.root.0.is_some());
+    assert_ne!(fast.root.0, slow.root.0);
+    assert_eq!(slow.coverage, Some(16));
+    assert_eq!(slow.output.len(), 16);
+    assert!(
+        !pair
+            .slice
+            .read(|db| Ok(pair.slice.installer.status(db, JOURNAL_FOLLOWER)?.ready))?
+    );
+    assert!(pair.current_output(JOURNAL_FOLLOWER).is_err());
+    let native = expected_journal_output(&before.native)?;
+    assert_eq!(pair.current_output(VIEW)?, native);
+    // This expected rowset/counter tuple comes only from the copied original references.
+    let remaining = before
+        .journal
+        .iter()
+        .filter(|r| r.revision > 16)
+        .cloned()
+        .collect();
+    let pinned = expected_journal_after(&before, remaining)?;
+    let commit_refused = Arc::new(AtomicBool::new(false));
+    let mut witness = None;
+    {
+        let mut writer = pair.slice.store.connection.write_background();
+        ensure!(
+            writer.is_autocommit(),
+            "journal commit refusal inherited a transaction"
+        );
+        // Private Plain fixture: no observer or existing commit-hook owner is installed.
+        // This fault injection is not an API for replacing a production callback owner.
+        let refused = commit_refused.clone();
+        writer.commit_hook(Some(move || {
+            refused.store(true, Ordering::Release);
+            true
+        }));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+            let tx = writer.transaction()?;
+            pair.slice.check(&tx)?;
+            assert_eq!(
+                pair.slice.installer.prune_journal(&tx, SOURCE, PAGE_ROWS)?,
+                16
+            );
+            let source: (u64, bool, u64, u64) = tx.query_row(
+                "SELECT revision,available,journal_rows,journal_bytes
+                 FROM main.ivm_install_sources WHERE name=?1",
+                [SOURCE],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            let journal = tx
+                .prepare(
+                    "SELECT revision,payload,bytes FROM main.ivm_install_journal
+                     WHERE source=?1 ORDER BY revision LIMIT 33",
+                )?
+                .query_map([SOURCE], |r| {
+                    Ok(RetainedReference {
+                        revision: r.get(0)?,
+                        payload: r.get(1)?,
+                        bytes: r.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ensure!(
+                journal.len() <= 32,
+                "journal commit-refusal witness row bound"
+            );
+            for reference in &journal {
+                // TEXT is already copied: this is only a fixture oracle width check.
+                ensure!(
+                    reference.payload.len() <= REFERENCE_BYTES
+                        && reference.bytes == reference.payload.len() as u64,
+                    "journal commit-refusal witness payload byte oracle"
+                );
+            }
+            // Delete-only, decrement-only and a no-op prune fail this independent witness.
+            assert_eq!(source, pinned.source);
+            assert_eq!(journal, pinned.journal);
+            assert_ne!(source, before.source);
+            assert_ne!(journal, before.journal);
+            assert_eq!(pair.state_at(&tx, VIEW)?, fast);
+            assert_eq!(pair.state_at(&tx, JOURNAL_FOLLOWER)?, slow);
+            witness = Some((source, journal)); // Owned outside the failing COMMIT.
+            // These helpers use the separate checked physical reader pool, not the writer.
+            assert_eq!(pair.slice.retention_state()?, before);
+            assert_eq!(pair.state(VIEW)?, fast);
+            assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+            tx.commit()?;
+            Ok(())
+        }));
+        // Clear the hook before ANY result/error/panic classification or physical return.
+        writer.commit_hook(None::<fn() -> bool>);
+        ensure!(
+            writer.is_autocommit(),
+            "refused journal commit left an active writer"
+        );
+        match result {
+            Ok(Err(error)) => {
+                let sqlite = error
+                    .downcast_ref::<rusqlite::Error>()
+                    .context("journal commit refusal lost SQLite cause")?;
+                match sqlite {
+                    rusqlite::Error::SqliteFailure(code, _) => assert_eq!(
+                        code.extended_code,
+                        rusqlite::ffi::SQLITE_CONSTRAINT_COMMITHOOK
+                    ),
+                    other => bail!("unexpected journal commit refusal: {other:?}"),
+                }
+            }
+            Ok(Ok(())) => bail!("journal COMMIT succeeded despite the refusing hook"),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    } // End the physical writer loan before the fresh committed-state observations.
+    assert!(commit_refused.load(Ordering::Acquire));
+    let (source, journal) =
+        witness.context("COMMIT refused before actual journal prune witness")?;
+    assert_eq!(source, pinned.source);
+    assert_eq!(journal, pinned.journal);
+    let restored = pair.slice.retention_state()?;
+    restored.assert_complete_output()?;
+    assert_eq!(restored, before);
+    assert_eq!(pair.state(VIEW)?, fast);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+    assert!(pair.current_output(JOURNAL_FOLLOWER).is_err());
+
+    // Predetermined success arm also fails if the refusing hook was left installed.
+    // Unexpected errors never enter a retry loop or a recovery/repair fallback.
+    assert_eq!(pair.prune_journal()?, 16);
+    assert_eq!(pair.slice.retention_state()?, pinned);
+    assert_eq!(pair.state(VIEW)?, fast);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+    // B is STILL16: a fast-root-only cutoff would wrongly delete the remaining16.
+    // A slow-root-only implementation is not distinguished by this fixed ordering.
+    assert_eq!(pair.prune_journal()?, 0);
+    assert_eq!(pair.slice.retention_state()?, pinned);
+    assert_eq!(pair.state(VIEW)?, fast);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+    pair.publish_live(JOURNAL_FOLLOWER)?; // Original references17..32 must remain usable.
+    let complete = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(complete.root.1, 32);
+    assert!(complete.root.2);
+    assert_eq!(complete.coverage, Some(32));
+    assert_eq!(pair.current_output(VIEW)?, native);
+    assert_eq!(pair.current_output(JOURNAL_FOLLOWER)?, native);
+    assert_eq!(pair.prune_journal()?, 16);
+    let drained = expected_journal_after(&before, vec![])?;
+    assert_eq!(pair.slice.retention_state()?, drained);
+    assert_eq!(pair.state(VIEW)?, fast);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, complete);
+    assert_eq!(pair.prune_journal()?, 0);
+    assert_eq!(pair.slice.retention_state()?, drained);
+    assert_eq!(pair.state(VIEW)?, fast);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, complete);
+    Ok(())
+}
+
+#[test]
+fn production_journal_prune_mirrored_roots_preserve_slowest_primary_prefix() -> Result<()> {
+    let (_directory, pair) = JournalConsumers::fixture(true)?;
+    for n in 0..32 {
+        append(&pair.slice, &format!("note/journal-mirrored-{n:02}"))?;
+    }
+    pair.publish_live(VIEW)?;
+    pair.publish_live(JOURNAL_FOLLOWER)?;
+    pair.publish_live(JOURNAL_FOLLOWER)?;
+    let before = pair.slice.retention_state()?;
+    before.reconcile()?; // Valid before journal-only pruning; primary output is deliberately behind.
+    let slow = pair.state(VIEW)?;
+    let fast = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(before.source.0, 32);
+    assert!(before.source.1);
+    assert_eq!(before.journal.len(), 32);
+    assert_eq!(before.images.len(), 32);
+    assert_eq!(before.native.len(), 32);
+    assert_eq!(slow.root.1, 16);
+    assert!(slow.root.2 && slow.root.0.is_some());
+    assert!(slow.root.5.is_none());
+    assert_eq!(slow.coverage, Some(16));
+    assert_eq!(fast.root.1, 32);
+    assert!(fast.root.2 && fast.root.0.is_some());
+    assert_eq!(fast.coverage, Some(32));
+    assert_ne!(slow.root.0, fast.root.0);
+    assert!(
+        !pair
+            .slice
+            .read(|db| Ok(pair.slice.installer.status(db, VIEW)?.ready))?
+    );
+    assert!(pair.current_output(VIEW).is_err());
+
+    // Select the slow prefix by ORIGINAL image revisions, never by produced output.
+    let prefix_ids = before
+        .images
+        .iter()
+        .filter(|image| image.revision <= 16)
+        .map(|image| image.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(prefix_ids.len(), 16);
+    let prefix_native = before
+        .native
+        .iter()
+        .filter(|(id, _, _, _)| prefix_ids.contains(id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(prefix_native.len(), 16);
+    let prefix_output = expected_journal_output(&prefix_native)?;
+    let native = expected_journal_output(&before.native)?;
+    assert_eq!(slow.output, prefix_output);
+    assert_eq!(before.output, prefix_output);
+    assert_eq!(before.root, (16, true, slow.root.3, slow.root.4));
+    assert_eq!(before.coverage, 16);
+    assert_eq!(fast.output, native);
+    assert_eq!(pair.current_output(JOURNAL_FOLLOWER)?, native);
+    let remaining = before
+        .journal
+        .iter()
+        .filter(|reference| reference.revision > 16)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(remaining.len(), 16);
+    let pinned = expected_journal_after(&before, remaining)?;
+
+    // A no-op, wrong payload deletion, delete-only or decrement-only prune fails full equality.
+    assert_eq!(pair.prune_journal()?, 16);
+    assert_eq!(pair.slice.retention_state()?, pinned);
+    assert_eq!(pair.state(VIEW)?, slow);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, fast);
+    // A is STILL16: always-B/MAX/source-head32 hides behind the first call's page cap,
+    // but would wrongly delete the remaining16 here. Existing A32/B16 controls reject
+    // always-A; neither fixed ordering proves a minimum for arbitrary registries.
+    assert_eq!(pair.prune_journal()?, 0);
+    assert_eq!(pair.slice.retention_state()?, pinned);
+    assert_eq!(pair.state(VIEW)?, slow);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, fast);
+    assert!(pair.current_output(VIEW).is_err());
+    assert_eq!(pair.current_output(JOURNAL_FOLLOWER)?, native);
+
+    // Derive the complete expected advance BEFORE publishing, not from its actual result.
+    // Target::Live changes only root revision/generation, coverage and output; the job,
+    // status revision, namespace, bindings, source, images and retained payloads stay fixed.
+    let generation = slow
+        .root
+        .3
+        .checked_add(1)
+        .context("mirror generation overflow")?;
+    let mut expected_advanced = pinned.clone();
+    expected_advanced.root = (32, true, generation, slow.root.4);
+    expected_advanced.coverage = 32;
+    expected_advanced.output = native.clone();
+    let mut root_row = slow.root_row.clone();
+    // Exact Installer v1 physical layout: revision at6, generation at8 of11 columns.
+    assert_eq!(root_row.len(), 11);
+    assert_eq!(root_row[6], Sql::Integer(16));
+    assert_eq!(root_row[8], Sql::Integer(i64::try_from(slow.root.3)?));
+    root_row[6] = Sql::Integer(32);
+    root_row[8] = Sql::Integer(i64::try_from(generation)?);
+    let expected_primary = JournalConsumerState {
+        root: (
+            slow.root.0.clone(),
+            32,
+            true,
+            generation,
+            slow.root.4,
+            slow.root.5.clone(),
+        ),
+        job: slow.job.clone(),
+        coverage: Some(32),
+        output: native.clone(),
+        root_row,
+        job_row: slow.job_row.clone(),
+    };
+    pair.publish_live(VIEW)?; // Consume ORIGINAL retained references17..32.
+    // Images32/journal16 intentionally violates the old equal-prefix reconcile helper.
+    // Full independently derived equality instead checks every conserved component.
+    assert_eq!(pair.slice.retention_state()?, expected_advanced);
+    assert_eq!(pair.state(VIEW)?, expected_primary);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, fast);
+    assert_eq!(pair.current_output(VIEW)?, native);
+    assert_eq!(pair.current_output(JOURNAL_FOLLOWER)?, native);
+
+    // Only after independent complete state/cut checks may the remaining prefix drain.
+    let drained = expected_journal_after(&expected_advanced, vec![])?;
+    assert_eq!(pair.prune_journal()?, 16);
+    assert_eq!(pair.slice.retention_state()?, drained);
+    assert_eq!(pair.state(VIEW)?, expected_primary);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, fast);
+    assert_eq!(pair.prune_journal()?, 0);
+    assert_eq!(pair.slice.retention_state()?, drained);
+    assert_eq!(pair.state(VIEW)?, expected_primary);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, fast);
+    assert_eq!(pair.current_output(VIEW)?, native);
+    assert_eq!(pair.current_output(JOURNAL_FOLLOWER)?, native);
+    // Both full retention comparisons keep ALL32 original images and their counters.
+    Ok(())
+}
+
+// Fixture-only reopen: the namespace is the parent's original owned value, never
+// discovered from SQL. No schema/start/bootstrap/repair or process-gate bypass.
+fn reopen_two_consumer_journal_fixture(path: &Path, follower: String) -> Result<JournalConsumers> {
+    ensure!(
+        !follower.is_empty() && follower.len() <= 128,
+        "post-commit follower identity exceeds fixture bound"
+    );
+    let mut slice = Slice::open(path)?;
+    ensure!(
+        follower != slice.manifest.job,
+        "post-commit consumers must have distinct namespaces"
+    );
+    slice.installer = Installer::new(vec![Box::new(Ledger), Box::new(JournalFollower)])?;
+    let pair = JournalConsumers { slice, follower };
+    pair.slice.read(|db| {
+        pair.slice.check(db)?;
+        let primary = pair.state_at(db, VIEW)?;
+        let follower = pair.state_at(db, JOURNAL_FOLLOWER)?;
+        ensure!(
+            primary.root.0.as_deref() == Some(pair.slice.manifest.job.as_str())
+                && follower.root.0.as_deref() == Some(pair.follower.as_str()),
+            "post-commit installed namespaces differ from original owned identities"
+        );
+        Ok(())
+    })?;
+    Ok(pair)
+}
+
+#[test]
+fn production_journal_prune_post_commit_death_child() -> Result<()> {
+    let Some(phase) = std::env::var_os("SLICE_TWO_CONSUMER_JOURNAL_PHASE") else {
+        return Ok(()); // A no-env PASS is not evidence of process death.
+    };
+    let phase = phase.to_str().context("post-commit phase is not UTF-8")?;
+    ensure!(
+        phase.starts_with("committed-journal:") && phase.len() <= 128,
+        "post-commit phase identity exceeds fixture bound"
+    );
+    let path = PathBuf::from(
+        std::env::var_os("SLICE_TWO_CONSUMER_JOURNAL_PATH")
+            .context("post-commit child path missing")?,
+    );
+    let follower = std::env::var("SLICE_TWO_CONSUMER_JOURNAL_FOLLOWER")
+        .context("post-commit child follower missing")?;
+    let marker = path.with_extension("two-consumer-journal-phase");
+    ensure!(
+        !marker.try_exists()?,
+        "post-commit phase artifact is not fresh"
+    );
+    let pair = reopen_two_consumer_journal_fixture(&path, follower)?;
+    assert_eq!(pair.state(VIEW)?.root.1, 16);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?.root.1, 32);
+    assert_eq!(pair.prune_journal()?, 16);
+    // A remains16: a fast-only cutoff must fail beyond the first call's page cap.
+    assert_eq!(pair.prune_journal()?, 0);
+    // Both calls committed and returned their physical writer loans BEFORE this marker.
+    durable_retention_artifact(&marker, phase.as_bytes())?;
+    // libtest may leave its test-name prefix on the current stdout line.
+    println!("\nSLICE_TWO_CONSUMER_COMMITTED_PRUNE {phase}");
+    std::io::stdout().flush()?;
+    // Exit78 was unused in this fixture at the pinned parent. This is post-commit
+    // process death with Store still live: no Rust destructors or explicit checkpoint.
+    // It is not SIGKILL, power loss, death DURING COMMIT or an uncommitted-crash control.
+    std::process::exit(78);
+}
+
+#[test]
+fn production_journal_prune_post_commit_death_reopens_both_consumers() -> Result<()> {
+    let (_directory, pair) = JournalConsumers::fixture(true)?;
+    for n in 0..32 {
+        append(&pair.slice, &format!("note/journal-post-commit-{n:02}"))?;
+    }
+    pair.publish_live(VIEW)?;
+    pair.publish_live(JOURNAL_FOLLOWER)?;
+    pair.publish_live(JOURNAL_FOLLOWER)?;
+    let before = pair.slice.retention_state()?;
+    before.reconcile()?;
+    let slow = pair.state(VIEW)?;
+    let fast = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(before.source.0, 32);
+    assert!(before.source.1);
+    assert_eq!(before.images.len(), 32);
+    assert_eq!(before.journal.len(), 32);
+    assert_eq!(before.native.len(), 32);
+    assert_eq!(slow.root.1, 16);
+    assert!(slow.root.2 && slow.root.0.is_some() && slow.root.5.is_none());
+    assert_eq!(slow.coverage, Some(16));
+    assert_eq!(fast.root.1, 32);
+    assert!(fast.root.2 && fast.root.0.is_some());
+    assert_eq!(fast.coverage, Some(32));
+    assert_ne!(slow.root.0, fast.root.0);
+    let prefix_ids = before
+        .images
+        .iter()
+        .filter(|image| image.revision <= 16)
+        .map(|image| image.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(prefix_ids.len(), 16);
+    let prefix_native = before
+        .native
+        .iter()
+        .filter(|(id, _, _, _)| prefix_ids.contains(id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(prefix_native.len(), 16);
+    let prefix = expected_journal_output(&prefix_native)?;
+    let native = expected_journal_output(&before.native)?;
+    assert_eq!(slow.output, prefix);
+    assert_eq!(before.output, prefix);
+    assert_eq!(before.root, (16, true, slow.root.3, slow.root.4));
+    assert_eq!(before.coverage, 16);
+    assert_eq!(fast.output, native);
+    assert_eq!(
+        pair.slice.read(|db| {
+            let status = pair.slice.installer.status(db, VIEW)?;
+            Ok((status.ready, status.source.revision))
+        })?,
+        (false, 32)
+    );
+    assert!(pair.current_output(VIEW).is_err());
+    assert_eq!(pair.current_output(JOURNAL_FOLLOWER)?, native);
+
+    // All expectations are derived in the PARENT before its Store is dropped.
+    let remaining = before
+        .journal
+        .iter()
+        .filter(|reference| reference.revision > 16)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(remaining.len(), 16);
+    let pinned = expected_journal_after(&before, remaining)?;
+    let generation = slow
+        .root
+        .3
+        .checked_add(1)
+        .context("post-commit generation overflow")?;
+    let mut advanced = pinned.clone();
+    advanced.root = (32, true, generation, slow.root.4);
+    advanced.coverage = 32;
+    advanced.output = native.clone();
+    let mut root_row = slow.root_row.clone();
+    assert_eq!(root_row.len(), 11); // Pinned Installer v1 physical root layout.
+    assert_eq!(root_row[6], Sql::Integer(16));
+    assert_eq!(root_row[8], Sql::Integer(i64::try_from(slow.root.3)?));
+    root_row[6] = Sql::Integer(32);
+    root_row[8] = Sql::Integer(i64::try_from(generation)?);
+    let complete_primary = JournalConsumerState {
+        root: (
+            slow.root.0.clone(),
+            32,
+            true,
+            generation,
+            slow.root.4,
+            slow.root.5.clone(),
+        ),
+        job: slow.job.clone(),
+        coverage: Some(32),
+        output: native.clone(),
+        root_row,
+        job_row: slow.job_row.clone(),
+    };
+    let drained = expected_journal_after(&advanced, vec![])?;
+    let path = pair.slice.path.clone();
+    let follower = pair.follower.clone();
+    let marker = path.with_extension("two-consumer-journal-phase");
+    assert!(!marker.try_exists()?);
+    let phase = format!("committed-journal:{}", uuid::Uuid::now_v7());
+    ensure!(
+        phase.len() <= 128,
+        "parent phase identity exceeds fixture bound"
+    );
+    // Every read scope above has returned its exact connection; no guard escapes.
+    // Drop the entire original Store before the child opens this fixture.
+    drop(pair);
+    let output = Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "production_journal_prune_post_commit_death_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("SLICE_TWO_CONSUMER_JOURNAL_PHASE", &phase)
+        .env("SLICE_TWO_CONSUMER_JOURNAL_PATH", &path)
+        .env("SLICE_TWO_CONSUMER_JOURNAL_FOLLOWER", &follower)
+        .output()?;
+    // Check all death/phase evidence BEFORE reopening any Store. Normal-return/no-env
+    // child, wrong code, stale marker or arbitrary child failure cannot pass these gates.
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected_stdout = format!("SLICE_TWO_CONSUMER_COMMITTED_PRUNE {phase}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == expected_stdout.as_str()),
+        "missing standalone phase marker; child stdout={:?}; stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut phase_bytes = Vec::new();
+    std::fs::File::open(&marker)?
+        .take(129)
+        .read_to_end(&mut phase_bytes)?;
+    ensure!(
+        phase_bytes.len() <= 128,
+        "post-commit phase artifact exceeds bound"
+    );
+    assert_eq!(phase_bytes.as_slice(), phase.as_bytes());
+
+    let reopened = reopen_two_consumer_journal_fixture(&path, follower)?;
+    // No-op/wrong row/byte maintenance or reopen replay fails this full independent
+    // snapshot; BOTH physical consumer states were owned before the child existed.
+    assert_eq!(reopened.slice.retention_state()?, pinned);
+    assert_eq!(reopened.state(VIEW)?, slow);
+    assert_eq!(reopened.state(JOURNAL_FOLLOWER)?, fast);
+    assert_eq!(
+        reopened.slice.read(|db| {
+            let status = reopened.slice.installer.status(db, VIEW)?;
+            Ok((status.ready, status.source.revision))
+        })?,
+        (false, 32)
+    );
+    assert!(reopened.current_output(VIEW).is_err());
+    assert_eq!(reopened.current_output(JOURNAL_FOLLOWER)?, native);
+    // With A STILL16 this second-process zero also tests the persisted slow-root pin.
+    assert_eq!(reopened.prune_journal()?, 0);
+    assert_eq!(reopened.slice.retention_state()?, pinned);
+    assert_eq!(reopened.state(VIEW)?, slow);
+    assert_eq!(reopened.state(JOURNAL_FOLLOWER)?, fast);
+    reopened.publish_live(VIEW)?; // ORIGINAL retained references17..32, no replay/fallback.
+    assert_eq!(reopened.slice.retention_state()?, advanced);
+    assert_eq!(reopened.state(VIEW)?, complete_primary);
+    assert_eq!(reopened.state(JOURNAL_FOLLOWER)?, fast);
+    assert_eq!(reopened.current_output(VIEW)?, native);
+    assert_eq!(reopened.current_output(JOURNAL_FOLLOWER)?, native);
+    assert_eq!(reopened.prune_journal()?, 16);
+    assert_eq!(reopened.slice.retention_state()?, drained);
+    assert_eq!(reopened.state(VIEW)?, complete_primary);
+    assert_eq!(reopened.state(JOURNAL_FOLLOWER)?, fast);
+    assert_eq!(reopened.prune_journal()?, 0);
+    assert_eq!(reopened.slice.retention_state()?, drained);
+    assert_eq!(reopened.state(VIEW)?, complete_primary);
+    assert_eq!(reopened.state(JOURNAL_FOLLOWER)?, fast);
+    assert_eq!(reopened.current_output(VIEW)?, native);
+    assert_eq!(reopened.current_output(JOURNAL_FOLLOWER)?, native);
+    Ok(())
+}

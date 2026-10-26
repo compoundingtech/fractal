@@ -1,4 +1,5 @@
-import type { Arrangement } from '../../clients/typescript/st3-client';
+import type { Arrangement } from '../../clients/typescript/fractal-client';
+import { sidebarArrangement } from './sidebarEdits';
 
 export type SidebarKind = 'Agents' | 'Missions' | 'Terminals' | 'Machines' | 'Pull requests' | 'Repositories' | 'Resources' | 'Unavailable';
 export type SidebarResource = { id: string; title: string; kind: SidebarKind; target: string; missing?: boolean };
@@ -15,7 +16,7 @@ export function rememberResources(previous: Map<string, SidebarResource>, curren
 
 /** One deterministic Sidebar arrangement, flattened to one folder level without rewriting it. */
 export function sidebarGroups(arrangements: Arrangement[], resources: Map<string, SidebarResource>, choices: SidebarChoices = {}, filter = ''): { groups: SidebarGroup[]; everythingCollapsed: boolean; unfiledCount: number } {
-  const arrangement = [...arrangements].filter(a => !a.deleted).sort((a, b) => Number(a.body.name.value !== 'Sidebar') - Number(b.body.name.value !== 'Sidebar') || compare(a.id, b.id))[0];
+  const arrangement = sidebarArrangement(arrangements);
   const catalog = new Map(resources);
   for (const id of Object.keys(arrangement?.body.placements ?? {})) if (!catalog.has(id)) catalog.set(id, { id, title: id, kind: 'Unavailable', target: id, missing: true });
   const folders = Object.entries(arrangement?.body.folders ?? {}).filter(([, folder]) => !folder.tombstone).sort(([aid, a], [bid, b]) => compare(a.position.value.key, b.position.value.key) || compare(aid, bid));

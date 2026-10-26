@@ -1,8 +1,9 @@
 # Long messages
 
 A message can carry up to 256 KiB of UTF-8 text. Up to 8 KiB the text is in the `message.sent`
-claim, as it always was. Past that the claim holds a preview, and the whole text is a file on the
-machine that took the message.
+claim. Past that the claim holds a preview, and the whole text is a file on the
+machine that took the message. The CLI's `--body` is limited by the OS argument size
+(128 KiB on Linux); larger messages go through the client API.
 
 ## What is stored, and where
 
@@ -16,10 +17,6 @@ Nothing of the text but the preview enters the database or replication, and the 
 field. Conversation content stays with its owner and is read from there per request, the way an
 image attachment is: no other member keeps a copy, in a table or a file. The claim row stays about
 1.5 KiB however long the message is, and no `blobs` row, document or `doc.bound` claim is written.
-
-A build that predates this keeps only the `attachments` entries that are images, so it reads the
-message as its preview and accepts the claim. A message without a `text/plain` entry, which is
-every message written before this, reads exactly as it did.
 
 ## Reading
 
@@ -45,7 +42,8 @@ in, and an agent seat reads what it can name.
 `message.send` and `POST /v1/messages` take the whole text in `content`. Over 256 KiB the daemon
 refuses with `message-too-large`, saying the limit and the size sent, and writes nothing, so a
 composer keeps the person's text. `GET /v1/client/capabilities` states `limits.max_message_bytes`
-(262144); a daemon that predates this omits it and takes 4096.
+(262144). A mission file's `message` node keeps its own 4 KiB limit.
+`st conversations export` writes the preview.
 
 ### Quotas
 
@@ -66,20 +64,6 @@ that signs the whole text of a long message is refused with `long-message-signat
 and nothing is written, so its composer keeps the text and says the device must be updated or the
 message shortened.
 
-## What it costs
-
-Measured by `what_a_message_costs_per_size` and the peer test
-`a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else` (debug build, loopback):
-
-| Body | Claim row (every member) | `blobs` rows | Owner file | Replication exchange | Read on the owner | Read from another member |
-|---:|---:|---:|---:|---:|---:|---:|
-| 4 KiB | 4,556 B (inline) | 0 | none | 5,089 B | not needed | not needed |
-| 64 KiB | 1,534 B | 0 | 65,536 B | 2,223 B | 2.4 ms | 21 ms |
-| 256 KiB | 1,535 B | 0 | 262,144 B | 2,223 B | 6.5 ms | 85 ms |
-
-A body up to 8 KiB is inline: its claim row is the text plus about 460 bytes, and it is replicated
-with the claim. The measured rows are 4 KiB and the two file-backed sizes.
-
 ## Lifecycle
 
 - A send is validated, its text staged to a temporary file (`.<id>.<n>.part`, fsynced), its
@@ -99,38 +83,16 @@ with the claim. The measured rows are 4 KiB and the two file-backed sizes.
   remains") and the daemon's own readers are handed the preview and a note. A marker whose message
   no longer exists is removed. The text is never written to the graph database, expired or not.
 - `st backup create` writes each body the member owns, with its message, sender and hash, after the
-  claims, and declares archive version 2 (an archive with no bodies stays version 1, which a build
-  without bodies restores; one with bodies it refuses cleanly); a body no claim names with that hash
-  is left out. The daemon spools the archive to temporary disk, so up to about 1.4 GiB of free space
+  claims, and declares archive version 2 (an archive with no bodies uses version 1). A body no
+  claim names with that hash is left out. The daemon spools the archive to temporary disk, so up to about 1.4 GiB of free space
   is needed on a member that owns the most the quota allows. `st backup restore` checks every body
   against its hash and against the restored claim, writes them beside the database, and reports
   `message_bodies_restored`, `message_bodies_unmatched` and `message_bodies_referenced` (the long
-  messages the claims name, including those another member owns). An archive made before this still
-  restores, with no bodies. A graph backup of a member that does not own a body cannot return it.
+  messages the claims name, including those another member owns). A graph backup of a member
+  that does not own a body cannot return it.
 
 ## Retention
 
 Bodies expire after 30 days by default (see Expiry above); only the preview, the claim and the
 owner's name remain. Set `ST3_MESSAGE_BODIES_RETENTION_DAYS` to another number of days, or `0` to
-keep bodies. Keeping bodies forever somewhere other than the owner's state directory is the seam
-below, not part of this change.
-
-### Where a body is read and written (for a storage plugin)
-
-A later change can let a plugin hold bodies, for as long as its owner chooses. The seam is two
-small places:
-
-- **Write:** `message_body::Bodies::stage` and `Staged::commit`, called from the accept path in
-  `api.rs` after validation and before the claim (committed after it), take the sender, the
-  message subject and the bytes.
-- **Read:** `whole_text` in `api/message_bodies.rs` (this member's file, or the owner's peer route)
-  and the owner-side chunk branch in `api/client_blobs.rs`. The claim's `text/plain`
-  `attachments` entry (hash, size, origin) is the locator, and the hash is checked on every read.
-
-Expiry is the one branch of `Bodies::reconcile` that calls `expire`; a plugin that keeps bodies
-would replace that branch and the two reads above. The text never enters the graph database.
-
-## Not covered
-
-- A mission file's `message` node keeps its own 4 KiB limit.
-- `st conversations export` writes the preview.
+keep bodies.

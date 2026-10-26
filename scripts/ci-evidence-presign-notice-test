@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""scripts/ci-evidence-presign-notice on fixture gate lines (no network): which checks it lists, which it passes over and why,
+and that nothing it meets makes it fail."""
+import importlib.machinery
+import importlib.util
+import io
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('ci_evidence_presign_notice', str(ROOT / 'scripts/ci-evidence-presign-notice'))
+notice = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(notice)
+LANES = {'version': 1, 'lanes': {
+    'genie-freshness': {'definition_paths': ['.st', 'flake.lock', 'flake.nix', 'scripts']},
+    'typescript-client': {'definition_paths': ['package.json', 'scripts/ci-typescript-client']},
+    'stage-lane': {'definition_paths': ['.st', 'scripts']},
+}}
+
+
+def line(check, **fields):
+    fields = {'decision': 'run', 'outcome': 'no_note', 'reason': 'no_record', 'tree_of': 'head', 'head_tree': 'used', 'fork': 'false',
+              'event': 'pull_request', 'pr': '7', **fields}
+    return f'evidence-decision v1 check={check} ' + ' '.join(f'{key}={value}' for key, value in fields.items()) + ' gate_sha256=abc'
+
+
+class Runner:
+    """git show of the lanes file and gh api of the pull request's files, from fixtures."""
+
+    def __init__(self, files=(), lanes=LANES, files_fail=False):
+        self.files, self.lanes, self.files_fail = files, lanes, files_fail
+
+    def __call__(self, command, **kwargs):
+        if command[:2] == ['git', 'show']:
+            if self.lanes is None:
+                return subprocess.CompletedProcess(command, 128, '', 'fatal: path does not exist')
+            return subprocess.CompletedProcess(command, 0, json.dumps(self.lanes), '')
+        if command[:2] == ['gh', 'api']:
+            if self.files_fail:
+                return subprocess.CompletedProcess(command, 1, '', 'HTTP 502')
+            return subprocess.CompletedProcess(command, 0, ''.join(f'{name}\n' for name in self.files), '')
+        raise AssertionError(command)
+
+
+class PresignNotice(unittest.TestCase):
+    def run_notice(self, lines, runner):
+        out = io.StringIO()
+        with tempfile.NamedTemporaryFile('r') as summary:
+            code = notice.main({'LINES': '\n'.join(lines), 'BASE_SHA': 'b' * 40, 'REPOSITORY': 'org/repo', 'PR_NUMBER': '7',
+                                'GITHUB_STEP_SUMMARY': summary.name}, runner=runner, out=out)
+            self.summary = summary.read()
+        self.assertEqual(code, 0)
+        return out.getvalue()
+
+    def test_a_signable_check_that_ran_for_lack_of_a_note_on_the_head_tree_is_listed(self):
+        text = self.run_notice([line('typescript-client'), line('genie-freshness'), line('linux-gate')], Runner(files=['crates/a.rs']))
+        self.assertIn('::notice title=Not pre-signed::These jobs ran in full because no pre-signed note covered this head: '
+                      'genie-freshness, typescript-client.', text)
+        self.assertIn('`scripts/st-test --push origin`', text)
+        self.assertIn('never fails a check or blocks a merge', text)
+        self.assertIn('evidence-presign-notice v1 pr=7 listed=genie-freshness,typescript-client passed_over=-', text)
+        self.assertIn('ran in full', self.summary)
+
+    def test_every_check_asks_for_the_same_command(self):
+        # No heavy or light split: st-test with no flag runs and signs the whole per-PR suite.
+        text = self.run_notice([line('stage-lane')], Runner(files=['crates/a.rs']))
+        self.assertIn('`scripts/st-test --push origin`', text)
+        self.assertNotIn('--all', text)
+
+    def test_covered_sampled_shadow_and_skipped_checks_are_not_listed(self):
+        lines = [line('typescript-client', decision='skip', outcome='satisfied'),
+                 line('typescript-client', outcome='satisfied', reason='satisfied_but_not_skipped:_sampled'),
+                 line('genie-freshness', outcome='satisfied', reason='satisfied_but_not_skipped:_shadow'),
+                 line('stage-lane', outcome='rejected')]
+        text = self.run_notice(lines, Runner(files=['crates/a.rs']))
+        self.assertNotIn('::notice', text)
+        self.assertIn('listed=- passed_over=-', text)
+
+    def test_a_merge_tree_fallback_a_fork_and_a_lane_edit_are_passed_over_with_the_reason(self):
+        lines = [line('typescript-client', tree_of='merge', head_tree='fallback:protected_files_differ_from_the_branch_point'),
+                 line('stage-lane', fork='true'), line('genie-freshness')]
+        text = self.run_notice(lines, Runner(files=['scripts/ci-local', 'crates/a.rs']))
+        self.assertNotIn('::notice', text)
+        self.assertIn('passed_over=genie-freshness:edits_its_own_lane,stage-lane:fork,'
+                      'typescript-client:merge_tree_(fallback:protected_files_differ_from_the_branch_point)', text)
+
+    def test_a_path_prefix_is_not_a_lane_edit_unless_it_is_the_path_or_below_it(self):
+        self.assertTrue(notice.edits(['scripts'], ['scripts/ci-local']))
+        self.assertTrue(notice.edits(['flake.lock'], ['flake.lock']))
+        self.assertFalse(notice.edits(['scripts'], ['scripts-extra/x', 'docs/scripts']))
+        self.assertFalse(notice.edits(['package.json'], ['apps/fractal-web/package.json']))
+
+    def test_unreadable_lanes_or_files_or_missing_lines_say_nothing_and_never_fail(self):
+        self.assertIn('nothing to say', self.run_notice([line('typescript-client')], Runner(lanes=None)))
+        text = self.run_notice([line('typescript-client')], Runner(files_fail=True))
+        self.assertNotIn('::notice', text)
+        self.assertIn('typescript-client:file_list_unreadable', text)
+        text = self.run_notice(['', 'noise', 'evidence-decision v1 check=$CHECK decision=run outcome=unavailable'], Runner())
+        self.assertIn('listed=- passed_over=-', text)
+
+    def test_the_lanes_it_reads_are_the_required_lanes_file(self):
+        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+        self.assertEqual(set(notice.lanes_at('HEAD', Runner(lanes={'lanes': lanes}))), set(lanes))
+        self.assertTrue(all(lane.get('definition_paths') for lane in lanes.values()))
+
+
+if __name__ == '__main__':
+    unittest.main()

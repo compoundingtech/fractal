@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep Fractal web shell cache writes on protected main instead of storing pull-request-only closure copies.",
+  "replay": { "status": "none", "detail": "No projection or replay changes." },
+  "schema": { "status": "none", "detail": "No database or migration changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet rule changes." },
+  "compatibility": { "status": "none", "detail": "No application, command or protocol compatibility changes. CI retains the same cache key definitions, restore scope, toolchain and cold-shell fallback." },
+  "downtime": { "status": "none", "detail": "No service restart or deployment change." },
+  "manual": { "status": "changed", "detail": "Only protected-main upkeep publishes the shared web shell closure. Pull requests still restore main's matching entry; changed flake inputs or cache misses evaluate the shell cold without saving a pull-request-scoped copy." },
+  "recovery": { "status": "none", "detail": "A cache miss still falls back to nix develop .#web. This change deletes no existing cache entries and changes no trust or restore rules." }
+}

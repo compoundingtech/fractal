@@ -71,7 +71,7 @@ class RigChecks(unittest.TestCase):
         self.assertIsNone(rig.onboarding_history({"status":"cancelled"}))
 
     def test_restart_waiting_requires_exact_subject_and_message(self):
-        subject="agent/st/expert"
+        subject="agent/st/assistant"
         waiting=f"st: `{subject}` restarted and is waiting for your input; attach with `st terminals attach {subject}`\n"
         self.assertTrue(rig.restart_requested({"exit":2,"stderr":waiting},subject))
         self.assertTrue(rig.restart_requested({"exit":0,"stderr":""},subject))
@@ -107,22 +107,22 @@ class RigChecks(unittest.TestCase):
             self.assertFalse(out.exists())
 
     def test_focus_probe_rejects_sidebar_and_unfocused_composer(self):
-        code='import os,tty; tty.setraw(0); os.write(1,b"\\x1b[?1049h working Expert sidebar Message Expert "+"·".encode()+b" click");\nwhile True:\n value=os.read(0,100)\n if b"\\x11" in value: os.write(1,b"\\x1b[?1049l"); break\n if b"home" in value: os.write(1,b"Now Nothing needs you")\n'
-        request={"argv":["python3","-c",code],"timeout":5,"expect_expert":True,"expert_focus_timeout":0.1}
+        code='import os,tty; tty.setraw(0); os.write(1,b"\\x1b[?1049h working Assistant sidebar Message Fractal Assistant "+"·".encode()+b" click");\nwhile True:\n value=os.read(0,100)\n if b"\\x11" in value: os.write(1,b"\\x1b[?1049l"); break\n if b"home" in value: os.write(1,b"Now Nothing needs you")\n'
+        request={"argv":["python3","-c",code],"timeout":5,"expect_assistant":True,"assistant_focus_timeout":0.1}
         r=subprocess.run(["python3","-c",rig.PTY_PROBE,json.dumps(request)],capture_output=True,text=True,timeout=8)
         self.assertEqual(r.returncode,0)
         value=json.loads(r.stdout)
-        self.assertFalse(value["expert_focused"])
+        self.assertFalse(value["assistant_focused"])
         self.assertTrue(value["home_navigation"])
         self.assertTrue(value["restored"])
 
-    def test_focus_probe_accepts_focused_expert_before_navigation(self):
-        code='import os,tty; tty.setraw(0); os.write(1,b"\\x1b[?1049h working Message Expert "+"·".encode()+b" type or click");\nwhile True:\n value=os.read(0,100)\n if b"\\x11" in value: os.write(1,b"\\x1b[?1049l"); break\n if b"home" in value: os.write(1,b"Now Nothing needs you")\n'
-        request={"argv":["python3","-c",code],"timeout":5,"expect_expert":True,"expert_focus_timeout":0.1}
+    def test_focus_probe_accepts_focused_assistant_before_navigation(self):
+        code='import os,tty; tty.setraw(0); os.write(1,b"\\x1b[?1049h working Message Fractal Assistant "+"·".encode()+b" type or click");\nwhile True:\n value=os.read(0,100)\n if b"\\x11" in value: os.write(1,b"\\x1b[?1049l"); break\n if b"home" in value: os.write(1,b"Now Nothing needs you")\n'
+        request={"argv":["python3","-c",code],"timeout":5,"expect_assistant":True,"assistant_focus_timeout":0.1}
         r=subprocess.run(["python3","-c",rig.PTY_PROBE,json.dumps(request)],capture_output=True,text=True,timeout=8)
         self.assertEqual(r.returncode,0)
         value=json.loads(r.stdout)
-        self.assertTrue(value["expert_focused"])
+        self.assertTrue(value["assistant_focused"])
         self.assertNotIn("Nothing needs you",value["initial_screen"])
         self.assertTrue(value["home_frame"])
 

@@ -4,7 +4,8 @@
 Any current authenticated paired session may report, including a read-only pairing.
 Unpaired local Unix sessions, anonymous callers, expired and revoked pairings are refused.
 These are optional local diagnostics, outside graph actions, SQLite mutation and replication.
-No app recorder, transport setting, activation or collector is implemented by this command.
+The phone records and reports these samples from `apps/ios/observations.ts`; the command itself
+only admits them.
 
 The generated methods are Rust `observations_report`, Swift `observationsReport` and
 TypeScript `observationsReport`. The response is `ObservationResponse`:

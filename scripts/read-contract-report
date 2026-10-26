@@ -60,9 +60,21 @@ def route_calls(source):
         text = source.split("fn router_for_transport", 1)[1].split("\nasync fn schema()", 1)[0]
     except IndexError as error:
         raise InventoryError("cannot bound router_for_transport registration source") from error
+    setup = re.match(
+        r"\s*\(state:\s*AppState,\s*transport:\s*ClientTransportBoundary\)\s*"
+        r"->\s*Router\s*\{\s*crate::slo::install\(\);\s*",
+        text,
+    )
+    if not setup:
+        raise InventoryError("unknown router setup before route registrations")
+    text = text[:setup.end()].replace("crate::slo::install();", "", 1) + text[setup.end():]
     if ";" not in text:
         raise InventoryError("cannot bound router builder expression")
     builder, tail = text.split(";", 1)
+    known_comment = "        // The same rows under the name a person reads.\n"
+    if builder.count(known_comment) != 1:
+        raise InventoryError("unknown router comment or route registration shape")
+    builder = builder.replace(known_comment, "", 1)
     compact_tail = re.sub(r"\s+", "", tail)
     expected_tail = (
         "app.layer(from_fn_with_state(state.clone(),refuse_while_leaving))"
@@ -287,8 +299,8 @@ def registered_handler_definitions(source_root, route_handlers):
     production_by_path = {}
     for key, handler in route_handlers.items():
         parts = handler.split("::")
-        path = (source_root / "crates/st3/src/api.rs" if len(parts) == 1 else
-                source_root / "crates/st3/src/api" / ("/".join(parts[:-1]) + ".rs"))
+        path = (source_root / "crates/fractal-api-core/src/api.rs" if len(parts) == 1 else
+                source_root / "crates/fractal-api-core/src/api" / ("/".join(parts[:-1]) + ".rs"))
         if path not in production_by_path:
             try:
                 source = path.read_text()
@@ -314,34 +326,40 @@ def registered_handler_definitions(source_root, route_handlers):
     return definitions
 
 
-def registered_claim_specs(schema_source):
+def registered_claim_specs(schema_source, directive_notes_source):
     try:
         definitions = schema_source.split("let definitions: &[ClaimDefinition<'_>] = &[", 1)[1].split(
             "    ];\n    for (kind", 1
         )[0]
     except IndexError as error:
         raise InventoryError("cannot bound st3-schema claim definitions") from error
+    directive_kind = re.findall(
+        r'(?m)^pub const KIND: &str = "([^"]+)";', directive_notes_source
+    )
+    if len(directive_kind) != 1:
+        raise InventoryError("directive-notes claim kind constant is unresolved")
     pattern = re.compile(
-        r'(?ms)^        \(\s*"([^"]+)",\s*&\[(.*?)\],\s*WritePolicy::[A-Za-z]+,'
+        r'(?ms)^        \(\s*("[^"]+"|directive_notes::KIND),\s*&\[(.*?)\],\s*WritePolicy::[A-Za-z]+,'
         r'\s*Cardinality::[A-Za-z]+,\s*(None|Some\("[^"]+"\)),'
         r'\s*(true|false),\s*&\[(.*?)\],\s*\),'
     )
     matches = list(pattern.finditer(definitions))
-    names = [match.group(1) for match in matches]
+    names = [directive_kind[0] if match.group(1) == "directive_notes::KIND"
+             else match.group(1)[1:-1] for match in matches]
     tuple_count = len(re.findall(r"^        \($", definitions, re.M))
     if len(names) != tuple_count or len(names) != len(set(names)) or not names:
         raise InventoryError("claim registry has duplicate kinds or cannot be parsed")
-    if not re.search(r'kind:\s*"custom\.\*\.\*"', schema_source):
-        raise InventoryError("custom.*.* resource allowance is unresolved")
+    if not re.search(r'kind:\s*"custom\.\*"', schema_source):
+        raise InventoryError("custom.* claim allowance is unresolved")
     specs = {}
-    for match in matches:
+    for match, name in zip(matches, names):
         projection = match.group(3)
-        specs[match.group(1)] = {
+        specs[name] = {
             "subject_types": re.findall(r'"([^"]+)"', match.group(2)),
             "declared_primary_projection": projection[6:-2] if projection != "None" else None,
             "wakes_reconciler": match.group(4) == "true",
         }
-    specs["custom.*.*"] = {
+    specs["custom.*"] = {
         "subject_types": ["custom"],
         "declared_primary_projection": None,
         "wakes_reconciler": False,
@@ -349,8 +367,8 @@ def registered_claim_specs(schema_source):
     return specs
 
 
-def registered_claim_kinds(schema_source):
-    return set(registered_claim_specs(schema_source))
+def registered_claim_kinds(schema_source, directive_notes_source):
+    return set(registered_claim_specs(schema_source, directive_notes_source))
 
 
 def registered_client_read_variants(peer_source):
@@ -598,7 +616,7 @@ def run_bounded_cli_inventory(binary, timeout_s=5, limit_bytes=1_000_000):
         selector.close()
         for stream in (process.stdout, process.stderr):
             stream.close()
-        if not complete:
+        if not complete and process.returncode is None:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -823,13 +841,16 @@ def report(root, ledger_path, manifest_path=None):
         blockers.append("historical ledger is malformed or unreadable")
     try:
         route_handlers = registered_route_handlers(
-            (root / "crates/st3/src/api.rs").read_text(),
-            (root / "crates/st3/src/peer.rs").read_text(),
+            (root / "crates/fractal-api-core/src/api.rs").read_text(),
+            (root / "crates/fractal-peer/src/peer.rs").read_text(),
         )
         routes = set(route_handlers)
         handler_definitions = registered_handler_definitions(root, route_handlers)
-        peer_source = (root / "crates/st3/src/peer.rs").read_text()
-        claim_specs = registered_claim_specs((root / "crates/st3-schema/src/lib.rs").read_text())
+        peer_source = (root / "crates/fractal-peer/src/peer.rs").read_text()
+        claim_specs = registered_claim_specs(
+            (root / "crates/fractal-schema/src/lib.rs").read_text(),
+            (root / "crates/fractal-schema/src/directive_notes.rs").read_text(),
+        )
         kinds = set(claim_specs)
         client_read_variants = registered_client_read_variants(peer_source)
         peer_protocol_routes = registered_peer_protocol_routes(peer_source)

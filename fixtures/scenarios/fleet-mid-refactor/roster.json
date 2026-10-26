@@ -223,6 +223,90 @@
         "workspace": "~/src/atlas/.worktrees/docs"
       }
     ],
+    "arrangements": [
+      {
+        "body": {
+          "folders": {
+            "01b8dd57-f7a0-7763-8687-4256d6b344fa": {
+              "name": {
+                "revision": "arrangement-1",
+                "value": "atlas"
+              },
+              "position": {
+                "revision": "arrangement-1",
+                "value": {
+                  "key": "b00",
+                  "parent": null
+                }
+              },
+              "tombstone": null
+            },
+            "01b8dd57-f7a0-7a7d-ab4a-98b693130b6c": {
+              "name": {
+                "revision": "arrangement-1",
+                "value": "Review"
+              },
+              "position": {
+                "revision": "arrangement-1",
+                "value": {
+                  "key": "b01",
+                  "parent": "01b8dd57-f7a0-7763-8687-4256d6b344fa"
+                }
+              },
+              "tombstone": null
+            },
+            "01b8dd57-f7a0-7c73-af03-a1796ed26593": {
+              "name": {
+                "revision": "arrangement-1",
+                "value": "Implementation"
+              },
+              "position": {
+                "revision": "arrangement-1",
+                "value": {
+                  "key": "b00",
+                  "parent": "01b8dd57-f7a0-7763-8687-4256d6b344fa"
+                }
+              },
+              "tombstone": null
+            }
+          },
+          "name": {
+            "revision": "arrangement-1",
+            "value": "Sidebar"
+          },
+          "placements": {
+            "agent/example/atlas/builder": {
+              "revision": "arrangement-1",
+              "value": {
+                "folder": "01b8dd57-f7a0-7c73-af03-a1796ed26593",
+                "key": "b00"
+              }
+            },
+            "agent/example/atlas/migrator": {
+              "revision": "arrangement-1",
+              "value": {
+                "folder": "01b8dd57-f7a0-7c73-af03-a1796ed26593",
+                "key": "b02"
+              }
+            },
+            "agent/example/atlas/reviewer": {
+              "revision": "arrangement-1",
+              "value": {
+                "folder": "01b8dd57-f7a0-7a7d-ab4a-98b693130b6c",
+                "key": "b01"
+              }
+            }
+          },
+          "version": 1
+        },
+        "deleted": false,
+        "id": "arrangement/person/ada/01b8dd57-f7a0-7631-9afa-2593589179f4",
+        "kind": "arrangement",
+        "owner": "person/ada",
+        "revision": "arrangement-1",
+        "updated_at": "2030-01-01T11:59:00.000Z"
+      }
+    ],
     "machines": [
       {
         "capacity": {
@@ -483,6 +567,10 @@
     {
       "codec": "timestamp",
       "pointer": "/state/agents/3/last_activity_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/arrangements/0/updated_at"
     },
     {
       "codec": "timestamp",
