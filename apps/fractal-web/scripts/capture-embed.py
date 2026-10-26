@@ -39,13 +39,17 @@ try:
     started = True
     time.sleep(5)
     initial = run('pty', 'peek', '--plain', args.session).stdout.decode()
-    if any(value in initial.lower() for value in ['select login method', 'sign in', 'not logged in', 'login required']):
-        raise RuntimeError('Harness requires login; no login attempted')
+    blocked = ['select login method', 'sign in', 'not logged in', 'login required', 'choose the text style', 'trust this folder', 'trust the files']
+    if any(value in initial.lower() for value in blocked):
+        raise RuntimeError('Harness onboarding, login or trust gate; no gate was accepted')
     run('pty', 'send', args.session, '--with-delay', '0.5', '--seq', args.prompt, '--seq', 'key:return')
     time.sleep(args.seconds)
     raw = run('pty', 'peek', args.session).stdout.decode()
     screen = pyte.Screen(args.columns, args.rows)
     pyte.Stream(screen).feed(raw)
+    final_text = '\n'.join(screen.display).lower()
+    if any(value in final_text for value in blocked):
+        raise RuntimeError('Harness onboarding, login or trust gate; no usable capture saved')
     colours = {'black': 0, 'red': 1, 'green': 2, 'brown': 3, 'blue': 4, 'magenta': 5, 'cyan': 6, 'white': 7, 'brightblack': 8, 'brightred': 9, 'brightgreen': 10, 'brightbrown': 11, 'brightblue': 12, 'brightmagenta': 13, 'brightcyan': 14, 'brightwhite': 15}
     def colour(value):
         if value in colours: return colours[value]
