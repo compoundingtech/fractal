@@ -942,14 +942,19 @@ async fn response_envelope_unbounded(
         && request.uri().path() == "/v1/client/capabilities"
         && !request.headers().contains_key(axum::http::header::AUTHORIZATION)
     {
-        return Json(json!({
-            "api_version": CLIENT_API_VERSION,
-            "capabilities": [
-                {"id":"device-key-proofs", "version":1, "state":"granted"},
-                {"id":"fabric-gateway-grant", "version":1, "state":"granted"},
-            ],
-        }))
-        .into_response();
+        // The second capability goes only to a client that says it understands it
+        // (`?accepts=fabric-gateway-grant`): an older client validating this answer as exactly
+        // one `device-key-proofs` entry keeps getting exactly that.
+        let mut capabilities = vec![json!({"id":"device-key-proofs", "version":1, "state":"granted"})];
+        if request
+            .uri()
+            .query()
+            .is_some_and(|query| query.split('&').any(|pair| pair == "accepts=fabric-gateway-grant"))
+        {
+            capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
+        }
+        return Json(json!({"api_version": CLIENT_API_VERSION, "capabilities": capabilities}))
+            .into_response();
     }
     let started = Instant::now();
     let client_request = request.uri().path().starts_with("/v1/client/");

@@ -690,7 +690,7 @@ function useAppStore(proof?: FabricProfile) {
     // gateway typed (or saved) stays this device's identity and its fallback route.
     const requestUrl = member ? fabricSnapshot.bridgeUrl : fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' ? fabricSnapshot.bridgeUrl : gateway;
     if (isFabricGatewayId(gateway) && requestUrl === gateway) throw new Error('Fabric is not connected yet, so there is nowhere to pair. Wait a moment and try again, or check the member\'s fabric grant for this phone.');
-    const response = await requestFetch(`${requestUrl}/v1/client/capabilities`);
+    const response = await requestFetch(`${requestUrl}/v1/client/capabilities?accepts=fabric-gateway-grant`);
     const text = await response.text();
     if (!response.ok || text.length > 8192) throw new Error('Member cannot advertise pairing proofs; upgrade it. The code was not submitted.');
     let advertisement: { api_version?: string; capabilities?: Array<{ id: string; version: number; state: string }> };

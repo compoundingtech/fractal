@@ -145,8 +145,9 @@ export async function verifyPairing(session: PersonPairedSession, key: string, f
 type Advertised = ReadonlyArray<{ id: string; version: number; state: string }>;
 /**
  * The phone's Fabric NodeID for the pairing request, only when the member advertises
- * `fabric-gateway-grant`: that member grants the NodeID its client gateway, and an older member
- * refuses a request carrying the field.
+ * `fabric-gateway-grant` (it does so only when asked with `?accepts=fabric-gateway-grant`): a
+ * member grants the NodeID its client gateway only for a code its person made with
+ * `--fabric-gateway`, and an older member refuses a request carrying the field.
  */
 export function pairingFabricNode(capabilities: Advertised, node: string): { fabric_node_id?: string } {
   const supported = capabilities.some(c => c.id === 'fabric-gateway-grant' && c.version === 1 && c.state === 'granted');

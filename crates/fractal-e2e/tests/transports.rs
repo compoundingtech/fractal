@@ -454,7 +454,7 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
         device_name: "Raw terminal device".into(),
         person_id: "person/avery".into(),
         full_control: Some(true),
-        scopes: None,
+        scopes: None, fabric_gateway: None,
     }).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1194,7 +1194,7 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
                 device_name: "Unattributed device".into(),
                 person_id: "person/ada".into(),
                 full_control: None,
-                scopes: None,
+                scopes: None, fabric_gateway: None,
             })
             .await
             .is_err(),
@@ -1568,7 +1568,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     device_name: "Conformance phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap();
 
@@ -1608,11 +1608,14 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     ).unwrap();
     assert_eq!(advertisement, serde_json::json!({
         "api_version": fractal_client::API_VERSION,
-        "capabilities": [
-            {"id":"device-key-proofs", "version":1, "state":"granted"},
-            {"id":"fabric-gateway-grant", "version":1, "state":"granted"},
-        ],
-    }));
+        "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
+    }), "a client that did not ask sees exactly the one capability older clients validate");
+    let asked = unix_response(&gateway_socket, "/v1/client/capabilities?accepts=fabric-gateway-grant", None).await;
+    let asked: Value = serde_json::from_slice(&asked.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(asked["capabilities"], serde_json::json!([
+        {"id":"device-key-proofs", "version":1, "state":"granted"},
+        {"id":"fabric-gateway-grant", "version":1, "state":"granted"},
+    ]));
     assert_eq!(
         unix_status(&gateway_socket, "/v1/client/agents", None).await,
         StatusCode::FORBIDDEN,

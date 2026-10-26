@@ -2007,6 +2007,10 @@ enum DevicesCommand {
         /// Delegate only observation: projections, glasses frames, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
+        /// Let this pairing grant the device this member's client gateway over Fabric (after
+        /// `st devices fabric enable`); without it pairing grants nothing over Fabric.
+        #[arg(long, conflicts_with = "assistant")]
+        fabric_gateway: bool,
         /// Begin a revocable external-assistant grant instead of a person device.
         #[arg(long, value_parser = parse_assistant_principal)]
         assistant: Option<AssistantPrincipal>,
@@ -8205,6 +8209,7 @@ async fn run_devices(
             device_name,
             full_control,
             read_only,
+            fabric_gateway,
             assistant: None,
             grant,
         } => {
@@ -8225,6 +8230,7 @@ async fn run_devices(
                             .map(|scope| (*scope).to_owned())
                             .collect()
                     }),
+                    fabric_gateway: fabric_gateway.then_some(true),
                 })
                 .await?;
             print_client_value(&response, json_output)?;

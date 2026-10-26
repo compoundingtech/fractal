@@ -101,6 +101,9 @@ pub enum Grant {
     },
     /// This member does not expose its client gateway over Fabric.
     NotEnabled,
+    /// The person who made this pairing code did not ask for a Fabric grant
+    /// (`st devices pair --fabric-gateway`).
+    NotRequested,
     Failed {
         detail: String,
     },
@@ -114,6 +117,7 @@ impl Grant {
             }
             Self::AlreadyTrusted { peer } => json!({"state": "already-trusted", "peer": peer}),
             Self::NotEnabled => json!({"state": "not-enabled"}),
+            Self::NotRequested => json!({"state": "not-requested"}),
             Self::Failed { detail } => json!({"state": "failed", "detail": detail}),
         }
     }

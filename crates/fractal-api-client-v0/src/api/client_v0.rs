@@ -5026,6 +5026,10 @@ pub struct PairingBegin {
     full_control: Option<bool>,
     /// Narrows the default device grant; every entry must be a limited pairing scope.
     scopes: Option<Vec<String>>,
+    /// Let this one pairing grant the device the client gateway over Fabric. Off unless the
+    /// person asks (`st devices pair --fabric-gateway`).
+    #[serde(default)]
+    fabric_gateway: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -5076,6 +5080,7 @@ pub async fn pairing_begin(
     let subject = format!("custom/client/pairing-{}", &stable[..24]);
     let expires_at = client_now_ms() + 300_000;
     let person_id = request.person_id;
+    let fabric_gateway = request.fabric_gateway == Some(true);
     let scopes: Vec<&str> = match (request.full_control.unwrap_or(false), request.scopes) {
         (true, Some(_)) => {
             return Err(validation(
@@ -5105,20 +5110,24 @@ pub async fn pairing_begin(
                 .collect()
         }
     };
+    let mut begun_fields = BTreeMap::from([
+        ("pairing_id".into(), Value::String(pairing_id.clone())),
+        ("device_name".into(), Value::String(request.device_name)),
+        ("person_id".into(), Value::String(person_id.clone())),
+        ("scopes".into(), json!(scopes)),
+        ("code_hash".into(), Value::String(credential_digest(&code))),
+        ("expires_at_unix_ms".into(), json!(expires_at)),
+    ]);
+    if fabric_gateway {
+        begun_fields.insert("fabric_gateway".into(), Value::Bool(true));
+    }
     state
         .store
         .append_claim(&ClaimInput {
             subject,
             kind: "custom.client.pairing-begun".into(),
             actor: Some(person_id.clone()),
-            fields: BTreeMap::from([
-                ("pairing_id".into(), Value::String(pairing_id.clone())),
-                ("device_name".into(), Value::String(request.device_name)),
-                ("person_id".into(), Value::String(person_id)),
-                ("scopes".into(), json!(scopes)),
-                ("code_hash".into(), Value::String(credential_digest(&code))),
-                ("expires_at_unix_ms".into(), json!(expires_at)),
-            ]),
+            fields: begun_fields,
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
@@ -5338,6 +5347,12 @@ pub async fn pairing_complete(
             "the pairing code is invalid, expired, or already used",
         ));
     }
+    // A Fabric grant needs the person's yes for this pairing, given when the code was made.
+    let fabric_wanted = begun
+        .body
+        .pointer("/fields/fabric_gateway")
+        .and_then(Value::as_bool)
+        == Some(true);
     let device_public_key = request.device_public_key.clone();
     let mut secret = [0_u8; 32];
     getrandom::fill(&mut secret).map_err(ApiError::internal)?;
@@ -5443,7 +5458,7 @@ pub async fn pairing_complete(
             ("delegated_scopes".into(), json!(scopes)),
             ("expires_at_unix_ms".into(), json!(expires_at)),
     ]);
-    if let Some(node) = &request.fabric_node_id {
+    if let Some(node) = request.fabric_node_id.as_ref().filter(|_| fabric_wanted) {
         fields.insert("fabric_node_id".into(), Value::String(node.clone()));
     }
     let completed = state.store.append_claim(&ClaimInput {
@@ -5478,7 +5493,11 @@ pub async fn pairing_complete(
     // The pairing stands whatever Fabric says: the device can still use another route, and
     // the session reports what happened so the device can say it.
     if let Some(node) = &request.fabric_node_id {
-        let grant = crate::fabric_gateway::grant(&state.state_dir, node).await;
+        let grant = if fabric_wanted {
+            crate::fabric_gateway::grant(&state.state_dir, node).await
+        } else {
+            crate::fabric_gateway::Grant::NotRequested
+        };
         if let crate::fabric_gateway::Grant::Failed { detail } = &grant {
             tracing::warn!(%device_id, %detail, "could not grant a paired device the client gateway over Fabric");
         }

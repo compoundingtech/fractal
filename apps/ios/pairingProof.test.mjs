@@ -85,6 +85,7 @@ test('only a failed Fabric grant is worth telling the person after pairing', () 
   assert.equal(fabricGrantProblem(undefined), '');
   assert.equal(fabricGrantProblem({ state: 'granted', service: 'demo-client/0', peer: 'st-device-0123456789ab' }), '');
   assert.equal(fabricGrantProblem({ state: 'not-enabled' }), '');
+  assert.equal(fabricGrantProblem({ state: 'not-requested' }), '');
   assert.equal(fabricGrantProblem({ state: 'already-trusted', peer: 'demo-phone' }), '');
   assert.match(fabricGrantProblem({ state: 'failed', detail: 'fabric add failed' }), /^Paired, but .*: fabric add failed\. Tailscale or LAN still reaches it\.$/);
 });

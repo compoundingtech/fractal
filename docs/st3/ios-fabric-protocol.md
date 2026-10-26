@@ -92,15 +92,21 @@ st devices fabric enable            # exposes client_gateway_socket as st3-clien
 It runs `fabric expose st3-client-v0 --socket CLIENT_GATEWAY_SOCKET` and records the
 service and the `fabric` executable in `STATE/fabric-gateway.toml`. From then on:
 
-- **Adding a phone** is `st devices pair NAME` on the member and the code on the phone.
-  A member with this file advertises `fabric-gateway-grant` version 1, and the phone
-  then sends its Fabric NodeID as `fabric_node_id` with the pairing completion. Once the
-  pairing is committed, the member runs
+- **Adding a phone** is `st devices pair NAME --fabric-gateway` on the member and the code on
+  the phone. Pairing grants nothing over Fabric unless the code was made with
+  `--fabric-gateway`: the person decides per pairing, and the default is no grant. A phone
+  asks for the member's pairing advertisement with `GET /v1/client/capabilities?accepts=fabric-gateway-grant`;
+  a member that offers the grant then lists `fabric-gateway-grant` version 1 beside
+  `device-key-proofs`, and answers any other request with `device-key-proofs` alone, as it
+  always has. The phone then sends its Fabric NodeID as `fabric_node_id` with the pairing
+  completion. If the code was made with `--fabric-gateway`, the member runs, once the pairing
+  is committed,
   `fabric add NODE_ID st-device-<first 12 hex> --inbound-only --allow st3-client-v0`.
   The paired session's `fabric_grant` says what happened: `granted`, `already-trusted`
   (someone already trusts that NodeID under another name; st leaves that entry alone),
-  `not-enabled`, or `failed` with a detail. The pairing stands whatever Fabric says, and
-  the phone shows a failure.
+  `not-enabled` (no `st devices fabric enable` on this member), `not-requested` (the code was
+  made without `--fabric-gateway`; the NodeID is not kept), or `failed` with a detail. The
+  pairing stands whatever Fabric says, and the phone shows a failure.
 - **Removing a phone** is `st devices revoke DEVICE`. After the revocation is recorded,
   the member removes the `st-device-…` peer it added for that NodeID, which ends the
   phone's admitted sessions. It keeps the grant while another live pairing on this member

@@ -501,7 +501,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
     device_name: "Fixture phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
