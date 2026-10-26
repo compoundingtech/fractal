@@ -15,6 +15,23 @@ fn launch_diagnostic_retains_only_current_attempt_last_twenty_lines() {
     assert_eq!(app_server_log_tail(&path, fs::metadata(&path).unwrap().len()).unwrap(), "");
 }
 
+#[test]
+fn protocol_schema_gate_accepts_codex_0164_error_union() {
+    let mut schemas = compatible_protocol_schemas();
+    let error = schemas.protocol.pointer_mut("/definitions/CodexErrorInfo").unwrap();
+    let mut arms = error.as_object_mut().unwrap().remove("oneOf").unwrap();
+    // 0.164.0 also includes a forward-compatible string/object catch-all. It must
+    // not erase the explicitly declared authentication and capacity words.
+    arms.as_array_mut().unwrap().push(json!({"type": ["string", "object"]}));
+    error["anyOf"] = arms;
+    verify_codex_protocol_schemas(&schemas).unwrap();
+    let words = schemas.protocol.pointer_mut("/definitions/CodexErrorInfo/anyOf/0/enum")
+        .unwrap().as_array_mut().unwrap();
+    words.retain(|word| word != "unauthorized");
+    assert!(format!("{:#}", verify_codex_protocol_schemas(&schemas).unwrap_err())
+        .contains("CodexErrorInfo has no 'unauthorized' word"));
+}
+
 // Shared CI runs several workspace suites at once; these waits test event ordering,
 // not a two-second performance bound.
 const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Report Codex preflight failures immediately, retain the app-server's final output and exit status, and diagnose clean exits before readiness as launch failures rather than host loss.",
+  "summary": "Accept Codex 0.164.0's error-union schema and report Codex preflight failures immediately, retaining app-server output and exit status and diagnosing clean exits before readiness as launch failures rather than host loss.",
   "replay": { "status": "none", "detail": "Existing observations are unchanged; new failed launches publish terminal evidence." },
   "schema": { "status": "none", "detail": "Uses existing harness diagnostic and runtime observation fields." },
   "rules": { "status": "none", "detail": "No coordinated upgrade required." },
