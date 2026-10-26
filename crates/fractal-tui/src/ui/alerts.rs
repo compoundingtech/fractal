@@ -221,18 +221,14 @@ impl Ui {
             .unwrap_or_default()
     }
 
-    /// The calls to show beside a prompt's answers: the exact call it asks about, when st names
-    /// it (none when its harness named none); from an older daemon, every unanswered call, of
-    /// which only a lone one is certain.
-    fn prompt_calls(&self, seat: &str, call: &Option<Option<String>>) -> Vec<&PendingCall> {
-        let waiting = self.calls_waiting(seat);
-        match call {
-            None => waiting.iter().collect(),
-            Some(named) => waiting
-                .iter()
-                .filter(|pending| named.as_deref() == Some(pending.id.as_str()))
-                .collect(),
-        }
+    /// The call to show beside a prompt's answers: the exact call it asks about, when st names
+    /// it and the conversation has it. A prompt that names none has no call beside it, so it is
+    /// never allowed, approved or answered from here: no unanswered call is guessed at.
+    fn prompt_calls(&self, seat: &str, call: &Option<String>) -> Vec<&PendingCall> {
+        self.calls_waiting(seat)
+            .iter()
+            .filter(|pending| call.as_deref() == Some(pending.id.as_str()))
+            .collect()
     }
 
     /// What the band shows under a native prompt, and its buttons. `allow` and `approve` are
@@ -245,7 +241,7 @@ impl Ui {
         seat: &str,
         answers: &[String],
         prompt: &str,
-        call: &Option<Option<String>>,
+        call: &Option<String>,
         width: usize,
     ) -> (Vec<BandRow>, Vec<(String, Color, Hit)>) {
         let mut rows = Vec::new();
@@ -323,36 +319,15 @@ impl Ui {
                     buttons.push(button("answer", theme::GREEN));
                 }
             }
+            // St names no call: nothing waiting is guessed at, so only deny is offered here.
+            (Some(_), _) if call.is_none() => rows.extend(note_rows(
+                "Fractal does not say which call this asks about: answer it in the terminal (Ctrl+]) or open it in Inbox",
+                width,
+            )),
             (Some("answer"), _) => rows.extend(note_rows(
                 "the question is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Inbox",
                 width,
             )),
-            // Several calls wait and the prompt names none: show them all and offer no allow.
-            (Some(_), [_, _, ..]) => {
-                rows.extend(note_rows(
-                    &format!(
-                        "{} calls are unanswered and Fractal cannot tell which one the harness asks about; answer it in the terminal (Ctrl+]):",
-                        calls.len()
-                    ),
-                    width,
-                ));
-                for call in calls.iter().take(CALL_LINES) {
-                    let line = call_lines(call).into_iter().next().unwrap_or_default();
-                    rows.push(BandRow::text(vec![
-                        Span::styled("   · ", theme::dim()),
-                        Span::styled(
-                            text::truncate(&format!("{} {line}", call.tool), width.saturating_sub(8)),
-                            theme::text(),
-                        ),
-                    ]));
-                }
-                if calls.len() > CALL_LINES {
-                    rows.push(BandRow::text(vec![Span::styled(
-                        format!("   … and {} more", calls.len() - CALL_LINES),
-                        theme::dim(),
-                    )]));
-                }
-            }
             (Some(gated), [only]) => {
                 let limit = if gated == "approve" { PLAN_LINES } else { CALL_LINES };
                 let mut runs = vec![text::run(format!("{}\n", only.tool), theme::bold())];
@@ -383,7 +358,7 @@ impl Ui {
                     ));
                 }
             }
-            (Some(_), []) => rows.extend(note_rows(
+            (Some(_), _) => rows.extend(note_rows(
                 "the call it would make is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Inbox",
                 width,
             )),
@@ -455,7 +430,7 @@ impl Ui {
     /// The JSON a question alert sends: positions only, each question's position to the positions
     /// of the options chosen. The questions and labels stay in the conversation; the seat's hook
     /// turns positions into labels.
-    fn question_answer(&self, id: &str, seat: &str, call: &Option<Option<String>>) -> Option<String> {
+    fn question_answer(&self, id: &str, seat: &str, call: &Option<String>) -> Option<String> {
         let calls = self.prompt_calls(seat, call);
         let [only] = calls.as_slice() else {
             return None;
@@ -838,6 +813,14 @@ mod tests {
         }
     }
 
+    /// `item` as st sends it once it names the exact call the prompt asks about.
+    fn naming(mut item: Attention, call: &str) -> Attention {
+        if let AttentionKind::Prompt { call: named, .. } = &mut item.kind {
+            *named = Some(call.to_owned());
+        }
+        item
+    }
+
     fn with_alerts(items: Vec<Attention>) -> Ui {
         let mut world = demo::world();
         world.attention = Load::Ready(items);
@@ -903,7 +886,7 @@ mod tests {
 
     #[test]
     fn a_pending_claude_call_is_shown_in_full_beside_allow_and_deny() {
-        let mut ui = with_alerts(vec![prompt("attention/one", &["allow", "deny"])]);
+        let mut ui = with_alerts(vec![naming(prompt("attention/one", &["allow", "deny"]), "call-Bash")]);
         waiting(&mut ui, vec![bash("rm -rf build/cache")]);
         let rows = ui.expanded_band("agent/example/atlas", 80);
         let shown = texts(&rows);
@@ -920,37 +903,33 @@ mod tests {
         )));
     }
 
+    /// A prompt that names no call is only denied here: no unanswered call is guessed at, not
+    /// even a lone one, so nothing is allowed that the harness did not ask about.
     #[test]
-    fn with_several_calls_unanswered_every_one_is_listed_and_only_deny_is_offered() {
+    fn a_prompt_that_names_no_call_is_only_denied_here() {
+        let allow = Hit::Alert("attention/one".into(), AlertTap::Answer("allow".into()));
+        let deny = Hit::Alert("attention/one".into(), AlertTap::Answer("deny".into()));
         let mut ui = with_alerts(vec![prompt("attention/one", &["allow", "deny"])]);
-        waiting(
-            &mut ui,
+        for calls in [
+            vec![bash("rm -rf build/cache")],
             vec![
                 bash("rm -rf build/cache"),
                 call("Write", serde_json::json!({"file_path": "notes.md", "content": "hi"})),
             ],
-        );
-        let rows = ui.expanded_band("agent/example/atlas", 80);
-        let shown = texts(&rows);
-        assert!(shown.contains("2 calls are unanswered"), "{shown}");
-        assert!(
-            shown.contains("rm -rf build/cache") && shown.contains("notes.md"),
-            "{shown}"
-        );
-        let taps = taps(&rows);
-        assert!(!taps.contains(&Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("allow".into())
-        )));
-        assert!(taps.contains(&Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("deny".into())
-        )));
+        ] {
+            waiting(&mut ui, calls);
+            let rows = ui.expanded_band("agent/example/atlas", 80);
+            let shown = texts(&rows);
+            assert!(shown.contains("Fractal does not say which call this asks about"), "{shown}");
+            assert!(!shown.contains("rm -rf build/cache"), "{shown}");
+            assert!(!taps(&rows).contains(&allow), "{shown}");
+            assert!(taps(&rows).contains(&deny), "{shown}");
+        }
     }
 
     #[test]
     fn allow_is_withheld_when_the_call_cannot_be_shown() {
-        let mut ui = with_alerts(vec![prompt("attention/one", &["allow", "deny"])]);
+        let mut ui = with_alerts(vec![naming(prompt("attention/one", &["allow", "deny"]), "call-Bash")]);
         // No call in the conversation yet.
         let taps_without = taps(&ui.expanded_band("agent/example/atlas", 80));
         assert!(!taps_without.contains(&Hit::Alert(
@@ -1035,7 +1014,7 @@ mod tests {
     /// (any number for a multi-select), and sent together once every question has a choice.
     #[test]
     fn a_question_is_answered_with_the_options_chosen_here() {
-        let mut ui = with_alerts(vec![prompt("attention/one", &["answer", "deny"])]);
+        let mut ui = with_alerts(vec![naming(prompt("attention/one", &["answer", "deny"]), "call-AskUserQuestion")]);
         ui.live = true;
         waiting(
             &mut ui,
@@ -1094,7 +1073,7 @@ mod tests {
         let named = |call: Option<&str>| {
             let mut item = prompt("attention/one", &["allow", "deny"]);
             if let AttentionKind::Prompt { call: named, .. } = &mut item.kind {
-                *named = Some(call.map(str::to_owned));
+                *named = call.map(str::to_owned);
             }
             item
         };
@@ -1121,7 +1100,7 @@ mod tests {
     /// A plan is shown in full beside `approve`; a screen prompt's own answers are one tap each.
     #[test]
     fn a_plan_and_a_screen_prompt_offer_their_own_answers() {
-        let mut ui = with_alerts(vec![prompt("attention/one", &["approve", "deny"])]);
+        let mut ui = with_alerts(vec![naming(prompt("attention/one", &["approve", "deny"]), "call-ExitPlanMode")]);
         waiting(
             &mut ui,
             vec![call(

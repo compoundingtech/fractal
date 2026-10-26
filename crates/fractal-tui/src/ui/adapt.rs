@@ -516,7 +516,8 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                                 .action_parameters
                                 .get("prompt.respond")
                                 .and_then(|parameters| parameters.get("call_id"))
-                                .map(|call| call.as_str().map(str::to_owned)),
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
                         },
                         "login" => AttentionKind::Login {
                             text: clean_message_text(&item.detail),
@@ -2203,6 +2204,28 @@ mod tests {
         assert_eq!(episode, "episode-1");
         assert_eq!(seat_id, "agent/example/atlas");
         assert_eq!(item.actions, ["prompt.respond"]);
+    }
+
+    /// The call a prompt asks about is the one st names. A null or missing `call_id` names none,
+    /// whichever daemon sent it.
+    #[test]
+    fn a_prompt_names_the_call_st_names_and_otherwise_none() {
+        for (call_id, named) in [
+            (Some(serde_json::json!("toolu_bash")), Some("toolu_bash")),
+            (Some(serde_json::Value::Null), None),
+            (None, None),
+        ] {
+            let mut card = prompt_card(true);
+            if let Some(call_id) = call_id {
+                card["action_parameters"]["prompt.respond"]["call_id"] = call_id;
+            }
+            let mut model = Model::default();
+            model.actor = "person/example".into();
+            model.now.items.push(served(card));
+            let items = attention(&model, &Extras::default());
+            let AttentionKind::Prompt { call, .. } = &items[0].kind else { panic!() };
+            assert_eq!(call.as_deref(), named);
+        }
     }
 
     #[test]

@@ -206,8 +206,8 @@ export function alertsIn<T extends AlertRow>(items: readonly T[], agentId: strin
 export type PromptAnswers = {
   target_id: string; episode: string; answers: string[];
   /**
-   * The exact call the prompt asks about (a tool use or Codex item id), or null when its harness
-   * named none; undefined from a daemon that predates it.
+   * The exact call the prompt asks about (a tool use or Codex item id), or null when st names
+   * none. A prompt that names none is only denied from here: no unanswered call is guessed at.
    */
   call_id?: string | null;
 };
@@ -221,7 +221,7 @@ export function promptAnswers(item: { readonly actions: readonly string[]; reado
   const episode = typeof parameters.episode === 'string' ? parameters.episode : item.episode ?? '';
   if (!episode) return null;
   const prompt: PromptAnswers = { target_id, episode, answers };
-  if ('call_id' in parameters) prompt.call_id = typeof parameters.call_id === 'string' ? parameters.call_id : null;
+  prompt.call_id = typeof parameters.call_id === 'string' ? parameters.call_id : null;
   return prompt;
 }
 
@@ -340,7 +340,7 @@ export function answerLabel(answer: string): string {
 
 /**
  * The answers a client may offer. `allow` and `approve` only beside the exact call the prompt asks
- * about, shown in full (from an older daemon: the one call unanswered); `answer` only when that
+ * about, shown in full; `answer` only when that
  * call's questions can be shown and chosen from; every other answer (deny, and a screen prompt's
  * or denial's own answers) always.
  */
@@ -355,11 +355,9 @@ export function offeredAnswers(prompt: PromptAnswers, calls: readonly PendingCal
 }
 
 /**
- * The calls to show beside a prompt's answers: the exact call it asks about, when its daemon names
- * it (none when it named none); from a daemon that predates that, every unanswered call, of which
- * only a lone one is certain.
+ * The call to show beside a prompt's answers: the exact call it asks about, when st names it and
+ * it is pending. A prompt that names none has none beside it.
  */
 export function promptCalls(prompt: PromptAnswers, calls: readonly PendingCall[]): PendingCall[] {
-  if (prompt.call_id === undefined) return [...calls];
   return calls.filter(call => call.id === prompt.call_id);
 }

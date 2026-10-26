@@ -62,7 +62,7 @@ assert.deepEqual(alertConversations({ source_id: 'step-run/r/s' }), []);
 
 // A native prompt's answers come from its alert; nothing when it offers none.
 const prompt = { actions: ['prompt.respond'], source_id: 'agent/example/ada', episode: 'ep1', action_parameters: { 'prompt.respond': { target_id: 'agent/example/ada', episode: 'ep7', answers: ['allow', 'deny', 42, 'Not An Answer'] } } };
-assert.deepEqual(promptAnswers(prompt), { target_id: 'agent/example/ada', episode: 'ep7', answers: ['allow', 'deny'] });
+assert.deepEqual(promptAnswers(prompt), { target_id: 'agent/example/ada', episode: 'ep7', answers: ['allow', 'deny'], call_id: null });
 // A screen prompt's own answers come through as they are.
 assert.deepEqual(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'ep8', answers: ['use', 'use-all', 'skip'] } } }).answers, ['use', 'use-all', 'skip']);
 assert.equal(promptAnswers({ ...prompt, actions: [] }), null);
@@ -81,12 +81,17 @@ assert.deepEqual(pendingCalls([call('c3', 'Edit', JSON.stringify({ file_path: '/
 // Two unanswered calls are both listed.
 const two = pendingCalls([call('c4', 'Bash', { command: 'make' }), result('c9'), call('c5', 'Write', { file_path: '/tmp/b' })]);
 assert.deepEqual(two.map(each => each.id), ['c4', 'c5']);
-// Allow is offered only when exactly one call is unanswered and shown in full; deny always.
-const answers = { target_id: 'a', episode: 'e', answers: ['allow', 'deny'] };
+// Allow is offered only beside the call the prompt names, shown in full; deny always.
+const answers = { target_id: 'a', episode: 'e', answers: ['allow', 'deny'], call_id: 'c' };
 assert.deepEqual(offeredAnswers(answers, []), ['deny']);
 assert.deepEqual(offeredAnswers(answers, [{ id: 'c', tool: 'Bash', lines: [] }]), ['deny']);
 assert.deepEqual(offeredAnswers(answers, [{ id: 'c', tool: 'Bash', lines: ['command: ls'] }]), ['allow', 'deny']);
 assert.deepEqual(offeredAnswers(answers, two), ['deny']);
+// A prompt that names no call is only denied, even beside a lone unanswered call.
+for (const unnamed of [{ ...answers, call_id: null }, { target_id: 'a', episode: 'e', answers: ['allow', 'deny'] }]) {
+  assert.deepEqual(offeredAnswers(unnamed, [{ id: 'c', tool: 'Bash', lines: ['command: ls'] }]), ['deny']);
+  assert.deepEqual(promptCalls(unnamed, two), []);
+}
 
 // A question is answered with its choices: each question by its text, several labels joined.
 const asked = [call('q1', 'AskUserQuestion', { questions: [
@@ -107,11 +112,11 @@ assert.notEqual(promptAlertKey(prompting('e2', 'r1')), promptAlertKey(prompting(
 assert.notEqual(promptAlertKey(prompting('e1', 'r2')), promptAlertKey(prompting('e1', 'r1')), 'a new revision of it');
 assert.equal(pendingQuestions(pendingCalls([call('b', 'Bash', { command: 'ls' })])), null);
 assert.equal(pendingQuestions([]), null);
-const question = { target_id: 'a', episode: 'e', answers: ['answer', 'deny'] };
+const question = { target_id: 'a', episode: 'e', answers: ['answer', 'deny'], call_id: 'q1' };
 assert.deepEqual(offeredAnswers(question, pendingCalls(asked)), ['answer', 'deny']);
 assert.deepEqual(offeredAnswers(question, []), ['deny'], 'no question to choose from yet');
 // A plan is approved only when it is shown; a screen prompt's answers are always offered.
-const plan = { target_id: 'a', episode: 'e', answers: ['approve', 'deny'] };
+const plan = { target_id: 'a', episode: 'e', answers: ['approve', 'deny'], call_id: 'p' };
 assert.deepEqual(offeredAnswers(plan, pendingCalls([call('p', 'ExitPlanMode', { plan: '1. Build' })])), ['approve', 'deny']);
 assert.deepEqual(offeredAnswers(plan, []), ['deny']);
 assert.deepEqual(offeredAnswers({ target_id: 'a', episode: 'e', answers: ['trust', 'exit'] }, []), ['trust', 'exit']);
@@ -132,4 +137,4 @@ assert.deepEqual(promptCalls(bound, both).map(each => each.id), ['c2']);
 assert.deepEqual(offeredAnswers({ ...bound, call_id: null }, both), ['deny'], 'no named call, no allow');
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'], call_id: 'c2' } } }).call_id, 'c2');
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'], call_id: null } } }).call_id, null);
-assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'] } } }).call_id, undefined);
+assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'] } } }).call_id, null, 'a missing call_id names none');
