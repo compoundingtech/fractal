@@ -103,6 +103,7 @@ mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
 mod work_cli;
+mod waiting_on_cli;
 use agents_cli::run_agents;
 use attention_cli::run_attention;
 use conversations_cli::{run_message, upload_attachments};
@@ -1202,6 +1203,19 @@ enum MissionViewCommand {
     },
     /// Explain one mission run, its goals, state, work, and usage.
     Show(MissionShowArgs),
+    /// What one run waits on: each open step, whom it waits on and since when, open asks, the
+    /// steps not ready and finished, and whether the run has stalled and why.
+    ///
+    /// Reads the daemon's published work and missions lists, never claim history, so it
+    /// answers in milliseconds. A held step with no progress, or a ready step nobody claims,
+    /// for longer than --quiet counts as stuck.
+    WaitingOn {
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
+        run: String,
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        #[arg(long)]
+        quiet: Option<String>,
+    },
     /// Change a mission's canonical ID without replacing its runs or revision history.
     RenameId(IdentityRenameArgs),
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
@@ -6420,6 +6434,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
             },
         )));
     }
+    // The member's CPU by closed minute, for the CPU targets. A member in a fleet runs one
+    // replication worker, whose CPU counts with the daemon's; `run_worker` needs a fleet.
+    tokio::spawn(fractal_daemon::task_cpu::account("slo.cpu_minutes", fractal_daemon::api::run_cpu_minutes(
+        store.clone(),
+        usize::from(config.fleet_id.is_some()),
+    )));
     tokio::spawn(fractal_daemon::task_cpu::account("recorder.receipts", fractal_daemon::recorder_receipts::run(
         store.clone(),
         fractal_daemon::recorder::receipt_path(&config.state_dir),

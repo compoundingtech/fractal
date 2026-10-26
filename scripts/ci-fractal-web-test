@@ -479,7 +479,7 @@ const provenance = { runId: '1234', runAttempt: 2, headSha: 'a'.repeat(40) }
 const aggregateShards = (receipts, count) => aggregate(receipts, count, provenance)
 const ids = Array.from({ length: 313 }, (_, i) => `story-${i}`).sort()
 assert.equal(shardNumber('story-0', 2), 1)
-for (const count of [1, 2, 3]) {
+for (const count of [1, 2, 3, 4]) {
   const shards = Array.from({ length: count }, (_, i) => shardStories(ids, i, count))
   assert.deepEqual(shards.flat().sort(), ids)
   for (const id of ids) {
@@ -533,9 +533,9 @@ console.log('passed: workflow provenance, same-head older attempts, newest-attem
 ''', text=True)
 sharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
 assert "fail-fast: false" in execution
-assert f"""matrix: ${{{{ fromJSON({sharded} && '{{"shard":[0,1]}}' || '{{"shard":[0]}}') }}}}""" in execution, "only the full set (merge groups, manual runs) is sharded"
+assert f"""matrix: ${{{{ fromJSON({sharded} && '{{"shard":[0,1,2,3]}}' || '{{"shard":[0]}}') }}}}""" in execution, "only the full set (merge groups, manual runs) is sharded"
 assert "KIT_SHARD_INDEX: ${{ matrix.shard }}" in execution
-assert f"KIT_SHARD_COUNT: ${{{{ {sharded} && '2' || '1' }}}}" in execution, "the per-commit set runs unsharded"
+assert f"KIT_SHARD_COUNT: ${{{{ {sharded} && '4' || '1' }}}}" in execution, "the per-commit set runs unsharded"
 assert "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}" in execution
 assert "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*" in gate_job
 assert "actions/upload-artifact@v4" in execution
@@ -554,6 +554,8 @@ roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "packages/fractal-sdk
 assert detector_kit_paths(roster_story) == roster_story, "the roster decode story bundles the roster and the SDK decode, so they select kit plays"
 composer_story = ["apps/fractal-web/src/web/ComposerImages.stories.tsx", "apps/fractal-web/src/web/composerSend.ts"]
 assert detector_kit_paths(composer_story) == composer_story, "the composer image integration story and live adapter select kit plays"
+native_transcript_story = ["apps/fractal-web/src/web/NativeTranscript.stories.tsx", "apps/fractal-web/src/web/ConversationPane.tsx"]
+assert detector_kit_paths(native_transcript_story) == native_transcript_story, "the native transcript story and production pane select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
@@ -566,8 +568,9 @@ with tempfile.TemporaryDirectory() as scratch:
                     "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx",
                     "./../../apps/fractal-web/src/telemetry/inputPaint.ts",
                     "./../../apps/fractal-web/src/web/ComposerImages.stories.tsx",
+                    "./../../apps/fractal-web/src/web/NativeTranscript.stories.tsx",
                     "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
-    assert covered.returncode == 0 and "6 repository files, 0 outside" in covered.stdout, covered
+    assert covered.returncode == 0 and "7 repository files, 0 outside" in covered.stdout, covered
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):

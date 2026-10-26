@@ -376,6 +376,7 @@ export const scenarioExemptionIds: readonly string[] = [
   './Transcript.stories.tsx#NativeToolOutputLight:contract-fixture',
   './Transcript.stories.tsx#NoGreenAllStates:contract-fixture',
   './Transcript.stories.tsx#NoGreenAllStatesLight:contract-fixture',
+  './Transcript.stories.tsx#NotFoundWithComposer:contract-fixture',
   './Transcript.stories.tsx#PendingSend:contract-fixture',
   './Transcript.stories.tsx#PendingSendLight:contract-fixture',
   './Transcript.stories.tsx#ProseOnly:contract-fixture',

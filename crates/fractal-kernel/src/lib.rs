@@ -33,4 +33,6 @@ pub mod seat_queue;
 pub mod skill;
 pub mod publication;
 pub mod terminal_binding;
+/// What a mission run waits on, and the fleet's blocked runs by cause.
+pub mod waiting_on;
 pub mod github_admission;

@@ -19,9 +19,21 @@ export function testRunnerUserAgent(browser) {
 
 // Chromium's HTTP resource cache is intentionally retained: the job's server and
 // bundle are immutable. Cache Storage and every other origin storage type are not.
-export async function createIsolatedKitWorker(browser, base) {
+export async function createIsolatedKitWorker(browser, base, { workerId = null } = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, userAgent: await testRunnerUserAgent(browser) })
   const origins = new Set()
+  let previousCase = null
+  const residualStorage = (boundary, snapshot) => {
+    const storage = [
+      { kind: 'localStorage', keys: snapshot.local },
+      { kind: 'sessionStorage', keys: snapshot.session },
+    ].filter(({ keys }) => keys.length)
+    if (!storage.length) return
+    const isolation = { boundary, origin: snapshot.origin, storage, workerId, previousCase }
+    const error = new Error(`Kit isolation ${boundary} audit: residual Web Storage ${JSON.stringify(isolation)}`)
+    error.isolation = isolation
+    throw error
+  }
   const trackOrigin = url => {
     const parsed = new URL(url)
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') origins.add(parsed.origin)
@@ -43,10 +55,32 @@ export async function createIsolatedKitWorker(browser, base) {
       for (const origin of origins) {
         const { usage } = await client.send('Storage.getUsageAndQuota', { origin })
         if (usage !== 0) throw new Error(`Kit isolation audit: residual storage at ${origin}: ${usage} bytes`)
+        // Use an inert document at the actual origin: quota usage excludes Web
+        // Storage, and the blank control page cannot read another origin's keys.
+        // Fulfilling locally avoids running application code during the audit.
+        const probe = await context.newPage()
+        try {
+          await probe.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }))
+          await probe.goto(origin)
+          residualStorage('reset', await probe.evaluate(() => ({
+            origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
+          })))
+        } finally {
+          await probe.close()
+        }
+      }
+      // Public audits also cover sessionStorage in still-live case pages;
+      // reset has already destroyed those browsing sessions.
+      for (const page of context.pages()) {
+        if (!origins.has(new URL(page.url()).origin)) continue
+        residualStorage('reset', await page.evaluate(() => ({
+          origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
+        })))
       }
     }
     return {
       context,
+      setPreviousCase(value) { previousCase = value },
       async reset() {
         const started = performance.now()
         assertControl()
@@ -101,9 +135,7 @@ export async function createIsolatedKitWorker(browser, base) {
             if (captured || ['http:', 'https:'].includes(new URL(page.url()).protocol)) {
               const snapshot = await firstSnapshot
               if (snapshot.error) throw new Error(`Kit isolation document-start audit failed at ${snapshot.origin}: ${snapshot.error}`)
-              if (snapshot.local.length || snapshot.session.length) {
-                throw new Error(`Kit isolation document-start audit: residual Web Storage at ${snapshot.origin}`)
-              }
+              residualStorage('document-start', snapshot)
             }
             return response
           }
