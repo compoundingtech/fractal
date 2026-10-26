@@ -341,7 +341,7 @@ async fn exchange_middleware_observes_head_before_bytes_extraction() {
             StatusCode::OK
         },
     ).layer(axum::middleware::from_fn(observe_exchange_body)));
-    let response = app.oneshot(axum::http::Request::builder()
+    let response = app.clone().oneshot(axum::http::Request::builder()
         .method("POST").uri(EXCHANGE_PATH)
         .header(EXCHANGE_CORRELATION_HEADER, &correlation)
         .body(Body::from("payload")).unwrap())
@@ -351,6 +351,24 @@ async fn exchange_middleware_observes_head_before_bytes_extraction() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["correlation_id"], correlation);
     assert_eq!(events[0]["request_body_bytes"], "7");
+    drop(events);
+    for method in ["HEAD", "POST"] {
+        capture.0.lock().unwrap().clear();
+        let response = app.clone().oneshot(axum::http::Request::builder()
+            .method(method).uri(EXCHANGE_PATH)
+            .body(Body::empty()).unwrap())
+            .with_subscriber(capture.clone()).await.unwrap();
+        let events = capture.0.lock().unwrap();
+        if method == "HEAD" {
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert!(events.is_empty(), "empty probe is not an interrupted upload");
+        } else {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["request_body_bytes"], "0");
+            assert!(events[0].contains_key("body_read_complete_unix_ms"));
+        }
+    }
 }
 
 #[tokio::test]

@@ -2316,11 +2316,15 @@ async fn observe_exchange_body(
     timing.record("head-received");
     request.extensions_mut().insert(Arc::clone(&timing));
     let (parts, body) = request.into_parts();
+    let complete = hyper::body::Body::is_end_stream(&body);
+    if complete {
+        timing.record("body-read-complete");
+    }
     let body = axum::body::Body::new(ExchangeRequestBody {
         inner: body,
         timing,
         bytes: 0,
-        complete: false,
+        complete,
         failed: false,
     });
     next.run(axum::extract::Request::from_parts(parts, body)).await
