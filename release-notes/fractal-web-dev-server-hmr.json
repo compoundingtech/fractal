@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Keep source directories watched through atomic file replacement and leave non-gateway WebSocket upgrades to the middleware host.",
+  "summary": "Leave non-gateway WebSocket upgrades to the middleware host, so the fractal-web dev server no longer answers Vite HMR upgrades with 403 and closes the HMR socket.",
   "replay": {
     "status": "none",
     "detail": "No replay or rebuild."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "No storage, protocol or wire-format change."
+    "detail": "No storage, protocol or wire-format change. In middleware (dev) mode only gateway client-route upgrades are handled; the standalone server is unchanged."
   },
   "downtime": {
     "status": "none",
