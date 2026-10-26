@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test only: the batched writer origin test no longer depends on how long its first write runs",
+  "replay": { "status": "none", "detail": "No replay or recovery behavior changes." },
+  "schema": { "status": "none", "detail": "No schema or persistent data changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or coordinated upgrade changes." },
+  "compatibility": { "status": "none", "detail": "The writer passes the same 50 ms batch window it used before; only the test injects its own." },
+  "downtime": { "status": "none", "detail": "No startup work or expected interruption." },
+  "manual": { "status": "none", "detail": "No operator actions or configuration changes." },
+  "recovery": { "status": "none", "detail": "No persistent state changes or new swap-back restrictions." }
+}

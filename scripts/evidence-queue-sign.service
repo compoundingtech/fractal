@@ -1,0 +1,17 @@
+[Unit]
+Description=Shadow merge-queue signer, sign: run every local check on one predicted or queued tree and push its host notes (scripts/evidence-queue-signer)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# builds.slice: with every other build on the signing host; the run's test binaries run outside build admission.
+Slice=builds.slice
+Environment=PATH=%h/.local/bin:/run/current-system/sw/bin:/usr/bin:/bin
+# The environment is minimal on purpose: it runs queued code with the host's signing key within reach, so it carries no secret
+# beyond that key and the git credential the notes push uses. Settings only in the env file (EVIDENCE_QUEUE_*, EVIDENCE_PRESIGN_*).
+EnvironmentFile=-%h/.config/evidence-queue-signer/env
+ExecStart=/usr/bin/env bash %h/.local/bin/evidence-queue-timer sign
+TimeoutStartSec=4h
+Nice=10
+IOSchedulingClass=idle

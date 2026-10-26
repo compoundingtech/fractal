@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { accounts, byOf, cost, groups, label, limitLine, money, nextBy, periodName, tokens, totalOf } from './usage.ts';
 
-// The same day of invented spend stui's demo shows (crates/stui/src/ui/demo.rs).
+// The same day of invented spend stui's demo shows (crates/fractal-tui/src/ui/demo.rs).
 const row = (agent, run, step, model, host, account, total, output, cost) => ({
   agent, mission_run: run, step, model, account, host, pricing: 'list',
   total_tokens: total, input_tokens: total / 50, output_tokens: output, cache_write_tokens: total / 20,

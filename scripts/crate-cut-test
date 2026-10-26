@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""Tests for the function-level crate splitter (crate_cut.py, rust_items.py).
+
+The parser is checked on the syntax the store crate uses; the planner and the cut on a small
+synthetic workspace that is then compiled, so a cut that does not build fails here."""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import crate_cut as cc  # noqa: E402
+import rust_items as ri  # noqa: E402
+
+
+class Parser(unittest.TestCase):
+    def test_items_have_exact_spans_with_docs_and_attributes(self):
+        src = textwrap.dedent('''\
+            //! inner doc
+            use std::fmt;
+
+            /// A thing.
+            #[derive(Debug)]
+            pub struct Thing<T: Clone> where T: Send { pub x: T }
+
+            impl<T: Clone> Thing<T> {
+                /// New.
+                pub fn new(x: T) -> Self { Thing { x } }
+                fn private(&self) -> &T { &self.x }
+            }
+
+            impl fmt::Display for Thing<u8> {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}", self.x) }
+            }
+
+            const RAW: &str = r#"} { "unbalanced" "#;
+            pub(crate) static ONCE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+            macro_rules! twice { ($e:expr) => { $e + $e }; }
+            #[cfg(test)]
+            mod tests { use super::*; #[test] fn t() {} }
+            thread_local! { static COUNT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+            ''')
+        items = ri.parse(src)
+        self.assertEqual([(i.kind, i.name) for i in items if i.kind != "use"], [
+            ("struct", "Thing"), ("impl", "impl Thing"), ("impl", "impl Display for Thing"),
+            ("const", "RAW"), ("static", "ONCE"), ("macro_rules", "twice"), ("mod", "tests"), ("macro_call", None)])
+        thing = items[1]
+        self.assertTrue(items[1].text.startswith("/// A thing.\n#[derive(Debug)]\npub struct Thing"))
+        impl = items[2]
+        self.assertEqual(impl.impl_type, "Thing")
+        self.assertEqual([c.name for c in impl.children], ["new", "private"])
+        self.assertTrue(impl.children[0].text.startswith("/// New.\n"))
+        self.assertEqual(items[3].impl_trait, "Display")
+        self.assertTrue(items[7].cfg_test)
+        # every item's text is exactly the source slice
+        for i in items:
+            self.assertEqual(src[i.start:i.end], i.text)
+
+    def test_the_text_between_items_is_only_whitespace_and_comments(self):
+        for rel in ("rust_items.py",):
+            pass
+        items, left = ri.check_roundtrip("fn a() {}\n\n// note\nfn b() {}\n")
+        self.assertEqual(len(items), 2)
+        self.assertEqual(left, [])
+
+    def test_a_block_comment_between_pub_and_the_keyword_is_part_of_the_item(self):
+        src = "pub /* marker: x */ fn restore() { helper(); }\npub(crate) /* m */ const X: u8 = 1;\nfn helper() {}\n"
+        self.assertEqual([(i.kind, i.name, i.is_pub) for i in ri.parse(src)], [("fn", "restore", True), ("const", "X", True), ("fn", "helper", False)])
+
+    def test_use_trees_round_trip_and_prune(self):
+        text = "pub use limits::{AccountLimit, LIMITS_ACTOR, LimitsOutcome};"
+        attrs, vis, paths = cc.use_paths(text)
+        self.assertEqual([p[0][-1] for p in paths], ["AccountLimit", "LIMITS_ACTOR", "LimitsOutcome"])
+        kept = [p for p in paths if p[0][-1] != "LIMITS_ACTOR"]
+        self.assertEqual(cc.render_use(attrs, vis, kept), "pub use limits::{AccountLimit, LimitsOutcome};")
+
+
+class Cut(unittest.TestCase):
+    """A lower crate whose `Store` has a fold knot (append <-> fold_hook) and a domain file that only
+    calls down: the domain moves, the knot and what it calls stay."""
+
+    LOWER = {
+        "lib.rs": "pub mod store;\npub mod dom;\n",
+        "store.rs": textwrap.dedent('''\
+            use std::collections::BTreeMap;
+
+            pub struct Store { pub rows: BTreeMap<String, i64> }
+
+            impl Store {
+                pub fn new() -> Self { Store { rows: BTreeMap::new() } }
+                pub fn append(&mut self, key: &str, value: i64) {
+                    self.rows.insert(key.into(), value);
+                    fold_hook(self);
+                }
+                pub fn total(&self) -> i64 { self.rows.values().sum() }
+            }
+
+            fn fold_hook(store: &mut Store) {
+                if store.total() > 100 && store.rows.len() < 3 { store.append("overflow", 1); }
+            }
+            '''),
+        "dom.rs": textwrap.dedent('''\
+            use crate::store::Store;
+
+            pub const LIMIT: i64 = 10;
+
+            fn describe(store: &Store) -> String { format!("over={}", over(store)) }
+
+            pub fn over(store: &Store) -> bool { store.total() > LIMIT }
+
+            impl Store {
+                /// The report.
+                pub fn report(&self) -> String { describe(self) }
+                pub fn bump(&mut self) { self.append("bump", LIMIT); }
+            }
+
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+                fn filled(n: i64) -> Store { let mut s = Store::new(); s.append("a", n); s }
+                #[test]
+                fn reports_over() { let s = filled(11); assert!(over(&s)); assert_eq!(s.report(), "over=true"); }
+                #[test]
+                fn total_stays_with_the_store() { assert_eq!(filled(3).total(), 3); }
+            }
+            '''),
+    }
+    CONFIG = {"order": ["d"], "domains": {"d": [r"dom\.rs"]}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="crate-cut-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for name, text in self.LOWER.items():
+            p = self.root / "crates/lowcrate/src" / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+        (self.root / "scripts").mkdir()
+        (self.root / "scripts/ci-test-paths.rs").write_text("")
+        (self.root / "crates/lowcrate/Cargo.toml").write_text('[package]\nname = "lowcrate"\nversion = "0.1.0"\nedition = "2024"\n[features]\ntest-support = []\n')
+        self.cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, self.cwd)
+
+    def plan(self):
+        nodes, files, tfiles = cc.load("crates/lowcrate/src")
+        cc.build_refs(nodes)
+        cc.plan(nodes, self.CONFIG)
+        return nodes, files, tfiles
+
+    def test_the_knot_stays_and_the_domain_moves(self):
+        nodes, _, _ = self.plan()
+        eff = {n.key(): n.eff for n in nodes if not n.test}
+        self.assertEqual(eff["store.rs::Store::append"], 0)
+        self.assertEqual(eff["store.rs::fold_hook"], 0)
+        self.assertEqual(eff["store.rs::Store::total"], 0)
+        self.assertEqual(eff["dom.rs::over"], 1)
+        self.assertEqual(eff["dom.rs::Store::report"], 1)
+        self.assertEqual(eff["dom.rs::LIMIT"], 1)
+
+    def test_a_reference_from_the_knot_pins_the_item(self):
+        text = self.LOWER["store.rs"].replace("fn fold_hook(store: &mut Store) {", "fn fold_hook(store: &mut Store) {\n    let _ = crate::dom::over(store);")
+        (self.root / "crates/lowcrate/src/store.rs").write_text(text)
+        nodes, _, _ = self.plan()
+        eff = {n.key(): n.eff for n in nodes if not n.test}
+        self.assertEqual(eff["dom.rs::over"], 0)
+        self.assertEqual(eff["dom.rs::LIMIT"], 0, "what a kept item uses is kept too")
+        self.assertEqual(eff["dom.rs::Store::report"], 1)
+
+    def test_the_test_moves_with_what_it_uses(self):
+        nodes, _, _ = self.plan()
+        tests = [n for n in nodes if n.test]
+        self.assertEqual(sorted((t.name, t.eff) for t in tests if t.kind == "fn" and t.name != "filled"), [("reports_over", 1), ("total_stays_with_the_store", 0)])
+
+    @unittest.skipUnless(shutil.which("cargo"), "cargo not available")
+    def test_the_cut_compiles_and_moves_text_verbatim(self):
+        nodes, files, tfiles = self.plan()
+
+        class Args:
+            layer = "d"
+            lower = "lowcrate"
+            crate = "highcrate"
+            src_dir = "crates/lowcrate/src"
+
+        before = (self.root / "crates/lowcrate/src/dom.rs").read_text()
+        cc.apply_cut(Args, nodes, files, tfiles, ["d"])
+        high = (self.root / "crates/highcrate/src/dom.rs").read_text()
+        low = (self.root / "crates/lowcrate/src/dom.rs").read_text()
+        self.assertIn("pub fn over(store: &Store) -> bool { store.total() > LIMIT }", high)
+        self.assertNotIn("fn over", low)
+        self.assertIn("pub trait DomStore {", high)
+        self.assertIn("    /// The report.\n    fn report(&self) -> String;", high)
+        self.assertIn("fn reports_over()", high)
+        self.assertNotIn("reports_over", low)
+        self.assertIn("fn total_stays_with_the_store", low)
+        # the helper both sides use is extracted once, into a module the lower crate shares
+        shared = (self.root / "crates/lowcrate/src/dom/shared_tests.rs").read_text()
+        self.assertIn("pub fn filled(n: i64) -> Store", shared)
+        self.assertNotIn("fn filled", low.replace("pub use crate::dom::shared_tests", ""))
+        (self.root / "crates/highcrate/Cargo.toml").write_text(
+            '[package]\nname = "highcrate"\nversion = "0.1.0"\nedition = "2024"\n[dependencies]\nlowcrate = { path = "../lowcrate", features = ["test-support"] }\n[features]\ntest-support = []\n')
+        (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/lowcrate", "crates/highcrate"]\nresolver = "3"\n')
+        env = dict(os.environ, CARGO_TARGET_DIR=str(self.root / "target"), CARGO_INCREMENTAL="0")
+        for k in [k for k in env if k.startswith(("ST_", "ST3_"))] + ["LD_PRELOAD"]:
+            env.pop(k, None)
+        run = subprocess.run(["cargo", "test", "--offline", "--workspace"], cwd=self.root, env=env, text=True, capture_output=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("reports_over", run.stdout + run.stderr)
+        del before
+
+
+if __name__ == "__main__":
+    unittest.main()

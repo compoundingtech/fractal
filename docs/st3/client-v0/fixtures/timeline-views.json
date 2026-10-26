@@ -24,12 +24,12 @@
         "role": "assistant", "type": "tool_call", "final": true,
         "body": {
           "call_id": "toolu_01", "name": "bash",
-          "arguments": { "command": "cargo test -p st3-client", "timeout": 60000, "i": "prove the fixtures still decode" },
+          "arguments": { "command": "cargo test -p fractal-client", "timeout": 60000, "i": "prove the fixtures still decode" },
           "blocks": [
             {
               "id": "block/2", "kind": "tool_call", "source_type": "omp.tool.call",
-              "view": { "type": "bash", "tool": "bash", "intent": "prove the fixtures still decode", "command": "cargo test -p st3-client", "cwd": "/srv/demo", "timeout_s": 60, "background": false },
-              "payload": { "toolCallId": "toolu_01", "command": "cargo test -p st3-client", "timeout": 60000, "i": "prove the fixtures still decode" }
+              "view": { "type": "bash", "tool": "bash", "intent": "prove the fixtures still decode", "command": "cargo test -p fractal-client", "cwd": "/srv/demo", "timeout_s": 60, "background": false },
+              "payload": { "toolCallId": "toolu_01", "command": "cargo test -p fractal-client", "timeout": 60000, "i": "prove the fixtures still decode" }
             }
           ]
         }

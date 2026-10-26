@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ClientError } from '../../clients/typescript/st3-client/index.ts';
+import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
 import { resendMessage, sendMessage } from './messageSend.ts';
 
 const refused = (code, status, details = {}, retryable = false) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'm', retryable, details }, status);

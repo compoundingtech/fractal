@@ -6,10 +6,10 @@ use std::process::Command;
 
 use crate::support::real_git;
 
-use st2::materialize::{
+use fractal_legacy_runner::materialize::{
     materialize_catalog, materialize_catalog_against, parse_plan, validate_agent,
 };
-use st2::{AgentSpec, discover};
+use fractal_legacy_runner::{AgentSpec, discover};
 
 fn write(path: &Path, contents: impl AsRef<[u8]>) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -265,7 +265,7 @@ fn task_selector_ambiguous_refuses_without_mutation() {
         &catalog.join("agents/ExampleMac/b/agent.kdl"),
         kdl("b", &b, "b"),
     );
-    let found = st2::discover(&catalog);
+    let found = fractal_legacy_runner::discover(&catalog);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     assert_eq!(found.specs.len(), 2);
     assert!(
@@ -296,7 +296,7 @@ fn task_selector_wrong_host_refuses_without_mutation() {
         target.display()
     );
     write(&catalog.join("agents/ExampleLinux/remote/agent.kdl"), text);
-    let found = st2::discover(&catalog);
+    let found = fractal_legacy_runner::discover(&catalog);
     assert!(found.errors.is_empty());
     assert_eq!(found.specs[0].tasks[0].id.as_deref(), Some("example-linux.task"));
     let out = Command::new(test_env!("CARGO_BIN_EXE_st2"))

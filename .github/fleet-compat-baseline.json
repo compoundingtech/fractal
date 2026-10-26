@@ -1,4 +1,16 @@
 {
-  "commit": "2c45cc60d736d4abb87899797e34d771f2e592e7",
-  "why": "st3 as it was on main before fleet membership. Replace with the pinned v0.3.0 release bundle and its SHA-256 once that release is published."
+  "commit": "ddce739fb0436969ee5599e8fd1162c717766787",
+  "tag": "v0.3.20",
+  "why": "Rolling previous-published-release compatibility baseline; advance after each stable release.",
+  "exception_reason": null,
+  "bundles": {
+    "x86_64-unknown-linux-gnu": {
+      "url": "https://github.com/compoundingtech/fractal/releases/download/v0.3.20/smalltalk-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "fac1e014b5e301e102ccf3b01bbcbd0ae61da7a5c76b1a1aa3fa244955263788"
+    },
+    "aarch64-apple-darwin": {
+      "url": "https://github.com/compoundingtech/fractal/releases/download/v0.3.20/smalltalk-aarch64-apple-darwin.tar.gz",
+      "sha256": "4b0b47e0fdcaef7b1f9060b37c18c14a058d307e6f96bf4938b7acdf85233ca2"
+    }
+  }
 }

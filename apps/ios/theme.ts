@@ -1,4 +1,4 @@
-// One palette, named by meaning, the same one stui uses (crates/stui/src/ui/theme.rs): Catppuccin
+// One palette, named by meaning, the same one stui uses (crates/fractal-tui/src/ui/theme.rs): Catppuccin
 // Mocha. Mauve is reserved for "a person is needed" and nothing else uses it.
 export const palette = {
   base: '#1e1e2e',
@@ -49,6 +49,12 @@ export const fonts = {
   italic: 'IBMPlexMono_400Regular_Italic',
   semibold: 'IBMPlexMono_600SemiBold',
   bold: 'IBMPlexMono_700Bold',
+} as const;
+
+/** System appearance for migrated iPhone surfaces; legacy tabs keep their palette. */
+export const systemColors = {
+  light: { background: '#f2f2f7', grouped: '#ffffff', text: '#000000', secondary: '#59595f', separator: '#c6c6c8', action: '#005fcc', attention: '#9c4400', fault: '#c00f20', success: '#216e35' },
+  dark: { background: '#000000', grouped: '#1c1c1e', text: '#ffffff', secondary: '#b5b5bd', separator: '#48484a', action: '#64aaff', attention: '#ffb15c', fault: '#ff6961', success: '#72d88a' },
 } as const;
 
 // stui colours each harness the same way everywhere.
