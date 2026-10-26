@@ -115,17 +115,24 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
 
 /**
  * Running subagents; `undefined` when the harness does not report them. A known count is its own accessible text; the
- * unreported "?" is spoken as "Unreported subagents", which keeps the visible word in the name.
+ * unreported "?" is spoken as "Unreported subagents", which keeps the visible word in the name. A narrow name column
+ * (deep nesting, the 240px sidebar) shows the bare count with the word kept for assistive tech, then drops the count so
+ * the title keeps a readable stretch; the count never paints past the name column.
  */
 function SubagentCount({ count, onPress }: { readonly count: number | undefined; readonly onPress: (() => void) | undefined }) {
   const content = count === undefined
-    ? <><span aria-hidden="true" data-count-text {...stylex.props(styles.countTag)}>? subagents</span><VisuallyHidden>Unreported subagents</VisuallyHidden></>
-    : <span data-count-text {...stylex.props(styles.countTag)}>{count} {count === 1 ? 'subagent' : 'subagents'}</span>
+    ? <><span aria-hidden="true" data-count-text {...stylex.props(styles.countTag)}>?<span data-count-word {...stylex.props(styles.countWord)}> subagents</span></span><VisuallyHidden>Unreported subagents</VisuallyHidden></>
+    : <span data-count-text {...stylex.props(styles.countTag)}>{count}<span data-count-word {...stylex.props(styles.countWord)}>{count === 1 ? ' subagent' : ' subagents'}</span></span>
   const id = count === undefined ? 'unknown' : String(count)
   return onPress === undefined
     ? <span data-subagent-count={id} {...stylex.props(styles.countHit)}>{content}</span>
     : <Button data-subagent-count={id} onPress={onPress} {...stylex.props(styles.countHit, styles.countButton)}>{content}</Button>
 }
+
+// Name-column widths: below `compactName` the full "14 subagents" would leave the title under ~24px, so the count goes
+// bare; below `hiddenCount` even the bare count would, so it leaves line 1.
+const compactName = '@container agent-name (width < 104px)'
+const hiddenCount = '@container agent-name (width < 48px)'
 
 const styles = stylex.create({
   // Relative: the containing block for the visually hidden details trigger, so it never escapes the scroll clip.
@@ -147,14 +154,22 @@ const styles = stylex.create({
   // Sidebar rows ring keyboard focus in neutral fgMuted, never the accent, so focus does not read as selection.
   focused: { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` },
   glyph: { gridColumn: '1', gridRow: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  // Line 1's name column: the title truncates first; the count keeps its whole width right after it.
-  name: { gridColumn: '2', gridRow: '1', display: 'flex', alignItems: 'center', columnGap: s.sm, minWidth: 0 },
+  // Line 1's name column: the title truncates first; the count fits the column (see `SubagentCount`) and the column
+  // clips, so the count can never cover the time or signal columns.
+  name: { gridColumn: '2', gridRow: '1', display: 'flex', alignItems: 'center', columnGap: s.sm, minWidth: 0, overflow: 'hidden', containerType: 'inline-size', containerName: 'agent-name' },
   title: { flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   // The hit area is line 1's full 24px track; the visible tag inside it is an outlined 11px label with no fill.
-  countHit: { flexShrink: 0, display: 'inline-flex', alignItems: 'center', height: g.controlSm, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans },
-  countButton: { cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted } },
-  // fgSoft, not fgMuted: 11px text must clear 4.5:1 on the hover and active-row washes too.
-  countTag: { display: 'inline-flex', alignItems: 'center', paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+  countHit: { flexShrink: 0, display: { default: 'inline-flex', [hiddenCount]: 'none' }, alignItems: 'center', height: g.controlSm, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans },
+  // Inset ring: the clipping name column would cut an outset one.
+  countButton: { cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  // fgSoft, not fgMuted: 11px text must clear 4.5:1 on the hover and active-row washes too. Inline-block, not flex, so the
+  // space before the word survives in the text and the accessible name.
+  countTag: { display: 'inline-block', paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+  // Compact: visually hidden, still in the accessible name.
+  countWord: {
+    position: { default: 'static', [compactName]: 'absolute' }, width: { default: 'auto', [compactName]: '1px' }, height: { default: 'auto', [compactName]: '1px' },
+    overflow: { default: 'visible', [compactName]: 'hidden' }, clipPath: { default: 'none', [compactName]: 'inset(50%)' }, whiteSpace: 'nowrap',
+  },
   time: { gridColumn: '3', gridRow: '1', justifySelf: 'end', color: ink.fgSoft, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   signal: { gridColumn: '4', gridRow: '1', display: 'flex', justifyContent: 'center' },
   needs: { color: tone.attention, fontSize: t.denseSize, fontWeight: t.weightSemibold },
