@@ -183,14 +183,16 @@ retain their explicit intervals, including faster thirty-second polling.
 
 Cadence is local scheduling state keyed by observer/revision, independent of the
 retained provider cursor. After a new revision or daemon restart, the observer polls
-once immediately, then follows three-minute active cadence and quiet backoff.
-Explicit refresh also runs immediately and resets cadence. Scheduling deadlines
+once immediately unless a provider rate-limit retry deadline is active, then follows
+three-minute active cadence and quiet backoff. Explicit refresh still runs immediately
+and resets cadence. Normal scheduling deadlines
 are not persisted in receipts (only their hashes are recorded); effective
 six/ten-minute deadlines live in the scheduler. Backoff uses the writer's canonical
 observation outcome across all fields, not raw delta JSON or receipt writes.
 An identity-only quiet delta after an item change advances to six minutes;
 re-emitting the same item does not count as another change.
 Pagination still continues at one second without advancing quiet backoff, and
-provider rate-limit errors retain their retry deadlines. This changes standing
+provider rate-limit errors retain their retry deadlines, including older receipts
+without a revision and after desired revision changes. This changes standing
 watch freshness to three minutes while active and up to ten minutes while quiet;
 it does not change direct merge/check gates or claim measured live savings.
