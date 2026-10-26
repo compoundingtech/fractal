@@ -53,18 +53,32 @@ for name in now-light now-dark conversation-light conversation-dark; do
   [[ ! -e "$out/$name.png" ]] || { printf 'Already exists: %s\n' "$out/$name.png" >&2; exit 2; }
 done
 exec > >(tee "$out/commands.log") 2>&1
-# Nix shells can shadow Apple's tools and point DEVELOPER_DIR/SDKROOT at a
-# macOS-only SDK. Use the host's selected Xcode for native simulator operations.
-# Unset DEVELOPER_DIR while querying too: xcode-select otherwise echoes it.
+# Native generation and builds must not inherit the devshell's CC=clang,
+# NIX_CFLAGS_*/NIX_LDFLAGS, or macOS-only SDK. xcodebuild otherwise resolves
+# clang to Nix's cc-wrapper even when xcodebuild itself is Apple's executable.
+# Keep only the host/session and explicit screenshot inputs; put Apple's tools
+# first while retaining Node and the ephemeral CocoaPods CLI on the tail of PATH.
+# Clear DEVELOPER_DIR during discovery too: xcode-select otherwise echoes it.
 apple_developer_dir="$(env -u DEVELOPER_DIR /usr/bin/xcode-select -p)"
-xcrun() { env -u SDKROOT DEVELOPER_DIR="$apple_developer_dir" /usr/bin/xcrun "$@"; }
-xcodebuild() { env -u SDKROOT DEVELOPER_DIR="$apple_developer_dir" /usr/bin/xcodebuild "$@"; }
+native() {
+  env -i \
+    HOME="$HOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" TMPDIR="${TMPDIR:-/tmp}" \
+    PATH="$apple_developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin:$apple_developer_dir/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH" \
+    DEVELOPER_DIR="$apple_developer_dir" NODE_BINARY="$(command -v node)" \
+    LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 APP_VARIANT=dev EXPO_NO_DOTENV=1 \
+    EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT='' \
+    EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK="${EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK:-}" \
+    EXPO_PUBLIC_FRACTAL_TEST_TAB=Now EXPO_PUBLIC_FRACTAL_TEST_LINKS='' \
+    "$@"
+}
+xcrun() { native /usr/bin/xcrun "$@"; }
+xcodebuild() { native /usr/bin/xcodebuild "$@"; }
 sim=''
 gateway_pid=''
 metro_pid=''
 cleanup() {
-  status=$?
-  trap - EXIT INT TERM
+  local status=$?
+  trap - EXIT INT TERM ERR
   set +e
   for pid in "$metro_pid" "$gateway_pid"; do
     if [[ -n "$pid" ]]; then kill "$pid"; wait "$pid"; fi
@@ -91,8 +105,8 @@ export EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK=''
 export EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK="com.compoundingtech.fractal.starter://pair?gateway=http%3A%2F%2F${host}%3A8791&id=demo&code=demo"
 export EXPO_PUBLIC_FRACTAL_TEST_TAB=Now
 export EXPO_PUBLIC_FRACTAL_TEST_LINKS=''
-run corepack pnpm exec expo prebuild --platform ios --clean --no-install
-run corepack pnpm run pods
+run native corepack pnpm exec expo prebuild --platform ios --clean --no-install
+run native corepack pnpm run pods
 # iPhone 16 Pro is supported by the macos-15 hosted runner's Xcode as well as newer Xcode.
 sim="$(xcrun simctl create "Fractal landing screenshots $$" 'iPhone 16 Pro')"
 printf 'Created simulator: %s\n' "$sim"
@@ -124,12 +138,19 @@ wait_service() {
   printf 'Timed out waiting for %s\n' "$url" >&2
   return 1
 }
+run node --input-type=module -e '
+  import { createRequire } from "node:module";
+  import { WebSocketServer } from "ws";
+  const require = createRequire(import.meta.url);
+  const { name, version } = require("ws/package.json");
+  console.log(JSON.stringify({ name, version, path: import.meta.resolve("ws"), server: typeof WebSocketServer }));
+'
 start_service "$out/demoGateway.log" node demoGateway.mjs 8791
 gateway_pid="$service_pid"
 wait_service "$gateway_pid" 'http://127.0.0.1:8791/v1/client/capabilities' "$out/demoGateway.log"
 start_service "$out/metro.log" corepack pnpm exec expo start --localhost --port 8081 --clear
 metro_pid="$service_pid"
-wait_service "$metro_pid" 'http://127.0.0.1:8081/status' "$out/metro.log"
+wait_service "$metro_pid" 'http://localhost:8081/status' "$out/metro.log"
 run xcrun simctl install "$sim" "$out/DerivedData/Build/Products/Debug-iphonesimulator/fractal.app"
 run xcrun simctl launch "$sim" com.compoundingtech.fractal.starter -RCT_jsLocation localhost:8081
 
@@ -141,10 +162,21 @@ appId: com.compoundingtech.fractal.starter
     timeout: 120000
 - tapOn: 'pair without a trusted fingerprint…'
 - tapOn: 'Use unpinned pairing'
-- tapOn: 'pair this device'
+# Maestro matches text case-insensitively by default; do not tap the navigation title.
+- tapOn: '(?-i:^pair this device$)'
 - extendedWaitUntil:
-    visible: 'Approve the widget release'
+    visible: '.*Approve the widget release.*'
     timeout: 30000
+# Dismiss the Debug warning notification through its visible close control;
+# keep the original warning in metro.log rather than suppressing its source.
+- runFlow:
+    when:
+      visible: '.*Open debugger to view warnings.*'
+    commands:
+      - tapOn:
+          text: '.*Open debugger to view warnings.*'
+          point: '95%,50%'
+      - assertNotVisible: '.*Open debugger to view warnings.*'
 FLOW
 run maestro --device "$sim" test "$out/pair.yaml"
 for view in now conversation; do
@@ -160,7 +192,12 @@ appId: com.compoundingtech.fractal.starter
 ---
 - openLink:
     link: '$link'
-    autoVerify: true
+# autoVerify is Android-only; a fresh iOS simulator asks before opening the app.
+- runFlow:
+    when:
+      visible: 'Open in.*Fractal Dev.*'
+    commands:
+      - tapOn: 'Open'
 - extendedWaitUntil:
     visible: '.*$expected.*'
     timeout: 30000
