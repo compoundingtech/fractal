@@ -162,7 +162,8 @@ appId: com.compoundingtech.fractal.starter
     timeout: 120000
 - tapOn: 'pair without a trusted fingerprint…'
 - tapOn: 'Use unpinned pairing'
-- tapOn: 'pair this device'
+# Maestro matches text case-insensitively by default; do not tap the navigation title.
+- tapOn: '(?-i:^pair this device$)'
 - extendedWaitUntil:
     visible: 'Approve the widget release'
     timeout: 30000
