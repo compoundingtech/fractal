@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Repair iOS landing screenshot capture with Apple's native toolchain, an Xcode 26 hosted runner, and the demo gateway's declared ws ESM server dependency",
+  "summary": "Repair iOS landing screenshots with Apple's native Xcode 26 toolchain, the demo gateway's declared ws ESM dependency, and a matching Metro readiness host",
   "replay": {"status": "none", "detail": "Screenshot tooling only; no replay changes."},
   "schema": {"status": "none", "detail": "No schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rule change."},

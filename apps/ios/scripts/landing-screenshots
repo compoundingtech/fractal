@@ -150,7 +150,7 @@ gateway_pid="$service_pid"
 wait_service "$gateway_pid" 'http://127.0.0.1:8791/v1/client/capabilities' "$out/demoGateway.log"
 start_service "$out/metro.log" corepack pnpm exec expo start --localhost --port 8081 --clear
 metro_pid="$service_pid"
-wait_service "$metro_pid" 'http://127.0.0.1:8081/status' "$out/metro.log"
+wait_service "$metro_pid" 'http://localhost:8081/status' "$out/metro.log"
 run xcrun simctl install "$sim" "$out/DerivedData/Build/Products/Debug-iphonesimulator/fractal.app"
 run xcrun simctl launch "$sim" com.compoundingtech.fractal.starter -RCT_jsLocation localhost:8081
 
