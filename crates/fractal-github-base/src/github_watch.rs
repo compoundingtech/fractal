@@ -20,8 +20,8 @@ use smallclaims::hash::canonical_hash;
 
 use crate::model::{MessageView, ObserverSpec, St3Error, WatchSpec};
 
-/// Initial cadence of the standing repository observer. The reconciler backs quiet polls off
-/// to six then ten minutes, resetting to three minutes whenever any observed facts change.
+/// Standing observers poll immediately after restart, then every three minutes while active.
+/// Quiet polls back off to six then ten minutes; any observed fact change resets three minutes.
 pub const WATCH_POLL: &str = "3m";
 
 /// The data types a watch needs from the observer: comments and reviews, and the state and
