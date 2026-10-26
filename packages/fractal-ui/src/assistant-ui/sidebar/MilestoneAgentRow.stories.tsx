@@ -626,6 +626,19 @@ const countHosts = [
   { key: 'desktop-320', width: 320, narrow: false },
   { key: 'phone-320', width: 320, narrow: true },
 ] as const
+/** A 240px tree nested to depth 8 (a 112px indent): the name column narrows until the count goes bare, then leaves line 1. */
+const deepCounts = [3, 1, 14, undefined, 3, 1, 14, undefined, 3] as const
+const deepRow = (depth: number): Row => countRow(`deep-${depth}`, `Depth ${depth} · coordinate the long release train`, deepCounts[depth], {
+  ...(depth === 0 ? {} : { parentRef: `agent/example-count-deep-${depth - 1}` }),
+  children: depth === deepCounts.length - 1 ? [] : [deepRow(depth + 1)],
+})
+const deepItems: readonly AgentItem[] = [toItem(deepRow(0), 0)]
+function DeepCountTree() {
+  const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set(deepCounts.map((_, depth) => `agent/example-count-deep-${depth}`)))
+  return <section aria-label="Deep nesting · 240px" data-host="count-deep" {...stylex.props(styles.column, styles.width240, styles.deepTree)}>
+    <SidebarTree aria-label="Deeply nested agents" items={deepItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={(item, state) => <MilestoneAgentRow row={item.row} now={storyNow} touchDisclosure={touchDisclosure(state)} />} />
+  </section>
+}
 
 function SubagentCountMatrix({ scheme }: { readonly scheme: Scheme }) {
   return <main data-testid="subagent-count" data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}><ThemePortal>
@@ -638,6 +651,7 @@ function SubagentCountMatrix({ scheme }: { readonly scheme: Scheme }) {
           <MilestoneAgentRow row={countChild} depth={1} displayOnly now={storyNow} />
         </section>
       </NarrowLayoutContext.Provider>)}
+      <DeepCountTree />
     </div>
   </ThemePortal></main>
 }
@@ -666,6 +680,8 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
         await expect(chip!.textContent).toContain('Unreported subagents')
       }
       const titleElement = row.querySelector<HTMLElement>('[data-row-column="title"]')!
+      // Every flat row has room for the full count: the word is painted, not compacted.
+      await expect(getComputedStyle(chip!.querySelector('[data-count-word]')!).position).toBe('static')
       const titleBox = titleElement.getBoundingClientRect(), chipBox = chip!.getBoundingClientRect(), tagBox = tag.getBoundingClientRect()
       const time = row.querySelector('[data-row-column="time"]')!.getBoundingClientRect()
       const line2 = row.querySelector('[data-row-column="line2"]')!.getBoundingClientRect()
@@ -688,13 +704,61 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
       } else await expect(titleElement.scrollWidth).toBeLessThanOrEqual(titleElement.clientWidth + 1)
     }
   }
+  // Deep nesting at 240px: the count fits its name column (full, then bare, then gone) and never covers time or signal;
+  // titles still truncate and keep their text, and every count keeps its full text for assistive tech.
+  const deep = surfaceRoot.querySelector<HTMLElement>('[data-host="count-deep"]')!
+  await expect(Math.abs(deep.getBoundingClientRect().width - 240)).toBeLessThanOrEqual(1)
+  const deepRows = await waitFor(() => { const found = [...deep.querySelectorAll<HTMLElement>('[data-milestone-row]')].filter(row => row.closest('[inert]') === null); expect(found).toHaveLength(deepCounts.length); return found })
+  const modes = new Set<'full' | 'compact' | 'hidden'>()
+  for (const [depth, row] of deepRows.entries()) {
+    const titleElement = row.querySelector<HTMLElement>('[data-row-column="title"]')!
+    await expect(titleElement.textContent).toBe(`Depth ${depth} · coordinate the long release train`)
+    await expect(titleElement.scrollWidth).toBeGreaterThan(titleElement.clientWidth)
+    const chip = row.querySelector<HTMLElement>('[data-subagent-count]')!
+    const tag = chip.querySelector<HTMLElement>('[data-count-text]')!
+    const count = deepCounts[depth]
+    await expect(tag.textContent).toBe(count === undefined ? '? subagents' : `${count} ${count === 1 ? 'subagent' : 'subagents'}`)
+    const name = row.querySelector('[data-row-column="name"]')!.getBoundingClientRect()
+    const time = row.querySelector('[data-row-column="time"]')!.getBoundingClientRect()
+    const signal = row.querySelector('[data-row-column="signal"]')!.getBoundingClientRect()
+    const titleBox = titleElement.getBoundingClientRect()
+    await expect(name.right).toBeLessThanOrEqual(time.left + 0.5)
+    await expect(name.right).toBeLessThanOrEqual(signal.left + 0.5)
+    await expect(titleBox.left).toBeGreaterThanOrEqual(name.left - 0.5)
+    await expect(titleBox.right).toBeLessThanOrEqual(name.right + 0.5)
+    if (getComputedStyle(chip).display === 'none') {
+      // Gone: the title takes the whole name column.
+      modes.add('hidden')
+      await expect(name.width).toBeLessThan(48 + 0.5)
+      await expect(Math.abs(titleBox.width - name.width)).toBeLessThanOrEqual(0.5)
+      continue
+    }
+    const word = chip.querySelector<HTMLElement>('[data-count-word]')!
+    const compact = getComputedStyle(word).position === 'absolute'
+    modes.add(compact ? 'compact' : 'full')
+    if (compact) {
+      // Bare count: the word is visually hidden but still in the text.
+      await expect(name.width).toBeLessThan(104 + 0.5)
+      await expect(name.width).toBeGreaterThanOrEqual(48 - 0.5)
+      await expect(word.getBoundingClientRect().width).toBeLessThanOrEqual(1)
+    } else await expect(name.width).toBeGreaterThanOrEqual(104 - 0.5)
+    const tagBox = tag.getBoundingClientRect()
+    await expect(tagBox.left).toBeGreaterThanOrEqual(name.left - 0.5)
+    await expect(tagBox.right).toBeLessThanOrEqual(name.right + 0.5)
+    await expect(tagBox.right).toBeLessThanOrEqual(time.left + 0.5)
+    await expect(tagBox.right).toBeLessThanOrEqual(signal.left + 0.5)
+    await expect(tag.scrollWidth).toBeLessThanOrEqual(tag.clientWidth + 1)
+    await expect(Math.abs(tagBox.left - titleBox.right - 6)).toBeLessThanOrEqual(1)
+  }
+  await expect(modes.has('compact')).toBe(true)
+  await expect(modes.has('hidden')).toBe(true)
   const [red, green, blue] = getComputedStyle(surfaceRoot).backgroundColor.match(/\d+(\.\d+)?/g)!.map(Number)
   await expect((0.2126 * red! + 0.7152 * green! + 0.0722 * blue!) / 255 > 0.5).toBe(surfaceRoot.getAttribute('data-scheme') === 'light')
 }
 
 export const SubagentCount: StoryObj<{ scheme: Scheme }> = {
   name: 'Subagent count · after the title · 240/320 desktop and phone',
-  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported and display-only counts with long titles verify the count copy, its placement right after the title, title truncation and one-line fit at 240px and 320px desktop and phone widths.' } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported and display-only counts with long titles verify the count copy, its placement right after the title, title truncation and one-line fit at 240px and 320px desktop and phone widths, and a 240px tree nested to depth 8 verifies the count goes bare and then leaves line 1 without covering the time or signal columns.' } },
   args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   render: ({ scheme }) => <SubagentCountMatrix scheme={scheme} />,
   play: subagentCountPlay,
@@ -763,6 +827,8 @@ const styles = stylex.create({
   clipped: { width: g.sidebarDefault, overflow: 'hidden', transform: 'translateX(0)' },
   width240: { width: '240px' },
   width320: { width: '320px' },
+  // Nine 48px rows, all mounted.
+  deepTree: { height: '520px' },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   // Resolves the surface's own tokens for the tone assertions: soft (neutral states), muted (stale), danger (never stale).
   toneProbe: { position: 'absolute', width: s.zero, height: s.zero, overflow: 'hidden', color: ink.fgSoft, backgroundColor: ink.fgMuted, borderTopColor: tone.dangerFg },
