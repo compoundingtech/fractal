@@ -969,6 +969,30 @@ fn usage_marks_a_reading_older_than_the_limits_cadence_as_stale() {
 }
 
 #[test]
+fn usage_lists_every_declared_account_with_its_limit_or_credits() {
+    let report = json!({
+        "rows": [],
+        "limits": [
+            {"account": "claude/aaaa", "account_ref": "ada/claude-1", "weekly_percent": 24.0,
+             "weekly_resets_at_unix_ms": 1_799_500_000_000_u64, "stale": false,
+             "measured_at_unix_ms": 1_799_000_000_000_u64},
+        ],
+        "accounts": [
+            {"name": "ada/claude-1", "account": "claude/aaaa", "provider": "anthropic", "kind": "subscription"},
+            {"name": "ada/claude-2", "account": "claude/bbbb", "provider": "anthropic", "kind": "subscription"},
+            {"name": "ada/key", "account": "omp/cccc", "provider": "anthropic", "kind": "api-key",
+             "credits": {"budget_microusd": 200_000_000_u64, "used_microusd": 154_300_000_u64,
+                         "unpriced_tokens": 7, "period_start_ms": 0}},
+        ],
+    });
+    let output = render_usage_report(&report, 24, None);
+    assert!(output.contains("ACCOUNTS  3 · every declared account\n"), "{output}");
+    assert!(output.contains("ada/claude-1  weekly 24% resets 2027-01-09 "), "{output}");
+    assert!(output.contains("ada/claude-2  no limits reported\n"), "{output}");
+    assert!(output.contains("ada/key  credits $154+ of $200 this month\n"), "{output}");
+}
+
+#[test]
 fn usage_names_a_declared_account_beside_the_providers_label() {
     let report = json!({
         "rows": [
