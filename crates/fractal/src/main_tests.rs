@@ -498,6 +498,15 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
             api.code.clone(), api.message.clone(), Box::new(api),
         ));
         eprintln!("{}", cli_error_message(&error, false));
+        let mut stalled = None;
+        // Exercise the actual Resync notice sink, including duplicate suppression.
+        for _ in 0..2 {
+            conversations_cli::report_resync(
+                Some(&fractal_client::ErrorCode::Internal),
+                "the stream failed",
+                &mut stalled,
+            );
+        }
         return;
     }
     for gate in [false, true] {
@@ -512,9 +521,9 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
         assert!(output.status.success(), "{output:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!(stderr.trim(), if gate {
-            "st hit a problem: the store failed (internal)"
+            "st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
         } else {
-            "Fractal hit a problem: the store failed (internal)"
+            "Fractal hit a problem: the store failed (internal)\nst: Fractal hit a problem: the stream failed · trying again"
         });
     }
 }
@@ -549,7 +558,7 @@ async fn blob_errors_keep_their_type_until_the_rendering_boundary() {
     }, false).await.unwrap_err();
     for error in [upload, read] {
         assert!(error.downcast_ref::<fractal_client::ClientError>().is_some(), "{error:#}");
-        assert_eq!(render_client_error(&error, true),
+        assert_eq!(render_client_error(&error, ClientMessage::Human),
             "Fractal hit a problem: the blob store failed (internal)");
         assert_eq!(plain_error(&error),
             "st hit a problem: the blob store failed (internal)");

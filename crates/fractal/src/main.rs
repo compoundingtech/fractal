@@ -5037,23 +5037,51 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     }
 }
 
-fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
-    // Exec gates capture stderr into durable/API-visible output. Keep the same
-    // stable rendering as native drivers and the separate refusal report.
-    if native_driver || std::env::var_os(fractal_daemon::gate_report::ENV).is_some() {
-        plain_error(error)
-    } else {
-        doctor_cli::human_outage_message(error).unwrap_or_else(|| render_client_error(error, true))
+/// CLI presentation is stable inside exec gates: both output streams enter JSON.
+#[derive(Clone, Copy)]
+enum ClientMessage {
+    Stable,
+    Human,
+}
+
+impl ClientMessage {
+    fn for_output(native_driver: bool) -> Self {
+        static IN_GATE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            std::env::var_os(fractal_daemon::gate_report::ENV).is_some()
+        });
+        if native_driver || *IN_GATE { Self::Stable } else { Self::Human }
+    }
+
+    fn error(self, error: &fractal_client::ClientError) -> String {
+        match self {
+            Self::Stable => error.plain(),
+            Self::Human => error.human(),
+        }
+    }
+
+    fn message(self, code: Option<&fractal_client::ErrorCode>, message: &str) -> String {
+        match self {
+            Self::Stable => fractal_client::plain_message(code, message),
+            Self::Human => fractal_client::human_message(code, message),
+        }
     }
 }
 
-/// The error chain as printed, with an st client-API error said in plain words and its code in
-/// parentheses for scripts, rather than a Rust enum name (`StaleFence`).
-fn plain_error(error: &anyhow::Error) -> String {
-    render_client_error(error, false)
+fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
+    let mode = ClientMessage::for_output(native_driver);
+    if let ClientMessage::Human = mode {
+        doctor_cli::human_outage_message(error).unwrap_or_else(|| render_client_error(error, mode))
+    } else {
+        render_client_error(error, mode)
+    }
 }
 
-fn render_client_error(error: &anyhow::Error, human: bool) -> String {
+/// Stable words and codes for scripts, gate output and refusal reports.
+fn plain_error(error: &anyhow::Error) -> String {
+    render_client_error(error, ClientMessage::Stable)
+}
+
+fn render_client_error(error: &anyhow::Error, mode: ClientMessage) -> String {
     let full = format!("{error:#}");
     let Some(api) = error
         .chain()
@@ -5068,7 +5096,7 @@ fn render_client_error(error: &anyhow::Error, human: bool) -> String {
         .ok()
         .and_then(|code| code.as_str().map(str::to_owned))
         .unwrap_or_default();
-    let message = if human { api.human() } else { api.plain() };
+    let message = mode.error(api);
     full.replace(&api.to_string(), &format!("{message} ({code})"))
 }
 

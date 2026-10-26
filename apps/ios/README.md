@@ -4,7 +4,7 @@ The four-tab Expo app uses the generated `st3.client.v0` TypeScript client. Its 
 
 Status, compatibility and connection notices call the daemon Fractal. An “older Fractal” label means the paired host does not serve the current presentation fields; its reported state is shown without inferring a newer state. These human labels do not rename protocol actor kinds, error codes or stored conversation events.
 
-The TypeScript human error helpers match Rust's explicit `human()` / `human_message()` renderers through `fixtures/clients/plain-errors-v1.json`. Rust's legacy `plain()` / `plain_message()` wording is retained for gate reports, because those report strings also enter durable claims and gate-check JSON. Neither human path mutates the original error envelope.
+The TypeScript human error helpers match Rust's explicit `human()` / `human_message()` renderers through `fixtures/clients/plain-errors-v1.json`. Rust's legacy `plain()` / `plain_message()` wording is retained for gate reports, because those report strings also enter durable claims and gate-check JSON. The CLI resolves one presentation mode per process: native drivers and exec-gate subprocesses keep stable error and stream-resync wording; other CLI output uses human wording. Neither human path mutates the original error envelope.
 
 ## Connect
 
