@@ -10,16 +10,16 @@ import * as Fiber from 'effect/Fiber'
 import * as Stream from 'effect/Stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Layer } from 'effect'
-import { BrowserSt3Platform } from './platform.ts'
+import { BrowserFractalPlatform } from './platform.ts'
 
 import {
   advertisedSubscriptionLimit,
   type FollowEvent,
   type FollowSpec,
   followKey,
-  type St3Diagnostic,
-  St3,
-  St3Live,
+  type FractalDiagnostic,
+  Fractal,
+  FractalLive,
   type WindowValue,
 } from '@fractal/sdk/effect'
 
@@ -146,11 +146,11 @@ interface Consumer {
 
 const mount = (spec: Extract<FollowSpec, { _tag: 'Window' }>) =>
   Effect.gen(function* () {
-    const st3 = yield* St3
+    const fractal = yield* Fractal
     const events: FollowEvent<WindowValue>[] = []
     let ended = false
     const fiber = yield* Effect.forkChild(
-      st3.followWindow(spec).pipe(
+      fractal.followWindow(spec).pipe(
         Stream.runForEach((event) => Effect.sync(() => events.push(event))),
         Effect.ensuring(Effect.sync(() => (ended = true))),
       ),
@@ -161,13 +161,13 @@ const mount = (spec: Extract<FollowSpec, { _tag: 'Window' }>) =>
 
 const run = (
   maxFollows: number,
-  test: (gateway: FakeGateway) => Effect.Effect<void, never, St3>,
+  test: (gateway: FakeGateway) => Effect.Effect<void, never, Fractal>,
   autoOpen = true,
-  onDiagnostics?: (event: St3Diagnostic) => void,
+  onDiagnostics?: (event: FractalDiagnostic) => void,
 ) => {
   const gateway = new FakeGateway()
   gateway.autoOpen = autoOpen
-  const layer = St3Live({
+  const layer = FractalLive({
     baseUrl: 'http://gateway.test',
     maxFollows,
     socket: gateway.factory,
@@ -175,7 +175,7 @@ const run = (
     onSubscribeSent: (id) => gateway.sentSubscribeIds.push(id),
     onFollowSubscribeSent: (event) => gateway.sentFollowSubscribes.push(event),
     ...(onDiagnostics === undefined ? {} : { onDiagnostics }),
-  }).pipe(Layer.provide(BrowserSt3Platform({ adoptEarlyCollections: false })))
+  }).pipe(Layer.provide(BrowserFractalPlatform({ adoptEarlyCollections: false })))
   return Effect.gen(function* () {
     yield* settle
     yield* test(gateway)
@@ -189,7 +189,7 @@ describe('follow admission', () => {
   afterEach(() => vi.useRealTimers())
 
   it('reports a rejected mission row once per revision across frames and resync', async () => {
-    const diagnostics: St3Diagnostic[] = []
+    const diagnostics: FractalDiagnostic[] = []
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       await run(1, (gateway) => Effect.gen(function* () {
@@ -284,10 +284,10 @@ describe('follow admission', () => {
   it('reports the shared connection Live only after the socket open event', () =>
     run(1, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const states: string[] = []
         const fiber = yield* Effect.forkChild(
-          st3.connection.pipe(Stream.runForEach((state) => Effect.sync(() => states.push(state._tag)))),
+          fractal.connection.pipe(Stream.runForEach((state) => Effect.sync(() => states.push(state._tag)))),
         )
         yield* settle
         expect(states).toContain('Connecting')
@@ -304,18 +304,18 @@ describe('follow admission', () => {
     const gateway = new FakeGateway()
     gateway.autoOpen = false
     gateway.closeImmediatelyAfterOpen = true
-    const layer = St3Live({
+    const layer = FractalLive({
       baseUrl: 'http://gateway.test',
       maxFollows: 1,
       socket: gateway.factory,
       fetch: gateway.fetch,
-    }).pipe(Layer.provide(BrowserSt3Platform({ adoptEarlyCollections: false })))
+    }).pipe(Layer.provide(BrowserFractalPlatform({ adoptEarlyCollections: false })))
     const states: string[] = []
     return Effect.runPromise(
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         yield* Effect.forkChild(
-          st3.connection.pipe(Stream.runForEach((state) => Effect.sync(() => states.push(state._tag)))),
+          fractal.connection.pipe(Stream.runForEach((state) => Effect.sync(() => states.push(state._tag)))),
         )
         yield* settle
         expect(states).not.toContain('Live')
@@ -326,19 +326,19 @@ describe('follow admission', () => {
   it('closes an acquired socket exactly once when the scope ends before open', async () => {
     const gateway = new FakeGateway()
     gateway.autoOpen = false
-    const layer = St3Live({
+    const layer = FractalLive({
       baseUrl: 'http://gateway.test',
       maxFollows: 1,
       socket: gateway.factory,
       fetch: gateway.fetch,
-    }).pipe(Layer.provide(BrowserSt3Platform({ adoptEarlyCollections: false })))
+    }).pipe(Layer.provide(BrowserFractalPlatform({ adoptEarlyCollections: false })))
     const states: string[] = []
 
     await Effect.runPromise(
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         yield* Effect.forkChild(
-          st3.connection.pipe(Stream.runForEach((state) => Effect.sync(() => states.push(state._tag)))),
+          fractal.connection.pipe(Stream.runForEach((state) => Effect.sync(() => states.push(state._tag)))),
         )
         yield* settle
         expect(gateway.socket).toBeDefined()
@@ -467,19 +467,19 @@ describe('follow admission', () => {
             entered = true
             return pending
           }
-          const st3 = yield* St3
+          const fractal = yield* Fractal
           const spec = { _tag: 'Terminal', runtime: 'runtime/a' } as const
           const events: string[] = []
           let ended = false
           yield* Effect.forkChild(
-            st3.followTerminal(spec).pipe(
+            fractal.followTerminal(spec).pipe(
               Stream.runForEach((event) => Effect.sync(() => events.push(event._tag))),
               Effect.ensuring(Effect.sync(() => (ended = true))),
             ),
           )
           yield* settle
           expect(entered).toBe(true)
-          yield* st3.setVisible(spec, false)
+          yield* fractal.setVisible(spec, false)
           yield* mount(windowSpec('missions'))
           release?.()
           yield* settle
@@ -499,15 +499,15 @@ describe('follow admission', () => {
   it('evicts the least-recently-visible invisible follow and never a visible one', () =>
     run(3, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const older = yield* mount(windowSpec('agents'))
         const visible = yield* mount(windowSpec('missions'))
         const newer = yield* mount(windowSpec('attention'))
         // `missions` was hidden first but is visible again; `agents` hid before `attention`.
-        yield* st3.setVisible(windowSpec('missions'), false)
-        yield* st3.setVisible(windowSpec('agents'), false)
-        yield* st3.setVisible(windowSpec('attention'), false)
-        yield* st3.setVisible(windowSpec('missions'), true)
+        yield* fractal.setVisible(windowSpec('missions'), false)
+        yield* fractal.setVisible(windowSpec('agents'), false)
+        yield* fractal.setVisible(windowSpec('attention'), false)
+        yield* fractal.setVisible(windowSpec('missions'), true)
 
         yield* mount(windowSpec('work'))
 
@@ -522,10 +522,10 @@ describe('follow admission', () => {
   it('keeps folding an invisible follow and shows it again without resubscribing', () =>
     run(2, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const agents = yield* mount(windowSpec('agents'))
         gateway.window('agents', false)
-        yield* st3.setVisible(windowSpec('agents'), false)
+        yield* fractal.setVisible(windowSpec('agents'), false)
         gateway.window('agents', true)
         yield* settle
 
@@ -534,7 +534,7 @@ describe('follow admission', () => {
           { _tag: 'Observed', value: { items: [], hasMore: true, rawItems: [], snapshot, undecodable: [], decodeStale: false } },
         ])
 
-        yield* st3.setVisible(windowSpec('agents'), true)
+        yield* fractal.setVisible(windowSpec('agents'), true)
         yield* settle
         expect(gateway.subscribes('agents')).toBe(1)
         expect(agents.ended()).toBe(false)
@@ -544,15 +544,15 @@ describe('follow admission', () => {
   it('ends an evicted follow with Stale; opening the same spec again resubscribes', () =>
     run(1, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const agents = yield* mount(windowSpec('agents'))
-        yield* st3.setVisible(windowSpec('agents'), false)
+        yield* fractal.setVisible(windowSpec('agents'), false)
         const missions = yield* mount(windowSpec('missions'))
 
         expect(tags(agents)).toEqual(['Stale'])
         expect(agents.ended()).toBe(true)
 
-        yield* st3.setVisible(windowSpec('missions'), false)
+        yield* fractal.setVisible(windowSpec('missions'), false)
         yield* Fiber.interrupt(missions.fiber)
         const again = yield* mount(windowSpec('agents'))
         expect(gateway.subscribes('agents')).toBe(2)
@@ -565,9 +565,9 @@ describe('follow admission', () => {
   it('lowers the cap on a server subscription limit and evicts to make room', () =>
     run(8, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const agents = yield* mount(windowSpec('agents'))
-        yield* st3.setVisible(windowSpec('agents'), false)
+        yield* fractal.setVisible(windowSpec('agents'), false)
         yield* mount(windowSpec('missions'))
         const attention = yield* mount(windowSpec('attention'))
 

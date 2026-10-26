@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { homeRows, homeSections, keepClosed, onHome } from '@fractal/views/homeView';
 
 const now = Date.parse('2026-09-30T12:00:00Z');
-// What st presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
-// derives nothing, so these rows carry it as st serves them.
+// What Fractal presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
+// derives nothing, so these rows carry it as Fractal serves them.
 const presented = (attention_kind, extra) => {
   const card = {
     'human-gate': { tier: 'stopped', kind: extra.review_mode === 'feedback' ? 'feedback' : 'review' },
@@ -20,8 +20,8 @@ const presented = (attention_kind, extra) => {
 };
 const item = (id, attention_kind, extra = {}) => ({ id: `attention/${id}`, kind: 'attention', attention_kind, title: id, detail: '', priority: 'normal', state: 'open', person_id: 'person/alex', requested_at: '2026-09-30T11:00:00Z', source_id: 'x', actions: [], presentation: presented(attention_kind, extra), ...extra });
 
-// Home shows what stui's Home shows: the person's unresolved requests and reviews, items without
-// app actions included. A message, a fault and a kind st adds later never reach Home.
+// Home shows what the Fractal terminal UI's Home shows: the person's unresolved requests and reviews, items without
+// app actions included. A message, a fault and a kind Fractal adds later never reach Home.
 const items = [
   item('note', 'unread-message'),
   item('fault', 'fault'),
@@ -60,7 +60,7 @@ assert.deepEqual(homeSections(withUpdate).map(section => section.title), ['someb
 // Renderers choose actual colors; the shared model describes their meaning.
 assert.deepEqual(withUpdate.map(row => row.color), ['person', 'green']);
 
-// Nothing leaves Home by itself: an item st closes (or resolves) while it is shown stays, marked.
+// Nothing leaves Home by itself: an item Fractal closes (or resolves) while it is shown stays, marked.
 {
   const open = id => ({ id, state: 'open', attention_kind: 'person-step', actions: ['work.done'], title: id, requested_at: '2026-10-07T07:00:00Z', update: { summary: 'x', about: 'y' }, presentation: presented('person-step', { update: true }) });
   const first = [open('attention/a'), open('attention/b'), open('attention/c')];
@@ -87,24 +87,24 @@ assert.deepEqual(withUpdate.map(row => row.color), ['person', 'green']);
   assert.equal(keepClosed(kept, [open('attention/a')], new Set()).find(item => item.id === 'attention/a').closedElsewhere, undefined);
 }
 
-// st places each item and names its step: a gate st puts in Today sits in Today, and the step is
+// Fractal places each item and names its step: a gate Fractal puts in Today sits in Today, and the step is
 // named by its path, not by its ID.
 {
   const gate = item('gate', 'human-gate', { alert: true, presentation: { tier: 'today', kind: 'feedback', agent: null, raised_by: null, waiting: { step: 'step-run/abc/1/review', path: 'review' } } });
   const [row] = homeRows([gate], 'person/alex', now);
   assert.deepEqual([row.tier, row.kind, row.waiting], ['today', 'review', 'step review']);
-  // Only a null group keeps it off Home; a group Home has no section for (alert, or one a newer st
-  // adds) shows where st's alert flag puts it, never dropped.
+  // Only a null group keeps it off Home; a group Home has no section for (alert, or one a newer Fractal
+  // adds) shows where Fractal's alert flag puts it, never dropped.
   assert.deepEqual(homeRows([{ ...gate, presentation: { ...gate.presentation, tier: null } }], 'person/alex', now), []);
   assert.deepEqual(homeRows([{ ...gate, presentation: { ...gate.presentation, tier: 'alert' } }], 'person/alex', now).map(row => [row.tier, row.kind]), [['stopped', 'review']]);
-  // A card this app does not know is unplaced, with st's text, never dropped.
+  // A card this app does not know is unplaced, with Fractal's text, never dropped.
   const [unknown] = homeRows([{ ...gate, presentation: { ...gate.presentation, kind: 'poll' } }], 'person/alex', now);
   assert.deepEqual([unknown.tier, unknown.kind, unknown.glyph], ['today', 'unplaced', '?']);
   assert.match(unknown.waiting, /does not know/);
 }
 
-// An st that presents nothing (an older st, or an item it has not presented yet): each item is
-// unplaced where its alert flag puts it, read as st's CLI reads it, and says why; st puts neither
+// A Fractal that presents nothing (an older Fractal, or an item it has not presented yet): each item is
+// unplaced where its alert flag puts it, read as Fractal's CLI reads it, and says why; Fractal puts neither
 // a message nor a fault on Now.
 {
   const bare = (id, attention_kind, extra) => item(id, attention_kind, { presentation: undefined, ...extra });
@@ -116,5 +116,5 @@ assert.deepEqual(withUpdate.map(row => row.color), ['person', 'green']);
     bare('fault', 'fault', { alert: true }),
   ], 'person/alex', now);
   assert.deepEqual(rows.map(row => [row.item.id, row.tier, row.kind]), [['attention/gate', 'stopped', 'unplaced'], ['attention/old', 'stopped', 'unplaced'], ['attention/note', 'later', 'unplaced']]);
-  assert.match(rows[0].waiting, /st is older, or has not presented it yet/);
+  assert.match(rows[0].waiting, /Fractal is older, or has not presented it yet/);
 }
