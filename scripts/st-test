@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
-  scripts/st-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE | --out DIR] [--attempt N] [--time-limit SECONDS]
+  scripts/st-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE | --out DIR] [--attempt N] [--time-limit SECONDS] [--queue-limit SECONDS]
   scripts/st-test --seed [REF] [--base origin/main] [--push REMOTE | --out DIR]
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
@@ -43,6 +43,10 @@ verification of the exported records are the publisher's responsibility. Lane-ed
 It runs `nix develop` and `pnpm install` from the tree under test, on this machine, as this user, with the host's
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
+
+Each check's --time-limit counts only the time it runs: the waits for a host build slot that scripts/ci-local reports as they happen
+(CI_LOCAL_QUEUE_LOG) extend it, up to --queue-limit seconds of waiting in all, so a busy host's queue cannot use up a check's time. The
+summary row says how long a check waited.
 
 Every run that gets as far as its summary appends one JSON line (version 1: start, end and total seconds, host, tree, the checks, every
 summary row and, when scripts/ci-local printed its stage table, linux-gate's stages) to ${XDG_STATE_HOME:-~/.local/state}/st-test/runs.jsonl,
@@ -1124,11 +1128,9 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         if target:
             environment['CARGO_TARGET_DIR'] = str(target)
         started = time.monotonic()
-        try:
-            done = subprocess.run(governed(RUN_TESTS, 'rust-tests'), cwd=directory, timeout=args.time_limit, env=environment)
-            code = done.returncode
-        except subprocess.TimeoutExpired:
-            code = 124
+        limit = Limit(args.time_limit, Path(scratch) / 'rust-tests.queue', args.queue_limit)
+        environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
+        code = run_limited(governed(RUN_TESTS, 'rust-tests'), limit, cwd=directory, env=environment)
         ran_seconds = round(time.monotonic() - started)
         if code not in RUN_COMPLETED or not junit.exists():
             return [('rust-tests', 'timed out' if code == 124 else 'NOT SIGNED', ran_seconds,
@@ -1241,6 +1243,88 @@ STAGE_LINE = re.compile(r'ci-local:\s+(\S+)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\
                         r'(?:\s+exit\s+(\S+)(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?)?\s*')
 # How long a check's output is still copied after the check itself exited: a process it left behind may hold the pipe open.
 STREAM_GRACE = 5
+QUEUE_LIMIT = 14400  # default --queue-limit: the build-slot waits a check may spend, apart from its --time-limit
+LIMIT_POLL = 1.0  # how often a check's limit is read again while it runs
+
+
+def queued_seconds(path, now=None):
+    """Seconds of the build-slot waits scripts/ci-local wrote to `path` (CI_LOCAL_QUEUE_LOG: `wait|slot EPOCH STAGE` lines) as the union of
+    their spans, so two stages waiting at the same time count once; a wait not yet ended runs to `now`. A missing or unreadable file is 0."""
+    now = time.time() if now is None else now
+    try:
+        lines = Path(path).read_text(errors='replace').splitlines()
+    except OSError:
+        return 0.0
+    waiting, spans = {}, []
+    for line in lines:
+        parts = line.split(' ', 2)
+        if len(parts) != 3:
+            continue
+        kind, at, stage = parts
+        try:
+            at = float(at)
+        except ValueError:
+            continue
+        if kind == 'wait':
+            waiting.setdefault(stage, at)
+        elif kind == 'slot' and stage in waiting:
+            spans.append((waiting.pop(stage), at))
+    spans += [(start, now) for start in waiting.values()]
+    total, reach = 0.0, float('-inf')
+    for start, end in sorted(spans):  # by start: each span adds only the part past the furthest end so far
+        start = max(start, reach)
+        if end > start:
+            total += end - start
+            reach = end
+    return total
+
+
+class Limit:
+    """A check's time limit that counts only the time it runs: `seconds` of running, plus the build-slot waits read from `queue_log`
+    (queued_seconds), of which at most `queue_limit` seconds in all."""
+
+    def __init__(self, seconds, queue_log=None, queue_limit=QUEUE_LIMIT):
+        self.seconds, self.queue_log, self.queue_limit = seconds, queue_log, queue_limit
+        self.started = time.monotonic()
+
+    def queued(self):
+        return queued_seconds(self.queue_log) if self.queue_log else 0.0
+
+    def remaining(self):
+        """Seconds left before the check is over its limit (0 or less once it is): running time or waiting time, whichever ends first."""
+        queued = self.queued()
+        ran = time.monotonic() - self.started - queued
+        return min(self.seconds - ran, self.queue_limit - queued)
+
+
+def wait_limited(process, limit):
+    """`process`'s exit code, or 124 after killing it (the process itself, as subprocess.run's timeout does) once `limit` has run out."""
+    while True:
+        left = limit.remaining()
+        if left <= 0:
+            process.kill()
+            process.wait()
+            return 124
+        try:
+            return process.wait(timeout=min(left, LIMIT_POLL))
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def run_limited(argv, limit, **options):
+    """subprocess.run(argv, **options).returncode under `limit` (a Limit): 124 when it ran out. Any error here kills the process."""
+    with subprocess.Popen(argv, **options) as process:
+        try:
+            return wait_limited(process, limit)
+        except BaseException:
+            process.kill()
+            raise
+
+
+def queue_note(limit):
+    """What the summary row adds about the check's build-slot waits, or ''."""
+    queued = round(limit.queued())
+    return f'; waited {queued}s for build slots (not counted against --time-limit)' if queued else ''
 
 
 def ci_local_stages(path):
@@ -1263,18 +1347,18 @@ def ci_local_stages(path):
 
 
 def streamed(argv, log, timeout, **options):
-    """`argv`'s exit code (124 past `timeout`), with its output (stdout and stderr, as one) copied as it comes both to this terminal, unchanged,
+    """`argv`'s exit code (124 once `timeout`, seconds or a Limit, has run out), with its output (stdout and stderr, as one) copied as it comes both to this terminal, unchanged,
     and to the file `log`, so the summary can read what it printed. subprocess.run's own semantics otherwise: past the timeout the process
     itself is killed (not its group: what it started is left as before) and waited for, and any error here (TERM's exit included) kills it
     too. Once it exited, what it left behind holding the pipe gets STREAM_GRACE seconds, then the pipe is closed."""
     sys.stdout.flush()
     raw = getattr(sys.stdout, 'buffer', None)
     decode = codecs.getincrementaldecoder('utf-8')(errors='replace').decode
-    deadline = time.monotonic() + timeout
+    limit = timeout if isinstance(timeout, Limit) else Limit(timeout)
     with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options) as process, open(log, 'wb') as kept:
         try:
             pipe, ended = process.stdout.fileno(), None
-            while time.monotonic() < deadline and (ended is None or time.monotonic() - ended < STREAM_GRACE):
+            while limit.remaining() > 0 and (ended is None or time.monotonic() - ended < STREAM_GRACE):
                 if ended is None and process.poll() is not None:
                     ended = time.monotonic()
                 if not select.select([pipe], [], [], 0.2)[0]:
@@ -1289,12 +1373,7 @@ def streamed(argv, log, timeout, **options):
                 else:
                     sys.stdout.write(decode(chunk))
                     sys.stdout.flush()
-            try:
-                return process.wait(timeout=max(0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-                return 124
+            return wait_limited(process, limit)
         except BaseException:
             process.kill()
             raise
@@ -1361,7 +1440,9 @@ def main(argv):
     parser.add_argument('--rerun', action='store_true', help='run a check even when this tree already has a passing signature for it')
     parser.add_argument('--crate', action='append', default=[], metavar='NAME', help='with --check rust-tests: only these crates (repeatable)')
     parser.add_argument('--attempt', default='1')
-    parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
+    parser.add_argument('--time-limit', type=int, default=7200, help='seconds each check may run, not counting its waits for a build slot (default 7200)')
+    parser.add_argument('--queue-limit', type=int, default=QUEUE_LIMIT,
+                        help=f'seconds each check may wait for build slots, apart from --time-limit (default {QUEUE_LIMIT})')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
     parser.add_argument('--seed', nargs='?', const='', metavar='REF', help='sign the per-crate rust-tests notes of REF (default: the base) instead of HEAD, '
                         'for the crates that lack one, and push them (to origin unless --push says otherwise); with --out, export every selected crate instead: '
@@ -1565,28 +1646,26 @@ def main(argv):
                 if name == WEB:
                     wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
                 started = time.monotonic()
+                limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit)
+                environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
                 command = wrap + ['--'] + LOCAL[name]
                 command = governed(command, name) if name in BUILDS else command
                 if output is None and CI_LOCAL in LOCAL[name]:
                     # scripts/ci-local ends with a table of its stages' times: its output still reaches this terminal as it comes, and is kept
                     # so the run's record can carry the stages.
                     log = Path(scratch) / f'{name}-output.log'
-                    code = streamed(command, log, args.time_limit, cwd=directory, env=environment)
+                    code = streamed(command, log, limit, cwd=directory, env=environment)
                     stages[:] = ci_local_stages(log)
                 else:
-                    try:
-                        done = subprocess.run(command, cwd=directory, timeout=args.time_limit, env=environment, stdout=output,
-                                              stderr=subprocess.STDOUT if output else None)
-                        code = done.returncode
-                    except subprocess.TimeoutExpired:
-                        code = 124
+                    code = run_limited(command, limit, cwd=directory, env=environment, stdout=output,
+                                       stderr=subprocess.STDOUT if output else None)
                 seconds = round(time.monotonic() - started)
                 ok = code == 0
                 if args.out:
                     why = 'packs exported, not imported or verified' if ok else 'export failed'
                 else:
                     is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
-                return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why), not ok, False
+                return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
 
             # The light checks run alongside the ones that build, one after another in a lane of their own, as CI runs them on runners of
             # their own: they wait on network, Nix and Node rather than the Rust build, and run after it they added minutes to every

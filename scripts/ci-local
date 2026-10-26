@@ -178,16 +178,24 @@ if [ -z "${CI_LOCAL_LOG_DIR:-}" ]; then
   # shellcheck disable=SC2012
   ls -1dt "$log_root"/run-* 2>/dev/null | tail -n +11 | while IFS= read -r old; do rm -rf "$old"; done
 fi
+# One line per build-slot wait as it starts and ends, `wait|slot EPOCH STAGE`, to CI_LOCAL_QUEUE_LOG when the caller names one: scripts/st-test
+# reads it while the run goes on, so its time limit counts only the time the stages run, not the time they wait for a slot.
+queue_event() {
+  [ -n "${CI_LOCAL_QUEUE_LOG:-}" ] || return 0
+  printf '%s %s %s\n' "$1" "$(date +%s)" "$2" >> "$CI_LOCAL_QUEUE_LOG" 2>/dev/null || true
+}
 # Passes a stage's output through, stamping the build admission queue's lines and adding up the time spent in the queue.
 queue_times() {
   local stage=$1 line waiting=-1 count=0 total=0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      'cargo: waiting in order'*) waiting=$SECONDS; count=$((count + 1)); printf 'ci-local: [%s] %s: waiting for a build slot\n' "$(stamp)" "$stage" ;;
-      'cargo: got build slot'*) if [ "$waiting" -ge 0 ]; then total=$((total + SECONDS - waiting)); waiting=-1; fi; printf 'ci-local: [%s] %s: got a build slot\n' "$(stamp)" "$stage" ;;
+      'cargo: waiting in order'*) if [ "$waiting" -lt 0 ]; then queue_event wait "$stage"; fi; waiting=$SECONDS; count=$((count + 1)); printf 'ci-local: [%s] %s: waiting for a build slot\n' "$(stamp)" "$stage" ;;
+      'cargo: got build slot'*) if [ "$waiting" -ge 0 ]; then total=$((total + SECONDS - waiting)); waiting=-1; queue_event slot "$stage"; fi; printf 'ci-local: [%s] %s: got a build slot\n' "$(stamp)" "$stage" ;;
     esac
     printf '%s\n' "$line"
   done
+  # A stage that ended while it waited (stopped, or its cargo gave up) waits no longer.
+  if [ "$waiting" -ge 0 ]; then queue_event slot "$stage"; fi
   echo "$count $total" > "$log_dir/$stage.queue"
 }
 setup_started=$(stamp); setup_began=$SECONDS
