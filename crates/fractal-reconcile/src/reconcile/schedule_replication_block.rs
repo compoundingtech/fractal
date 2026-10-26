@@ -143,7 +143,7 @@ schedule "orchard" {{ {clock}
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
             "node".into(), Arc::new(Notify::new())).with_schedule_peers(vec!["peer".into()]);
         store.replication_sync.lock().unwrap().insert("peer".into(), smallclaims::store::PeerSyncProgress {
-            measured: Some(crate::replication::ReplicationPeerSync {
+            measured: Some(smallclaims::replication::ReplicationPeerSync {
                 peer_only_envelopes: 7, local_only_envelopes: 3, measured_at_unix_ms: now_ms(),
                 ..Default::default()
             }), ..Default::default()
