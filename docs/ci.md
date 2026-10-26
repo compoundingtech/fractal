@@ -847,7 +847,7 @@ post-DOM readiness, assertion and close timings. The strict lifecycle assertions
 story-identity checks, matrix size and job timeout are unchanged.
 
 Merge groups and manual runs (`KIT_PLAY_SET=all`) with kit-input changes fan execution
-out into two non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
+out into four non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
 and the gate refuses shard options for any set but `all`. Each shard validates the
 **full** Storybook index, then partitions it by `SHA-256(storyId) mod N`; adding a story
 cannot move existing stories. `kitShardCount` in `.github/workflows/workspace-ci.ts`
@@ -861,6 +861,25 @@ Storybook build and their strict plays. Browser controls and Storybook wait for 
 stream to finish. The kit typecheck, isolation/negative controls and SDK frame CPU budgets
 stay on shard 0. App-only
 changes schedule just shard 0. `KIT_PLAY_SHARD_*` is scoped to the kit invocation.
+
+The job timeout stays **25 minutes**. On 2026-10-26, the two-shard full matrix
+exhausted shard 0's budget: [run 40357292970](https://github.com/compoundingtech/fractal/actions/runs/40357292970)
+spent about four minutes preparing the runner, six minutes installing and running
+the non-play streams, and two minutes on browser controls/builds before strict plays.
+Shard 0 was cancelled after 26m24s with only 998 of its 1,132 cases completed;
+shard 1 finished its 1,265 cases in 13m02s of plays. This is not a larger shard-0
+story partition: shard 0 also owns the other lanes. Play speed varies too:
+[run 40359051491](https://github.com/compoundingtech/fractal/actions/runs/40359051491)
+took 20m39s for shard 1's same 1,265 cases, leaving little room even without
+the non-play lanes. These jobs use GitHub-hosted runners. Observed shard-0 runs
+took 1,444–1,530 seconds on EPYC 7763 runners versus 822–1,065 seconds on
+EPYC 9V45/9V74 runners; the overruns correlate with runner CPU type, not
+contention on a local build host. Four shards halve each old parity partition while preserving
+the stable hash rule, all cases, axe and receipt coverage. A third shard would
+reduce plays by only about a third, leaving less headroom for shard 0's fixed work
+and the observed runner variation. Extra shards duplicate setup and the small
+Storybook build; they do not duplicate app tests or browser controls. These are
+historical timings, not a measured runtime guarantee for the four-shard workflow.
 
 Every shard publishes `receipt.json` in an artifact named
 `kit-play-<run_id>-<github.sha>-shard-<index>-attempt-<run_attempt>`, even on a play failure, and
@@ -1239,7 +1258,8 @@ those sparse p99s are effectively observed maxima. This bounded tolerance still 
 regressions on rare paths. CPU tolerates 0.05 cores. A PR without a main baseline fails as P0;
 a main bootstrap may check only absolute budgets and errors.
 
-The CPU budget (2 cores) comes from [`slo/targets.toml`](../slo/targets.toml), which st3 builds in:
+The CPU budget (2 cores, `load_max_cores`) comes from [`slo/targets.toml`](../slo/targets.toml), which st3 builds in. It is
+the bound under this synthetic load, not the member's production CPU target (`max_cores`). The file is built in:
 a missing file fails the build and an invalid one fails the run, with no default. The report and step summary also show each
 path's p99 target from that file (`descriptive_target_ms`, `over_descriptive_target`) when the path
 stands for one. Targets describe and never gate: the budgets and main's baseline remain the gates.
