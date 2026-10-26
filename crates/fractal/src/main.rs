@@ -5693,9 +5693,7 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
     format!("{}{agent}  {state}{until}{title}", text("thread"))
 }
 
-fn gh_unwatch_hint(thread: &str) -> String {
-    format!("To stop: st gh unwatch {thread}")
-}
+const GH_UNWATCH_HINT: &str = "To stop: st gh unwatch";
 
 async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, json: bool) -> Result<()> {
     match command {
@@ -5718,7 +5716,7 @@ async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, jso
             println!(
                 "Each new comment or review that this seat did not post, each time the required checks on its head turn pass or fail, and its close or merge wake this seat once."
             );
-            println!("{}", gh_unwatch_hint(thread));
+            println!("{GH_UNWATCH_HINT} {thread}");
         }
         GhCommand::Unwatch(args) => {
             let outcome: Value = client

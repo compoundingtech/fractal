@@ -8121,6 +8121,5 @@ fn native_identity_rename_allows_generated_idempotency_key() {
 
 #[test]
 fn github_watch_continuation_keeps_the_agent_executable() {
-    assert_eq!(gh_unwatch_hint("compoundingtech/fractal#3909"),
-        "To stop: st gh unwatch compoundingtech/fractal#3909");
+    assert_eq!(GH_UNWATCH_HINT, "To stop: st gh unwatch");
 }

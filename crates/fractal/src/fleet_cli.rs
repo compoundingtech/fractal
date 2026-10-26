@@ -281,8 +281,9 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     sent?.success(),
                     "fabric send-file to {name} failed; the invite stays open until it expires"
                 );
+                let program = if json_output { "st" } else { "fractal" };
                 println!(
-                    "Sent invite {} to {name}'s Fabric inbox. On {name}, run:\n  fractal fleet {command} --fabric-inbox",
+                    "Sent invite {} to {name}'s Fabric inbox. On {name}, run:\n  {program} fleet {command} --fabric-inbox",
                     created.invite
                 );
             } else if args.code_only {
