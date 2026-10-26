@@ -6,6 +6,8 @@ export type SidebarUsageScope = '24h-root-and-subagents' | 'lifetime-incl-subage
 export const usageScopeLabel = (scope: SidebarUsageScope): string => scope === '24h-root-and-subagents' ? '24h root and subagents' : scope === 'lifetime-incl-subagents' ? 'Lifetime including subagents' : 'Reported by agent'
 export type SidebarDuration = { readonly _tag: 'Known'; readonly scope: '24h-activity-span' | 'lifetime'; readonly ms: number } | { readonly _tag: 'Unknown' }
 export type SidebarLastTurn = { readonly _tag: 'Known'; readonly kind: 'turn-completed' | 'activity'; readonly at: number } | { readonly _tag: 'Unknown' }
+/** Reported main-context occupancy; this is not cumulative usage or descendant accounting. */
+export type SidebarContext = { readonly _tag: 'Known'; readonly usedTokens?: number; readonly windowTokens?: number; readonly usedPercent: number; readonly observedAt: number } | { readonly _tag: 'Unknown' }
 /** `done`/`total` exactly as the run reports them (cancelled steps count toward `total`); Unknown when the run summary is not hydrated, never `0/0`. */
 export type SidebarMissionProgress = { readonly _tag: 'Known'; readonly done: number; readonly total: number } | { readonly _tag: 'Unknown' }
 /** The agent's current step: its name, a question waiting on you (with its decision handle when the bridge reports one), or Unknown. */
@@ -26,6 +28,7 @@ export type SidebarMissionInfo =
   | { readonly _tag: 'Failed'; readonly updatedAt?: number }
 export interface SidebarReported {
   readonly model?: string
+  readonly context?: SidebarContext
   /** Producers may provide both scoped observations; the row prefers an explicit lifetime fact. */
   readonly usage?: SidebarUsage | readonly SidebarUsage[]
   readonly duration?: SidebarDuration | readonly SidebarDuration[]

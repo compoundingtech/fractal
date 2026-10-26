@@ -33,11 +33,11 @@ def commit(repo, message, write=(), remove=(), move=()):
     return git(repo, "rev-parse", "HEAD")
 
 
-def detect(remote, event, base="", head="", kit=False):
+def detect(remote, event, base="", head="", kit=False, base_ref="refs/heads/main"):
     with tempfile.TemporaryDirectory() as scratch:
         output, summary = Path(scratch, "output"), Path(scratch, "summary")
         env = {**os.environ, "EVENT": event, "REMOTE": str(remote), "BASE_SHA": base, "HEAD_SHA": head,
-               "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)}
+               "BASE_REF": base_ref, "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)}
         result = subprocess.run(["python3", str(detector)], env=env, capture_output=True, text=True)
         outputs = dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
         key = "kit-inputs" if kit else "relevant"
@@ -173,9 +173,11 @@ with tempfile.TemporaryDirectory() as scratch:
     app = commit(repo, "app only", write=["apps/fractal-web/src/app.ts"])
     git(repo, "checkout", "--quiet", "-b", "kit", base)
     kit = commit(repo, "kit", write=["packages/fractal-ui/src/button.tsx"])
-    # A strings-only app commit after a kit change must not inherit that kit input.
+    # PR/push deltas exclude earlier kit inputs; stacked merge groups must retain them until main lands them.
     strings = commit(repo, "app strings", write=["apps/fractal-web/src/strings.ts"])
     trailing_rust = commit(repo, "trailing Rust", write=["src/main.rs"])
+    git(repo, "checkout", "--quiet", "-b", "queued-entry2", kit)
+    entry2 = commit(repo, "unrelated queued entry2", write=["docs/guide.md"])
     git(repo, "checkout", "--quiet", "-b", "flake", base)
     flake = commit(repo, "Chromium lock", write=["flake.lock"])
     git(repo, "checkout", "--quiet", "-b", "workflow", base)
@@ -185,6 +187,8 @@ with tempfile.TemporaryDirectory() as scratch:
     # main moved on with a web change; a Rust-only PR based on the older main stays Rust-only.
     git(repo, "checkout", "--quiet", "main")
     advanced = commit(repo, "main web", write=["pnpm-workspace.yaml"])
+    git(repo, "checkout", "--quiet", "-b", "rust-only-queue", advanced)
+    queued_rust = commit(repo, "queued Rust only", write=["src/main.rs"])
     for index, path in enumerate(("megarepo.kdl", "megarepo.lock", "flake.lock")):
         git(repo, "checkout", "--quiet", "-b", f"dependency-pin-{index}", base)
         pin = commit(repo, f"dependency pin {path}", write=[path])
@@ -201,8 +205,8 @@ with tempfile.TemporaryDirectory() as scratch:
     check("deletion executes", detect(repo, "pull_request", base, deleted), (0, "relevant=true"))
     check("root-only patterns do not match nested files", detect(repo, "pull_request", base, nested), (0, "relevant=false"))
     check("a web path containing a newline executes", detect(repo, "pull_request", base, newline), (0, "relevant=true"))
-    check("Rust-only merge group schedules no web execution", detect(repo, "merge_group", base, rust), (0, "relevant=false"))
-    check("merge group covers the whole queued range", detect(repo, "merge_group", base, advanced), (0, "relevant=true"))
+    check("Rust-only merge group schedules no web execution", detect(repo, "merge_group", advanced, queued_rust), (0, "relevant=false"))
+    check("merge group excludes changes already on current main", detect(repo, "merge_group", base, advanced), (0, "relevant=false"))
     check("manual runs force execution", detect(repo, "workflow_dispatch"), (0, "relevant=true"))
     for event in ("pull_request", "merge_group", "push"):
         for name, head, expected in (("app only", app, False), ("kit", kit, True),
@@ -215,13 +219,27 @@ with tempfile.TemporaryDirectory() as scratch:
               detect(repo, event, base, dependency_change, kit=True), (0, "kit-inputs=true"))
         check(f"{event}: strings-only app diff executes app lanes",
               detect(repo, event, kit, strings), (0, "relevant=true"))
-        check(f"{event}: strings-only app diff skips kit plays",
-              detect(repo, event, kit, strings, kit=True), (0, "kit-inputs=false"))
-    for event in ("merge_group", "push"):
-        check(f"{event}: exact base excludes earlier kit inputs",
-              detect(repo, event, kit, trailing_rust, kit=True), (0, "kit-inputs=false"))
-        check(f"{event}: multi-commit range includes app change before final Rust commit",
-              detect(repo, event, kit, trailing_rust), (0, "relevant=true"))
+        check(f"{event}: strings-only app diff kit plays",
+              detect(repo, event, kit, strings, kit=True), (0, f"kit-inputs={str(event == 'merge_group').lower()}"))
+    check("stacked merge group retains entry1 kit inputs despite unrelated entry2",
+          detect(repo, "merge_group", kit, entry2, kit=True), (0, "kit-inputs=true"))
+    check("push: exact base excludes earlier kit inputs",
+          detect(repo, "push", kit, trailing_rust, kit=True), (0, "kit-inputs=false"))
+    check("push: multi-commit range includes app change before final Rust commit",
+          detect(repo, "push", kit, trailing_rust), (0, "relevant=true"))
+    # Once entry1 lands on the target branch, its kit change is no longer queued.
+    git(repo, "branch", "release-target", kit)
+    check("merge group uses the event target branch ref",
+          detect(repo, "merge_group", kit, trailing_rust, kit=True, base_ref="refs/heads/release-target"),
+          (0, "kit-inputs=false"))
+    git(repo, "checkout", "--quiet", "--orphan", "unrelated-target")
+    commit(repo, "unrelated target", write=["unrelated.txt"])
+    for target in ("refs/heads/missing-target", "refs/heads/unrelated-target"):
+        for kit_output in (False, True):
+            key = "kit-inputs" if kit_output else "relevant"
+            check(f"merge group: {target} runs all lanes ({key})",
+                  detect(repo, "merge_group", kit, trailing_rust, kit=kit_output, base_ref=target),
+                  (0, f"{key}=true"))
     for event in ("pull_request", "merge_group", "push"):
         for name, remote, before, after in (
             ("missing head", repo, base, ""),
@@ -271,6 +289,7 @@ assert "github.event.pull_request.base.sha || github.event.merge_group.base_sha"
 assert "github.event.pull_request.head.sha || github.event.merge_group.head_sha" in changes
 assert "github.event.merge_group.base_sha || github.event.before" in changes
 assert "github.event.merge_group.head_sha || github.sha" in changes
+assert "BASE_REF: ${{ github.event.merge_group.base_ref || 'refs/heads/main' }}" in changes
 assert "KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}" in execution
 assert "KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'commit' || 'all' }}" in execution, "PRs run the per-commit set"
 assert "KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' }}" in execution, "merge groups keep axe"
