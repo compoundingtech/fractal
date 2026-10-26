@@ -239,7 +239,7 @@ describe('native closed transcript boundary', () => {
 
 describe('inspect preview', () => {
   it('redacts adversarial keys and token strings before UTF-8 capping', () => {
-    const raw = { authorization: 'Bearer never-show', nested: { api_key: 'secret', password: 'hunter2', safe: 'ghp_abcdef sk-abcdef xoxb-abcdef eyJabc.def.ghi' }, content: Array.from({ length: 100 }, () => '界'.repeat(600)) }
+    const raw = { authorization: 'never-show', nested: { api_key: 'secret', password: 'hunter2', safe: 'ghp_abcdef sk-abcdef xoxb-abcdef eyJabc.def.ghi' }, content: Array.from({ length: 100 }, () => '界'.repeat(600)) }
     const preview = inspectPreview(raw)
     expect(preview.bytes).toBe(new TextEncoder().encode(JSON.stringify(raw)).length)
     expect(new TextEncoder().encode(preview.text).length).toBeLessThanOrEqual(4096)
