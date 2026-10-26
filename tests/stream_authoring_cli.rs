@@ -1,6 +1,23 @@
 use fractal_legacy_runner::Runner as _;
 
-static RUNTIME_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The runtime tests start real pty sessions under the user's st2 state directory, whose pty ids they
+/// share, so they must take turns. nextest runs each test in its own process, which a `Mutex` does not
+/// span (one in three runs of the group lost a spawn to a sibling's session), and so does another
+/// checkout's run of the same tests: an advisory file lock does, held until the guard drops.
+struct RuntimeTest(std::fs::File);
+
+impl RuntimeTest {
+    fn take() -> Self {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(std::env::temp_dir().join("st-stream-authoring-cli-runtime.lock"))
+            .unwrap();
+        file.lock().unwrap();
+        Self(file)
+    }
+}
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -257,7 +274,7 @@ fn command_and_direct_argv_are_mutually_exclusive() {
 
 #[test]
 fn launched_stream_removal_retires_runtime_before_source_publication() {
-    let _runtime = RUNTIME_TEST.lock().unwrap();
+    let _runtime = RuntimeTest::take();
     let catalog = tempfile::tempdir().unwrap();
     write_agent(catalog.path());
     let add = st2(
@@ -346,7 +363,7 @@ fn launched_stream_removal_retires_runtime_before_source_publication() {
 
 #[test]
 fn launched_stream_removal_escalates_an_ignoring_adapter_before_forgetting_it() {
-    let _runtime = RUNTIME_TEST.lock().unwrap();
+    let _runtime = RuntimeTest::take();
     let catalog = tempfile::tempdir().unwrap();
     write_agent(catalog.path());
     let add = st2(
@@ -426,7 +443,7 @@ fn launched_stream_removal_escalates_an_ignoring_adapter_before_forgetting_it() 
 #[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn failed_source_publish_after_stop_keeps_declaration_relaunchable() {
-    let _runtime = RUNTIME_TEST.lock().unwrap();
+    let _runtime = RuntimeTest::take();
     let catalog = tempfile::tempdir().unwrap();
     write_agent(catalog.path());
     assert!(
