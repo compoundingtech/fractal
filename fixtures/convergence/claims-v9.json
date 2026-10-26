@@ -21,6 +21,136 @@
     "projection": "agents",
     "wakes_reconciler": false
   },
+  "agent.helper-launched": {
+    "kind": "agent.helper-launched",
+    "subjects": [
+      "agent"
+    ],
+    "fields": {
+      "credential_home_label": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "declaration": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "harness": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "helper_incarnation": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "incarnation": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "launcher": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent"
+        ]
+      },
+      "operation_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "person": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "person"
+        ]
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "agents",
+    "wakes_reconciler": true,
+    "retention": "local"
+  },
+  "agent.launcher-bound": {
+    "kind": "agent.launcher-bound",
+    "subjects": [
+      "agent"
+    ],
+    "fields": {
+      "creation_key": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "credential_home": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "desired_digest": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "harness": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "incarnation": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "launcher": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent"
+        ]
+      },
+      "person": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "person"
+        ]
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "agents",
+    "wakes_reconciler": true,
+    "retention": "local"
+  },
   "agent.placement.source-offline": {
     "kind": "agent.placement.source-offline",
     "subjects": [
@@ -590,6 +720,38 @@
     "cardinality": "append",
     "projection": "checkpoints",
     "wakes_reconciler": false
+  },
+  "client.action-result": {
+    "kind": "client.action-result",
+    "subjects": [
+      "custom"
+    ],
+    "fields": {
+      "authority_actor": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "request_digest": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "result": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": true,
+    "retention": "local"
   },
   "client.hang": {
     "kind": "client.hang",
@@ -1190,6 +1352,37 @@
     "projection": null,
     "wakes_reconciler": false,
     "retention": "local"
+  },
+  "custom.client.action-result": {
+    "kind": "custom.client.action-result",
+    "subjects": [
+      "custom"
+    ],
+    "fields": {
+      "authority_actor": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "request_digest": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "result": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": true
   },
   "daemon.diagnostic": {
     "kind": "daemon.diagnostic",
@@ -1882,6 +2075,12 @@
           "listening",
           "dial-out"
         ],
+        "immutable": false,
+        "reference": false
+      },
+      "node_id": {
+        "value_type": "string",
+        "required": false,
         "immutable": false,
         "reference": false
       },
@@ -6652,6 +6851,12 @@
         "immutable": false,
         "reference": false
       },
+      "credential_home": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "deadline_key": {
         "value_type": "string",
         "required": false,
@@ -6713,6 +6918,18 @@
         "reference": false
       },
       "runtime_id": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "runtime_pid": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "runtime_pid_start_token": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -6775,6 +6992,12 @@
         "immutable": false,
         "reference": false
       },
+      "credential_home": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "deadline_key": {
         "value_type": "string",
         "required": false,
@@ -6841,6 +7064,18 @@
         "immutable": false,
         "reference": false
       },
+      "runtime_pid": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "runtime_pid_start_token": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "signal": {
         "value_type": "string",
         "required": false,
@@ -6888,6 +7123,12 @@
       },
       "deadline_unix_ms": {
         "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "fresh_session": {
+        "value_type": "boolean",
         "required": false,
         "immutable": false,
         "reference": false
@@ -6985,6 +7226,12 @@
         "immutable": false,
         "reference": false
       },
+      "credential_home": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "deadline_key": {
         "value_type": "string",
         "required": false,
@@ -7046,6 +7293,18 @@
         "reference": false
       },
       "runtime_id": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "runtime_pid": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "runtime_pid_start_token": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -7247,6 +7506,12 @@
         "reference": false
       },
       "key": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "owner_run": {
         "value_type": "string",
         "required": false,
         "immutable": false,
@@ -8923,12 +9188,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -9048,12 +9307,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -9169,12 +9422,6 @@
       },
       "summary": {
         "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait_on": {
-        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -9605,12 +9852,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -9730,12 +9971,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -9851,12 +10086,6 @@
       },
       "summary": {
         "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait_on": {
-        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -9986,12 +10215,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -10010,43 +10233,6 @@
     "cardinality": "once-per-attempt",
     "projection": "work",
     "wakes_reconciler": true
-  },
-  "work.wait-ended": {
-    "kind": "work.wait-ended",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "attempt": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "message": {
-        "value_type": "subject-reference",
-        "required": false,
-        "immutable": false,
-        "reference": true
-      },
-      "reason": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
   },
   "workspace.observed": {
     "kind": "workspace.observed",

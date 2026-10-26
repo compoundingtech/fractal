@@ -246,7 +246,7 @@ describe('kit transcript turn mapping', () => {
     const turns = transcriptTurnsForItems([unconfirmed], { firstTurnComplete: true })
     expect(turns[0]!.prompt?.sendState).toEqual({
       _tag: 'Unconfirmed',
-      detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.',
+      detail: 'Fractal may have taken this message and has not confirmed it yet. Sending it again is safe.',
     })
   })
 

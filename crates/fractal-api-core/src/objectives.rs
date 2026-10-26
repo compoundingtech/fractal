@@ -516,6 +516,7 @@ mod tests {
             measured_by: "agent/a".into(),
             host: "host".into(),
             seats: vec![],
+            identity: None,
         }
     }
 

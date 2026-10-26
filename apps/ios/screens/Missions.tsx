@@ -75,7 +75,7 @@ export function MissionsScreen() {
       ListEmptyComponent={<Empty text={filter ? `No mission matches “${filter}”.` : loadErrors.missions ? `Missions could not be loaded: ${loadErrors.missions}` : hasSynced && missionsLoaded ? 'No missions yet.' : 'Loading missions…'} />}
       ListFooterComponent={<View style={{ paddingBottom: 24 }}>
         {truncated.missions ? <Note tone="warning">More missions exist beyond these 200.</Note> : null}
-        {hidden ? <Pressable onPress={() => setShowSystem(true)}><Note>{hidden} hidden (st's own, and failures before today) · tap to show</Note></Pressable> : null}
+        {hidden ? <Pressable onPress={() => setShowSystem(true)}><Note>{hidden} hidden (Fractal's own, and failures before today) · tap to show</Note></Pressable> : null}
         <SectionHeader title="launches" count={open.length} />
         {open.map(launch => <ListRow key={launch.id} glyph="◇" glyphColor={theme.waiting} title={launch.title} right={<T dim>{launch.phase}</T>} second={`${launch.planner_config.provider} · ${launch.id}`} onPress={() => navigation.navigate('Launch', { id: launch.id })} />)}
         {truncated.launches ? <Note tone="warning">More launches exist; the CLI lists them all.</Note> : null}

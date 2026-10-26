@@ -76,7 +76,7 @@ pub(super) async fn run_work(
                 print_value(&response, true)
             } else {
                 println!(
-                    "{}\t{}\nClaim: st work claim {} --as {}",
+                    "{}\t{}\nClaim: fractal work claim {} --as {}",
                     response.status, response.subject, response.subject, args.actor
                 );
                 Ok(())
@@ -283,7 +283,7 @@ pub(super) async fn run_work(
                     .work_list(cursor.as_deref(), Some(limit), all)
                     .await?
             };
-            let mut command = "st work ls".to_owned();
+            let mut command = "fractal work ls".to_owned();
             if let Some(actor) = actor.as_deref() {
                 command.push_str(&format!(" --as {actor}"));
             }
@@ -469,7 +469,7 @@ pub(super) async fn run_work(
             );
             if args.print_kdl {
                 eprintln!(
-                    "Submit the candidate with `st work revise` after reviewing {} as {}",
+                    "Submit the candidate with `fractal work revise` after reviewing {} as {}",
                     args.file.display(),
                     actor
                 );

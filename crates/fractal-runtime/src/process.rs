@@ -604,7 +604,7 @@ pub fn process_start_token(pid: u32) -> Result<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn process_identity(pid: u32) -> Result<(char, u64)> {
+pub(crate) fn process_identity(pid: u32) -> Result<(char, u64)> {
     crate::procfs::require_matching_procfs()?;
     let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let end = stat.rfind(')').context("malformed process stat")?;
@@ -790,6 +790,29 @@ mod tests {
             .env(ROOT, root.path())
             .output()
             .expect("launch inherited-procfs namespace regression");
+        // A dev box can forbid unprivileged user namespaces (Ubuntu's AppArmor sets
+        // kernel.apparmor_restrict_unprivileged_userns=1), and then unshare fails before the
+        // regression starts. Outside CI only, say so and record the skip in CI_TEST_ENV_SKIPS,
+        // which st-test signs into the note. CI always runs it.
+        let in_ci = std::env::var_os("CI_RUN_ID").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !in_ci
+            && output.status.code() == Some(1)
+            && stderr
+                .lines()
+                .any(|line| line.starts_with("unshare: ") && line.ends_with("Operation not permitted"))
+        {
+            eprintln!("skipped: no unprivileged userns on this host ({})", stderr.trim());
+            if let Some(skips) = std::env::var_os("CI_TEST_ENV_SKIPS") {
+                use std::io::Write;
+                writeln!(
+                    fs::OpenOptions::new().create(true).append(true).open(skips).unwrap(),
+                    "fractal-runtime process::tests::inherited_outer_procfs_refuses_launch_and_control_before_mutation"
+                )
+                .unwrap();
+            }
+            return;
+        }
         assert!(
             output.status.success(),
             "namespace regression failed: {}\n{}",
