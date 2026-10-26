@@ -495,7 +495,7 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
             "retryable": false
         })).unwrap();
         let error = anyhow::Error::from(fractal_client::ClientError::Api(
-            api.code, api.message.clone(), Box::new(api),
+            api.code.clone(), api.message.clone(), Box::new(api),
         ));
         eprintln!("{}", cli_error_message(&error, false));
         return;
