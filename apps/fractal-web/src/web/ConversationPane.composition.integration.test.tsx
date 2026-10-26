@@ -183,14 +183,17 @@ describe('ConversationPane composition activation', () => {
     await mount()
     const composer = container.querySelector('[data-testid="conversation-composer-dock"]')!
     const parent = container.querySelector<HTMLElement>('[role="tab"][data-thread-id="agent/selected"]')!
+    expect(parent.textContent).toBe('Main')
     const child = container.querySelector<HTMLElement>('[role="tab"][data-thread-id="session/external-child-review"]')!
     await act(async () => child.click())
-    expect(container.querySelector('[data-thread-read-only]')?.textContent).toContain('not replied to')
+    const notice = container.querySelector<HTMLElement>('[data-thread-read-only]')!
+    expect(notice.textContent).toContain('Subagent thread')
+    expect(notice.closest('[data-thread-panel]')?.lastElementChild).toBe(notice)
     expect(container.querySelectorAll('[data-testid="conversation-composer-dock"]')).toHaveLength(1)
     expect(container.querySelector('[data-testid="conversation-composer-dock"]')).toBe(composer)
     expect(composer.closest('[hidden]')).not.toBeNull()
     expect(container.querySelector('[data-thread-item]')).toBeNull()
-    await act(async () => parent.click())
+    await act(async () => notice.querySelector<HTMLButtonElement>('button')!.click())
     expect(container.querySelector('[data-thread-read-only]')).toBeNull()
     expect(container.querySelector('[data-testid="conversation-composer-dock"]')).toBe(composer)
     expect(composer.closest('[hidden]')).toBeNull()

@@ -79,6 +79,13 @@ describe('ConversationPane kit composition', () => {
     expect(html).not.toContain('Connecting')
   })
 
+  it('does not repeat the parent name in a single-thread tab strip', () => {
+    const html = render()
+    expect(html).not.toContain('role="tablist"')
+    expect(html).not.toContain('data-agent-thread-strip')
+    expect(html).toContain('textarea')
+  })
+
   it('shows only children with task-block conversation references as thread tabs', () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: {
       items: [], hasOlder: false, subagents: [
@@ -87,9 +94,21 @@ describe('ConversationPane kit composition', () => {
       ],
     } }
     const html = render()
-    expect(html).toContain('Agent threads')
+    expect(html).toContain('Subagents')
     expect(html).toContain('Reviewer')
     expect(html).not.toContain('Count only')
+  })
+
+  it('uses a human fallback label instead of a raw child identifier', () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [], hasOlder: false, subagents: [
+        { id: 'internal-task-identifier', status: 'running', conversation: { session_id: 'session/external-child-unnamed' } },
+      ],
+    } }
+    const html = render()
+    expect(html).toContain('Subagent 1')
+    expect(html).not.toContain('internal-task-identifier')
+    expect(html).toContain('Main')
   })
 
   it('never mounts a composer for a read-only thread', () => {

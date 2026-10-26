@@ -27,8 +27,8 @@ export const ConversationPane = (props: React.ComponentProps<typeof Conversation
   const [selected, setSelected] = React.useState(props.agentRef)
   const children = feed._tag === 'Observed' ? feed.value.subagents ?? [] : []
   const threads = [
-    { id: props.agentRef, label: props.agentName },
-    ...children.flatMap(child => child.conversation === undefined ? [] : [{ id: child.conversation.session_id, label: child.name ?? child.id, readOnly: true }]),
+    { id: props.agentRef, label: 'Main' },
+    ...children.flatMap((child, index) => child.conversation === undefined ? [] : [{ id: child.conversation.session_id, label: child.name ?? `Subagent ${index + 1}`, readOnly: true }]),
   ]
   const active = threads.find(thread => thread.id === selected) ?? threads[0]!
   const tabs = React.useRef<AgentThreadTabsHandle>(null)
