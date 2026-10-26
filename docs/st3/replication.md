@@ -1304,12 +1304,20 @@ original timestamps; subsequent client boundaries remain INFO. The client emits
 Every handled server request emits exactly one INFO `replication exchange server
 summary`, including fast successes whose response never reaches the client.
 Search both hosts' journals for the ID from the failed record; no DEBUG logging
-is required. The summary includes `status`, `server_ingress_unix_ms`,
+is required. The summary includes `status`, `head_received_unix_ms`,
+`body_read_complete_unix_ms`, `request_body_bytes`, `server_ingress_unix_ms`,
 `server_ingress_elapsed_us`, `backend_done_unix_ms`, `backend_done_elapsed_us`,
 `response_headers_ready_unix_ms`, and `response_headers_ready_elapsed_us`.
 `backend_done: false` and absent backend timestamps mean no completed backend
 answer was observed at response handoff (for example an overload or early refusal).
 The server's individual boundaries remain DEBUG, including late backend completion.
+Head-received means the HTTP request head reached the route middleware, before
+Axum buffers the body. Body-read-complete means that buffering reached the end
+of the wire body; the byte count is compressed bytes when content encoding is used.
+An upload that errors, exceeds the body limit, or is cancelled before completion
+emits one INFO `replication exchange request body incomplete` record when dropped,
+with correlation ID, head arrival time, bytes read so far and `body_read_error`.
+A missing handler summary alone therefore does not prove a missing request head.
 Ingress means the handler entered after Axum extracted the body. Headers-ready
 means the signed/compressed response was handed to Axum, not that the socket write
 completed. A retained backend job records completion with its originating request

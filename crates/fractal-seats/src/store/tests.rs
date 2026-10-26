@@ -1801,21 +1801,24 @@ version 2
 fn response_usage_stays_local_while_attributed_totals_replicate() {
     let local = Store::open_memory("host-one").unwrap();
     let subject = "agent/example.worker";
-    let seed = local
-        .append_claim(&ClaimInput {
-            subject: subject.into(),
-            kind: "harness.observed".into(),
-            actor: Some(subject.into()),
-            fields: BTreeMap::from([
-                ("state".into(), Value::String("ready".into())),
-                ("driver".into(), Value::String("claude".into())),
-                ("incarnation_id".into(), Value::String("inc-one".into())),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some("usage-seed".into()),
-        })
-        .unwrap();
+    let observed = |state: &str, key: &str| {
+        local
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.observed".into(),
+                actor: Some(subject.into()),
+                fields: BTreeMap::from([
+                    ("state".into(), Value::String(state.into())),
+                    ("driver".into(), Value::String("claude".into())),
+                    ("incarnation_id".into(), Value::String("inc-one".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            })
+            .unwrap()
+    };
+    let seed = observed("ready", "usage-seed");
     local.connection.lock().unwrap().execute(
         /* sqlite-large-value: allow-for-now lv-h79caef580176 owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
              VALUES (?1, 'agent', 'revision', ?2, '{}', 'mission-run/example', 'run-generation/example', 'step-run/example/record')",
@@ -1873,6 +1876,9 @@ fn response_usage_stays_local_while_attributed_totals_replicate() {
         29
     );
     std::thread::sleep(std::time::Duration::from_millis(2));
+    // Turn b runs, and its tally arrives once the harness is ready again.
+    observed("working", "usage-turn-b");
+    observed("ready", "usage-turn-b-ready");
     let mut second = record("turn-b", 5, 1, 30, 0);
     second
         .fields

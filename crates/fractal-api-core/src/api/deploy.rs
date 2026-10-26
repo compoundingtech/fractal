@@ -13,6 +13,8 @@ pub async fn verify_go(
             "deploy verification requires the local Unix endpoint",
         )));
     }
+    // A deploy is being checked on this member: this minute of its CPU is not an idle one.
+    note_cpu_busy(smallclaims::windows::cpu_minutes::Busy::Deploy);
     let store = state.store.clone();
     blocking_action(move || {
         let policy = Policy::load_packaged().map_err(|error| {
