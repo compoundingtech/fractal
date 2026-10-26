@@ -219,7 +219,7 @@ pub async fn run(args: SekretsArgs, json_output: bool, endpoint: Option<String>)
             Ok(0)
         }
         SekretsCommand::Setup(setup) => {
-            print!("{}", setup_script(&setup)?);
+            print!("{}", setup_script(&setup, json_output)?);
             Ok(0)
         }
         SekretsCommand::Presets => {
@@ -670,8 +670,9 @@ fn render(request: &Request, value: &Value) -> String {
     }
 }
 
-fn setup_script(setup: &SetupArgs) -> Result<String> {
+fn setup_script(setup: &SetupArgs, json_output: bool) -> Result<String> {
     let person = &setup.person;
+    let program = if json_output { "st" } else { "fractal" };
     if super::store::person_name(person).is_none() {
         bail!("--person must be a person such as person/ada");
     }
@@ -707,7 +708,7 @@ fn setup_script(setup: &SetupArgs) -> Result<String> {
     Ok(format!(
         r#"#!/bin/sh
 # st sekrets: the gateway, its user and its store. Review, then run as root, for example
-#   fractal sekrets setup --person {person} > sekrets-setup.sh && sudo sh sekrets-setup.sh
+#   {program} sekrets setup --person {person} > sekrets-setup.sh && sudo sh sekrets-setup.sh
 # Run it again after updating st to give the gateway the new binary.
 set -eu
 command -v bwrap >/dev/null || {{ echo "install bubblewrap first (apt install bubblewrap)" >&2; exit 1; }}
@@ -755,7 +756,7 @@ EOF
 systemctl daemon-reload
 systemctl enable st-sekrets.service
 systemctl restart st-sekrets.service
-echo "sekrets gateway running; next, from a login session: fractal sekrets enable"
+echo "sekrets gateway running; next, from a login session: {program} sekrets enable"
 "#,
         uids = people
             .iter()
@@ -839,7 +840,7 @@ mod tests {
             also: vec!["1001=person/robin".into()],
             st: Some("/bin/sh".into()),
             checkout_roots: vec!["/home".into(), "/srv/work".into()],
-        })
+        }, false)
         .unwrap();
         assert!(script.contains("\"1000\" = \"person/ada\""));
         assert!(script.contains("\"1001\" = \"person/robin\""));
@@ -848,5 +849,23 @@ mod tests {
         assert!(script.contains("User=sekrets"));
         assert!(script.contains("for uid in 1000 1001; do"));
         assert!(script.contains("setfacl -m u:sekrets:x \"$home\""));
+    }
+
+    #[test]
+    fn setup_script_preserves_legacy_json_stdout_and_brands_human_advice() {
+        let setup = SetupArgs {
+            person: "person/ada".into(),
+            uid: Some(1000),
+            also: Vec::new(),
+            st: Some("/bin/sh".into()),
+            checkout_roots: vec!["/home".into()],
+        };
+        let json_script = setup_script(&setup, true).unwrap();
+        let human_script = setup_script(&setup, false).unwrap();
+        assert!(json_script.contains("#   st sekrets setup --person person/ada > sekrets-setup.sh"));
+        assert!(json_script.contains("next, from a login session: st sekrets enable"));
+        assert!(human_script.contains("#   fractal sekrets setup --person person/ada > sekrets-setup.sh"));
+        assert!(human_script.contains("next, from a login session: fractal sekrets enable"));
+        assert_eq!(json_script, human_script.replace("fractal sekrets", "st sekrets"));
     }
 }
