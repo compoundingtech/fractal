@@ -2247,7 +2247,7 @@ enum RepairCommand {
     /// Apply exactly the plan identified by a dry-run token.
     Apply {
         token: String,
-        /// Caller identity. Agent seats must explicitly name their literal seat identity.
+        /// Caller identity. Agents must explicitly name their literal agent identity.
         /// The daemon verifies the authenticated harness binding and records the caller.
         #[arg(long = "as")]
         actor: Option<String>,
