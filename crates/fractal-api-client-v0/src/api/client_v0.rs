@@ -7216,7 +7216,7 @@ async fn publish_creation(
         let desired = intent.subjects.values().find(|member| member.subject == subject).unwrap();
         let harness = desired.member.as_ref().and_then(|member| member.driver.as_deref())
             .ok_or_else(|| validation("helper creation requires a typed harness"))?;
-        state.store.bind_helper_launcher_from_peer(desired, &key, &session.authority_actor, harness, session.peer_pid)
+        state.store.bind_helper_launcher_from_peer(desired, &key, &session.authority_actor, harness, session.peer_process.as_ref())
             .map_err(|error| validation(error.to_string()))?;
     }
     let mut scoped = request.clone();
@@ -8613,7 +8613,7 @@ async fn action_inner(
     if request.action_type == "agent.create" && session.authority_actor.starts_with("agent/")
         && state.store.latest_actual_value(&session.authority_actor).map_err(ApiError::internal)?.is_some()
     {
-        state.store.verify_helper_launcher_peer(&session.authority_actor, session.peer_pid)
+        state.store.verify_helper_launcher_peer(&session.authority_actor, session.peer_process.as_ref())
             .map_err(|error| validation(error.to_string()))?;
     }
     let request_digest = action_request_digest(&request)?;
@@ -13166,7 +13166,7 @@ subscription "watch/source" {
                 }).unwrap();
             }
             let mut session = ClientSession::local(Some(launcher)).unwrap();
-            session.peer_pid = Some(std::process::id());
+            session.peer_process = Some(fractal_runtime::PeerProcessIdentity::capture(std::process::id(), None).unwrap());
             let snapshot = new_client_snapshot(&state);
             let request = ActionRequest {
                 api_version: CLIENT_API_VERSION.into(), id: "action/helper".into(),
@@ -13175,7 +13175,7 @@ subscription "watch/source" {
                 parameters: json!({"name":"helper", "harness":"codex", "workspace":"/tmp"}),
             };
             let mut unproven = session.clone();
-            unproven.peer_pid = None;
+            unproven.peer_process = None;
             let refused = action(State(state.clone()), Extension(new_client_snapshot(&state)),
                 Extension(unproven), Json(request.clone())).await.unwrap_err();
             assert!(refused.message.contains("kernel-authenticated"));

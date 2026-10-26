@@ -2326,11 +2326,24 @@ An unowned launcher does not confer person ownership.
 Credential-directory references are local to the launcher's host, so helpers must
 launch on that host. Inheritance also requires kernel-authenticated Unix socket
 peer credentials and proof that the peer descends from the launcher's exact
-daemon-recorded harness PID and Linux process-start token. `ST_AGENT`, headers,
-and other environment values cannot establish this grant. Old launcher runs
-without process provenance must be relaunched. Platforms without verified process
-ancestry (currently non-Linux), missing peer PIDs, or unavailable process evidence
-fail closed with a clear refusal; no alternative account or login is selected.
+daemon-recorded harness PID and Linux process-start token. On supported Linux
+kernels, the server retains the original connector's `SO_PEERPIDFD` and refuses
+exited connectors, even when the socket remains open or its PID is reused.
+Older kernels capture the connector's start token at accept time and recheck it
+at the grant; this fallback has the kernel start-time clock's tick granularity.
+Every intermediate ancestor's generation and parent edge is checked
+again before granting. `ST_AGENT`, headers and other environment values cannot
+establish this grant. Old launcher runs without process provenance must be
+relaunched. Platforms without verified process ancestry (currently non-Linux),
+missing peer identity, unreadable procfs or unavailable process evidence fail
+closed with a clear refusal; no alternative account or login is selected.
+
+Socket peer credentials and a pidfd identify the original connector, not the
+current writer of each request. A descriptor handed over by the launcher's
+subtree retains that connector's authority while its identity remains live:
+this is delegation. Ancestry trusts the entire launcher subtree; it is not
+isolation between its descendants. Do not pass an authenticated descriptor to
+an untrusted process.
 
 Reconciliation stops a helper when that exact launcher incarnation ends.
 Spawning and restarting refuse an ended binding, including after a daemon

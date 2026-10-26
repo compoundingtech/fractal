@@ -142,27 +142,57 @@ fn launcher_runtime(store: &Store, launcher: &str) -> Result<Option<(Value, Stri
 }
 
 #[cfg(target_os = "linux")]
-fn require_launcher_ancestry(mut peer: u32, root: u32, token: u64) -> Result<()> {
-    anyhow::ensure!(root > 1 && fractal_runtime::process_start_token(root)? == token,
-        "the launcher process generation ended or was replaced");
-    let mut seen = BTreeSet::new();
-    for _ in 0..128 {
+fn launcher_process_row(pid: u32) -> Result<(u32, u64)> {
+    let pid = i32::try_from(pid).context("socket peer PID is out of range")?;
+    let row = pty_core::proctable::process(pid).known()
+        .context("socket peer process ancestry is unavailable")?;
+    anyhow::ensure!(!row.is_zombie() && !row.is_exiting(),
+        "socket peer process ancestry contains an exited process");
+    let parent = u32::try_from(row.ppid).context("socket peer parent PID is out of range")?;
+    // Both fields come from the same /proc stat read, never two PID lookups.
+    let token = row.identity.as_ref().and_then(|identity| identity.as_str().strip_prefix("linux:"))
+        .context("socket peer process generation is unavailable")?.parse()?;
+    Ok((parent, token))
+}
+
+#[cfg(target_os = "linux")]
+fn require_launcher_ancestry_with(
+    mut peer: u32, root: u32, token: u64,
+    mut validate_peer: impl FnMut() -> Result<()>,
+    mut process: impl FnMut(u32) -> Result<(u32, u64)>,
+) -> Result<()> {
+    // A numeric PID, even one now occupied by the launcher itself, is not the connector.
+    validate_peer()?;
+    anyhow::ensure!(root > 1, "the launcher process generation ended or was replaced");
+    let mut chain = [(0, 0, 0); 128];
+    for index in 0..chain.len() {
+        anyhow::ensure!(peer > 1 && !chain[..index].iter().any(|(pid, _, _)| *pid == peer),
+            "the socket peer is not a descendant of the claimed launcher runtime");
+        let (parent, birth) = process(peer)?;
+        chain[index] = (peer, parent, birth);
         if peer == root {
-            anyhow::ensure!(fractal_runtime::process_start_token(root)? == token,
-                "the launcher process generation changed during authorization");
+            anyhow::ensure!(birth == token, "the launcher process generation ended or was replaced");
+            // Retain every generation and edge: an intermediate PID can also be reused
+            // or reparented while the walk is in progress.
+            for &(pid, parent, birth) in &chain[..=index] {
+                anyhow::ensure!(process(pid)? == (parent, birth),
+                    "socket peer process ancestry changed during authorization");
+            }
+            validate_peer()?;
             return Ok(());
         }
-        anyhow::ensure!(peer > 1 && seen.insert(peer),
-            "the socket peer is not a descendant of the claimed launcher runtime");
-        let stat = std::fs::read_to_string(format!("/proc/{peer}/stat"))?;
-        peer = stat.rsplit_once(") ").and_then(|(_, fields)| fields.split_whitespace().nth(1))
-            .context("socket peer process ancestry is unavailable")?.parse()?;
+        peer = parent;
     }
     anyhow::bail!("socket peer process ancestry exceeds the authorization bound")
 }
 
+#[cfg(target_os = "linux")]
+fn require_launcher_ancestry(peer: &fractal_runtime::PeerProcessIdentity, root: u32, token: u64) -> Result<()> {
+    require_launcher_ancestry_with(peer.pid(), root, token, || peer.validate(), launcher_process_row)
+}
+
 #[cfg(not(target_os = "linux"))]
-fn require_launcher_ancestry(_peer: u32, _root: u32, _token: u64) -> Result<()> {
+fn require_launcher_ancestry(_peer: &fractal_runtime::PeerProcessIdentity, _root: u32, _token: u64) -> Result<()> {
     anyhow::bail!("helper inheritance requires verified process ancestry, unavailable on this platform")
 }
 
@@ -180,8 +210,8 @@ impl Store {
     }
 
     /// Credential grants require kernel peer credentials and the daemon's exact process witness.
-    pub fn verify_helper_launcher_peer(&self, launcher: &str, peer_pid: Option<u32>) -> Result<String> {
-        let peer_pid = peer_pid.context("helper inheritance requires a kernel-authenticated local socket peer PID")?;
+    pub fn verify_helper_launcher_peer(&self, launcher: &str, peer_process: Option<&fractal_runtime::PeerProcessIdentity>) -> Result<String> {
+        let peer_process = peer_process.context("helper inheritance requires a kernel-authenticated local socket peer process")?;
         let (actual, host) = launcher_runtime(self, launcher)?
             .context("the launcher has no unambiguous current runtime")?;
         anyhow::ensure!(host.trim_start_matches("host/") == self.origin().trim_start_matches("host/"),
@@ -201,15 +231,15 @@ impl Store {
         let token = fields["runtime_pid_start_token"].as_str()
             .context("helper inheritance requires a recorded launcher process generation; relaunch the launcher")?
             .parse()?;
-        require_launcher_ancestry(peer_pid, root, token)?;
+        require_launcher_ancestry(peer_process, root, token)?;
         Ok(incarnation.to_owned())
     }
 
     pub fn bind_helper_launcher_from_peer(
         &self, desired: &DesiredSubject, creation_key: &str, launcher: &str,
-        harness: &str, peer_pid: Option<u32>,
+        harness: &str, peer_process: Option<&fractal_runtime::PeerProcessIdentity>,
     ) -> Result<()> {
-        let incarnation = self.verify_helper_launcher_peer(launcher, peer_pid)?;
+        let incarnation = self.verify_helper_launcher_peer(launcher, peer_process)?;
         let bound = self.capture_helper_launcher_binding(desired, creation_key, launcher, harness)?;
         anyhow::ensure!(bound == incarnation, "the launcher restarted during helper authorization");
         Ok(())
@@ -339,6 +369,75 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn connector_pid_reused_by_launcher_is_not_connector_authority() {
+        // The new launcher occupies the exited connector's numeric PID. Its current
+        // row and the launcher receipt agree, but the accept-time witness does not.
+        for exit_during_walk in [false, true] {
+            let mut validations = 0;
+            let result = require_launcher_ancestry_with(40, 40, 200, || {
+                validations += 1;
+                anyhow::ensure!(exit_during_walk && validations == 1,
+                    "the original socket connector exited");
+                Ok(())
+            }, |_| Ok((1, 200)));
+            assert!(result.unwrap_err().to_string().contains("original socket connector"));
+            assert_eq!(validations, if exit_during_walk { 2 } else { 1 });
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ancestry_rechecks_intermediate_generations_and_parent_edges() {
+        for replacement in [(40, 999), (70, 50)] {
+            let mut intermediate_reads = 0;
+            let result = require_launcher_ancestry_with(60, 40, 40, || Ok(()), |pid| {
+                Ok(match pid {
+                    60 => (50, 60),
+                    50 => {
+                        intermediate_reads += 1;
+                        if intermediate_reads == 1 { (40, 50) } else { replacement }
+                    }
+                    40 => (1, 40),
+                    _ => unreachable!(),
+                })
+            });
+            assert!(result.unwrap_err().to_string().contains("ancestry changed"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ancestry_fails_closed_on_every_unreadable_process_lookup() {
+        // Three rows in the walk, then the same three rows at the generation fence.
+        for unreadable in 1..=6 {
+            let mut reads = 0;
+            let result = require_launcher_ancestry_with(60, 40, 40, || Ok(()), |pid| {
+                reads += 1;
+                anyhow::ensure!(reads != unreadable, "unreadable proc");
+                Ok(match pid {
+                    60 => (50, 60),
+                    50 => (40, 50),
+                    40 => (1, 40),
+                    _ => unreachable!(),
+                })
+            });
+            assert!(result.unwrap_err().to_string().contains("unreadable proc"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ancestry_rejects_loops_and_excessive_depth() {
+        let looping = require_launcher_ancestry_with(60, 40, 40, || Ok(()),
+            |pid| Ok((if pid == 60 { 50 } else { 60 }, u64::from(pid))));
+        assert!(looping.unwrap_err().to_string().contains("not a descendant"));
+        let deep = require_launcher_ancestry_with(200, 40, 40, || Ok(()),
+            |pid| Ok((pid - 1, u64::from(pid))));
+        assert!(deep.unwrap_err().to_string().contains("authorization bound"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn helper_launcher_peer_requires_recorded_exact_process_generation() {
         let store = Store::open_memory("node").unwrap();
         launcher(&store, Some("person/ada"));
@@ -346,23 +445,57 @@ mod tests {
         let desired = intent.subjects.values().next().unwrap();
         let pid = std::process::id();
         let token = fractal_runtime::process_start_token(pid).unwrap();
+        let peer = fractal_runtime::PeerProcessIdentity::capture(pid, None).unwrap();
         assert!(store.bind_helper_launcher_from_peer(desired, "create-helper",
             "agent/node.launcher", "codex", None).unwrap_err().to_string().contains("kernel-authenticated"));
         assert!(store.bind_helper_launcher_from_peer(desired, "create-helper",
-            "agent/node.launcher", "codex", Some(pid)).unwrap_err().to_string().contains("recorded"));
+            "agent/node.launcher", "codex", Some(&peer)).unwrap_err().to_string().contains("recorded"));
         for (start_token, accepted) in [(token.wrapping_add(1), false), (token, true)] {
             append(&store, "agent/node.launcher", "runtime.action.succeeded",
                 json!({"action":"start", "incarnation_id":"launcher-1", "harness":"codex",
                     "credential_home":"/logins/codex", "runtime_pid":pid,
                     "runtime_pid_start_token":start_token.to_string()}));
             let result = store.bind_helper_launcher_from_peer(desired, "create-helper",
-                "agent/node.launcher", "codex", Some(pid));
+                "agent/node.launcher", "codex", Some(&peer));
             assert_eq!(result.is_ok(), accepted);
         }
         append(&store, "agent/node.launcher", "runtime.observed",
             json!({"status":"running", "incarnation_id":"launcher-2"}));
         assert!(store.bind_helper_launcher_from_peer(desired, "different-run",
-            "agent/node.launcher", "codex", Some(pid)).is_err());
+            "agent/node.launcher", "codex", Some(&peer)).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_helper_can_launch_a_helper_with_its_own_process_witness() {
+        let store = Store::open_memory("node").unwrap();
+        launcher(&store, Some("person/ada"));
+        let pid = std::process::id();
+        let token = fractal_runtime::process_start_token(pid).unwrap();
+        let peer = fractal_runtime::PeerProcessIdentity::capture(pid, None).unwrap();
+        let mut parent = "agent/node.launcher".to_owned();
+        for (index, name) in ["garden/root/helper", "garden/root/helper/child"].into_iter().enumerate() {
+            append(&store, &parent, "runtime.action.succeeded",
+                json!({"action":"start", "incarnation_id":"launcher-1", "harness":"codex",
+                    "credential_home":"/logins/codex", "runtime_pid":pid,
+                    "runtime_pid_start_token":token.to_string()}));
+            let mut intent = declaration(name);
+            let key = format!("nested-helper-{index}");
+            let desired = intent.subjects.values_mut().next().unwrap();
+            desired.member.as_mut().unwrap().tags.insert("st3.client.create-key".into(), key.clone());
+            let subject = desired.subject.clone();
+            store.bind_helper_launcher_from_peer(desired, &key, &parent, "codex", Some(&peer)).unwrap();
+            publish(&store, &intent, &key, Some(&parent));
+            let binding = store.helper_launcher_binding(&subject).unwrap().unwrap();
+            assert_eq!(binding.launcher, parent);
+            assert_eq!(binding.person.as_deref(), Some("person/ada"));
+            assert_eq!(binding.credential_home.as_deref(), Some("/logins/codex"));
+            assert!(store.helper_launcher_alive(&subject).unwrap());
+            append(&store, &subject, "runtime.observed",
+                json!({"status":"running", "incarnation_id":"launcher-1"}));
+            parent = subject;
+        }
+        assert_eq!(parent, "agent/garden/root/helper/child");
     }
 
     #[test]

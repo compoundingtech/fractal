@@ -14,6 +14,7 @@
 mod environment;
 mod isolate;
 mod priority;
+mod peer_process;
 mod process;
 mod procfs;
 mod pty;
@@ -36,6 +37,7 @@ pub use priority::{
     protect_server, protect_servers, report as priority_report, server_unit,
     set_configured as set_configured_seat_priority, work_prefix,
 };
+pub use peer_process::PeerProcessIdentity;
 pub use process::{
     ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token,
 };

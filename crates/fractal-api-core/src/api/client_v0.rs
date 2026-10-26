@@ -353,8 +353,8 @@ pub struct ClientSession {
     pub transport: &'static str,
     /// Server-established harness or local peer provenance, never a client header.
     pub local_peer: bool,
-    /// Kernel-authenticated Unix socket peer PID; never supplied by a request header.
-    pub peer_pid: Option<u32>,
+    /// Accept-time kernel connector generation; never supplied by a request header.
+    pub peer_process: Option<fractal_runtime::PeerProcessIdentity>,
     pub custom_forms: bool,
     pub conversation_blocks: bool,
     pub conversation_delivery_links: bool,
@@ -376,7 +376,7 @@ impl ClientSession {
             assistant_write: None,
             transport,
             local_peer: false,
-            peer_pid: None,
+            peer_process: None,
             custom_forms: true,
             conversation_blocks: false,
             conversation_delivery_links: false,
@@ -418,7 +418,7 @@ impl ClientSession {
                 assistant_write: None,
                 transport: "unix",
                 local_peer: false,
-                peer_pid: None,
+                peer_process: None,
                 custom_forms,
                 conversation_blocks: false,
                 conversation_delivery_links: false,
@@ -441,7 +441,7 @@ impl ClientSession {
             assistant_write: None,
             transport: "unix",
             local_peer: false,
-            peer_pid: None,
+            peer_process: None,
             custom_forms,
             conversation_blocks: false,
             conversation_delivery_links: false,
@@ -461,7 +461,7 @@ impl ClientSession {
             assistant_write: None,
             transport: "fabric-loopback",
             local_peer: false,
-            peer_pid: None,
+            peer_process: None,
             custom_forms: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
@@ -631,7 +631,8 @@ pub fn authenticate(
                 .get(LOCAL_PERSON_HEADER)
                 .and_then(|value| value.to_str().ok());
             let mut session = ClientSession::local(person)?;
-            session.peer_pid = request.extensions().get::<super::LocalPeer>().map(|peer| peer.pid);
+            session.peer_process = request.extensions().get::<super::LocalPeer>()
+                .and_then(|peer| peer.peer_process.clone());
             session.local_peer = request.extensions().get::<super::BoundAgent>().is_some()
                 || request.extensions().get::<super::LocalPeer>()
                     .is_some_and(|peer| peer.ancestor.is_some())
@@ -744,7 +745,7 @@ pub fn paired_client_session(
         assistant_write: None,
         transport,
         local_peer: false,
-        peer_pid: None,
+        peer_process: None,
         custom_forms,
         conversation_blocks: false,
         conversation_delivery_links: false,

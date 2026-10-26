@@ -2573,11 +2573,26 @@ exit 0
     #[cfg(target_os = "linux")]
     #[test]
     fn process_identity_captures_the_harness_not_the_pty_server_and_fences_incarnation() {
-        let Some(pty) = scoped_pty() else {
-            eprintln!("skipped: no systemd user scopes or no pty binary");
+        let environment = BTreeMap::from([("PATH".into(), std::env::var("PATH").unwrap_or_default())]);
+        let Ok(pty) = crate::resolve_executable("pty", &environment) else {
+            assert_ne!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"),
+                "hosted CI must install the real pty binary for process provenance");
+            eprintln!("skipped: no pty binary outside hosted CI");
             return;
         };
-        let session = Started::orphaning(&pty, "process-identity", "exec sleep 600", &[]);
+        // Provenance does not depend on systemd containment. Exercise the actual PTY
+        // child under both scope and detached backends used by the hosted runners.
+        let root = tempfile::tempdir().unwrap();
+        let pid_file = root.path().join("harness.pid");
+        let mut session = Started {
+            runtime: PtyRuntime::new(root.path().join("r")).with_binary(pty.to_string_lossy()),
+            id: "process-identity".into(), root, harness: 0, orphan: 0,
+        };
+        session.spawn(&Launch::Argv(vec![
+            "sh".into(), "-c".into(),
+            format!("echo $$ > '{}'; exec sleep 600", pid_file.display()),
+        ]), &[]);
+        session.harness = read_pid(&pid_file);
         let incarnation = session.incarnation();
         let identity = session.runtime.process_identity_if(&session.id, &incarnation)
             .unwrap().expect("the live PTY must prove its terminal child's identity");
@@ -2596,6 +2611,7 @@ exit 0
         fs::write(&metadata_path, original).unwrap();
         assert!(changed.unwrap_err().to_string().contains("changed incarnation"),
             "PID reuse must not establish provenance");
+        eprintln!("real PTY provenance exercised: harness PID and generation fenced");
     }
 
     #[test]
