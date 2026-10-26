@@ -26,8 +26,10 @@ Send one JSON command per subscription:
 and Nathan's decision:** subscribe frames may add
 `"trace": {"traceparent": "W3C value", "tracestate": "optional W3C value"}`.
 The lowercase `trace` wire key belongs to the repository-local client_v0 namespace;
-its members use W3C Trace Context, not a separate identifier format. This applies to
-all collection-socket subscribe variants, including conversations and terminals.
+its members use W3C Trace Context, not a separate identifier format. Every
+collection-socket subscribe variant accepts the field, but it affects only `missions`,
+`attention`, `agents`, `work`, `glasses`, `arrangements`, `conversation`, and `terminal`,
+the collections that emit `st.subscription.first_frame`.
 It grants no authority and changes no subscription fields.
 
 The daemon accepts absent, null, and malformed `trace` values without rejecting the
@@ -41,8 +43,9 @@ ignore the unknown field; frames without it remain unchanged.
 
 Dedicated conversation and terminal streams have no subscribe frame, so their
 upgrade-linked behavior is unchanged. Unsubscribe, command frames, and strict HTTP
-bodies do not acquire this field. TypeScript and Swift SDK support and code generation
-are follow-up work after the #1910 decision; neither SDK is changed here.
+bodies do not acquire this field. The generated TypeScript client exposes `trace`
+as an opaque `SubscribeTraceContext`. Typed SDK helpers and Swift client support
+are follow-up work after the #1910 decision.
 
 Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, and `arrangements`,
 plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,

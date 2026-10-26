@@ -184,13 +184,16 @@ span. The context is captured before handler dispatch because the handler constr
 and terminal pumps. W3C context on the upgrade therefore survives task boundaries without
 extending the request span's lifetime.
 
-Each accepted subscribe constructs one bounded `st.subscription.first_frame` span,
-linked to the valid upgrade context. The proposed optional subscribe `trace` field
+Accepted subscriptions to `missions`, `attention`, `agents`, `work`, `glasses`,
+`arrangements`, `conversation`, and `terminal` construct one bounded
+`st.subscription.first_frame` span linked to the valid upgrade context.
+The proposed optional subscribe `trace` field
 (pending [#1910](https://github.com/compoundingtech/smalltalk/pull/1910)) carries W3C
 `traceparent` and optional `tracestate`; the field's repository-local naming and
 compatibility contract is in [collections.md](client-v0/collections.md).
-All collection-socket subscribe variants, including conversations and terminals,
-use the W3C propagator to extract it. A valid frame context parents a SERVER span and
+Every collection-socket subscribe variant accepts the field, but only the collections
+listed above use the W3C propagator to extract it for their first-frame span.
+A valid frame context parents a SERVER span and
 records `st.parent.sampled` through the same helper as HTTP SERVER spans.
 Absent, null, malformed, or invalid context never rejects a frame: the span remains
 an INTERNAL root with an empty parent. Dedicated streams have no subscribe frame

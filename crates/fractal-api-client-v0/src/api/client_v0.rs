@@ -228,7 +228,6 @@ fn subscription_first_frame(
     if !crate::otel::export_enabled() && profile.is_none() {
         return None;
     }
-    let remote = crate::otel::extract_frame_context(frame_trace);
     let collection = match collection {
         "missions" => "missions",
         "attention" => "attention",
@@ -240,6 +239,7 @@ fn subscription_first_frame(
         "terminal" => "terminal",
         _ => return None,
     };
+    let remote = crate::otel::extract_frame_context(frame_trace);
     let span = tracing::info_span!(
         parent: None,
         "st.subscription.first_frame",
