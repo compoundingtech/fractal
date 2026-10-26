@@ -1936,10 +1936,21 @@ child revision changes and daemon restarts. An already reached tick is never rep
 `catch-up "latest"`. Members admitting the same tick while apart converge on one run and initial
 generation; the first creation in canonical claim order supplies its child definition.
 
-A fleet member holds scheduled admission until it has completed an exchange since startup, and
-while replication reports missing history or a deferred projection. A local-only daemon and a
-fleet's sole member can admit immediately. Other fleet members may continue local work during a
-partition; a cold member needs a peer exchange before starting scheduled work.
+A fleet member holds scheduled admission until at least one peer comparison since startup
+reports zero peer-only envelopes. A local-only daemon and a fleet's sole member can admit
+immediately. Deferred projection, active catch-up and first-sync still hold admission.
+A fresh positive peer-only count blocks every schedule. For a primary-only schedule with
+unchanged placement and ownership, an old positive comparison stops blocking when replication
+marks it stale (35 seconds without renewal). This does not erase the count or prove that
+the offline peer has no history; the startup barrier and durable occurrence deduplication remain.
+
+Schedules declaring a standby keep positive comparisons blocking even when stale, on both
+primary and standby. Placement/ownership changes retain the same conservative policy:
+if any retained schedule declaration names another primary, declares a standby, or differs
+in owner run/generation/step, stale positive counts still block. This deliberately includes
+completed historical moves and removed standbys rather than guessing when a move is settled.
+Staged or conflicting owned-set changes remain fenced by the existing ownership guard,
+including at the due callback. No elapsed timeout grants takeover authority.
 
 The mission steps are normal claimable work. A schedule does not start another occurrence while its prior mission run remains active.
 

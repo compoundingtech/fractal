@@ -14,6 +14,12 @@ Run `fractal web` to open the daemon's [local web app](web-and-ios.md), select a
 
 An agent's native terminal remains useful for login, trust, and provider screens. It is not the only way to inspect its work: missions, messages, and results live in the graph.
 
+In the terminal UI's Agents sidebar, a dim anchor after a seat's name marks an explicitly
+declared `lifecycle "standing"` seat in both list and tree views. The anchor uses the MDI
+anchor glyph (U+F0031), which requires a Nerd Font. Owner, bounded, unknown, and undeclared
+lifecycles have no marker; runtime activity and mission ownership never infer one.
+On a narrow sidebar, the name shortens before the anchor, preserving the right columns.
+
 ## From the CLI
 
 ```sh

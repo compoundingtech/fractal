@@ -5,6 +5,7 @@ import { baseline, CHART_HEIGHT, CHART_INSET, CHART_WIDTH, clock, linePath, xFor
 import type { ChartScene as AgentTraceScene, ChartLane as Lane } from './adapter.ts'
 import { DetailsSkeletonPlot } from '../DetailsSkeleton.tsx'
 import { MissingDetailsValue } from '../DetailsUnavailable.tsx'
+import { formatDuration } from '../../../time/human-time'
 
 export interface ContextPanelProps { readonly scene: AgentTraceScene; readonly lane: Lane; readonly compact?: boolean }
 
@@ -29,7 +30,7 @@ export const contextPanelFootprint = (lane: Lane, compact: boolean): ContextPane
   const firstIndex = samples[0] !== undefined && 'turnIndex' in samples[0] ? samples[0].turnIndex : 1
   const lastSample = samples.at(-1)
   const lastIndex = lastSample !== undefined && 'turnIndex' in lastSample ? lastSample.turnIndex : samples.length
-  const cadence = lane.bucketMs === 60_000 ? 'per minute' : lane.bucketMs !== undefined ? `${lane.bucketMs / 1000}s buckets` : 'time buckets'
+  const cadence = lane.bucketMs === 60_000 ? 'per minute' : lane.bucketMs !== undefined ? `${formatDuration(lane.bucketMs)} buckets` : 'time buckets'
   return {
     summary: compact ? `${points.length} ${sampleKind} samples` : `Peak ${Math.round(maximum)}%`,
     source: points.every(point => point.isContextEstimated) ? 'estimates' : points.some(point => point.isContextEstimated) ? 'observed + estimates' : 'observed',
@@ -58,7 +59,7 @@ export const ContextPanel = ({ lane, compact = false }: ContextPanelProps): Reac
   const lastIndex = lastSample !== undefined && 'turnIndex' in lastSample ? lastSample.turnIndex : samples.length
   const turnX = (index: number) => firstIndex === lastIndex ? CHART_WIDTH / 2 : CHART_INSET + ((index - firstIndex) / (lastIndex - firstIndex)) * (CHART_WIDTH - CHART_INSET * 2)
   const plot = points.map(point => ({ ...point, x: compact && usesTurns ? turnX(point.index) : xFor(point.ts, start, end), y: yFor(point.value, maximum) }))
-  const cadence = lane.bucketMs === 60_000 ? 'per minute' : lane.bucketMs !== undefined ? `${lane.bucketMs / 1000}s buckets` : 'time buckets'
+  const cadence = lane.bucketMs === 60_000 ? 'per minute' : lane.bucketMs !== undefined ? `${formatDuration(lane.bucketMs)} buckets` : 'time buckets'
   const axisLabel = usesTurns ? 'per turn · compaction ticks' : `${cadence} · compaction ticks`
   const sourceLabel = points.every(point => point.estimated) ? 'estimates' : points.some(point => point.estimated) ? 'observed + estimates' : 'observed'
   const area = `${linePath(plot)} L${plot.at(-1)!.x.toFixed(1)},${baseline} L${plot[0]!.x.toFixed(1)},${baseline} Z`
