@@ -100,16 +100,6 @@ test('Markdown AllStates consumes the declared conversation slice', () => {
 // Exact export IDs remain undeclared while their owning PRs block these files.
 // Removing a story or declaring its mode must remove its entry; new debt fails.
 const deferredStoryModes: Readonly<Record<string, number>> = {
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#HoverCardKnown': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#HoverCardUnknown': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#TimeCohort': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#FrozenWorkingVersusIdle': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#QuickOpenAction': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#AllStates': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#DensitiesAndChildren': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#PhoneTouchTargets': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#PhoneFocusNoHover': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#ThemedOverlaysAndFocus': 2906,
 }
 
 // Reviewed shrink-only pin owned by the app, separate from the blocked-PR ratchet.
@@ -432,7 +422,7 @@ test('app mode debt matches its reviewed shrink-only pin', () => {
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(557)
+  expect(exemptions).toHaveLength(567)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 
