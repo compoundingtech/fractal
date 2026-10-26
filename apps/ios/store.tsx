@@ -982,7 +982,7 @@ function useAppStore(proof?: FabricProfile) {
           const kept = (await uploader.uploadBlob(decodeBase64(image.base64), image.mediaType)).value;
           attachments.push({ blob: kept.blob, media_type: image.mediaType, ...(image.name ? { name: image.name } : {}) });
         } catch (e) {
-          if (e instanceof ClientError && e.status === 404) return { how: 'failed', error: 'the st this phone is paired with cannot carry images yet; it needs a newer st' };
+          if (e instanceof ClientError && e.status === 404) return { how: 'failed', error: 'the Fractal version this phone is paired with cannot carry images yet; it needs an update' };
           return { how: 'failed', error: `the image could not be sent: ${errorText(e)}` };
         }
       }

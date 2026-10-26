@@ -822,7 +822,7 @@ impl Args {
 
 /// What `st ui --classic` says now that spaces are Fractal TUI's only layout.
 const CLASSIC_GONE: &str =
-    "The classic layout is gone: run plain `st ui`, or `st ui --space NAME` to open a named space";
+    "The classic layout is gone: run plain `fractal ui`, or `fractal ui --space NAME` to open a named space";
 
 /// `st ui open`: ask this person's terminal interface on this machine to show a subject, and
 /// say plainly what happened.
@@ -831,8 +831,8 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
     let pane = ui::requests::pane_for(&open.subject).map_err(anyhow::Error::msg)?;
     let person = configured_person()?
         .filter(|person| person.starts_with("person/") && person.len() > 7)
-        .context("st ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config")?;
-    let dir = ui::requests::dir(&person).context("st ui open needs a state directory: set HOME")?;
+        .context("fractal ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config")?;
+    let dir = ui::requests::dir(&person).context("fractal ui open needs a state directory: set HOME")?;
     let place = match (open.split, open.below) {
         (false, _) => Place::Tab,
         (true, false) => Place::Right,
@@ -871,7 +871,7 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
             open.subject
         ),
         Some(Answer::NotFound) => anyhow::bail!(
-            "st has no {}: nothing was opened. Check the name with st agents ls or st missions ls",
+            "st has no {}: nothing was opened. Check the name with fractal agents ls or fractal missions ls",
             open.subject
         ),
         None => anyhow::bail!(
@@ -906,7 +906,7 @@ pub fn run(mut options: Args) -> Result<()> {
         return ui::run_demo(&args);
     }
     if !io::stdout().is_terminal() {
-        anyhow::bail!("st ui needs an interactive terminal");
+        anyhow::bail!("fractal ui needs an interactive terminal");
     }
     let _quality_session = ui::slo::Session::start();
     let stopping = Arc::new(AtomicBool::new(false));
@@ -929,7 +929,7 @@ pub fn run(mut options: Args) -> Result<()> {
     };
     anyhow::ensure!(
         !client_only || profile.is_some(),
-        "Run st devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256 first"
+        "Run fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256 first"
     );
     let person = match &profile {
         Some(profile) => Some(profile.person()?.to_owned()),
@@ -939,7 +939,7 @@ pub fn run(mut options: Args) -> Result<()> {
         person
             .as_deref()
             .is_some_and(|person| person.starts_with("person/") && person.len() > 7),
-        "st ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config"
+        "fractal ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config"
     );
     let (clients, cache_path) = match &profile {
         Some(profile) => {
@@ -1027,7 +1027,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains("plain `st ui`") && error.contains("`st ui --space NAME`"),
+            error.contains("plain `fractal ui`") && error.contains("`fractal ui --space NAME`"),
             "{error}"
         );
     }

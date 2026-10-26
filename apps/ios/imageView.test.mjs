@@ -50,6 +50,7 @@ test('an owner out of reach and an expired image say so in different words; only
   const gone = imageWords({ kind: 'failed', code: 'blob-expired', message: 'blob expired' }, facts);
   assert.equal(gone.retry, false);
   assert.match(gone.text, /has expired/);
+  assert.equal(imageFailure('blob-expired').words, 'This image has expired: Fractal no longer keeps it.');
   assert.equal(imageFailure(undefined, 'offline').words, 'offline');
   assert.equal(imageFailure(undefined, 'offline').retry, true);
   assert.equal(errorCode(ownerError('remote-unavailable', 'x')), 'remote-unavailable');

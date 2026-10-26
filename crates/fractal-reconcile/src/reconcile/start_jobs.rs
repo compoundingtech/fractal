@@ -165,6 +165,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             let guard = || -> Result<()> {
                 anyhow::ensure!(!store.runtime_start_revoked(&id)?, "start operation was revoked");
                 store.owned_desired_guard(&prepared.subject)?;
+                anyhow::ensure!(store.helper_launcher_alive(&subject)?,
+                    "the helper's launcher run has ended");
                 anyhow::ensure!(store.selected_desired_token(&subject)? == prepared.selected_token,
                     "declaration changed before launch");
                 anyhow::ensure!(prepared.requests_retained(&store)?,
