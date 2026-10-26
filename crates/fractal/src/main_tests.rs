@@ -483,6 +483,82 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
 }
 
 #[test]
+fn gate_subprocess_stderr_keeps_stable_client_errors() {
+    const CHILD: &str = "ST_TEST_GATE_ERROR_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let api: fractal_client::ErrorEnvelope = serde_json::from_value(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/gate-test",
+            "code": "internal",
+            "message": "the store failed",
+            "retryable": false
+        })).unwrap();
+        let error = anyhow::Error::from(fractal_client::ClientError::Api(
+            api.code, api.message.clone(), Box::new(api),
+        ));
+        eprintln!("{}", cli_error_message(&error, false));
+        return;
+    }
+    for gate in [false, true] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "tests::gate_subprocess_stderr_keeps_stable_client_errors", "--nocapture"])
+            .env(CHILD, "1")
+            .env_remove(fractal_daemon::gate_report::ENV);
+        if gate {
+            command.env(fractal_daemon::gate_report::ENV, "/unused/gate-report");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(stderr.trim(), if gate {
+            "st hit a problem: the store failed (internal)"
+        } else {
+            "Fractal hit a problem: the store failed (internal)"
+        });
+    }
+}
+
+#[tokio::test]
+async fn blob_errors_keep_their_type_until_the_rendering_boundary() {
+    use axum::{Json, Router, http::StatusCode};
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("blob.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = Router::new().fallback(|| async {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/blob-test",
+            "code": "internal",
+            "message": "the blob store failed",
+            "retryable": false
+        })))
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let endpoint = Endpoint::Unix(socket);
+    let file = directory.path().join("image.png");
+    fs::write(&file, b"image").unwrap();
+    let upload = upload_attachment(&endpoint, "person/test", &file, Some("image/png"))
+        .await.unwrap_err();
+    let read = run_blobs(&endpoint, None, BlobCommand::Get {
+        reference: format!("blob/{}", "a".repeat(64)),
+        message: None,
+        output: None,
+        actor: Some("person/test".into()),
+    }, false).await.unwrap_err();
+    for error in [upload, read] {
+        assert!(error.downcast_ref::<fractal_client::ClientError>().is_some(), "{error:#}");
+        assert_eq!(render_client_error(&error, true),
+            "Fractal hit a problem: the blob store failed (internal)");
+        assert_eq!(plain_error(&error),
+            "st hit a problem: the blob store failed (internal)");
+    }
+    server.abort();
+    let _ = server.await;
+}
+
+#[test]
 fn a_claude_session_without_a_binding_is_reported_once_after_the_grace() {
     let dir = tempfile::tempdir().unwrap();
     let start = Instant::now();

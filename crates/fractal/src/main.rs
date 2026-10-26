@@ -5038,9 +5038,9 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
 }
 
 fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
-    // Only this known human outage diagnostic is product-name presentation.
-    // Other errors may carry agent-only commands, including harness actor refusals.
-    if native_driver {
+    // Exec gates capture stderr into durable/API-visible output. Keep the same
+    // stable rendering as native drivers and the separate refusal report.
+    if native_driver || std::env::var_os(fractal_daemon::gate_report::ENV).is_some() {
         plain_error(error)
     } else {
         doctor_cli::human_outage_message(error).unwrap_or_else(|| render_client_error(error, true))
@@ -11349,8 +11349,7 @@ async fn upload_attachment(
     };
     let uploaded = generated_client(endpoint, Some(actor))?
         .upload_blob(bytes, &media_type)
-        .await
-        .map_err(|error| anyhow::anyhow!("{}", error.plain()))?
+        .await?
         .value;
     Ok(fractal_daemon::model::AttachmentInput {
         blob: uploaded.blob,
@@ -11391,8 +11390,7 @@ async fn run_blobs(
             let hash = fractal_daemon::blobs::parse_reference(&reference)?;
             let bytes = generated_client(endpoint, Some(&actor))?
                 .blob(&hash, message.as_deref())
-                .await
-                .map_err(|error| anyhow::anyhow!("{}", error.plain()))?;
+                .await?;
             match output {
                 Some(path) => {
                     fs::write(&path, &bytes)
