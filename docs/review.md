@@ -5,7 +5,8 @@ pushes, `scripts/review` (which runs the standard over a head and signs the verd
 here so that no reviewer depends on what was said in a conversation, and so that two reviewers given the same head reach the same
 verdict.
 
-A change goes from idea to main in this order, and each agent does all of it for its own change:
+There is no central reviewer: no intake seat, no curator, no watcher. Every agent, ours and a contributor's, does the whole path
+for its own change, with the same script and this document:
 
 1. **Idea and development.** The author works on a branch and merges `main` into it (never rebases, never force-pushes).
 2. **Signed checks.** `scripts/st-test --all --push origin` runs every check on the head and signs what it ran. No push goes out
@@ -20,19 +21,28 @@ it safe to put in front of everyone, and what could go wrong that the checks can
 
 ## The verdict
 
-A verdict is structured, so a machine can gate on it and a person can read it:
+A verdict is one JSON document, checked against [`.st/review-verdict.schema.json`](../.st/review-verdict.schema.json) by
+`scripts/review-validate`. **If it does not parse and validate, the review fails locally and nothing is signed.** The signature covers
+the whole document, so the findings, the scores and the text cannot be edited afterwards.
 
 | Field | Meaning |
 | --- | --- |
 | `head` | the full 40-character commit the verdict is about; a verdict is void the moment the head moves |
 | `base` | the full `main` commit the head was read against |
+| `round` | 1 to 3, the attempt this is (see "Findings, and the loop") |
 | `verdict` | `GO` or `CHANGES` |
-| `risk` | `low`, `medium` or `high`, with the reasons (see the rubric) |
-| `findings` | each with `file`, `line`, `reason`, the fix that would be accepted, and `blocking` or `advisory` |
+| `risk` | `deterministic` (the script's level and the rules that fired), `llm` (the model's level and its reasons) and `final` (the higher of the two) |
+| `findings` | each with `severity` (`blocking` or `advisory`), `file`, `line`, `reason` and the `fix` that would be accepted |
+| `answers` | for a round after the first: which change answers which earlier finding |
 | `flags` | `public_contract`, `stored_format`, `trust_or_permission`, `global_view`, each `yes` or `no` with one sentence |
 | `read` | what was read in full, what was read as structure only, what was served from the review record |
-| `answers` | for a round after the first: which earlier finding each change answers |
+| `patch_ids` | the per-file patch-id of the change's own diff, the key of the review record |
+| `reviewer` | the model, its family and the harness that ran it |
 | `standard` | the digest of this document, so a verdict names the rule it was made under |
+| `text` | the full review text |
+
+`scripts/review-validate` also checks what a schema cannot say: `risk.final` is the higher of the two scores, a `GO` has no blocking
+finding and a `CHANGES` has at least one, and a round after the first says what answers what.
 
 Words reviewers use, and what they mean:
 
@@ -86,6 +96,21 @@ All at one exact head:
 
 The verdict carries a risk, `low`, `medium` or `high`, and the reasons. Risk replaces asking a person: nothing that gates `main`,
 a deploy, a release or the merge queue waits for a person's approval. **Only `low` and `medium` may enter the merge queue.**
+
+There are two scores, and the final one is the higher:
+
+- **The deterministic score** comes from `scripts/review-risk BASE HEAD`, a script over the diff with named rules in
+  [`.st/review-risk.json`](../.st/review-risk.json): the risky classes of `.st/risky-classes.json` (stored formats and migrations,
+  claim folding and replay, authorisation and keys, the public client and wire contracts, generated contracts, the build and its
+  configuration, routing and delivery), plus deleting data, removing a public item of a contract, private key material, the skip and
+  signing machinery, workflows, and the size of the change. It is a floor: it knows where a change lands, not what it does.
+- **The model's score** is the reviewing model's own level, with reasons, after reading the change against this rubric.
+
+**The model may raise the risk above the floor and never lower it.** A change the script calls `high` is `high` whatever the model
+says; a change the script calls `low` is `high` if the model finds a reason. To lower a change's risk, change the change (see
+below), not the score.
+
+The rubric below is what the model applies and what the script's rules approximate.
 
 **High** — any one of these makes the change high:
 
