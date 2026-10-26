@@ -55,6 +55,11 @@ def git(repo, *args, stdin=None):
     return done.stdout.decode().strip()
 
 
+def apparent_gb(path):
+    """Pool-cap policy fixtures count file lengths, independently of filesystem allocation and compression."""
+    return sum(file.stat().st_size for file in path.rglob('*') if file.is_file()) / 1e9
+
+
 class PoolTreeTest(unittest.TestCase):
     """Pool reuse without a signer or remote: only disposable local worktrees are involved."""
 
@@ -293,7 +298,26 @@ class StTest(unittest.TestCase):
         base_tree = git(self.work, 'rev-parse', 'origin/main^{tree}')
         self.assertEqual(digest, verifier.lane_definition(str(self.work), base_tree, git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)['sha256'])
 
-    def test_a_tree_that_edits_its_own_lane_is_not_signed(self):
+    def test_a_tree_that_edits_its_own_lane_is_signed_with_the_edited_definition_and_covered(self):
+        self.lane_file()
+        self.commit('scripts/lane.sh', 'lane, but fewer tests\n')
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('not signed', out)
+        statement, = self.statements()
+        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        rules = verifier.lane_rules(git(self.work, 'show', 'origin/main:.st/required-lanes.json'), 'demo')
+        definition = verifier.lane_definition(str(self.work), git(self.work, 'rev-parse', 'origin/main^{tree}'),
+                                              git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)
+        self.assertEqual(definition['changed'], ['scripts/lane.sh'])
+        self.assertEqual(statement['predicate']['observed']['inputs']['lane_definition_sha256'], definition['tree_sha256'])
+        code, out, err = self.run_st_test('--check', 'demo', '--status')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'demo +covered ')
+
+    def test_against_a_base_whose_wrapper_refuses_lane_edits_the_check_is_left_to_ci(self):
+        wrap = self.work / 'scripts/evidence-wrap'
+        wrap.write_text(wrap.read_text().replace('\nSIGNS_LANE_EDITS = True\n', '\n'))  # the base's wrapper from before 2026-10-26
         self.lane_file()
         self.commit('scripts/lane.sh', 'lane, but fewer tests\n')
         code, out, err = self.run_st_test('--check', 'demo')
@@ -302,6 +326,9 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.statements(), [])
         self.assertRegex(out, r'demo +not signed +0s +this tree edits its lane \(scripts/lane\.sh\); CI runs it')
         self.assertNotIn('FAILED', out)
+        code, out, err = self.run_st_test('--check', 'demo', '--status')
+        self.assertEqual(code, 0, out + err)  # st-test still reports it so; the pre-push hook refuses it (evidence-prepush)
+        self.assertRegex(out, r'demo +lane edit: CI runs it +this tree edits its lane \(scripts/lane\.sh\)')
 
     def main_moves(self, name, content):
         """main gains a commit the feature branch does not have."""
@@ -351,12 +378,13 @@ class StTest(unittest.TestCase):
         finally:
             os.chdir(cwd)
 
-    def test_status_counts_a_lane_edit_as_covered_by_ci(self):
+    def test_status_does_not_count_an_unsigned_lane_edit_as_covered(self):
         self.lane_file()
         self.commit('scripts/lane.sh', 'lane, but fewer tests\n')
         code, out, err = self.run_st_test('--check', 'demo', '--status')
-        self.assertEqual(code, 0, out + err)
-        self.assertRegex(out, r'demo +lane edit: CI runs it +this tree edits its lane \(scripts/lane\.sh\)')
+        self.assertEqual(code, 3, out + err)
+        self.assertRegex(out, r'demo +not covered ')
+        self.assertNotIn('lane edit', out)
 
     def test_status_names_every_policy_check_and_one_without_a_local_command_is_ci_s(self):
         policy = json.loads(json.dumps(POLICY))
@@ -750,6 +778,7 @@ class StTest(unittest.TestCase):
         lock.write_text('')
         os.utime(lock, (used, used))
 
+    @mock.patch.object(st_test, 'du_gb', apparent_gb)
     def test_the_pool_is_kept_under_a_total_cap_by_evicting_the_least_recently_used_unlocked_units(self):
         base = Path(self.tmp.name) / 'pool'
         self.fake_unit(base, 'repo-a', 0, 200, 1_000)   # oldest
@@ -769,6 +798,7 @@ class StTest(unittest.TestCase):
         self.assertRegex(err.getvalue(), r'evicted repo-b/tree-0 and target-0 \(0\.\d GB, idle \d+ min\)')
         self.assertIn('evicted repo-a/tree-1', err.getvalue())
 
+    @mock.patch.object(st_test, 'du_gb', apparent_gb)
     def test_the_cap_evicts_old_layout_units_and_origin_pool_units_alike_oldest_first(self):
         base = Path(self.tmp.name) / 'pool2'
         self.fake_unit(base, 'old-clone-key', 0, 200, 1_000)        # the layout before origin pools
@@ -799,6 +829,7 @@ class StTest(unittest.TestCase):
                 with self.assertRaises(st_test.Failure):
                     st_test.pool_max_gb()
 
+    @mock.patch.object(st_test, 'du_gb', apparent_gb)
     def test_a_run_enforces_the_cap_before_it_starts_and_never_evicts_its_own_tree(self):
         self.commit('b.txt', 'two')
         base = self.home / '.cache/st-test'
@@ -1240,6 +1271,25 @@ class StTest(unittest.TestCase):
         for name in ('ST_AGENT', 'ST_SKIP_EVIDENCE', 'ST_EVIDENCE_TIME_LIMIT'):
             self.assertIn(name, seen)
 
+    def test_a_check_sees_no_pty_session_of_the_seat(self):
+        self.commit('b.txt', 'two')
+        seat = {'PTY_ROOT': '/seat/pty', 'PTY_SESSION': 'fleet.seat', 'PTY_SESSION_GENERATION': 'g'}
+        out = Path(self.tmp.name) / 'seen'
+        code, _, err = self.run_st_test('--check', 'demo', extra_env=seat, command=['sh', '-c', f'env > {out}'])
+        self.assertEqual(code, 0, err)
+        seen = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
+        for name in seat:
+            self.assertNotIn(name, seen)
+
+    def test_a_check_sees_no_fractal_variable_of_the_seat(self):
+        self.commit('b.txt', 'two')
+        seat = {'FRACTAL_ENDPOINT': '/seat/st3.sock', 'FRACTAL_AGENT': 'agent/x', 'FRACTAL_BIN': '/seat/st3'}
+        out = Path(self.tmp.name) / 'seen'
+        code, _, err = self.run_st_test('--check', 'demo', extra_env=seat, command=['sh', '-c', f'env > {out}'])
+        self.assertEqual(code, 0, err)
+        seen = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
+        self.assertEqual([name for name in seen if name.startswith('FRACTAL_')], [])
+
     def test_a_base_that_looks_like_a_git_option_is_refused(self):
         self.commit('b.txt', 'two')
         for bad in ('--upload-pack=x', '-x', 'a b', ''):
@@ -1284,7 +1334,7 @@ class StTest(unittest.TestCase):
         for path in (self.home / '.local/bin/cargo', bin_dir / 'systemd-run'):
             path.write_text(recorder.format(calls=calls))
             path.chmod(0o755)
-        env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime)}
+        env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime), 'ST_EVIDENCE_GOVERN': 'on'}
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
@@ -1300,7 +1350,7 @@ class StTest(unittest.TestCase):
             self.assertFalse(calls.exists())
             self.commit('d.txt', 'four')
             (tmp / 'no-bus').mkdir()
-            code, out, err = self.run_st_test('--check', 'demo', extra_env={'XDG_RUNTIME_DIR': str(tmp / 'no-bus')})  # no user bus: runs anyway, and says so
+            code, out, err = self.run_st_test('--check', 'demo', extra_env=dict(env, XDG_RUNTIME_DIR=str(tmp / 'no-bus')))  # no user bus: runs anyway, and says so
             self.assertEqual(code, 0, err)
             self.assertIn('st-test: demo runs without the host build cap (no user systemd bus for a builds.slice scope)', err)
             self.assertFalse(calls.exists())  # neither a scope nor a ticket
@@ -1946,7 +1996,7 @@ class PerCrate(StTest):
 
     def hook(self, body):
         path = Path(self.tmp.name) / 'origin.git/hooks/pre-receive'
-        path.write_text('#!/bin/bash\n' + body)
+        path.write_text('#!/usr/bin/env bash\n' + body)
         path.chmod(0o755)
 
     def push_refs(self, count):

@@ -41,7 +41,7 @@ describe('canonical native quota source', () => {
       sourceSchema: 'st3.client.v0/usage.period', accounts: [],
     } })
     expect(yield* Effect.result(source.history('account/ada/claude-1'))).toMatchObject({
-      _tag: 'Failure', failure: { kind: 'unavailable' },
+      _tag: 'Failure', failure: { kind: 'unavailable', reason: 'Native Fractal usage does not publish ledger account history.' },
     })
     expect(requests).toEqual(['/v1/client/usage'])
   }))

@@ -1534,8 +1534,10 @@ A check whose base policy compares a note's input with the run's own value (`inp
 judges it: `st-test` passes the verifier `--run-input kit_inputs=...`, computed by the base's `scripts/ci-fractal-web-changes` (`kit_paths` of the diff
 from the merge base; `true` when that cannot be told) in `--status`, in the pre-push hook (which only asks `--status`) and in the skip of an
 already-signed check. Without it a signed `fractal-web` tree read as `not covered: no_run_input`.
-`scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
-counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); unless `--check` names checks, every check of the skip
+`scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A tree that edits a check's lane
+is signed like any other since 2026-10-26 (the base's `evidence-wrap` records the edited definition's digest, which the host level's `"lane":
+"tree"` accepts), so it is covered only by such a note; against an older base, whose wrapper refuses it, the check reads `lane edit: CI runs it`,
+and the pre-push hook refuses that row like a missing note. Unless `--check` names checks, every check of the skip
 policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
 
 **An agent's push is refused unless its tree is covered.** Our agents run the tests deliberately, as part of their work, with
@@ -1837,8 +1839,8 @@ It lists a check only when all of these hold:
 - Its gate ran it for lack of a note: `decision=run outcome=no_note` on a same-repository pull request.
 - The gate asked about the head's own tree (`tree_of=head head_tree=used`). After a fallback to the merge tree, a pre-signed
   note could not have counted.
-- The pull request does not edit the lane's `definition_paths` (from the pull request's file list). `st-test` refuses to sign
-  such a tree.
+- The pull request does not edit the lane's `definition_paths` (from the pull request's file list). `st-test` refused to sign
+  such a tree before 2026-10-26; it signs it now.
 
 With a check listed, it writes one notice annotation and the job summary:
 

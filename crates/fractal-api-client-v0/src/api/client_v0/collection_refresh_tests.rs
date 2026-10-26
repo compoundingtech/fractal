@@ -1181,6 +1181,7 @@ fn paired_session() -> ClientSession {
         assistant_write: None,
         transport: "paired",
         local_peer: false,
+        peer_process: None,
         custom_forms: false,
         conversation_blocks: false,
         conversation_delivery_links: false, conversation_message_participants: false,
