@@ -218,7 +218,7 @@ fn first_claim_socket_denial_names_cause_and_recovers_on_an_isolated_daemon() {
 
 #[test]
 fn omp_pending_ask_survives_sigterm_without_a_model_turn_or_person_action() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     canary("omp", "ask-sigterm");
@@ -226,7 +226,7 @@ fn omp_pending_ask_survives_sigterm_without_a_model_turn_or_person_action() {
 
 #[test]
 fn omp_pending_ask_survives_sigkill_without_a_model_turn_or_person_action() {
-    if st3::test_support::supervise_test() {
+    if fractal_daemon::test_support::supervise_test() {
         return;
     }
     canary("omp", "ask-sigkill");
