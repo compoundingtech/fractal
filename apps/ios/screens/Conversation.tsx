@@ -488,10 +488,9 @@ function AgentStrip({ agent, onMission }: { agent: NonNullable<ReturnType<typeof
   const harness = harnessName(agent.driver);
   const work = agent.current_work?.[0];
   return <View style={styles.strip}>
-    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-      <T bold color={color}>{glyph} </T><T bold>{agentName(agent)}</T><T color={color}>  {agentReported(agent) ?? agentWord(state)}</T>
-      <View style={{ flex: 1 }} />
-      <T color={harnessColor(harness)}>{harness}</T><T dim>{agentModel(agent) ? ` · ${agentModel(agent)}` : ''} · {agent.host_id?.replace(/^host\//, '') ?? '?'}</T>
+    <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 8 }}>
+      <T numberOfLines={1} style={{ flex: 1, flexShrink: 1, minWidth: 0 }}><T bold color={color}>{glyph} </T><T bold>{agentName(agent)}</T><T color={color}>  {agentReported(agent) ?? agentWord(state)}</T></T>
+      <T numberOfLines={1} style={{ flexShrink: 1, maxWidth: '50%' }}><T color={harnessColor(harness)}>{harness}</T><T dim>{agentModel(agent) ? ` · ${agentModel(agent)}` : ''} · {agent.host_id?.replace(/^host\//, '') ?? '?'}</T></T>
     </View>
     <T dim numberOfLines={1}>{agent.id}</T>
     {agent.checkout ? <T soft>{checkoutLabel(agent.checkout)}</T> : null}
