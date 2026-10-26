@@ -3704,14 +3704,14 @@ enum WorkCommand {
     ///
     /// `--on` names what the step waits on: a pull request (`OWNER/REPO#N`: its checks,
     /// reviews, merge queue and merge), another step (`step-run/...`), or a time (`45m`, or an
-    /// RFC 3339 time). fractal watches it and wakes this seat when it moves: a pull request through
+    /// RFC 3339 time). fractal watches it and wakes this agent when it moves: a pull request through
     /// `fractal gh watch`, which the wait sets, a step when it finishes, a time when it comes. The
     /// step shows `waiting on` its target, and an open wait on a target keeps fractal from nudging
-    /// an idle seat about it. For a person's answer, use `fractal work ask`.
+    /// an idle agent about it. For a person's answer, use `fractal work ask`.
     ///
     /// A build slot or the merge queue is waiting, not execution: the step's timeout counts
     /// only the time it runs. The clock restarts at `work resume`, when the target moves, or
-    /// after `--for` at the latest, so a seat that stops answering cannot hide behind a wait.
+    /// after `--for` at the latest, so an agent that stops answering cannot hide behind a wait.
     /// Waits share a 12h budget per attempt; a wait on a target stops the clock for what is
     /// left of it unless `--for` says less. A wait with only `--reason` is a note: nothing
     /// watches it. The lease still needs its renewals.
@@ -3951,7 +3951,7 @@ struct WorkWaitArgs {
     #[arg(long, env = "ST3_INCARNATION")]
     incarnation: Option<String>,
     /// What the step waits on: OWNER/REPO#N, step-run/..., or a time such as 45m or an RFC
-    /// 3339 time. fractal wakes this seat when it moves.
+    /// 3339 time. fractal wakes this agent when it moves.
     #[arg(long = "on", value_name = "TARGET")]
     on: Option<String>,
     /// The longest the clock stays stopped, such as 30m or 4h; at most 12h. Required without
