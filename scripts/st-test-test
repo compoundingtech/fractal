@@ -1000,6 +1000,22 @@ class StTest(unittest.TestCase):
         # the pool tree was the merge, at no cost to the branch: HEAD of the clone did not move
         self.assertEqual(git(self.work, 'rev-parse', 'HEAD^{tree}'), head_tree)
 
+    def test_a_base_that_moves_while_the_run_waits_for_a_tree_is_signed_at_its_new_tip(self):
+        self.branch_from_a_base_with_the_gate()
+        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))  # a protected file: the merge is what is signed
+        real_acquire = st_test.acquire_tree
+        def main_moves_while_waiting(*args, **kwargs):
+            self.main_commits('later.txt', 'merged while the run waited')
+            return real_acquire(*args, **kwargs)
+        with mock.patch.object(st_test, 'acquire_tree', side_effect=main_moves_while_waiting):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        expected = git(self.work, 'merge-tree', '--write-tree', '--no-messages', 'HEAD', 'origin/main').split()[0]
+        git(self.work, 'cat-file', '-e', f'{expected}:later.txt')  # the merge holds the tip that landed during the wait
+        statement, = self.statements()
+        self.assertIn(expected, json.dumps(statement))
+        self.assertEqual(self.run_st_test('--status', '--check', 'demo')[0], 0, 'the tree CI judges now is the one signed')
+
     def test_when_main_moved_only_unprotected_files_the_head_tree_is_signed_as_before(self):
         self.branch_from_a_base_with_the_gate()
         head_tree = git(self.work, 'rev-parse', 'HEAD^{tree}')

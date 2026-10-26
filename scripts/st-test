@@ -331,6 +331,15 @@ def gate_commit(base):
     return result
 
 
+def fetch_base(base):
+    """The base's commit at its current tip: a remote-tracking base (origin/main) is fetched first, since main moves; the lag and the
+    policy are read at that tip."""
+    remote, _, branch = base.partition('/')
+    if branch:
+        git('fetch', '-q', remote, branch)
+    return text(git('rev-parse', '--verify', '-q', base + '^{commit}'))
+
+
 def target_commit(base):
     """The commit that is signed: the one whose tree the CI gate will judge (gate_commit: the head, or the merge with the base when
     the gate falls back to it); with --seed, the commit it names."""
@@ -1483,10 +1492,8 @@ def main(argv):
 
     # A run's times count from here (the base fetch, the pool tree, the members and the notes fetch are part of what a run costs).
     started_wall, started = time.time(), time.monotonic()
-    remote, _, branch = args.base.partition('/')
-    if branch:
-        git('fetch', '-q', remote, branch)  # the base moves; the lag and the policy are read at its current tip
-    base_commit = text(git('rev-parse', '--verify', '-q', args.base + '^{commit}'))
+    remote = args.base.partition('/')[0]
+    base_commit = fetch_base(args.base)
     if args.status:
         commit, why_merge = gate_commit(args.base)
         if why_merge:
@@ -1539,25 +1546,31 @@ def main(argv):
     with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
         os.chmod(scratch, 0o700)
         (Path(scratch) / 'pid').write_text(str(os.getpid()))
-        tools = {}
-        for name in BASE_SCRIPTS:
-            path = Path(scratch) / name
-            path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
-            path.chmod(0o700)
-            tools[name] = str(path)
         directory = Path(scratch) / 'tree'
         pool_trees, tree_lock, tree_target, n = pool_size(), None, None, None
         try:
             if pool_trees:
-                commit, root = target_commit(args.base), pool_root()
-                if gate_commit(args.base)[1]:
-                    print(f'st-test: {gate_commit(args.base)[1]}', flush=True)
+                root = pool_root()
+                target_commit(args.base)  # a branch that does not merge with the base fails now, not after the wait for a tree
                 n, tree_lock = acquire_tree(root, pool_trees)
+                # The wait for a tree can take hours, and main moves meanwhile: the base is fetched again and the commit to sign chosen at
+                # its tip now, so what is signed is only as old as the run itself (2026-10-26: a run that waited 1h50m signed a merge with a
+                # main that had already moved a protected file, and the push was refused).
+                base_commit = fetch_base(args.base)
+                commit, why_merge = gate_commit(args.base)
+                if why_merge:
+                    print(f'st-test: {why_merge}', flush=True)
                 if pool_max_gb():
                     evict_to_cap(pool_base(), pool_max_gb(), keep=(root, n))
                 directory, tree_target = prepare_tree(root, n, commit), root / f'target-{n}'
             else:
                 directory, commit = target_worktree(args.base, scratch)
+            tools = {}
+            for name in BASE_SCRIPTS:  # from the base as it is now, after any wait for a tree
+                path = Path(scratch) / name
+                path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
+                path.chmod(0o700)
+                tools[name] = str(path)
             lag = behind(args.base)
             tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
             lane_base = branch_point(commit, base_commit)
