@@ -59,6 +59,16 @@ mission "app/update-deps" state="ready" {
     assigned-to "agent/app/maintainer"
     goal "List every outdated dependency."
   }
+  step "choose-parser" {
+    assigned-to "person/ada"
+    goal "Ship parser 3.0 and migrate the CLI, or hold at 2.x?"
+    depends-on { step "audit" completed }
+  }
+  step "changelogs" {
+    assigned-to "agent/app/reviewer"
+    goal "Read the changelogs of every update."
+    depends-on { step "audit" completed }
+  }
   step "update" timeout="1h" {
     assigned-to "agent/app/maintainer"
     goal "A deps PR with CI green."
@@ -160,8 +170,9 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
             .unwrap();
     };
 
-    // Ada's scenario: the maintainer's step and the conversation that runs it.
+    // Ada's scenario: the maintainer's step, Ada's choice and the conversation that runs it.
     let mut update = None;
+    let mut choose = None;
     let mut timeline = None;
     // Robin's scenario: the migration step that asks Robin.
     let mut migrate = None;
@@ -176,6 +187,8 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         };
         let (audit, step_update) = (step("audit"), step("update"));
         let maintainer = audit.assigned_to.clone().unwrap();
+        let changelogs = step("changelogs");
+        let reviewer = changelogs.assigned_to.clone().unwrap();
         work(
             &audit.subject,
             &maintainer,
@@ -208,6 +221,21 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
             "progress",
             "update-progress",
             "Updated parser, vitest and zod. Parser 3.0 breaks three CLI tests.",
+        );
+        // The reviewer reads the changelogs meanwhile, so the mission has two agents at work.
+        work(
+            &changelogs.subject,
+            &reviewer,
+            "claim",
+            "changelogs-claim",
+            "Reading the changelogs",
+        );
+        work(
+            &changelogs.subject,
+            &reviewer,
+            "progress",
+            "changelogs-progress",
+            "vitest and zod are minor. Parser 3.0 drops the old flag syntax.",
         );
         // The maintainer's harness is running, so the TUI shows its conversation (with
         // "Conversation first" on): the timeline its driver reports, merged with its messages.
@@ -250,6 +278,7 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         );
         timeline = Some(entries);
         update = Some(step_update);
+        choose = Some(step("choose-parser"));
     } else {
         let index = run("marrowpine/invoice-index", "invoice-index-1");
         let step_migrate = index
@@ -333,7 +362,7 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
             ],
         );
     }
-    if let (Some(update), Some(mut entries)) = (update, timeline) {
+    if let (Some(update), Some(choose), Some(mut entries)) = (update, choose, timeline) {
         let maintainer = update.assigned_to.clone().unwrap();
         let reviewer = "agent/app/reviewer";
         let send = |from: &str, to: &str, subject: &str, body: &str| {
@@ -365,51 +394,19 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
             "Re: Deps PR",
             "Parser 3.0 drops the old flag syntax. The CLI breaks on it.",
         );
-        let ask = fractal(
-            &dir,
-            &socket,
-            &[
-                "work",
-                "ask",
-                "--for",
-                "person/ada",
-                "--title",
-                "Ship parser 3.0 and migrate the CLI, or hold at 2.x?",
-                "--reason",
-                "Parser 3.0 drops the old flag syntax. Shipping it moves the CLI to the new syntax in this PR. Holding keeps parser at 2.x until the next update.",
-                "--step",
-                &update.subject,
-                "--as",
-                &maintainer,
-                "--incarnation",
-                &format!("{maintainer}:1"),
-                "--idempotency-key",
-                "website-ask-ada",
-            ],
-        );
-        let ask: Value = serde_json::from_slice(&ask.stdout).unwrap();
-        let ask = find_string(&ask, &|text| text.contains("/ask-"))
-            .unwrap_or_else(|| panic!("no ask subject in {ask}"));
+        // Ada's step is declared in the mission, so it shows by its name. She answers it.
         fractal(
             &dir,
             &socket,
             &[
                 "work",
                 "done",
-                &ask,
+                &choose.subject,
                 "--as",
                 "person/ada",
                 "--summary",
                 "Ship 3.0 and migrate the CLI.",
             ],
-        );
-        // The answer hands the step back to its agent. The maintainer takes it up again.
-        work(
-            &update.subject,
-            &maintainer,
-            "claim",
-            "update-resume",
-            "Moving the CLI to parser 3.0",
         );
         work(
             &update.subject,
@@ -462,15 +459,6 @@ fn fractal(dir: &Path, socket: &Path, args: &[&str]) -> Output {
         String::from_utf8_lossy(&output.stderr)
     );
     output
-}
-
-fn find_string(value: &Value, matches: &dyn Fn(&str) -> bool) -> Option<String> {
-    match value {
-        Value::String(text) if matches(text) => Some(text.clone()),
-        Value::Array(items) => items.iter().find_map(|item| find_string(item, matches)),
-        Value::Object(fields) => fields.values().find_map(|item| find_string(item, matches)),
-        _ => None,
-    }
 }
 
 /// An agent's harness timeline, as its driver reports it: entries in order, each a local observation.
