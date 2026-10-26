@@ -804,6 +804,7 @@ async fn drive_st2_native(
             }
             settled = settle.control_tick(&mut control_retry, &mut interval), if !completion_announced => {
                 if driver == "claude" && mailbox.subscription.is_some() && settled
+                    && claude_attachment_check_due(&mailbox, &mut loop_state, current_unix_ms()? as u64)
                     && let Err(error) = check_claude_attachment(
                         client, subject, &incarnation, &mailbox, attach_started, &mut loop_state,
                     ).await

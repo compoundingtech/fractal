@@ -329,7 +329,7 @@ pub fn error(error: &fractal_client::ClientError) -> String {
         fractal_client::ClientError::Protocol(message) if message.starts_with("HTTP 404") => {
             "This st does not serve objectives and budgets yet: its daemon needs an update.".into()
         }
-        error => format!("Could not read objectives and budgets: {}", error.plain()),
+        error => format!("Could not read objectives and budgets: {}", error.human()),
     }
 }
 

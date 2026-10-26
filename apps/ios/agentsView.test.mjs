@@ -20,10 +20,12 @@ assert.equal(agentState(served('needs_login')), 'needs-login');
 assert.equal(agentState(served('down')), 'down');
 assert.equal(agentState({ state: 'running', harness_state: 'working' }), 'unknown', 'an older daemon serves no presentation');
 // An older st's row shows the state it reports, marked so, and derives nothing.
-import { agentReported } from './agentsView.ts';
-assert.equal(agentReported({ state: 'running' }), 'running · older st');
+import { agentReported, OLDER_ST_NOTE } from './agentsView.ts';
+assert.equal(agentReported({ state: 'running' }), 'running · older Fractal');
 assert.equal(agentReported(served('working')), undefined);
-assert.equal(agentRows([{ ...agent('example/old'), presentation: undefined }], [], 'example-linux', now)[0].reported, 'running · older st');
+assert.equal(agentRows([{ ...agent('example/old'), presentation: undefined }], [], 'example-linux', now)[0].reported, 'running · older Fractal');
+assert.equal(OLDER_ST_NOTE, 'This host runs an older Fractal version: agent states appear as reported.');
+assert.equal(UNMANAGED_GROUP, 'found running · not started by Fractal');
 assert.equal(agentState(served('something-new')), 'unknown');
 assert.equal(agentWord('compacting'), 'compacting');
 assert.equal(agentWord('needs-you'), 'alert');

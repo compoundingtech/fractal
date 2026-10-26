@@ -133,6 +133,10 @@ struct Cli {
     read_contract_inventory_json: bool,
     #[arg(long, global = true, hide = true)]
     checkpoint_space_gate_capabilities: bool,
+    /// Daemon Unix socket, HTTP URL, or fabric://NODE-OR-NAME/st3-client-v0.
+    /// Native Fabric product requests use FRACTAL_CLIENT_CREDENTIAL for the paired bearer.
+    /// Fabric supports client-v0 and health only, not terminal/mailbox WebSockets,
+    /// backups, drivers, or other local-only daemon commands.
     #[arg(long, global = true)]
     endpoint: Option<String>,
     /// Run a second, fully separate fractal on this machine: its own state, config, sockets, node
@@ -816,7 +820,7 @@ fn leave_receipt_confirmation(
         Some(removal) if removal.code == "member-left" => Ok(Some(removal.reported_by.clone())),
         Some(removal) => anyhow::bail!(
             "{} reports this machine as {}, so what it wrote after that will not replicate; \
-             finish with st fleet leave --offline",
+             finish with fractal fleet leave --offline",
             removal.reported_by,
             removal.code
         ),
@@ -874,7 +878,7 @@ async fn wait_for_leave_confirmation(
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
             "{stage}, no member reported holding everything this machine wrote within {seconds} \
-             seconds ({}); run st fleet leave again, or st fleet leave --offline and remove this \
+             seconds ({}); run fractal fleet leave again, or fractal fleet leave --offline and remove this \
              machine from another member",
             leave_peer_summary(&status)
         );
@@ -4460,7 +4464,7 @@ fn run_admission(command: AdmissionCommand, json_output: bool) -> Result<()> {
         );
     } else if reason.is_some() {
         println!(
-            "{} installed build explicitly allowed; admission checks bypassed. Record: {}\nRestart only the affected seat to apply. A changed executable or shipped extension needs its own exception. Revoke with `st admission revoke {} --binary {}`.",
+            "{} installed build explicitly allowed; admission checks bypassed. Record: {}\nRestart only the affected seat to apply. A changed executable or shipped extension needs its own exception. Revoke with `fractal admission revoke {} --binary {}`.",
             build.harness,
             path.display(),
             build.harness,
@@ -4789,10 +4793,10 @@ fn plain_ui_requested(arguments: usize, stdin: bool, stdout: bool, seat: bool) -
 fn run_terminal_ui(mut options: fractal_tui::Args, endpoint: Option<&str>) -> ExitCode {
     let result = (|| -> Result<()> {
         if let Some(endpoint) = endpoint {
-            match Endpoint::parse(endpoint) {
+            match Endpoint::parse(endpoint)? {
                 Endpoint::Unix(path) => options = options.with_endpoint(path),
                 _ => anyhow::bail!(
-                    "st ui uses a local Unix socket; pair remote devices with st devices complete"
+                    "fractal ui uses a local Unix socket; pair remote devices with fractal devices complete"
                 ),
             }
         }
@@ -4838,7 +4842,7 @@ fn run_demo(command: DemoCommand) -> ExitCode {
             DemoCommand::Seat { player } => demo::seat(player),
             DemoCommand::Play { file, reset } => {
                 let instance = fractal_daemon::instance::current().context(
-                    "a demo plays in its own instance, so your fleet is never touched: st --instance demo demo play FILE",
+                    "a demo plays in its own instance, so your fleet is never touched: fractal --instance demo demo play FILE",
                 )?;
                 let demo = demo::load(&file)?;
                 // The demo acts as its own people and agents; a seat's identity must not leak in.
@@ -4921,6 +4925,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
         .or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"))
         .as_deref()
         .map(Endpoint::parse)
+        .transpose()?
         .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -5014,12 +5019,7 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
             if let Some(exit) = error.downcast_ref::<CommandExit>() {
                 return ExitCode::from(exit.0);
             }
-            let message = if native_driver {
-                plain_error(&error)
-            } else {
-                doctor_cli::human_outage_message(&error)
-                    .unwrap_or_else(|| plain_error(&error))
-            };
+            let message = cli_error_message(&error, native_driver);
             eprintln!("st: {message}");
             if refused_command(&error) {
                 fractal_daemon::gate_report::note_refusal(&plain_error(&error));
@@ -5042,9 +5042,51 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     }
 }
 
-/// The error chain as printed, with an st client-API error said in plain words and its code in
-/// parentheses for scripts, rather than a Rust enum name (`StaleFence`).
+/// CLI presentation is stable inside exec gates: both output streams enter JSON.
+#[derive(Clone, Copy)]
+enum ClientMessage {
+    Stable,
+    Human,
+}
+
+impl ClientMessage {
+    fn for_output(native_driver: bool) -> Self {
+        static IN_GATE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            std::env::var_os(fractal_daemon::gate_report::ENV).is_some()
+        });
+        if native_driver || *IN_GATE { Self::Stable } else { Self::Human }
+    }
+
+    fn error(self, error: &fractal_client::ClientError) -> String {
+        match self {
+            Self::Stable => error.plain(),
+            Self::Human => error.human(),
+        }
+    }
+
+    fn message(self, code: Option<&fractal_client::ErrorCode>, message: &str) -> String {
+        match self {
+            Self::Stable => fractal_client::plain_message(code, message),
+            Self::Human => fractal_client::human_message(code, message),
+        }
+    }
+}
+
+fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
+    let mode = ClientMessage::for_output(native_driver);
+    if let ClientMessage::Human = mode {
+        doctor_cli::human_outage_message(error).unwrap_or_else(|| render_client_error(error, mode))
+    } else {
+        render_client_error(error, mode)
+    }
+}
+
+/// Stable words and codes for scripts, gate output and refusal reports.
 fn plain_error(error: &anyhow::Error) -> String {
+    render_client_error(error, ClientMessage::Stable)
+}
+
+fn render_client_error(error: &anyhow::Error, mode: ClientMessage) -> String {
     let full = format!("{error:#}");
     let Some(api) = error
         .chain()
@@ -5059,7 +5101,8 @@ fn plain_error(error: &anyhow::Error) -> String {
         .ok()
         .and_then(|code| code.as_str().map(str::to_owned))
         .unwrap_or_default();
-    full.replace(&api.to_string(), &format!("{} ({code})", api.plain()))
+    let message = mode.error(api);
+    full.replace(&api.to_string(), &format!("{message} ({code})"))
 }
 
 static DAEMON_WAIT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
@@ -5136,7 +5179,8 @@ async fn run(cli: Cli) -> Result<()> {
     );
     let mission_run = fractal_drivers::contracts::env("ST_MISSION_RUN");
     guard_mutating_cli_actor(&cli.command, own.as_deref(), mission_run.as_deref())?;
-    if let Command::Setup(args) = cli.command {
+    if let Command::Setup(mut args) = cli.command {
+        args.json_output = cli.json;
         return crate::setup::run(args).await.map(|_| ());
     }
     // Staging must bypass normal service-family conflict checks and all install
@@ -5270,6 +5314,7 @@ async fn run(cli: Cli) -> Result<()> {
         .or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"))
         .as_deref()
         .map(Endpoint::parse)
+        .transpose()?
         .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
     let _ = DAEMON_WAIT.set(Duration::from_secs(cli.daemon_wait));
     let client = cli_client(&endpoint);
@@ -5442,7 +5487,7 @@ async fn run(cli: Cli) -> Result<()> {
             run_replication(&client, &config, command, cli.json).await
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
-        Command::Uninstall(args) => run_uninstall(&endpoint, args).await,
+        Command::Uninstall(args) => run_uninstall(&endpoint, args, cli.json).await,
         Command::Migrate { command: MigrateCommand::Host(args) } => {
             migrate_cli::run(&endpoint, args, cli.json).await
         }
@@ -5695,6 +5740,8 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
     format!("{}{agent}  {state}{until}{title}", text("thread"))
 }
 
+const GH_UNWATCH_HINT: &str = "To stop: st gh unwatch";
+
 async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, json: bool) -> Result<()> {
     match command {
         GhCommand::Watch(args) => {
@@ -5716,7 +5763,7 @@ async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, jso
             println!(
                 "Each new comment or review that this seat did not post, each time the required checks on its head turn pass or fail, and its close or merge wake this seat once."
             );
-            println!("To stop: st gh unwatch {thread}");
+            println!("{GH_UNWATCH_HINT} {thread}");
         }
         GhCommand::Unwatch(args) => {
             let outcome: Value = client
@@ -6969,7 +7016,7 @@ async fn startable_mission(
         anyhow::ensure!(
             now < deadline,
             "{absent} after {}s. A mission published on another host arrives by replication; \
-             check `st replication status`.",
+             check `fractal replication status`.",
             wait.as_secs()
         );
         if !announced {
@@ -7108,7 +7155,7 @@ async fn follow_mission_run_to(
             let mut frame = render_mission_run_page(&run, &page.runs, style, current_unix_ms()?);
             if let Some(cursor) = &page.next_cursor {
                 frame.push_str(&format!(
-                    "\nTREE      More runs follow; st missions show {} --cursor {cursor} --limit {limit}\n",
+                    "\nTREE      More runs follow; fractal missions show {} --cursor {cursor} --limit {limit}\n",
                     run.subject,
                 ));
             }
@@ -7358,7 +7405,7 @@ async fn attach_terminal(
         && !outer.is_empty()
     {
         anyhow::bail!(
-            "st terminals attach: already inside PTY session `{outer}`. Detach first with Ctrl+\\, or pass --force."
+            "fractal terminals attach: already inside PTY session `{outer}`. Detach first with Ctrl+\\, or pass --force."
         );
     }
     // The subject's running PTY sessions on this host, read from the registry alone. When there
@@ -7382,11 +7429,11 @@ async fn attach_terminal(
                 return terminal_exit(code);
             }
             (None, _) if budget.is_some() => {
-                anyhow::bail!("st terminals attach: daemon did not answer within 1 s and no local PTY session matches `{subject}`");
+                anyhow::bail!("fractal terminals attach: daemon did not answer within 1 s and no local PTY session matches `{subject}`");
             }
             (None, Some(root)) => {
                 eprintln!(
-                    "st terminals attach: waiting for the {daemon}; no PTY session of `{subject}` runs under {} to attach without it.",
+                    "fractal terminals attach: waiting for the {daemon}; no PTY session of `{subject}` runs under {} to attach without it.",
                     root.display()
                 );
                 consult.await
@@ -7419,6 +7466,7 @@ fn endpoint_label(endpoint: &Endpoint) -> String {
     match endpoint {
         Endpoint::Unix(socket) => socket.display().to_string(),
         Endpoint::Http(url) => url.clone(),
+        Endpoint::Fabric(endpoint) => endpoint.to_string(),
     }
 }
 
@@ -7454,7 +7502,7 @@ async fn attach_remote_terminal(
         },
         Err(error) => format!("{error:#}"),
     };
-    eprintln!("st terminals attach: {unreached}. Attaching through the client gateway instead.");
+    eprintln!("fractal terminals attach: {unreached}. Attaching through the client gateway instead.");
     fractal_daemon::remote_terminal::attach(&gateway, subject, subject).await
 }
 
@@ -7594,7 +7642,7 @@ async fn attach_unconsulted(
         .split_first()
         .context("an attachment without st needs a PTY session")?;
     eprintln!(
-        "st terminals attach: {why}, so st was not consulted. Attaching as the local user to PTY session `{}` of `{subject}` (started {}) under {}, without st's incarnation check.",
+        "fractal terminals attach: {why}, so st was not consulted. Attaching as the local user to PTY session `{}` of `{subject}` (started {}) under {}, without st's incarnation check.",
         newest.runtime_id,
         newest.created_at,
         pty_root.display()
@@ -7834,10 +7882,22 @@ fn trace_scalar(value: &Value) -> String {
 }
 
 fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<GeneratedClient> {
-    let Endpoint::Unix(socket) = endpoint else {
-        anyhow::bail!(
-            "client-v0 product commands require the trusted local Unix endpoint; remote clients must use a paired Fabric credential"
-        );
+    let socket = match endpoint {
+        Endpoint::Unix(socket) => socket,
+        Endpoint::Fabric(endpoint) => {
+            let mut client = GeneratedClient::fabric(endpoint.clone());
+            if let Some(credential) = std::env::var_os("FRACTAL_CLIENT_CREDENTIAL") {
+                let credential = credential.into_string().map_err(|_| {
+                    anyhow::anyhow!("FRACTAL_CLIENT_CREDENTIAL must contain valid UTF-8")
+                })?;
+                client = client.with_credential(credential);
+            }
+            return Ok(client
+                .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true));
+        }
+        Endpoint::Http(_) => anyhow::bail!(
+            "client-v0 product commands require a trusted local Unix or native Fabric endpoint"
+        ),
     };
     if let Some(startup) = fractal_daemon::startup::read(socket)
         && startup.status == "starting"
@@ -7874,7 +7934,7 @@ async fn run_now(
         "the now limit must be 1 through 200"
     );
     let person = args.person.as_deref().or(configured_person).context(
-        "st now needs `--as person/NAME` or `person = \"person/NAME\"` in the st config",
+        "fractal now needs `--as person/NAME` or `person = \"person/NAME\"` in the st config",
     )?;
     let person = parse_person_subject(person).map_err(anyhow::Error::msg)?;
     let client = generated_client(endpoint, Some(&person))?;
@@ -7892,7 +7952,7 @@ async fn run_now(
             .now_list(args.cursor.as_deref(), Some(args.limit), args.all)
             .await?
     };
-    let mut command = format!("st now --as {person}");
+    let mut command = format!("fractal now --as {person}");
     if let Some(owner_run) = args.owner_run {
         command.push_str(&format!(" --owner-run {owner_run}"));
     }
@@ -7962,7 +8022,7 @@ fn render_now_page(page: &ClientPage, continuation_command: &str) -> String {
         if !output.is_empty() {
             output.push('\n');
         }
-        output.push_str("Work: st work ls · Health: st doctor\n");
+        output.push_str("Work: fractal work ls · Health: fractal doctor\n");
     }
     if let Some(cursor) = page.page.next_cursor.as_deref() {
         use std::fmt::Write as _;
@@ -7988,7 +8048,7 @@ async fn run_machines(endpoint: &Endpoint, args: MachinesArgs, json_output: bool
         "MACHINES",
         &response,
         json_output,
-        &format!("st machines{history}"),
+        &format!("fractal machines{history}"),
     )
 }
 
@@ -8050,7 +8110,7 @@ async fn run_devices(
             let rendered = render_product_page(
                 "DEVICES",
                 &response.value,
-                &format!("st devices --as {person}{history}"),
+                &format!("fractal devices --as {person}{history}"),
             );
             print!(
                 "{}",
@@ -8082,7 +8142,7 @@ async fn run_devices(
             print_client_value(&response, json_output)?;
             if !json_output {
                 println!(
-                    "Complete on the assistant host before the code expires: `st devices complete MEMBER_URL PAIRING_ID --assistant`, then enter the code. Grant scopes and expiry are sealed; change them with `st devices --as {person} grant policy <grant>`."
+                    "Complete on the assistant host before the code expires: `fractal devices complete MEMBER_URL PAIRING_ID --assistant`, then enter the code. Grant scopes and expiry are sealed; change them with `fractal devices --as {person} grant policy <grant>`."
                 );
             }
             Ok(())
@@ -8151,7 +8211,7 @@ async fn run_devices(
                     let current = client.assistant_grant(&grant).await?;
                     anyhow::ensure!(
                         !current.value.revoked,
-                        "{grant} is revoked; begin a new grant with `st devices --as {person} pair --assistant`"
+                        "{grant} is revoked; begin a new grant with `fractal devices --as {person} pair --assistant`"
                     );
                     let terms = SealedAssistantGrantTerms::from_cli(
                         &person,
@@ -8540,7 +8600,7 @@ fn configured_human(
 ) -> Result<String> {
     let person = explicit.or(configured).with_context(|| {
         format!(
-            "st {command} needs `--as person/NAME` or `person = \"person/NAME\"` in the st config"
+            "fractal {command} needs `--as person/NAME` or `person = \"person/NAME\"` in the st config"
         )
     })?;
     parse_person_subject(person).map_err(anyhow::Error::msg)
@@ -8687,15 +8747,15 @@ async fn run_collection_watch(
             if collection == "agents" {
                 print!(
                     "{}",
-                    render_client_agents(&page.value, false, false, "st agents ls --watch")
+                    render_client_agents(&page.value, false, false, "fractal agents ls --watch")
                 );
             } else if collection == "attention" {
                 print!(
                     "{}",
-                    render_alert_sections(&page.value, Some(title), "st alerts ls --watch")
+                    render_alert_sections(&page.value, Some(title), "fractal alerts ls --watch")
                 );
             } else {
-                print_product_page(title, &page, false, &format!("st {collection} ls --watch"))?;
+                print_product_page(title, &page, false, &format!("fractal {collection} ls --watch"))?;
             }
             cli_output::stdout().flush()?;
             if cli_output::closed() {
@@ -8739,9 +8799,9 @@ fn render_sync_notice(sync: &fractal_client::SyncNotice, now: u128) -> String {
         output,
         "{}",
         if sync.diverged() {
-            "  Exchanges cannot fix this, so items below can be wrong. Details: st3 replication status\n"
+            "  Exchanges cannot fix this, so items below can be wrong. Details: fractal replication status\n"
         } else {
-            "  Until then, items below can be out of date. Progress: st3 replication status\n"
+            "  Until then, items below can be out of date. Progress: fractal replication status\n"
         }
     );
     output
@@ -8926,7 +8986,7 @@ fn render_product_page_headed(
                 };
                 let _ = writeln!(
                     output,
-                    "  action{reads}: st alerts show {} --as {}",
+                    "  action{reads}: fractal alerts show {} --as {}",
                     item.source_id, item.person_id
                 );
                 // What `st alerts approve` and its siblings take: a person copies it from here.
@@ -8953,7 +9013,7 @@ fn render_product_page_headed(
                 if let Some(claimant) = &item.claimant {
                     let _ = writeln!(output, "  assigned: {claimant}");
                 }
-                let _ = writeln!(output, "  action: st work show {}", item.header.id);
+                let _ = writeln!(output, "  action: fractal work show {}", item.header.id);
             }
             ClientResource::Mission(item) => {
                 let _ = writeln!(
@@ -8967,9 +9027,9 @@ fn render_product_page_headed(
                     let _ = writeln!(output, "  usage {}", render_usage(usage));
                 }
                 if item.runs_truncated {
-                    let _ = writeln!(output, "  inspect: st missions show {}", item.header.id);
+                    let _ = writeln!(output, "  inspect: fractal missions show {}", item.header.id);
                 } else if let Some(run) = item.runs.last() {
-                    let _ = writeln!(output, "  inspect: st missions show {run}");
+                    let _ = writeln!(output, "  inspect: fractal missions show {run}");
                 }
             }
             ClientResource::Launch(item) => {
@@ -8984,7 +9044,7 @@ fn render_product_page_headed(
                     if item.decisions.len() == 1 { "" } else { "s" }
                 );
                 let _ = writeln!(output, "  {}", item.title);
-                let _ = writeln!(output, "  inspect: st launch show {}", item.header.id);
+                let _ = writeln!(output, "  inspect: fractal launch show {}", item.header.id);
             }
             ClientResource::Operation(item) => {
                 let _ = writeln!(
@@ -8992,7 +9052,7 @@ fn render_product_page_headed(
                     "{}  operation  {}  {}  {}",
                     item.header.id, item.severity, item.state, item.summary
                 );
-                let _ = writeln!(output, "  recovery: st doctor");
+                let _ = writeln!(output, "  recovery: fractal doctor");
             }
             ClientResource::Agent(item) => {
                 let _ = writeln!(
@@ -9012,8 +9072,8 @@ fn render_product_page_headed(
                 );
                 let _ = writeln!(output, "  runtime: {}", item.runtime_id);
                 if item.terminal_id.is_some() && item.state == "running" {
-                    let _ = writeln!(output, "  peek: st terminals peek {}", item.owner_id);
-                    let _ = writeln!(output, "  attach: st terminals attach {}", item.owner_id);
+                    let _ = writeln!(output, "  peek: fractal terminals peek {}", item.owner_id);
+                    let _ = writeln!(output, "  attach: fractal terminals attach {}", item.owner_id);
                 }
                 if let Some(owner) = &item.owner_run_id {
                     let _ = writeln!(output, "  owner: {owner}");
@@ -9051,9 +9111,9 @@ fn render_product_page_headed(
                     }
                     let _ = writeln!(output);
                 }
-                let _ = writeln!(output, "  inspect: st subject show {}", item.host_id);
+                let _ = writeln!(output, "  inspect: fractal subject show {}", item.host_id);
                 if !matches!(item.state.as_str(), "local" | "reachable") {
-                    let _ = writeln!(output, "  recovery: st replication status");
+                    let _ = writeln!(output, "  recovery: fractal replication status");
                 }
             }
             ClientResource::Device(item) => {
@@ -9067,11 +9127,11 @@ fn render_product_page_headed(
                 );
                 if let Some(person) = &item.person_id {
                     let _ = writeln!(
-                        output, "  action: st devices --as {} revoke {}",
+                        output, "  action: fractal devices --as {} revoke {}",
                         person, item.header.id
                     );
                 } else if let Some(grant) = &item.grant_id {
-                    let _ = writeln!(output, "  action: st devices grant revoke {grant}");
+                    let _ = writeln!(output, "  action: fractal devices grant revoke {grant}");
                 }
             }
             ClientResource::Session(item) => {
@@ -9085,7 +9145,7 @@ fn render_product_page_headed(
                 }
                 let _ = writeln!(
                     output,
-                    "  timeline: st conversations timeline {}",
+                    "  timeline: fractal conversations timeline {}",
                     item.header.id
                 );
             }
@@ -9504,6 +9564,50 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let declared_accounts = report["accounts"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if !declared_accounts.is_empty() && only.is_none() {
+        // Every declared account, whether or not it spent or reported a limit, so a missing
+        // account is visible as missing and never as absent from the list.
+        output.push('\n');
+        let _ = writeln!(
+            output,
+            "ACCOUNTS  {} · every declared account",
+            declared_accounts.len()
+        );
+        for account in declared_accounts {
+            let name = account["name"].as_str().unwrap_or("unknown");
+            let limit = limits
+                .iter()
+                .find(|limit| limit["account"] == account["account"] && !account["account"].is_null());
+            let dollars = |microusd: &Value| {
+                format!("${}", microusd.as_u64().unwrap_or(0) / 1_000_000)
+            };
+            let detail = if let Some(credits) = account.get("credits") {
+                format!(
+                    "credits {}{} of {} this month",
+                    dollars(&credits["used_microusd"]),
+                    if credits["unpriced_tokens"].as_u64().unwrap_or(0) > 0 { "+" } else { "" },
+                    dollars(&credits["budget_microusd"])
+                )
+            } else if let Some(limit) = limit {
+                let weekly = limit["weekly_percent"]
+                    .as_f64()
+                    .map_or_else(|| "?".to_owned(), |value| format!("{value:.0}%"));
+                let reset = limit["weekly_resets_at_unix_ms"]
+                    .as_u64()
+                    .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+                    .map_or_else(String::new, |at| format!(" resets {}", at.format("%Y-%m-%d %H:%M UTC")));
+                let stale = if limit["stale"].as_bool() == Some(true) { "  stale" } else { "" };
+                format!("weekly {weekly}{reset}{stale}")
+            } else {
+                "no limits reported".to_owned()
+            };
+            let _ = writeln!(output, "{name}  {detail}");
+        }
+    }
     if !limits.is_empty() && only.is_none() {
         let percent = |value: &Value| {
             value
@@ -9571,6 +9675,11 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
     let declared = limits
         .iter()
         .filter_map(|limit| Some((limit["account"].as_str()?, limit["account_ref"].as_str()?)))
+        .chain(
+            declared_accounts
+                .iter()
+                .filter_map(|account| Some((account["account"].as_str()?, account["name"].as_str()?))),
+        )
         .collect::<BTreeMap<_, _>>();
     let groups = only
         .map(|by| vec![by])
@@ -10016,7 +10125,7 @@ fn event_cursor_error(error: anyhow::Error, query: &str, trace: bool) -> anyhow:
         "event cursor {after} has a gap: retained floor {floor}, frontier {frontier}. Missed transitions were not replayed."
     );
     if trace {
-        message.push_str(&format!(" Inspect retained claims, then explicitly continue on the same endpoint with `st trace show{filters} --after-index {frontier} --follow`"));
+        message.push_str(&format!(" Inspect retained claims, then explicitly continue on the same endpoint with `fractal trace show{filters} --after-index {frontier} --follow`"));
     } else {
         message.push_str(" Inspect the current subject state and retry this command explicitly.");
     }
@@ -10042,7 +10151,7 @@ impl LocalEventFeed {
                         .pointer("/features/bounded_legacy_events")
                         .and_then(Value::as_u64)
                         == Some(1),
-                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
+                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `fractal service restart`, then rerun the original command"
                 );
                 Err(error)
             }
@@ -10309,7 +10418,7 @@ async fn list_outcomes(
             .as_deref()
             .map(|a| format!(" --as {a}"))
             .unwrap_or_default();
-        println!("Next: st {collection} ls{actor} --limit {limit} --cursor '{cursor}'");
+        println!("Next: fractal {collection} ls{actor} --limit {limit} --cursor '{cursor}'");
     }
     if partial {
         fractal_daemon::gate_report::note_partial_listing(shown);
@@ -10456,7 +10565,7 @@ async fn doctor_request<T: serde::de::DeserializeOwned>(
         }
         Err(error) if fractal_daemon::client::daemon_unreachable(&error).is_some() => {
             if json_output {
-                let message = doctor_cli::human_outage_message(&error)
+                let message = doctor_cli::outage_message(&error)
                     .unwrap_or_else(|| plain_error(&error));
                 print_value(&json!({"status": "fail", "checks": [{
                     "name": "daemon", "status": "fail", "message": message
@@ -10494,10 +10603,10 @@ async fn run_doctor(
                 );
             }
         }
-        anyhow::ensure!(status != "fail", "st doctor found a failed check");
+        anyhow::ensure!(status != "fail", "fractal doctor found a failed check");
         anyhow::ensure!(
             !args.strict || status != "warn",
-            "st doctor found a computed warning in strict mode"
+            "fractal doctor found a computed warning in strict mode"
         );
         return Ok(());
     }
@@ -10559,14 +10668,14 @@ async fn run_doctor(
             println!("{status}\tstartup\t{}", startup.summary());
         }
         for check in &report.checks {
-            println!("{}\t{}\t{}", check.status, check.name, check.message);
+            println!("{}\t{}\t{}", check.status, check.name, presentation::human_command_hints(&check.message));
         }
         print!("{}", render_performance(&report.performance));
     }
-    anyhow::ensure!(report.status != "fail", "st doctor found a failed check");
+    anyhow::ensure!(report.status != "fail", "fractal doctor found a failed check");
     anyhow::ensure!(
         !args.strict || report.status == "pass",
-        "st doctor found a warning in strict mode"
+        "fractal doctor found a warning in strict mode"
     );
     Ok(())
 }
@@ -10627,7 +10736,7 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                         println!("  evidence\t{}", serde_json::to_string(&item.details)?);
                     }
                 }
-                println!("Apply this exact plan with: st repair apply {}", plan.token);
+                println!("Apply this exact plan with: fractal repair apply {}", plan.token);
             }
         }
         RepairCommand::Apply { token } => {
@@ -10733,7 +10842,7 @@ fn render_fenced_admissions(residue: &[smallclaims::store::FleetAdmissionResidue
     (!fenced.is_empty()).then(|| {
         format!(
             "this node admitted {} beyond the writer's high water, which the fleet fenced, so its \
-             claims differ from the fleet's; st doctor reports them",
+             claims differ from the fleet's; fractal doctor reports them",
             fenced.join(", ")
         )
     })
@@ -11070,7 +11179,7 @@ fn render_checkpoint_status(status: &fractal_daemon::store::CheckpointStatusView
     if status.halted {
         output.push_str(
             "halted        a trim found the graph would change; see daemon diagnostics, then \
-             `st replication checkpoint resume`\n",
+             `fractal replication checkpoint resume`\n",
         );
     }
     output.push_str(&format!("participants  {}\n", names(&status.participants)));
@@ -11185,7 +11294,7 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
 fn confirm_service_reset(config: &Config) -> Result<()> {
     anyhow::ensure!(
         std::io::stdin().is_terminal(),
-        "st service reset requires an interactive terminal"
+        "fractal service reset requires an interactive terminal"
     );
     let mut answer = String::new();
     for (prompt, expected) in [
@@ -11336,8 +11445,7 @@ async fn upload_attachment(
     };
     let uploaded = generated_client(endpoint, Some(actor))?
         .upload_blob(bytes, &media_type)
-        .await
-        .map_err(|error| anyhow::anyhow!("{}", error.plain()))?
+        .await?
         .value;
     Ok(fractal_daemon::model::AttachmentInput {
         blob: uploaded.blob,
@@ -11378,8 +11486,7 @@ async fn run_blobs(
             let hash = fractal_daemon::blobs::parse_reference(&reference)?;
             let bytes = generated_client(endpoint, Some(&actor))?
                 .blob(&hash, message.as_deref())
-                .await
-                .map_err(|error| anyhow::anyhow!("{}", error.plain()))?;
+                .await?;
             match output {
                 Some(path) => {
                     fs::write(&path, &bytes)
@@ -11426,7 +11533,7 @@ async fn run_rules(
                 return print_value(&rules, true);
             }
             if rules.is_empty() {
-                println!("no rules: every principal may write what its person may (st rules lockdown sets the presets)");
+                println!("no rules: every principal may write what its person may (fractal rules lockdown sets the presets)");
             }
             for rule in rules {
                 println!(
@@ -11477,7 +11584,7 @@ async fn run_rules(
                 println!("{name}\taudit\t{}", rule.description);
             }
             println!(
-                "Each rule logs what it would refuse; read the log with st rules audit, then st rules mode NAME enforce."
+                "Each rule logs what it would refuse; read the log with fractal rules audit, then fractal rules mode NAME enforce."
             );
             Ok(())
         }
@@ -11487,7 +11594,7 @@ async fn run_rules(
             let mut rule = rules
                 .into_iter()
                 .find(|rule| rule.name == name)
-                .with_context(|| format!("no rule is named `{name}`; st rules ls lists them"))?
+                .with_context(|| format!("no rule is named `{name}`; fractal rules ls lists them"))?
                 .rule;
             rule.mode = match mode.as_str() {
                 "off" => Mode::Off,
@@ -11695,7 +11802,7 @@ fn document_continuation_command(
         .map(|name| format!(" {}", shell_argument(name)))
         .unwrap_or_default();
     format!(
-        "st documents ls{name} --limit {limit}{} --cursor {}",
+        "fractal documents ls{name} --limit {limit}{} --cursor {}",
         if all { " --all" } else { "" },
         shell_argument(cursor)
     )
@@ -11732,7 +11839,7 @@ async fn run_import(endpoint: &Endpoint, command: ImportCommand, json_output: bo
             if let Some(cursor) = next_cursor {
                 let history = if all { " --all" } else { "" };
                 println!(
-                    "More sessions are available: st import ls{history} --cursor {cursor} --limit {limit}"
+                    "More sessions are available: fractal import ls{history} --cursor {cursor} --limit {limit}"
                 );
             }
             if partial {
@@ -11849,12 +11956,12 @@ fn render_import_session(session: &fractal_client::Session) -> String {
     if importable {
         let _ = writeln!(
             output,
-            "  import: st import run {} --as person/NAME",
+            "  import: fractal import run {} --as person/NAME",
             session.header.id
         );
         let _ = writeln!(
             output,
-            "  conversation: st conversations timeline {}",
+            "  conversation: fractal conversations timeline {}",
             session.header.id
         );
     } else if let Some(reason) = session.extra.get("import_reason").and_then(Value::as_str) {
@@ -12068,7 +12175,7 @@ fn lane_actor(explicit: Option<&str>, configured_person: Option<&str>) -> Result
         return Ok(seat_subject(&own));
     }
     configured_person.map(str::to_owned).context(
-        "st lanes needs `--as person/NAME`, `--as agent/PATH`, or `person = \"person/NAME\"` in the st config",
+        "fractal lanes needs `--as person/NAME`, `--as agent/PATH`, or `person = \"person/NAME\"` in the st config",
     )
 }
 
@@ -12705,7 +12812,7 @@ fn render_client_agent(
             let _ = writeln!(output, "ROLLOUT      published, rollout pending (manual)");
             let _ = writeln!(
                 output,
-                "CUTOVER      st agents rollout {} --as ACTOR",
+                "CUTOVER      fractal agents rollout {} --as ACTOR",
                 agent.header.id
             );
         } else {
@@ -12731,7 +12838,7 @@ fn render_client_agent(
         if matches!(phase, "held" | "failed" | "blocked") {
             let _ = writeln!(
                 output,
-                "RETRY        st agents rollout {} --as ACTOR",
+                "RETRY        fractal agents rollout {} --as ACTOR",
                 agent.header.id
             );
         }
@@ -13743,7 +13850,7 @@ fn derived_message_key(
 /// running the same command again sends it at most once.
 fn message_send_error(error: anyhow::Error, key: &str) -> anyhow::Error {
     let check = format!(
-        "st conversations status --idempotency-key {}",
+        "fractal conversations status --idempotency-key {}",
         shell_word(key)
     );
     let unconfirmed = format!(
@@ -14365,6 +14472,10 @@ struct NativeLoopState {
     /// Admissions for attachment-dependent writes, carried across re-exec with the binding.
     #[serde(default)]
     claude_attachment_admissions: AdmissionBucket,
+    /// When this binding last polled attachment without push. Not carried: a replacement
+    /// image polls once at once.
+    #[serde(skip)]
+    claude_attachment_polled: Option<((String, u64, String), u64)>,
     /// This image's own settle. A replacement image draws a new one, so it is never carried.
     #[serde(skip)]
     settle: ResumeSettle,
@@ -14402,6 +14513,7 @@ struct AdmissionBucket {
 
 const ADMISSION_BURST: u32 = 2;
 const ADMISSION_REFILL_MS: u64 = 10_000;
+const UNPUSHED_ATTACHMENT_RECHECK_MS: u64 = 10_000;
 
 impl AdmissionBucket {
     fn take(&mut self, fence: &fractal_daemon::mailbox::Fence, now_ms: u64) -> bool {
@@ -16991,6 +17103,39 @@ async fn publish_claude_readiness_fallback(
     Ok(false)
 }
 
+/// Whether this control tick checks attachment. With push the check reads the pushed value and
+/// rations its own admissions. Without push (an older daemon, or a reconnect waiting for its
+/// first frame) each check is a GET: a starting phase still checks every tick so readiness is
+/// not delayed, but a settled one (attached or blocked) is rechecked every ten seconds, not
+/// every second.
+fn claude_attachment_check_due(
+    mailbox: &NativeMailbox,
+    state: &mut NativeLoopState,
+    now_ms: u64,
+) -> bool {
+    if mailbox.pushed_attachment().is_some() {
+        return true;
+    }
+    let fence = &mailbox.fence;
+    let binding = (fence.incarnation.clone(), fence.epoch, fence.token.clone());
+    let settled = state.claude_attachment_reconciled
+        && state.claude_attachment_phase != "starting"
+        && state.claude_attachment_pending.is_none()
+        && state.claude_attachment_terminal.is_none();
+    // A replacement binding, or a wall clock stepped backwards, checks at once.
+    if settled
+        && state.claude_attachment_polled.as_ref().is_some_and(|(polled_binding, polled)| {
+            *polled_binding == binding
+                && now_ms >= *polled
+                && now_ms - polled < UNPUSHED_ATTACHMENT_RECHECK_MS
+        })
+    {
+        return false;
+    }
+    state.claude_attachment_polled = Some((binding, now_ms));
+    true
+}
+
 async fn check_claude_attachment(
     client: &Client,
     subject: &str,
@@ -17003,8 +17148,8 @@ async fn check_claude_attachment(
     // On a connection that has pushed attachment, the pushed value alone feeds the phase. Until
     // it has (an older daemon, or a new connection), the GET does, as before; never both.
     let pushed = mailbox.pushed_attachment();
-    // Admissions are rationed only where the phase comes from push; without push every tick
-    // already makes its GET, exactly as before.
+    // Admissions are rationed only where the phase comes from push; without push every check
+    // makes its GET (claude_attachment_check_due spaces those checks).
     let mut from_push = pushed.is_some();
     let mut checked = match pushed {
         Some(attachment) => Ok(attachment),

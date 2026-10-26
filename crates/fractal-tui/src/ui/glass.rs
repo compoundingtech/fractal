@@ -6842,7 +6842,7 @@ mod tests {
                 },
             });
         }
-        assert!(screen(&ui).contains("unconfirmed, st did not answer"));
+        assert!(screen(&ui).contains("unconfirmed, Fractal did not answer"));
         // Letters type in a conversation: Ctrl+R sends it again, and Backspace takes it back
         // into the box to change or delete there.
         ctrl(&mut ui, 'r');

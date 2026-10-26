@@ -169,10 +169,10 @@ pub fn verify_st3_plugin() -> Result<()> {
     let marketplace = st3_marketplace_root()?;
     verify_st3_marketplace_at(&marketplace)?;
     if !st3_marketplace_is_registered_at(&marketplace)? {
-        bail!("the st Claude marketplace is not registered; run `st claude-channel install`");
+        bail!("the st Claude marketplace is not registered; run `fractal claude-channel install`");
     }
     if !st3_plugin_is_installed()? {
-        bail!("the st Claude channel plugin is not installed; run `st claude-channel install`");
+        bail!("the st Claude channel plugin is not installed; run `fractal claude-channel install`");
     }
     Ok(())
 }

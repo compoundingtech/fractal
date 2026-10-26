@@ -160,6 +160,7 @@ pub async fn run(
     let mut transcript = Transcript::default();
     let wrapper = std::env::var(fractal_drivers::claude_session::SESSION_ENV).unwrap_or_default();
     let mut retries = BTreeMap::<String, Retry>::new();
+    let mut retained = BTreeMap::<String, RetainedView>::new();
     let mut unconfirmed_since = BTreeMap::<String, Instant>::new();
     let mut diagnostics = BTreeMap::<String, DiagnosticReport>::new();
     let mut preparation_errors = BTreeMap::<String, String>::new();
@@ -217,16 +218,17 @@ pub async fn run(
                     let mut tracked = messages.clone();
                     let mut dirty = false;
                     let pending: BTreeSet<_> = state.attempted.iter().chain(&state.accepted).chain(&state.confirmed).cloned().collect();
+                    retained.retain(|message, _| pending.contains(message) && !live.contains(message));
                     for message in pending {
                         if live.contains(&message) { continue; }
                         let key = format!("recovery:{message}");
                         if !retry_ready(&retries, &key) { continue; }
-                        match client.get::<MessageView>(&format!("/v1/messages/read/{message}")).await {
-                            Ok(view) if view.to == subject && matches!(view.status.as_str(), "sent" | "staged" | "delivered") => {
-                                tracked.push(view);
+                        match recover_retained(client, subject, &message, &mut retained, Instant::now()).await {
+                            Recovery::Retained(view) => {
+                                tracked.push(*view);
                                 retries.remove(&key);
                             },
-                            Ok(_) => {
+                            Recovery::Settled => {
                                 dirty |= state.attempted.remove(&message);
                                 dirty |= state.accepted.remove(&message);
                                 dirty |= state.confirmed.remove(&message);
@@ -234,7 +236,7 @@ pub async fn run(
                                 unconfirmed_since.remove(&message);
                                 retries.remove(&key);
                             },
-                            Err(error) => {
+                            Recovery::Unavailable(error) => {
                                 retry_failed(&mut retries, &key);
                                 diagnostic(client, &state.fence, &message, "claude-handoff-status-unavailable",
                                     &format!("{message}: retained handoff status could not be read; receipt recovery retries with backoff up to 30s: {error:#}"),
@@ -388,6 +390,8 @@ pub async fn run(
                         }.await;
                         match result {
                             Ok(()) => {
+                                // This receipt changed the message's status: read it again next tick.
+                                retained.remove(&message);
                                 state.accepted.remove(&message);
                                 if state.confirmed.remove(&message) { content.remove(&message); }
                                 state.receipt_records.remove(&message);
@@ -487,6 +491,53 @@ fn current_notification_observation(observed: &fractal_drivers::harness_state::O
                 | fractal_drivers::harness_state::Activity::Idle
                 | fractal_drivers::harness_state::Activity::Active
                 | fractal_drivers::harness_state::Activity::Child)
+}
+
+/// The last read of a retained handoff that is no longer in the live stream. Its status
+/// changes when this channel publishes a receipt (which drops the entry) or when someone
+/// else reads or closes it, so it is read again with backoff instead of on every tick.
+struct RetainedView {
+    view: MessageView,
+    due: Instant,
+    checks: u32,
+}
+
+enum Recovery {
+    Retained(Box<MessageView>),
+    Settled,
+    Unavailable(anyhow::Error),
+}
+
+const RETAINED_RECHECK_MAX: Duration = Duration::from_secs(60);
+
+fn retained_recheck_delay(checks: u32) -> Duration {
+    Duration::from_secs(1_u64 << checks.min(6)).min(RETAINED_RECHECK_MAX)
+}
+
+async fn recover_retained(
+    client: &Client,
+    subject: &str,
+    message: &str,
+    retained: &mut BTreeMap<String, RetainedView>,
+    now: Instant,
+) -> Recovery {
+    if let Some(cached) = retained.get(message).filter(|cached| now < cached.due) {
+        return Recovery::Retained(Box::new(cached.view.clone()));
+    }
+    match client.get::<MessageView>(&format!("/v1/messages/read/{message}")).await {
+        Ok(view) if view.to == subject && matches!(view.status.as_str(), "sent" | "staged" | "delivered") => {
+            let checks = retained.get(message).map_or(0, |cached| cached.checks).saturating_add(1);
+            retained.insert(message.into(), RetainedView {
+                view: view.clone(), due: now + retained_recheck_delay(checks), checks,
+            });
+            Recovery::Retained(Box::new(view))
+        },
+        Ok(_) => {
+            retained.remove(message);
+            Recovery::Settled
+        },
+        Err(error) => Recovery::Unavailable(error),
+    }
 }
 
 async fn announce_initialization(client: &Client, input: &ClaimInput) -> Result<ClaimRecord> {
@@ -1187,6 +1238,69 @@ mod tests {
         ] {
             assert_eq!(retry_delay(failures), Duration::from_secs(seconds));
         }
+    }
+
+    #[tokio::test]
+    async fn claude_retained_handoff_status_is_read_with_backoff_not_every_tick() {
+        use axum::{Json, Router, http::StatusCode, routing::get};
+        use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let status = Arc::new(Mutex::new("delivered"));
+        let app = Router::new().route("/v1/messages/read/{*subject}", get({
+            let reads = Arc::clone(&reads);
+            let status = Arc::clone(&status);
+            move |axum::extract::Path(subject): axum::extract::Path<String>| {
+                let reads = Arc::clone(&reads);
+                let status = *status.lock().unwrap();
+                async move {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    if status == "unavailable" { return Err(StatusCode::INTERNAL_SERVER_ERROR); }
+                    Ok(Json(json!({"api_version":"st3.v1", "value":{
+                        "subject":subject, "from":"person/sender", "to":"agent/worker",
+                        "content":"hello", "status":status, "created_index":1,
+                    }})))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(crate::client::Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let mut retained = BTreeMap::new();
+        let start = Instant::now();
+        let tick = |second: u64| start + Duration::from_secs(second);
+
+        // Ten minutes of one-second ticks over a handoff that stays delivered: the old loop
+        // read it 600 times. Every tick still sees the retained view.
+        for second in 0..600 {
+            let recovery = recover_retained(&client, "agent/worker", "message/kept", &mut retained, tick(second)).await;
+            assert!(matches!(recovery, Recovery::Retained(view) if view.status == "delivered"));
+        }
+        let kept = reads.load(Ordering::SeqCst);
+        assert!(kept <= 16, "a delivered handoff was read {kept} times in 600 ticks");
+
+        // Someone else reads it: the channel notices within one recheck interval.
+        *status.lock().unwrap() = "read";
+        let mut settled = false;
+        for second in 600..=600 + RETAINED_RECHECK_MAX.as_secs() {
+            let recovery = recover_retained(&client, "agent/worker", "message/kept", &mut retained, tick(second)).await;
+            if matches!(recovery, Recovery::Settled) { settled = true; break; }
+        }
+        assert!(settled, "a read handoff was not settled within {RETAINED_RECHECK_MAX:?}");
+        assert!(!retained.contains_key("message/kept"));
+
+        // A failed read is not cached: the caller's retry backoff decides the next attempt,
+        // and the next success is read at once.
+        *status.lock().unwrap() = "unavailable";
+        let failed = recover_retained(&client, "agent/worker", "message/lost", &mut retained, tick(700)).await;
+        assert!(matches!(failed, Recovery::Unavailable(_)));
+        assert!(!retained.contains_key("message/lost"));
+        *status.lock().unwrap() = "delivered";
+        let before = reads.load(Ordering::SeqCst);
+        let recovered = recover_retained(&client, "agent/worker", "message/lost", &mut retained, tick(701)).await;
+        assert!(matches!(recovered, Recovery::Retained(_)));
+        assert_eq!(reads.load(Ordering::SeqCst), before + 1);
+        server.abort();
     }
 
     #[test]
