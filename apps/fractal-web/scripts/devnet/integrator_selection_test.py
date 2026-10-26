@@ -178,6 +178,117 @@ class SelectionTest(unittest.TestCase):
         self.assertIsNone(self.module.SELECTION_DEADLINE)
         self.assertFalse(self.module.C.exists())
 
+    def test_clone_config_refusal_is_preserved_in_tick_receipt(self):
+        subprocess.run(['git', 'init', '-q', str(self.module.C)], check=True)
+        config = self.module.C / '.git/config'
+        original = config.read_bytes()
+        real_run = self.module.run
+        def run(args, **kwargs):
+            return self.response([]) if args[0] == 'gh' else real_run(args, **kwargs)
+        cases = [
+            ('gc.rerereunresolved', 'gc.rerereunresolved'),
+            ('filter.x.clean', 'filter.x.clean'),
+            ('url.https://fixture-user:fixture-secret@example.invalid/repo?access=fixture-query.insteadOf',
+             'url.<redacted-subsection>.insteadof'),
+            ('http.https://fixture-user:fixture-secret@example.invalid/repo?access=fixture-query.extraheader',
+             'http.<redacted-subsection>.extraheader'),
+        ]
+        for key, expected in cases:
+            with self.subTest(key=key):
+                config.write_bytes(original)
+                subprocess.run(['git', 'config', '--file', str(config), key, 'forbidden'], check=True)
+                before = config.read_bytes()
+                log = io.StringIO()
+                with patch.object(self.module, 'run', side_effect=run), \
+                        patch.object(self.module, 'observe_served'), \
+                        patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                        contextlib.redirect_stdout(log):
+                    self.module.tick()
+                row = json.loads((self.module.L / 'live-r3.jsonl').read_text().splitlines()[-1])
+                self.assertEqual(row['build'], 'failed')
+                self.assertIn('non-allowlisted', row['detail'])
+                self.assertIn(expected, row['detail'])
+                self.assertIn(expected, log.getvalue())
+                for secret in ('fixture-user', 'fixture-secret', 'fixture-query', 'forbidden'):
+                    self.assertNotIn(secret, log.getvalue())
+                self.assertEqual(config.read_bytes(), before)
+
+    def test_clone_preparation_rejects_worktree_identity_override(self):
+        subprocess.run(['git', 'init', '-q', str(self.module.C)], check=True)
+        subprocess.run(['git', '-C', str(self.module.C), 'config',
+                        'extensions.worktreeConfig', 'true'], check=True)
+        worktree_config = self.module.C / '.git/config.worktree'
+        worktree_config.write_text('[user]\n name = Not the launcher\n email = override@example.invalid\n')
+        before = worktree_config.read_bytes()
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            self.module.prepare_clone()
+        self.assertIn('user.name', raised.exception.stderr)
+        self.assertIn('user.email', raised.exception.stderr)
+        self.assertNotIn('override@example.invalid', raised.exception.stderr)
+        self.assertEqual(worktree_config.read_bytes(), before)
+
+    def test_uncaptured_host_git_failure_retains_stderr(self):
+        subprocess.run(['git', 'init', '-q', str(self.module.C)], check=True)
+        with contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(subprocess.CalledProcessError) as raised:
+            self.module.git('checkout', 'missing-branch')
+        self.assertIn('missing-branch', raised.exception.stderr)
+        real_run = self.module.run
+        def run(args, **kwargs):
+            return self.response([]) if args[0] == 'gh' else real_run(args, **kwargs)
+        with patch.object(self.module, 'run', side_effect=run), \
+                patch.object(self.module, 'prepare_clone',
+                             side_effect=lambda: self.module.git('checkout', 'missing-branch')), \
+                patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.module.tick()
+        row = json.loads((self.module.L / 'live-r3.jsonl').read_text())
+        self.assertEqual(row['build'], 'failed')
+        self.assertIn('missing-branch', row['detail'])
+
+    def test_fresh_clone_preparation_can_commit_without_global_identity(self):
+        # The tick runs the real clone/preparation and host-git paths. Stop after
+        # a commit at the fetch boundary; no candidate build or network is needed.
+        source = self.module.SOURCE_CLONE
+        subprocess.run(['git', 'init', '-q', str(source)], check=True)
+        subprocess.run(['git', '-C', str(source), '-c', 'user.name=Fixture',
+                        '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null',
+                        'commit', '--allow-empty', '-qm', 'initial'], check=True)
+        subprocess.run(['git', '-C', str(source), 'branch', '-M', 'main'], check=True)
+        real_run = self.module.run
+        committed = []
+        class CommitComplete(Exception):
+            pass
+        def run(args, **kwargs):
+            if args[0] == 'gh':
+                return self.response([])
+            if args[0] == 'git' and 'fetch' in args:
+                self.module.git('commit', '--allow-empty', '-m', 'integrator fixture')
+                committed.append(self.module.text('log', '-1', '--format=%an <%ae>|%cn <%ce>'))
+                raise CommitComplete('commit proof complete')
+            return real_run(args, **kwargs)
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(('GIT_', 'FRACTAL_INTEGRATOR_GIT_USER_'))}
+        env.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                   FRACTAL_INTEGRATOR_SANDBOX='bwrap')
+        with patch.dict(os.environ, env, clear=True), \
+                patch.object(self.module, 'run', side_effect=run), \
+                patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.module.tick()
+        identity = 'Fractal live-r3 integrator <live-r3@fractal-integrator.invalid>'
+        self.assertEqual(committed, [identity + '|' + identity])
+        row = json.loads((self.module.L / 'live-r3.jsonl').read_text())
+        self.assertEqual(row['error'], 'commit proof complete')
+        with patch.dict(os.environ, {'FRACTAL_INTEGRATOR_GIT_USER_NAME': 'Deployment Bot',
+                                     'FRACTAL_INTEGRATOR_GIT_USER_EMAIL': 'bot@example.invalid'}):
+            self.module.prepare_clone()
+        self.assertEqual(self.module.text('config', '--local', 'user.name'), 'Deployment Bot')
+        self.assertEqual(self.module.text('config', '--local', 'user.email'), 'bot@example.invalid')
+
     def test_oversized_pr_is_skipped_without_api_or_cache_and_selection_continues(self):
         oversized = dict(self.pr, changedFiles=4058)
         row = {'skipped': [], 'selection': []}
