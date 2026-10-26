@@ -4682,6 +4682,7 @@ fn cli_main() -> ExitCode {
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(fractal_daemon::driver_hook::SUBCOMMAND))
     {
+        let _ = STDERR_MESSAGE.set(ClientMessage::Stable);
         return run_driver_hook();
     }
     // Cargo bakes the target name into each executable. The installed st3 binary cannot

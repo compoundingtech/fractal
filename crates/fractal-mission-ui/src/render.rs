@@ -259,10 +259,7 @@ pub fn steps(
                 // A long owner is cut so its age never runs into it.
                 format!(
                     "{:<18}",
-                    text::truncate(match step.owner.as_deref() {
-                        Some("st") => "Fractal",
-                        owner => owner.unwrap_or("nobody"),
-                    }, 17)
+                    text::truncate(step.human_owner().unwrap_or("nobody"), 17)
                 ),
                 if step.owner.is_some() {
                     palette.soft()
