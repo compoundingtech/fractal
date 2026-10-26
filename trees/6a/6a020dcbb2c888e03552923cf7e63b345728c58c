@@ -9,3 +9,4 @@ record b22db799e4fb399ac0410544339d7b2ba0cdbba7 linux-gate 0 fleet/ci 2026-10-22
 record bdab1b20fc9c5d3bbba436a6af1507dfc2128c69 isolation-vm 0 fleet/ci 2026-10-22T04:12:38Z
 record d4a8bd569a4a56171fe7b411ffce9a5c5bb32f8d linux-clippy 0 fleet/ci 2026-10-22T03:59:27Z
 record f4e9d4bfef86eaf5dbb3860acb1adbee65e0eb0c typescript-client 0 fleet/ci 2026-10-22T04:03:18Z
+gc 2026-10-26T03:42:19+00:00 9046b01f8a78b91d9f9364392398f0329805590c08000c4a32722ae1b44a79a6

@@ -11,3 +11,4 @@ record cc74a256cb2a93fddc9fd7f31721f4ce71cc8fe7 typescript-client 0 fleet/ci 202
 record d4eeb22f69fb957d44a1ece232c0ff856072f30a linux-tests-shard-4 0 fleet/ci 2026-10-22T04:27:46Z
 record e5295a3d6fdfaff00e3f882d5830a0eb5a7f605c linux-clippy 0 fleet/ci 2026-10-22T04:19:05Z
 record f245e3b555b41af8c2da43d39c0d7c30fbcfe178 fractal-web 0 fleet/ci 2026-10-22T04:33:00Z
+gc 2026-10-26T03:42:19+00:00 9046b01f8a78b91d9f9364392398f0329805590c08000c4a32722ae1b44a79a6

@@ -9,3 +9,4 @@ record cc292816b566a843678c2d7733b8a81f8b0964b3 linux-fleet-compat 0 fleet/ci 20
 record e73b3f383b37b45b9f8bc6c1cf9c688bf7c032a0 typescript-client 0 fleet/ci 2026-10-23T00:05:02Z
 record f67b3ba5a438f169b39c3c76f65932ef5e428da0 mail-redelivery-canaries 0 fleet/ci 2026-10-23T00:01:35Z
 record f83aa2e667558666b86e2cf3b171b92c47e926ad genie-freshness 0 fleet/ci 2026-10-23T00:01:46Z
+gc 2026-10-26T03:42:19+00:00 9046b01f8a78b91d9f9364392398f0329805590c08000c4a32722ae1b44a79a6

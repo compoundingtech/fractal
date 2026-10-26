@@ -8,3 +8,4 @@ record 7fb369c66b217028081b7a2de7d64be8ca177128 linux-tests-shard-2 100 fleet/ci
 record d000a2f05e5bda9b1db00696074e79873bcbd0df linux-gate 1 fleet/ci 2026-10-25T09:09:22Z
 record d55f7ef98ff7b806324becc71f3fcbc81a2c3f42 typescript-client 0 fleet/ci 2026-10-25T09:03:13Z
 record f2ca15aeb2d88352474ff19c447c89f6e6bb2dca ci-script-tests 0 fleet/ci 2026-10-25T09:00:34Z
+gc 2026-10-26T03:42:19+00:00 9046b01f8a78b91d9f9364392398f0329805590c08000c4a32722ae1b44a79a6

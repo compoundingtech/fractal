@@ -8,3 +8,4 @@ record 5a2bbb0ec84b53c55895c11edfbcb9f2d6e9d1cc linux-tests 0 fleet/ci 2026-10-2
 record 7aa39eaf3562a009a83a96b443c55eef450b0aab linux-clippy 0 fleet/ci 2026-10-25T23:54:05Z
 record d4d94f054ff77b0810086bd1a045cfcb7640b22e linux-gate 0 fleet/ci 2026-10-26T00:07:42Z
 record ee203ee858dfbb63d3b9ff3fe78ee01190d0e3f4 fractal-web 0 fleet/ci 2026-10-26T00:06:28Z
+gc 2026-10-26T03:42:19+00:00 9046b01f8a78b91d9f9364392398f0329805590c08000c4a32722ae1b44a79a6
