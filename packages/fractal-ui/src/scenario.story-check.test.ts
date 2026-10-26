@@ -104,12 +104,6 @@ const deferredStoryModes: Readonly<Record<string, number>> = {
 
 // Reviewed shrink-only pin owned by the app, separate from the blocked-PR ratchet.
 const deferredAppStoryModes: Readonly<Record<string, 'fractal-web-app'>> = {
-  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#DarkBeforeHydration': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#LightBeforeHydration': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#AllStates': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#FullyDecoded': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#UndecodableRow': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#AllBadStale': 'fractal-web-app',
 }
 
 interface StoryModule {
@@ -416,13 +410,13 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('app mode debt matches its reviewed shrink-only pin', () => {
-  expect(Object.keys(deferredAppStoryModes)).toHaveLength(6)
+  expect(Object.keys(deferredAppStoryModes)).toHaveLength(0)
   expect(undeclaredApp.sort()).toEqual(Object.keys(deferredAppStoryModes).sort())
   for (const id of undeclaredApp) process.stdout.write(`${id}: undeclared — owned by ${deferredAppStoryModes[id]}\n`)
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(567)
+  expect(exemptions).toHaveLength(573)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 
