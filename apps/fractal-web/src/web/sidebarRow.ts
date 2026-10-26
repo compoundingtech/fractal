@@ -116,6 +116,9 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
   // The canonical state drives both the G3 glyph and its sentence-case word.
   // Lifecycle takes precedence over harness activity: a stopped idle harness is Ended, not Idle.
   const statusLabel = statuses[status].label
+  // OMP supports subagent observations; other harnesses opt in only by reporting a roster.
+  const supportsSubagents = agent.harness === 'omp' || agent.subagents !== undefined
+  const subagentsKnown = agent.subagents !== undefined && !(agent.harness === 'omp' && stale)
   return {
     ref: agent.ref, id: agent.ref, title: agent.name, host: agent.host, status,
     statusLabel: stale ? 'Last verified · ' + statusLabel : statusLabel,
@@ -126,8 +129,8 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
       ? { _tag: 'Unavailable' } : sidebarMissionContext({ agent, missions, attention }),
     missionInfo,
     needsMe,
-    subagentCount: agent.subagents?.length,
-    childrenKnown: agent.subagents !== undefined,
+    subagentCount: subagentsKnown ? agent.subagents!.length : undefined,
+    childrenKnown: supportsSubagents ? subagentsKnown : undefined,
     children: agent.subagents?.map(child => sidebarSubagentRow({ parent: agent, child, stale })) ?? [],
     // Cost is optional and may use another currency; never present unknown spend as $0.
     usage: agent.usage._tag === 'Known' ? {

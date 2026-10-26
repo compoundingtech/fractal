@@ -55,14 +55,14 @@ it('distinguishes no mission, failed without a value and failed with retained mi
   const failed = { _tag: 'Failed' } as const
   const noMission = sidebarRow({ agent, stale: false, missionUnavailable: true, missionInfo: failed })
   expect(noMission.missionContext).toEqual({ _tag: 'None' })
-  expect(sidebarRowAccessibleName(noMission)).toBe('Reported name, ? subagents, Idle')
+  expect(sidebarRowAccessibleName(noMission)).toBe('Reported name, Idle')
   const working = { ...agent, mission: 'mission/example/review' }
   const missing = sidebarRow({ agent: working, stale: false, missionUnavailable: true, missionInfo: failed })
   expect(missing.missionContext).toEqual({ _tag: 'Unavailable' })
-  expect(sidebarRowAccessibleName(missing)).toBe('Reported name, ? subagents, Idle, mission info unavailable')
+  expect(sidebarRowAccessibleName(missing)).toBe('Reported name, Idle, mission info unavailable')
   const retained = sidebarRow({ agent: working, stale: false, missionInfo: failed })
   expect(retained.missionContext).toMatchObject({ _tag: 'Mission', slug: 'review' })
-  expect(sidebarRowAccessibleName(retained)).toBe('Reported name, ? subagents, Idle, Mission review, mission info may be out of date')
+  expect(sidebarRowAccessibleName(retained)).toBe('Reported name, Idle, Mission review, mission info may be out of date')
 })
 describe('controlled native sidebar observations', () => {
   it('never exposes an unknown raw status in hover copy', () => {
@@ -80,7 +80,7 @@ describe('controlled native sidebar observations', () => {
     expect(result.lastTurn).toEqual({_tag:'Unknown'})
     expect(result.needsMe).toBeUndefined()
     expect(result.unread).toBeUndefined()
-    expect(result.childrenKnown).toBe(false)
+    expect(result.childrenKnown).toBeUndefined()
     expect(result.terminal).toBeUndefined()
   })
   it('keeps generic activity distinct from a completed turn', () => {
@@ -143,7 +143,21 @@ describe('controlled native sidebar observations', () => {
     expect(row({ subagents: [] }).subagentCount).toBe(0)
     expect(sidebarRowAccessibleName(row({ subagents: [] }))).toBe('Reported name, Idle')
     expect(row().subagentCount).toBeUndefined()
-    expect(sidebarRowAccessibleName(row())).toBe('Reported name, ? subagents, Idle')
+    expect(sidebarRowAccessibleName(row())).toBe('Reported name, Idle')
+  })
+  it('shows unknown counts only for subagent-capable OMP observations', () => {
+    for (const harness of [undefined, 'codex', 'claude-code']) {
+      expect(row({ harness }).childrenKnown).toBeUndefined()
+      expect(sidebarRowAccessibleName(row({ harness }))).toBe('Reported name, Idle')
+    }
+    const missing = row({ harness: 'omp' })
+    expect(missing.childrenKnown).toBe(false)
+    expect(sidebarRowAccessibleName(missing)).toBe('Reported name, ? subagents, Idle')
+    const stale = row({ harness: 'omp', subagents: [] }, true)
+    expect(stale.childrenKnown).toBe(false)
+    expect(stale.subagentCount).toBeUndefined()
+    expect(sidebarRowAccessibleName(stale)).toBe('Reported name, ? subagents, Last verified · Idle')
+    expect(sidebarRowAccessibleName(row({ harness: 'omp', subagents: [] }))).toBe('Reported name, Idle')
   })
 })
 
@@ -202,7 +216,7 @@ describe('retained mission row context', () => {
 
   it('keeps concise accessible names aligned with real mission evidence', () => {
     const actual = sidebarRow({ agent: seat, stale: false, missions: [hydrated] })
-    const prefix = `${seat.name}, ? subagents, Idle, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps`
+    const prefix = `${seat.name}, Idle, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps`
     expect(sidebarRowAccessibleName(actual)).toBe(`${prefix}, Step Review changes`)
     const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
       actions: ['work.done'], conversation_id: 'agent/example-readonly', detail: 'Ship this change?', update: undefined }
@@ -211,7 +225,7 @@ describe('retained mission row context', () => {
     expect(sidebarRowAccessibleName(waiting)).toBe(`${prefix}, Waiting for you: Ship this change?, mission info may be out of date`)
     expect(sidebarRowAccessibleName({ ...actual, missionInfo: { _tag: 'Failed' } }))
       .toBe(`${prefix}, Step Review changes, mission info may be out of date`)
-    expect(sidebarRowAccessibleName(row())).toBe('Reported name, ? subagents, Idle')
+    expect(sidebarRowAccessibleName(row())).toBe('Reported name, Idle')
   })
   it('does not attach another agent question just because it shares the mission run', () => {
     const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
