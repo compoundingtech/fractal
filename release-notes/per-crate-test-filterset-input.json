@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test --check rust-tests records a long filterset as the crate count and the sha256 of the expression, because the signer takes an input of at most 500 characters and a full run names every workspace crate",
+  "replay": {"status": "none", "detail": "CI and local tooling only; no product code changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product contract change. rust-tests is opt-in and no skip policy reads its notes yet."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

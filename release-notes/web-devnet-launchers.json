@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Version the Fractal Web Devnet launchers and use Devnet-provided edge URLs without querying startup status.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Developer-only launch scripts. Immutable builds retain the purpose and build-directory arguments. No released application or API changes." },
+  "downtime": { "status": "none", "detail": "No deployment changes in this PR." },
+  "manual": { "status": "none", "detail": "No released-product manual step. Deployment owners can adopt these scripts with explicit credential and optional private Vite config paths." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

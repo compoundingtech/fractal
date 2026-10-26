@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/evidence-gc keeps the evidence note namespace bounded: keeps open pull request heads, recent main trees and the input keys they use; migrates the first layout; soft limit and cap",
+  "replay": {"status": "none", "detail": "No daemon replay change."},
+  "schema": {"status": "none", "detail": "No daemon claim or portable record change."},
+  "rules": {"status": "changed", "detail": "A new operator script, scripts/evidence-gc, deletes evidence note refs that no run can still ask about (a note applies to the exact tree it names): dry run by default, --apply to act, --remote to delete on the remote in batches of 500. It keeps the records of every open pull request's current head tree and merge-queue tip, of main's trees of the last 3 days, and the input-index refs whose key a protected head still projects to; it migrates the first-layout refs it keeps to refs/notes/evidence/<tree>/<record>; above 3,000 refs it removes the oldest unprotected ones first; a protected set over 5,000 raises an alert (exit 3) and deletes nothing protected. It fails closed when a head cannot be resolved. Nothing runs it automatically yet; no verifier rule, policy or enforce flag changes."},
+  "compatibility": {"status": "none", "detail": "No behaviour of an existing command changes. Deleting a note only makes a later lookup for that tree report no_record, and the check then runs as it did before notes existed."},
+  "downtime": {"status": "none", "detail": "No daemon downtime required."},
+  "manual": {"status": "none", "detail": "Running the script is an operator action; the first cleanup of the 9,430 existing notes is taken with a git bundle of the namespace beforehand."},
+  "recovery": {"status": "none", "detail": "A deleted note cannot be restored from the repository, but it is recomputable (the check runs again and signs a new one) and the pre-cleanup bundle restores the old refs with git fetch from the bundle."}
+}

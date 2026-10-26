@@ -3,7 +3,7 @@
 ## Context
 
 - The st command surface is described in [../README.md](../README.md) and
-  [../cli-guided-tour.md](../cli-guided-tour.md).
+  [CLI reference](../../site/reference/cli.md).
 - The implementation contract is [spec.md](./spec.md). Decisions:
   [.decisions/0001-runtime-completion.md](./.decisions/0001-runtime-completion.md).
 

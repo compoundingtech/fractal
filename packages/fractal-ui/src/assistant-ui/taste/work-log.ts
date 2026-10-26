@@ -12,6 +12,8 @@ export interface WorkLogCall {
   readonly startedAt: string
   readonly endedAt?: string
   readonly detail?: string
+  /** Verbatim tool input (pretty JSON, or the raw string). Shown only in an expanded tool detail, never in the row label or failure overlay. */
+  readonly rawInput?: string
   readonly outputLanguage?: string
   /** Observed edit/write path, not a guessed title. */
   readonly changedPath?: string
@@ -146,6 +148,8 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
     const extension = dot > 0 ? filename.slice(dot + 1).toLowerCase() : undefined
     return [{
       id: call.id, kind, title: call.name, summary: toolHumanSummary(call.input, call.name), argsSummary: summarizeArgs(call.input),
+      // Empty input carries nothing to inspect, so it does not make a row expandable.
+      rawInput: typeof call.input === 'string' ? call.input || undefined : call.input === undefined || call.input === null || typeof call.input === 'object' && Object.keys(call.input).length === 0 ? undefined : JSON.stringify(call.input, null, 2),
       status: call.status, startedAt: call.at, endedAt: call.result?.at,
       detail: toolOutput(call.result?.content) || undefined,
       outputLanguage: (media === undefined ? undefined : outputMediaLanguages[media]) ?? (kind === 'run' ? 'bash' : kind === 'read' ? extension : undefined),
@@ -170,8 +174,8 @@ export function formatWorkDuration(milliseconds: number | undefined): string {
   const seconds = Math.floor(milliseconds / 1000)
   if (seconds < 1) return ''
   if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${seconds % 60 === 0 ? '' : ` ${seconds % 60}s`}`
-  return `${Math.floor(seconds / 3600)}h${Math.floor(seconds / 60) % 60 === 0 ? '' : ` ${Math.floor(seconds / 60) % 60}m`}`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${seconds % 60 === 0 ? '' : ` ${String(seconds % 60).padStart(2, '0')}s`}`
+  return `${Math.floor(seconds / 3600)}h${Math.floor(seconds / 60) % 60 === 0 ? '' : ` ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}m`}`
 }
 const outputMediaLanguages: Readonly<Record<string, string>> = {
   'application/json': 'json', 'text/json': 'json', 'text/markdown': 'markdown',

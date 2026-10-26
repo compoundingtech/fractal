@@ -7,6 +7,10 @@
 # space-separated NAME=VALUE pairs to add to the daemon's environment, such as
 # an allocator preload.
 
+# These runners use /proc and verified pidfd cleanup, including when sourced by
+# graceful/no-boot evals. Refuse unsupported hosts before launching fixtures.
+python3 "${BASH_SOURCE[0]%/*}/../script_process.py" --check-platform || return $?
+
 perf_state_dir() {
   if [[ -n ${PERF_DATA:-} ]]; then
     printf '%s/%s\n' "$PERF_DATA" "$(basename "$1")"
@@ -56,24 +60,11 @@ perf_stop_daemon() {
   PTY_ROOT="$root/pty" pty list --json 2>/dev/null | jq -r '.[].name' | while read -r session; do
     PTY_ROOT="$root/pty" pty kill "$session" >/dev/null 2>&1 || true
   done
-  kill -TERM "$pid" 2>/dev/null || true
+  python3 "${BASH_SOURCE[0]%/*}/../script_process.py" "$pid" 15 --root "$root"
   for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
-  declare -A ancestors=()
-  ancestor=$$
-  while [[ -n "$ancestor" && "$ancestor" != 0 ]]; do
-    ancestors[$ancestor]=1
-    ancestor="$(awk '/^PPid:/ {print $2}' "/proc/$ancestor/status" 2>/dev/null || true)"
-  done
-  for signal in TERM KILL; do
-    for proc in /proc/[0-9]*; do
-      other="${proc#/proc/}"
-      [[ -n "${ancestors[$other]:-}" ]] && continue
-      if { tr '\0' ' ' <"$proc/cmdline"; } 2>/dev/null | grep -qF "$root/bin/" \
-        || [[ "$(readlink "$proc/cwd" 2>/dev/null)" == "$root/"* ]] \
-        || { tr '\0' '\n' <"$proc/environ"; } 2>/dev/null | grep -qxF "ST3_ENDPOINT=$root/st3.sock"; then
-        kill "-$signal" "$other" 2>/dev/null || true
-      fi
-    done
+  for signal in 15 9; do
+    python3 "${BASH_SOURCE[0]%/*}/../script_process.py" all "$signal" --root "$root"
+    python3 "${BASH_SOURCE[0]%/*}/../script_process.py" all "$signal" --endpoint "$root/st3.sock"
     sleep 1
   done
 }

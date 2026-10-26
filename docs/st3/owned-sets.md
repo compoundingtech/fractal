@@ -25,7 +25,9 @@ st apply --set garden seats.kdl missions.kdl schedules.kdl \
 Remove `--dry-run` to publish. A dry run prints blockers and exits with failure when any
 are present. Add `--check` to execute gates during the preview, with `--workspace DIR` and
 `--input NAME=VALUE` as needed; gate answers appear on stderr. Publication checks for broken
-exec gates by default; `--no-gate-check` skips them.
+mission and step exec gates by default; `--no-gate-check` skips them. Loop `until` scripts
+are listed as "not checked, they run after each round", including in dry-run checks.
+Per-round step scripts still preflight; runtime `until` evaluation remains at each round boundary.
 
 All source flags are required together with `--set`. Without `--set`, publish plain files
 with `st apply seats.kdl missions.kdl schedules.kdl --as person/operator`.
@@ -148,15 +150,9 @@ supersession and current rollout. Remote replica visibility remains unknown in t
 `st sets status <set> --sha <sha>` returns 404 until that SHA has a receipt; this is intended.
 Read `st sets show <set>` to obtain the current revision for publication fencing.
 
-A native seat can declare `rollout "manual"` in its body. The declaration is published and
-included in the receipt digest, while a changed running seat stays on its incarnation until
-`st agents rollout <seat>` is requested. Reads show `published, rollout pending (manual)`;
-this intentional deferral allows the source's `satisfied` field to be true while `running`
-remains false. The property survives each complete apply and needs no apply-time flag.
-
-Plain declaration-changing start, stop, rename and publication routes refuse managed subjects.
-Restart, suspend and resume require an unblocked set and cannot bypass an active, held or pending manual owned-seat rollout. Use `st agents rollout` to retry its cutover with fresh fences.
-Use the set publisher to change a managed declaration or retire it.
+For native-session continuity, manual rollout and cutover refusals, see
+[owned-seat cutover](owned-seat-cutover.md). Use the set publisher to change a managed
+declaration or retire it.
 
 Owned sets do not install a repository watcher. Git-backed automation remains a separate,
 configured `github.ref` observation, pinned subscription and CI gate feeding the serial applier.

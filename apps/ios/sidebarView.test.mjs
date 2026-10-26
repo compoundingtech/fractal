@@ -30,3 +30,9 @@ assert.equal(sidebarGroups([], busy, {}, 'Row 30').groups[0].resources.length, 1
 assert.equal(sidebarGroups([arrangement], resources, { 'folder/first': true }).groups[0].collapsed, true);
 // Viewing, searching and collapse choices never modify graph registers.
 assert.equal(arrangement.body.placements['agent/a'].value.folder, 'first');
+
+// Explicit unfiling and reordering are reflected even inside the grouped Everything else list.
+const reordered = structuredClone(arrangement);
+reordered.body.placements = { 'agent/a': register({ folder: null, key: 'a1' }), 'agent/z': register({ folder: null, key: 'a0' }) };
+const known = rememberResources(resources, [...current, { id: 'agent/z', title: 'Zulu', kind: 'Agents', target: 'agent/z' }]);
+assert.deepEqual(sidebarGroups([reordered], known).groups.find(g => g.id === 'kind/Agents').resources.map(row => row.id), ['agent/z', 'agent/a']);

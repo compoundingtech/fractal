@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The strict story check now fails when a story has no accessibility evidence, and keeps checking stories after in-app navigation.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or backfill. This changes only the UI story check."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or fleet coordination changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The strict story check now requires one completed story and one passed accessibility report per case when accessibility checks are on. In-app navigation keeps collecting evidence; navigation to a replacement document fails the check. Stories that previously passed without evidence now fail. Client and wire formats are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption; only the development and CI story check changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or manual upgrade steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No data migration to undo. Reverting restores the previous story check, including its missing-evidence gap."
+  }
+}

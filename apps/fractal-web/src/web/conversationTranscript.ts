@@ -4,16 +4,16 @@ import type {
   TranscriptEmptyState,
   TranscriptHistory,
   TranscriptTurn,
-} from '@smalltalk/fractal-ui/assistant-ui'
-import { workLogTurnFromItems, type WorkKind } from '@smalltalk/fractal-ui/assistant-ui/work-log'
-import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
+} from '@fractal/ui/assistant-ui'
+import { workLogTurnFromItems, type WorkKind } from '@fractal/ui/assistant-ui/work-log'
+import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import { Schema } from 'effect'
 import { ConversationItem, type RunStatus, type SendState } from '../conversation/model.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import { sendFailureDetail } from './composerSend.ts'
 
-/** Unknown protocol events are hidden by default; explicit inspection uses payload-free notices. */
+/** Unknown protocol events are hidden by default; mixed messages retain an explicit body disclosure. */
 type KitConversationItem = NonNullable<ConversationRuntimeOptions['messages']>[number]
 type KitTextItem = Extract<KitConversationItem, { _tag: 'Text' }>
 
@@ -35,15 +35,22 @@ export const transcriptSendFailureReason = (reason: string): KitSendFailureReaso
   return classified ?? sendFailureReasons.failed
 }
 
-/** Only failed Text sends require an adapter allocation; every other source item stays by reference. */
+/** Only failed or unconfirmed Text sends require an adapter allocation; every other source item stays by reference. */
 const hasKitSendState = (item: ConversationItem): item is ConversationItem & KitConversationItem =>
-  item._tag !== 'Text' || item.sendState?._tag !== 'Failed'
+  item._tag !== 'Text' || (item.sendState?._tag !== 'Failed' && item.sendState?._tag !== 'Unconfirmed')
+
+/** Raw send diagnostics never reach the kit; it shows fixed human copy for each outcome. */
+const kitSendState = (state: SendState): KitTextItem['sendState'] =>
+  state._tag === 'Failed'
+    ? { ...state, reason: transcriptSendFailureReason(state.reason), detail: sendFailureDetail(state.reason) }
+    : state._tag === 'Unconfirmed' ? { _tag: 'Unconfirmed', detail: sendFailureDetail('unconfirmed') }
+      : state
 
 const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly role: 'user' } =>
   item._tag === 'Text' && item.role === 'user'
 
 
-const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent'
+const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent' && item.mixedContent !== true
 
 /** The host owns work-log classification: how a tool reads, runs or edits. */
 const toolKindFor = (name: string): WorkKind => {
@@ -150,16 +157,13 @@ export const prepareTranscriptTurns = (
   }
   for (const sourceItem of items) {
     if (!options.showSystemEvents && isOmittedItem(sourceItem)) continue
-    // The runtime must not receive unknown protocol payloads either: its converter and fallback
-    // rows render the same short notice, never a raw JSON envelope or producer-specific kind.
-    const item: KitConversationItem = sourceItem._tag === 'UnknownEvent'
+    // Only mixed messages carry their full body to the kit's opt-in disclosure.
+    // Other unknown protocol rows remain payload-free notices under explicit inspection.
+    const item: KitConversationItem = sourceItem._tag === 'UnknownEvent' && sourceItem.mixedContent !== true
       ? { _tag: 'Notice', id: sourceItem.id, kind: 'event', text: 'An event this view cannot show yet.',
         ...(sourceItem.at === undefined ? {} : { at: sourceItem.at }) }
-      : hasKitSendState(sourceItem) ? sourceItem
-        : { ...sourceItem, sendState: sourceItem.sendState?._tag === 'Failed'
-          ? { ...sourceItem.sendState, reason: transcriptSendFailureReason(sourceItem.sendState.reason),
-            detail: sendFailureDetail(sourceItem.sendState.reason) }
-          : sourceItem.sendState }
+      : sourceItem._tag !== 'Text' || hasKitSendState(sourceItem) ? sourceItem
+        : { ...sourceItem, sendState: sourceItem.sendState === undefined ? undefined : kitSendState(sourceItem.sendState) }
     if (isPrompt(item)) {
       flush()
       prompt = item
@@ -206,7 +210,7 @@ const unavailableCopy: Readonly<Record<UnavailableClassification, { readonly rea
   ungranted: { reason: 'Conversation access not granted', detail: 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
   unsupported: { reason: 'Conversation not supported', detail: 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.' },
   'not-found': { reason: 'Conversation not found', detail: 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
-  failed: { reason: 'Conversation unavailable', detail: 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.' },
+  failed: { reason: 'Conversation unavailable', detail: 'The gateway could not load this conversation. Your draft is unchanged.' },
 }
 
 /** Server codes are unrestricted strings: only a short lowercase slug may reach a data-wf attribute. */
@@ -290,6 +294,37 @@ export const transcriptSyncStatus = (
 
 export const transcriptObservedAt = (observation: FeedSyncObservation | undefined, now: number): number =>
   observation?.observedAt ?? now
+
+/** What the last observation showed in flight: working with its newest running call, or idle. */
+export interface LastSeenActivity {
+  readonly activity: 'working' | 'idle'
+  /** The in-flight call's readable command, when the last observation had one. */
+  readonly detail: string | undefined
+}
+
+/**
+ * A stale conversation is last-known, not live: in-flight work stops reading as running, and each call still running
+ * at the last observation leaves the work log for the "Last seen" tail. Settled history is untouched.
+ */
+export const frozenTranscript = (turns: readonly TranscriptTurn[]): { readonly turns: readonly TranscriptTurn[]; readonly lastSeen: LastSeenActivity } => {
+  const lastRunning = turns.findLast(turn => turn.work.running)
+  const inFlight = lastRunning?.work.calls.findLast(call => call.status === 'running')
+  return {
+    turns: turns.map(turn => {
+      const running = new Set(turn.work.calls.filter(call => call.status === 'running').map(call => call.id))
+      if (!turn.work.running && running.size === 0) return turn
+      return {
+        ...turn,
+        items: turn.items.filter(item => !running.has(item.id) && (item._tag !== 'Status' || !activeRunStatuses[item.status])),
+        work: { ...turn.work, running: false, foldable: false, calls: turn.work.calls.filter(call => !running.has(call.id)) },
+      }
+    }),
+    lastSeen: {
+      activity: lastRunning === undefined ? 'idle' : 'working',
+      detail: inFlight === undefined ? undefined : inFlight.argsSummary ?? inFlight.title,
+    },
+  }
+}
 
 
 /** Agent text is untrusted: only plain web URLs may leave the app, never javascript:, data: or blob: targets. */

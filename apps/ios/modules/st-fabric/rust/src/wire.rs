@@ -1,4 +1,5 @@
-//! Generic exposure wire at fabric v0.2.30 / 8bd9017. No mux and no resumption.
+//! The direct exposure wire at fabric v0.2.41 / 84c3208 (its `docs/tunnel-wire.md`).
+//! No mux and no resumption.
 use anyhow::{Result, bail};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -81,6 +82,24 @@ pub async fn read<R: AsyncRead + Unpin>(input: &mut R) -> Result<Frame> {
     }
 }
 
+/// The stable code a fabric 0.2.41 or later member puts first in a close reason
+/// or an Error frame's text: `fabric:<code> <diagnostic>` (fabric `docs/errors.md`).
+/// Only the code is kept: the diagnostic can name a path on the member. An older
+/// member sends the text without a code.
+pub fn error_code(text: &[u8]) -> Option<String> {
+    let rest = text.strip_prefix(b"fabric:")?;
+    let code = &rest[..rest
+        .iter()
+        .position(|byte| *byte == b' ')
+        .unwrap_or(rest.len())];
+    let valid = !code.is_empty()
+        && code.len() <= 64
+        && code
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || *byte == b'_');
+    valid.then(|| String::from_utf8_lossy(code).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +146,21 @@ mod tests {
         write(&mut bytes, Frame::Close(3)).await?;
         assert_eq!(bytes, [4, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 3]);
         Ok(())
+    }
+    #[test]
+    fn typed_error_codes() {
+        for (text, code) in [
+            (&b"fabric:peer_not_in_allow_list node is not in fabric allow-list"[..], Some("peer_not_in_allow_list")),
+            (b"fabric:peer_not_permitted_for_service peer abc is not permitted for service demo/0 (access revoked)", Some("peer_not_permitted_for_service")),
+            (b"fabric:service_unavailable failed to connect to /private/path", Some("service_unavailable")),
+            (b"fabric:session_expired", Some("session_expired")),
+            // Before 0.2.41, and anything that is not a code.
+            (b"node is not in fabric allow-list", None),
+            (b"fabric: missing", None),
+            (b"fabric:Not_A_Code text", None),
+            (b"fabric:path/../x text", None),
+        ] {
+            assert_eq!(error_code(text).as_deref(), code, "{}", String::from_utf8_lossy(text));
+        }
     }
 }

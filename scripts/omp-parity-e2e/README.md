@@ -1,7 +1,7 @@
 # OMP conversation parity proof
 
 Runs an isolated, real st3 daemon, its client HTTP API, the shared TypeScript
-conversation renderer, and interactive stui. Requires binaries containing the
+conversation renderer, and the interactive terminal UI (`st ui`). Requires binaries containing the
 incremental/keyset and OMP parity changes, including the live palette affordance
 for opening a saved `session/...` id. It never launches OMP, calls a model, modifies
 an original transcript, or simulates a live OMP process.
@@ -9,7 +9,7 @@ an original transcript, or simulates a live OMP process.
 From the repository root, with previously built binaries:
 
 ```bash
-scripts/omp-parity-e2e/run --st3 "$PWD/target/debug/st3" --stui "$PWD/target/debug/stui" --out "$PWD/tmp/omp-parity-e2e"
+scripts/omp-parity-e2e/run --st3 "$PWD/target/debug/st3" --out "$PWD/tmp/omp-parity-e2e"
 ```
 
 Optional: add `--corpus /absolute/path/to/session.jsonl` for private first-page
@@ -20,7 +20,7 @@ output directory; `--keep` therefore retains potentially sensitive data. Reports
 contain only kind/view/source-type labels, counts, timings, and synthetic proof.
 
 Dependencies: bash, curl, jq, Node with native TypeScript support (Node 22.18+ or
-24+), tmux, realpath, mktemp, and the usual Unix core utilities. Run the renderer
+24+), tmux, the `pty` executable on PATH, realpath, mktemp, and the usual Unix core utilities. Run the renderer
 alone with `node scripts/omp-parity-e2e/render.mjs tmp/omp-parity-e2e/page.json`.
 `OMP_E2E_TIMEOUT` controls each polling/HTTP timeout in seconds (default 45).
 `TMPDIR` controls temporary runtime and tmux socket placement. HOME and all XDG
@@ -30,7 +30,7 @@ only to the isolated daemon's Unix socket and `person/tester`.
 Every check writes `PASS` or `FAIL` to `<out>/report.txt`. Independent checks
 continue after failure; failed setup dependencies stop immediately. The final
 exit is nonzero if any check failed.
-Synthetic pages, chunk responses, TS rows, parent stui capture (`stui.txt`) and
+Synthetic pages, chunk responses, TS rows, parent terminal UI capture (`stui.txt`) and
 child capture (`stui-child.txt`) are retained as evidence. Cleanup stops the
 terminal and daemon and removes isolation unless `--keep` was supplied.
 
@@ -45,7 +45,8 @@ terminal and daemon and removes isolation unless `--keep` was supplied.
   tool-start block is internal.
 - Model, context, cost, and todos header fields have transcript provenance,
   timestamp and value; their values are populated. A task result links
-  ParityChild to an `external-child` conversation.
+  ParityChildConversationReview (28 bytes, strictly longer than 23 bytes) to an
+  `external-child` conversation.
 - Must-fix audit details in API and shared TS rows: source subagent name/type,
   multiline assignment and parent context/contract; assistant failure and persisted
   retry recovery; bash cwd/timeout; grep/glob flags, native match/file counts and
@@ -74,7 +75,7 @@ terminal and daemon and removes isolation unless `--keep` was supplied.
   marks (`[x]` completed, `[ ]` pending, `[~]` in progress, `[!]` blocked, `[/]`
   abandoned), the completed header count `todo 1/5`, child `open session/` row,
   IRC sender/message, and one shared transcript provenance suffix.
-- Real stui connects, opens its palette and the saved parent, renders parent
+- The real terminal UI connects, opens its palette and the saved parent, renders parent
   content, a bash command row with cwd/timeout, transcript model header, full
   assignment and parent contract, and the named child open row. Activating that row
   shows child completion without parent assistant content.
@@ -91,7 +92,7 @@ terminal and daemon and removes isolation unless `--keep` was supplied.
 Ctrl+K opens the live palette; type the discovered full `session/...` id and
 Enter opens the saved conversation. Shift+O selects full conversation density;
 `o` opens all tool outputs; End follows the recent bash/subagent showcase.
-The child card's `open ParityChild` row is a left-button `PaneIntent::Open` hit,
+The child card's `open ParityChildConversationReview` row is a left-button `PaneIntent::Open` hit,
 not a keyboard focus/Enter binding. The harness finds that row in capture-pane
 and sends a real SGR mouse click at its coordinates. All waits poll for content
 with a deadline; there are no fixed startup sleeps.
@@ -99,5 +100,5 @@ with a deadline; there are no fixed startup sleeps.
 The isolated tmux session is named `omp-e2e`, with a unique socket under
 `${TMPDIR:-/tmp}/agent-tmux-sockets/omp-e2e-*.sock` (not the ambient server).
 The exact `tmux -S ... attach -t omp-e2e` monitor command is printed on startup.
-If the saved-session palette affordance is missing, the stui check fails rather
+If the saved-session palette affordance is missing, the terminal UI check fails rather
 than creating a host-visible fake OMP process or substituting a demo renderer.

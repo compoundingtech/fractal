@@ -7,7 +7,7 @@
 // reply never arrives for good, the app asks whether the thing still waits: if it does not, the
 // answer is done (this one landed, or someone answered it first) and a repeat submit is a success,
 // not a failure. A refusal while it still waits is shown as the refusal it is.
-import { notApplied, outcomeUnknown } from '../../clients/typescript/st3-client';
+import { notApplied, outcomeUnknown } from '../../clients/typescript/fractal-client';
 
 export type AnswerPorts<R> = {
   /** A fresh request with its own key, fenced to a snapshot read now. */
