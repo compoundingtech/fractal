@@ -629,6 +629,27 @@ impl ExportDaemon {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
 
+    /// Waits until the published mission list answers. Readiness does not wait for its first publication, and a
+    /// missions window opened before it resyncs first and records that frame on its first-frame span too.
+    fn await_mission_list(&self) {
+        use std::io::{Read as _, Write as _};
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let mut socket = std::os::unix::net::UnixStream::connect(&self.socket).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            write!(socket, "GET /v1/client/missions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+                x-st3-client: fractal\r\nx-st3-person: person/ada\r\n\r\n").unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            if response.starts_with("HTTP/1.1 200 ") {
+                return;
+            }
+            assert!(response.contains("mission-list-not-ready") && Instant::now() < deadline,
+                "mission list: {response}\n{}", self.diagnostics());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn health(&self, traceparent: Option<&str>) {
         use std::io::{Read as _, Write as _};
         let mut socket = std::os::unix::net::UnixStream::connect(&self.socket).unwrap();
@@ -1868,6 +1889,9 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     let root = tempfile::tempdir().unwrap();
     let source = stage_replication_source(root.path());
     let mut daemon = ExportDaemon::start(&collector, root.path());
+    // Each window's first frame must be its snapshot (a resync before it is covered by
+    // daemon_collection_stream_without_export_delivers_first_frame).
+    daemon.await_mission_list();
     let mut socket = daemon.websocket("/v1/client/collections/stream",
         "st3.client.collections.v0", TRACEPARENT).await;
     let upgrade = daemon.await_span(root.path(), |span| {
