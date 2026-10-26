@@ -29022,7 +29022,13 @@ agent "worker" {
             .selected_desired_token("agent/node.worker")
             .unwrap()
             .unwrap();
-        let attention = store.fault_items(Some("person/alex")).unwrap();
+        // The parked seat's fault goes to its owner; find it by the seat.
+        let attention = store
+            .fault_items(None)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.subject == "agent/node.worker")
+            .collect::<Vec<_>>();
         assert_eq!(attention.len(), 1);
         assert_eq!(attention[0].subject, "agent/node.worker");
         assert!(
@@ -44851,6 +44857,15 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .selected_desired_token("agent/node.worker")
             .unwrap()
             .unwrap();
+        // The parked seat's fault goes to its owner, whoever that is; find it by the seat.
+        let parked_faults = |store: &Store| {
+            store
+                .fault_items(None)
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.subject == "agent/node.worker" && item.title.starts_with("A Codex agent stopped"))
+                .count()
+        };
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -44869,7 +44884,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .codex_crash_loop_raised("agent/node.worker", &token_a)
                 .unwrap()
         );
-        assert_eq!(store.fault_items(Some("person/alex")).unwrap().len(), 1);
+        assert_eq!(parked_faults(&store), 1);
 
         // A person revises the declaration, and the new revision's incarnation becomes ready.
         apply_source(&store, &source("gpt-5.6-sol"), "crash-loop-b");
@@ -44894,12 +44909,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             )
             .unwrap();
 
-        assert!(
-            store
-                .fault_items(Some("person/alex"))
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(parked_faults(&store), 0);
     }
 
     #[test]

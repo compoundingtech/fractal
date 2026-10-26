@@ -225,7 +225,9 @@ mod tests {
         }));
         raise(&token);
         let parked = row(&store, &id, store.index().unwrap());
-        assert_eq!(parked["state"], "stopped");
+        assert_eq!(parked["state"], "failed");
+        assert_eq!(parked["fault"], reason);
+        assert_eq!(parked["presentation"]["group"], "fault");
         assert_eq!(parked["end_reason"]["kind"], "parked");
         assert_eq!(parked["end_reason"]["actor"], ST_RUNTIME_ACTOR);
         assert_eq!(parked["end_reason"]["reason"], reason);
