@@ -3073,14 +3073,14 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
         "agent/example/operator"
     );
     let receipts = store
-        .claims_for_kind_at("custom.client.action-result", None, true, 100)
+        .claims_for_kind_at("client.action-result", None, true, 100)
         .unwrap()
         .claims;
     assert!(!receipts.is_empty());
     for receipt in receipts {
-        let actor = receipt.actor.as_deref().unwrap();
+        assert!(receipt.actor.is_none(), "action receipts are server-written");
+        let actor = receipt.body["fields"]["authority_actor"].as_str().unwrap();
         assert!(actor.starts_with("agent/example/"), "{actor}");
-        assert_eq!(receipt.body["fields"]["authority_actor"], actor);
     }
 }
 

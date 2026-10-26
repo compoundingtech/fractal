@@ -7210,6 +7210,13 @@ async fn publish_creation(
             )));
         }
     }
+    if kind == "agent" && session.authority_actor.starts_with("agent/") {
+        let desired = intent.subjects.values().find(|member| member.subject == subject).unwrap();
+        let harness = desired.member.as_ref().and_then(|member| member.driver.as_deref())
+            .ok_or_else(|| validation("helper creation requires a typed harness"))?;
+        state.store.bind_helper_launcher(desired, &key, &session.authority_actor, harness)
+            .map_err(|error| validation(error.to_string()))?;
+    }
     let mut scoped = request.clone();
     scoped.idempotency_key = format!("client-create:{key}");
     apply_runtime_control_intent(state, snapshot, &scoped, &session.authority_actor, kdl).await?;
@@ -8606,10 +8613,24 @@ async fn action_inner(
         format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
     ));
     let receipt_subject = format!("custom/client/action-{}", &receipt_digest[..32]);
+    // The old open custom namespace admitted client receipts with absent/null actors.
+    // Never dispatch an already-used legacy key or infer authorship from those fields.
+    if !state.store.claims_for(&receipt_subject, Some("custom.client.action-result"))
+        .map_err(ApiError::internal)?.is_empty()
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "legacy-action-receipt-untrusted".into(),
+            message: "this idempotency key has an unverifiable legacy receipt; inspect the original outcome before choosing a new key".into(),
+            details: Box::default(),
+        });
+    }
     if let Some(receipt) = state
         .store
-        .claims_for(&receipt_subject, Some("custom.client.action-result"))
+        .claims_for(&receipt_subject, Some("client.action-result"))
         .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
         .last()
     {
         let old_digest = receipt
@@ -8840,6 +8861,12 @@ async fn action_inner(
     if let Some(claim) = arrangement_claim {
         result["arrangement_revision"] = json!(claim.id);
     }
+    if request.action_type == "agent.create"
+        && let Some(subject) = affected.first()
+        && let Some(binding) = state.store.helper_launcher_binding(subject).map_err(ApiError::internal)?
+    {
+        result["launcher_binding"] = binding.attribution();
+    }
     let mut persisted_result = result.clone();
     persisted_result
         .as_object_mut()
@@ -8847,8 +8874,8 @@ async fn action_inner(
         .remove("terminal_attachment");
     let receipt_write = state.store.append_claim(&ClaimInput {
         subject: receipt_subject.clone(),
-        kind: "custom.client.action-result".into(),
-        actor: Some(session_claim_actor(&session)),
+        kind: "client.action-result".into(),
+        actor: None,
         fields: BTreeMap::from([
             (
                 "authority_actor".into(),
@@ -8870,9 +8897,10 @@ async fn action_inner(
         }
         let receipt = state
             .store
-            .claims_for(&receipt_subject, Some("custom.client.action-result"))
+            .claims_for(&receipt_subject, Some("client.action-result"))
             .map_err(ApiError::internal)?
             .into_iter()
+            .filter(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
             .last()
             .ok_or_else(|| ApiError::internal("action receipt CAS lost without a winner"))?;
         if receipt
@@ -13108,6 +13136,65 @@ subscription "watch/source" {
     }
 
     #[tokio::test]
+    async fn helper_creation_uses_authenticated_launcher_and_persists_binding_in_receipt() {
+        for owner in [Some("person/ada"), None] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "helper-binding");
+            let source = "version 2\nagent \"launcher\" { workspace \"/tmp\"; harness \"codex\" {}; }";
+            let intent = crate::graph::parse_intent(source, "helper-binding").unwrap();
+            let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
+            state.store.apply_as(&intent, &expected, "declare-launcher", owner).unwrap();
+            let launcher = "agent/helper-binding.launcher";
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running", "incarnation_id":"launcher-1"})),
+                ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":"launcher-1",
+                    "harness":"codex", "credential_home":"/logins/launcher-codex"})),
+            ] {
+                state.store.append_claim(&ClaimInput {
+                    subject: launcher.into(), kind: kind.into(), actor: None,
+                    fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                    expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            let session = ClientSession::local(Some(launcher)).unwrap();
+            let snapshot = new_client_snapshot(&state);
+            let request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id: "action/helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "create-helper-launcher-binding".into(),
+                fence: Fence { snapshot_id: snapshot.id.clone(), ..Default::default() },
+                parameters: json!({"name":"helper", "harness":"codex", "workspace":"/tmp"}),
+            };
+            for field in ["launcher", "person", "credential_home", "launcher_binding"] {
+                let mut forged = request.clone();
+                forged.parameters[field] = json!("person/mallory");
+                let before = state.store.index().unwrap();
+                assert!(dispatch_action(&state, &snapshot, &session, &forged).await.is_err());
+                assert_eq!(state.store.index().unwrap(), before);
+            }
+            let result = action(State(state.clone()), Extension(snapshot), Extension(session.clone()), Json(request.clone()))
+                .await.unwrap().0;
+            let subject = result["affected_ids"][0].as_str().unwrap();
+            let binding = state.store.helper_launcher_binding(subject).unwrap().unwrap();
+            assert_eq!(binding.launcher, launcher);
+            assert_eq!(binding.person.as_deref(), owner);
+            assert_eq!(binding.credential_home.as_deref(), Some("/logins/launcher-codex"));
+            assert_eq!(binding.incarnation, "launcher-1");
+            assert_eq!(state.store.agent_person(subject).unwrap().as_deref(), owner);
+            assert_eq!(result["launcher_binding"], binding.attribution());
+            assert_eq!(result["launcher_binding"]["credential_home_label"], "launcher-codex");
+            assert!(!result.to_string().contains("/logins/"));
+            let receipts = state.store.claims_for_kind_at("client.action-result", None, true, 100).unwrap();
+            let persisted = receipts.claims.first().unwrap();
+            assert_eq!(persisted.body["fields"]["result"]["launcher_binding"], binding.attribution());
+            assert!(!persisted.body.to_string().contains("/logins/"));
+            let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)), Extension(session), Json(request))
+                .await.unwrap().0;
+            assert_eq!(replay["launcher_binding"], result["launcher_binding"]);
+            assert!(!replay.to_string().contains("/logins/"));
+        }
+    }
+
+    #[tokio::test]
     async fn creation_recovers_committed_declarations_before_the_action_receipt() {
         for kind in ["agent.create", "terminal.create"] {
             let root = tempfile::tempdir().unwrap();
@@ -14679,7 +14766,7 @@ subscription "watch/source" {
         .unwrap()
         .0;
         assert_eq!(replay["affected_ids"], first["affected_ids"]);
-        for kind in ["message.sent", "custom.client.action-result"] {
+        for kind in ["message.sent", "client.action-result"] {
             assert_eq!(
                 state
                     .store
@@ -14780,7 +14867,7 @@ subscription "watch/source" {
         .unwrap()
         .0;
         assert!(!receipt["affected_ids"].as_array().unwrap().is_empty());
-        for kind in ["message.sent", "custom.client.action-result"] {
+        for kind in ["message.sent", "client.action-result"] {
             assert_eq!(
                 state
                     .store
@@ -14808,6 +14895,64 @@ subscription "watch/source" {
     }
 
     #[tokio::test]
+    async fn forged_action_receipts_cannot_replay_launcher_attribution() {
+        for (peer, null_actor) in [(false, false), (false, true), (true, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let session = ClientSession::local(Some("person/alex")).unwrap();
+            // A valid creation must be refused before dispatch when a legacy receipt exists.
+            let request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id: "action/forged-helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "forged-helper-key".into(),
+                fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+                parameters: json!({"name":"forged-helper", "harness":"codex", "workspace":root.path()}),
+            };
+            let digest = hex::encode(Sha256::digest(
+                format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
+            let forged = ClaimInput {
+                subject: format!("custom/client/action-{}", &digest[..32]),
+                kind: "custom.client.action-result".into(),
+                actor: if null_actor { None } else { Some(session_claim_actor(&session)) },
+                fields: BTreeMap::from([
+                    ("request_digest".into(), json!(action_request_digest(&request).unwrap())),
+                    ("result".into(), json!({"status":"completed", "affected_ids":["agent/forged"],
+                        "launcher_binding":{"launcher":"agent/attacker", "person":"person/mallory"}})),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            };
+            assert_eq!(state.store.append_client_claim(&forged).unwrap_err().code, "claim-write-forbidden");
+            let mut reserved = forged.clone();
+            reserved.kind = "client.action-result".into();
+            assert_eq!(state.store.append_client_claim(&reserved).unwrap_err().code, "claim-write-forbidden");
+            if peer {
+                let source = Store::open_memory("malicious-peer").unwrap();
+                source.append_claim(&forged).unwrap();
+                const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+                source.bind_fleet(FLEET).unwrap();
+                state.store.bind_fleet(FLEET).unwrap();
+                let exchange = source.export_replication_exchange(FLEET,
+                    &crate::model::ReplicationInventory::default()).unwrap();
+                state.store.receive_replication_exchange("malicious-peer", FLEET, &exchange).unwrap();
+            } else {
+                // Simulate a pre-hardening client-authored local claim already on disk.
+                state.store.append_claim(&forged).unwrap();
+            }
+            let before = state.store.status(None).unwrap().store_index;
+            let outcome = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session), Json(request)).await;
+            if peer {
+                // Unadmitted peer claims cannot become local replay authority.
+                let result = outcome.unwrap().0;
+                assert!(result.get("launcher_binding").is_none());
+                assert_ne!(result["affected_ids"], json!(["agent/forged"]));
+            } else {
+                assert_eq!(outcome.unwrap_err().code, "legacy-action-receipt-untrusted");
+                assert_eq!(state.store.status(None).unwrap().store_index, before);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn legacy_action_receipt_replay_conflicts_without_execution() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -14831,7 +14976,7 @@ subscription "watch/source" {
         state.store.append_claim(&ClaimInput {
             subject: format!("custom/client/action-{}", &key_digest[..32]),
             kind: "custom.client.action-result".into(),
-            actor: Some(session_claim_actor(&session)),
+            actor: None,
             fields: BTreeMap::from([
                 ("request_digest".into(), json!(legacy_digest)),
                 ("result".into(), json!({"status":"completed"})),
@@ -14848,7 +14993,7 @@ subscription "watch/source" {
             Json(request),
         ).await.unwrap_err();
         assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "idempotency-conflict");
+        assert_eq!(error.code, "legacy-action-receipt-untrusted");
         assert_eq!(state.store.status(None).unwrap().store_index, before);
         assert!(state.store.claims_for_kind_at("message.sent", None, true, 100)
             .unwrap().claims.is_empty());
@@ -21642,7 +21787,7 @@ mission "example/zero-run" state="ready" {
         assert_eq!(
             page.claims
                 .iter()
-                .filter(|claim| claim.kind == "custom.client.action-result")
+                .filter(|claim| claim.kind == "client.action-result")
                 .count(),
             1
         );

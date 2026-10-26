@@ -1247,12 +1247,20 @@ or checkpoint authority. Existing canonical claims and checkpoint rules are unch
 
 Asks, attention actions, message sends and held effects are not pinned by this local-response
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.
-Client actions keep their durable `custom.client.action-result` receipt; normal claim append
+Client actions keep their durable, server-only `client.action-result` receipt; normal claim append
 uses its existing operation identity and checkpoint tombstones. Cleanup never deletes these
 claims. Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
 follow `retryable`, and this new code is terminal. TypeScript/phone `isTransient` and
 `retryTransient` likewise stop on this code; the phone's fresh-fence `notApplied` retry list
 contains only stale-fence/rate-limited. Swift preserves unknown codes and `retryable: false`.
+
+Legacy `custom.client.action-result` receipts cannot prove server authorship, even
+with a local origin and absent/null actor. A retry whose key has any such receipt
+fails closed with HTTP 409 `legacy-action-receipt-untrusted` before dispatch or
+side effects. This covers both actor-bearing old server receipts and old
+client-forged receipts; neither is silently upgraded or replayed. Inspect the
+original outcome before choosing a new key. New typed receipts replay normally.
+No stored claims are rewritten and no migration is required.
 
 Caller keys have one namespace across actors and nodes that share these claims. Use a fresh,
 globally unique key for each new request; keys are not an authorization boundary. Reusing
@@ -2294,6 +2302,42 @@ in `st agents new`. Workspace paths are absolute on the selected host; omission 
 its usual new-agent directory. The host creates missing agent workspaces. OpenCode does not accept
 `effort`. Message text is nonempty, at most 64 KiB, and uses the native harness startup argument.
 An existing active seat requires a different name; a stopped seat may be deliberately recreated.
+
+Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
+emitted exactly once. Short names retain the usual host qualification.
+
+When the authenticated caller is an agent, the new agent is a run-owned helper,
+regardless of harness. The server records an owner-local `agent.launcher-bound`
+receipt with the authenticated launcher, its person owner (if known), the selected
+declaration, and the exact launcher runtime incarnation. Claude and Codex helpers
+must match the launcher's credential-bearing harness and inherit only that
+harness's credential-directory reference; cross-provider creation is refused.
+The helper retains its own agent identity. Credential files and secret values are never copied into
+arguments or environment variables. Absolute credential-directory references remain
+host-local; replicated action receipts carry only non-authoritative attribution
+labels. Peer-replicated binding claims cannot grant person or credential authority.
+An unowned launcher does not confer person ownership.
+Credential-directory references are local to the launcher's host, so helpers
+must launch on that host. Older account-bound launcher incarnations without an
+effective credential-directory receipt must be relaunched before creating a
+helper; Fractal does not guess an account or substitute another login directory.
+
+Reconciliation stops a helper when that exact launcher incarnation ends.
+Spawning and restarting refuse an ended binding, including after a daemon
+restart; the credential reference is no longer usable for a new launch.
+Restarting the launcher ends its helpers: the new incarnation must create them
+again. Historical binding receipts remain for attribution.
+Each successful helper launch atomically records a server-only, durable owner-local
+`agent.helper-launched` receipt with its launcher, person owner, credential-home
+label, launcher incarnation, and operation ID. Age and count retention preserve it.
+Client-writable or peer-replicated receipts cannot grant binding authority.
+A declaration edit cannot silently switch the helper to a different login:
+if it no longer matches its credential receipt, stop and recreate the helper.
+
+This is a Fractal lifecycle bound, not native process containment: while the
+daemon is unavailable, a helper can outlive its launcher until reconciliation
+resumes. Agent Policy accepts this explicit exception; native containment is
+tracked in [#3923](https://github.com/compoundingtech/fractal/issues/3923).
 
 `repo` is an existing repository's absolute path on the selected host. It adds the existing
 `checkout` declaration and creates the agent workspace as a worktree. `base` defaults to

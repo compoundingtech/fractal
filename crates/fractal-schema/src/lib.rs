@@ -646,7 +646,7 @@ impl Registry {
         replicated: bool,
     ) -> Result<&ClaimSpec, ValidationError> {
         let subject_spec = self.validate_subject(subject)?;
-        if is_custom_claim_kind(kind) {
+        if is_custom_claim_kind(kind) && !self.claims.contains_key(kind) {
             if subject_spec.family != "custom" {
                 return Err(error(
                     "invalid-custom-claim-subject",
@@ -655,13 +655,15 @@ impl Registry {
             }
             return Ok(custom_claim_spec());
         }
-        if kind.starts_with("custom.") {
+        if kind.starts_with("custom.") && !self.claims.contains_key(kind) {
             return Err(error(
                 "invalid-custom-claim-kind",
                 "a custom claim must use custom.NAMESPACE.NAME",
             ));
         }
-        if subject_spec.family == "custom" {
+        if subject_spec.family == "custom" && !kind.starts_with("custom.")
+            && !self.claims.get(kind).is_some_and(|spec| spec.subjects.iter().any(|family| family == "custom"))
+        {
             return Err(error(
                 "invalid-custom-subject-claim",
                 "a custom/ subject requires a custom. claim",
@@ -2028,6 +2030,22 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "agent.launcher-bound", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("agents"), true, &[],
+        ),
+        (
+            "agent.helper-launched", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("agents"), true, &[],
+        ),
+        (
+            "custom.client.action-result", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Append, None, true, &[],
+        ),
+        (
+            "client.action-result", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Append, None, true, &[],
+        ),
+        (
             "agent.retired",
             &["agent"],
             WritePolicy::SystemOnly,
@@ -3350,6 +3368,30 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("preserved_incarnation", string()),
             ("request", FieldSpec { required: true, ..object() }),
         ],
+        "custom.client.action-result" | "client.action-result" => &[
+            ("authority_actor", string()),
+            ("request_digest", required_string()),
+            ("result", FieldSpec { required: true, ..object() }),
+        ],
+        "agent.helper-launched" => &[
+            ("launcher", required_reference_to(&["agent"])),
+            ("person", reference_to(&["person"])),
+            ("harness", required_string()),
+            ("incarnation", required_string()),
+            ("declaration", required_string()),
+            ("credential_home_label", string()),
+            ("operation_id", required_string()),
+            ("helper_incarnation", string()),
+        ],
+        "agent.launcher-bound" => &[
+            ("launcher", required_reference_to(&["agent"])),
+            ("person", reference_to(&["person"])),
+            ("harness", required_string()),
+            ("credential_home", string()),
+            ("incarnation", required_string()),
+            ("creation_key", required_string()),
+            ("desired_digest", required_string()),
+        ],
         "agent.retired" => &[
             ("reason", required_string()),
             ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
@@ -3559,6 +3601,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("code", string()),
             ("blocking", array()),
             ("harness", string()),
+            ("credential_home", string()),
             ("native_session_id", string()),
         ],
         "runtime.observed" => &[
@@ -4964,6 +5007,17 @@ mod tests {
         assert_eq!(
             registry().validate_subject("custom/acme").unwrap_err().code,
             "invalid-custom-subject"
+        );
+    }
+
+    #[test]
+    fn server_action_receipt_namespace_was_not_admissible_as_a_custom_claim() {
+        let mut legacy = registry().clone();
+        legacy.claims.remove("client.action-result");
+        assert_eq!(
+            legacy.validate_claim("custom/client/action-example", "client.action-result", &BTreeMap::new())
+                .unwrap_err().code,
+            "invalid-custom-subject-claim"
         );
     }
 
