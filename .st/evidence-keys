@@ -2,3 +2,4 @@ fleet/ci namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG9EjmnSdYPfIhcSMp
 host/anvil namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM38UY5Mtu9ckGIh30AQn2yZWuxwDYo29/tvORWVuocZ
 host/forge namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKtGSZHvqXbj967xUVMoMAibmjgsUWf9JgQvUJQUFkdt
 agent/tamarack namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICk6VhgNn5WIZAiAq0gx780q2h1Jdjee+wvQiRplnxqE
+agent/larch namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILlp8N39jCAI9XxbZgrzwWqStNYFad4lVOxUMZgNe4lU
