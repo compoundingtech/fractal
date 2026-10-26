@@ -13147,7 +13147,7 @@ subscription "watch/source" {
             let snapshot = new_client_snapshot(&state);
             let request = ActionRequest {
                 api_version: CLIENT_API_VERSION.into(), id: "action/helper".into(),
-                action_type: "agent.create".into(), idempotency_key: "create-helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "create-helper-launcher-binding".into(),
                 fence: Fence { snapshot_id: snapshot.id.clone(), ..Default::default() },
                 parameters: json!({"name":"helper", "harness":"codex", "workspace":"/tmp"}),
             };
