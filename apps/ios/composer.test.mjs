@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { draftSize, messageLimit, restoreDraft, sendReason } from './composer.ts';
 
-// The limit is whatever st advertises; an older st advertises none and nothing is blocked here.
+// The limit is whatever Fractal advertises; an older Fractal advertises none and nothing is blocked here.
 assert.equal(messageLimit({ limits: { max_message_bytes: 262144 } }), 262144);
 assert.equal(messageLimit({ limits: {} }), undefined);
 assert.equal(messageLimit(null), undefined);

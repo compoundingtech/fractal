@@ -1,4 +1,4 @@
-// One palette, named by meaning, the same one stui uses (crates/fractal-tui/src/ui/theme.rs): Catppuccin
+// One palette, named by meaning, the same one the Fractal terminal UI uses (crates/fractal-tui/src/ui/theme.rs): Catppuccin
 // Mocha. Mauve is reserved for "a person is needed" and nothing else uses it.
 export const palette = {
   base: '#1e1e2e',
@@ -57,7 +57,7 @@ export const systemColors = {
   dark: { background: '#000000', grouped: '#1c1c1e', text: '#ffffff', secondary: '#b5b5bd', separator: '#48484a', action: '#64aaff', attention: '#ffb15c', fault: '#ff6961', success: '#72d88a' },
 } as const;
 
-// stui colours each harness the same way everywhere.
+// Fractal terminal UI colours each harness the same way everywhere.
 export function harnessColor(harness: string): string {
   switch (harness) {
     case 'claude': return palette.peach;

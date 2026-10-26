@@ -8,7 +8,7 @@ import { markdown } from './markdown';
 import { StackActions } from '@react-navigation/native';
 import { navigationRef } from './navigation';
 
-// Shared renderers retain the legacy stui presentation by default. SystemScreen scopes
+// Shared renderers retain the legacy Fractal terminal UI presentation by default. SystemScreen scopes
 // system text, semantic appearance and grouped rows to the migrated native surfaces.
 
 export const SIZE = 14;
@@ -140,7 +140,7 @@ function Runs({ runs, base, onDocument = openDocumentLink }: { runs: Run[]; base
   return <>{runs.map((run, index) => <Text key={index} style={appearance.system ? [base, run.style === 'bold' && { fontWeight: '600' }, run.style === 'code' && { fontFamily: fonts.regular }, run.style === 'link' && { color: appearance.colors.action, textDecorationLine: 'underline' }] : runStyle(run, base)} onPress={run.document ? () => onDocument(run.document!) : run.url ? () => void Linking.openURL(run.url!) : run.path ? () => showPath(run.path!) : undefined}>{run.text}</Text>)}</>;
 }
 
-/** Markdown as stui renders a reply: peach headings, lavender bullets, code in a gutter. */
+/** Markdown as the Fractal terminal UI renders a reply: peach headings, lavender bullets, code in a gutter. */
 export function Markdown({ text, color = theme.text, selectable = true, onDocument }: { text: string; color?: string; selectable?: boolean; onDocument?: DocumentOpener }) {
   const appearance = useTextAppearance();
   const base: TextStyle = appearance.system ? { fontFamily: 'System', fontSize: 17, color: appearance.color(color) } : { ...styles.text, color };
