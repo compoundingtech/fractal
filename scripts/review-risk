@@ -6,6 +6,11 @@
 Prints JSON: {"level": "low"|"medium"|"high", "reasons": [{"rule", "level", "paths": [...], "lines": [...]}], "changed_files": N,
 "changed_lines": N}. The level is the highest of the reasons' levels. A review's final risk is the higher of this and the reviewing
 model's own score: the model may raise the risk above this floor and never lower it.
+
+The rules (.st/review-risk.json), the risky classes (.st/risky-classes.json) and the engine that applies them (scripts/classify-risk)
+are read from BASE, never from the head under review, so a change cannot lower its own floor by editing them. If BASE does not hold
+them yet (the change that introduces them), the review fails; --rules-from-checkout reads them from the checkout instead, for that
+one bootstrap case only.
 """
 import argparse
 import importlib.machinery
@@ -15,6 +20,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 sys.dont_write_bytecode = True
 
 RULES = ".st/review-risk.json"
@@ -22,28 +28,48 @@ ORDER = {"low": 0, "medium": 1, "high": 2}
 HERE = Path(__file__).resolve().parent
 
 
-def classify_risk():
-    """scripts/classify-risk, the risky-class engine this floor builds on."""
-    loader = importlib.machinery.SourceFileLoader("classify_risk", str(HERE / "classify-risk"))
+def load_engine(path):
+    """scripts/classify-risk, the risky-class engine this floor builds on, loaded from PATH."""
+    loader = importlib.machinery.SourceFileLoader("classify_risk", str(path))
     spec = importlib.util.spec_from_loader("classify_risk", loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
 
 
+def rule_files(repo, base, from_checkout, folder):
+    """(rules text, risky classes text, engine module): from BASE's tree, or the checkout's when asked to."""
+    wanted = {"rules": RULES, "classes": ".st/risky-classes.json", "engine": "scripts/classify-risk"}
+    texts = {}
+    for key, path in wanted.items():
+        if from_checkout:
+            texts[key] = (repo / path).read_text()
+            continue
+        shown = subprocess.run(["git", "show", f"{base}:{path}"], cwd=repo, capture_output=True, text=True)
+        if shown.returncode:
+            raise SystemExit(f"review-risk: {base} holds no {path}; the rules are read from the base, never from the head "
+                             f"(--rules-from-checkout is for the change that introduces them)")
+        texts[key] = shown.stdout
+    engine_path = Path(folder) / "classify-risk"
+    engine_path.write_text(texts["engine"])
+    return json.loads(texts["rules"]), json.loads(texts["classes"]), load_engine(engine_path)
+
+
 def read_diff(repo, base, head):
     """(paths, lines): the changed paths, and per path its (marker, line) pairs, marker '+' or '-'."""
     names = subprocess.check_output(["git", "diff", "--name-only", f"{base}...{head}"], cwd=repo, text=True).split("\n")
     text = subprocess.check_output(["git", "diff", "-U0", "--no-color", f"{base}...{head}"], cwd=repo, text=True, errors="replace")
-    lines, current = {}, None
+    lines, current, header = {}, None, False
     for line in text.split("\n"):
-        if line.startswith("+++ b/"):
+        if line.startswith("diff --git"):
+            current, header = None, True
+        elif header and line.startswith("+++ b/"):
             current = line[6:]
-        elif line.startswith("--- a/"):
+        elif header and line.startswith("--- a/"):
             current = current or line[6:]
-        elif line.startswith("diff --git"):
-            current = None
-        elif current and line[:1] in ("+", "-") and not line.startswith(("+++", "---")):
+        elif line.startswith("@@"):
+            header = False
+        elif not header and current and line[:1] in ("+", "-"):
             lines.setdefault(current, []).append((line[0], line[1:]))
     return [name for name in names if name], lines
 
@@ -96,14 +122,15 @@ def main():
     parser.add_argument("base")
     parser.add_argument("head")
     parser.add_argument("--repo", type=Path, default=HERE.parent)
+    parser.add_argument("--rules-from-checkout", action="store_true", help="read the rules and the engine from the checkout, not from BASE (bootstrap only)")
     args = parser.parse_args()
-    rules = json.loads((args.repo / RULES).read_text())
-    if rules.get("version") != 1:
-        raise SystemExit(f"{RULES}: unsupported version")
-    risky = json.loads((args.repo / classify_risk().RULES).read_text())
-    paths, lines = read_diff(args.repo, args.base, args.head)
-    changed = sum(len(pairs) for pairs in lines.values())
-    reasons = score(rules, paths, lines, risky, classify_risk())
+    with tempfile.TemporaryDirectory(prefix="review-risk-") as folder:
+        rules, risky, engine = rule_files(args.repo, args.base, args.rules_from_checkout, folder)
+        if rules.get("version") != 1:
+            raise SystemExit(f"{RULES}: unsupported version")
+        paths, lines = read_diff(args.repo, args.base, args.head)
+        changed = sum(len(pairs) for pairs in lines.values())
+        reasons = score(rules, paths, lines, risky, engine)
     large = rules.get("large")
     if large and changed >= large["changed_lines"]:
         reasons.append({"rule": "large-change", "level": large["level"], "paths": [], "lines": [f"{changed} changed lines (at least {large['changed_lines']})"]})

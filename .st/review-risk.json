@@ -34,6 +34,11 @@
       ]
     },
     {
+      "name": "trust-files",
+      "level": "high",
+      "globs": [".st/evidence-keys", ".st/evidence-keys/**", ".st/evidence-log-key", ".st/evidence-authors.json", ".st/evidence-skip-policy.json", ".st/evidence-policy.json", ".st/required-lanes.json", ".st/review-risk.json", ".st/risky-classes.json", ".st/review-verdict.schema.json", ".st/review-harness.json"]
+    },
+    {
       "name": "skip-and-signing-machinery",
       "level": "medium",
       "globs": ["scripts/st-test", "scripts/evidence-*", "scripts/ci-evidence-*", "scripts/ci-local", "scripts/ci-linux", "scripts/review", "scripts/review-*", ".st/**"]

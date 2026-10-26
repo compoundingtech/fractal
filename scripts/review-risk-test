@@ -24,6 +24,7 @@ class ReviewRisk(unittest.TestCase):
         (self.repo / ".st").mkdir()
         for name in ("risky-classes.json", "review-risk.json"):
             (self.repo / ".st" / name).write_text((ROOT / ".st" / name).read_text())
+        self.write("scripts/classify-risk", (ROOT / "scripts" / "classify-risk").read_text())
         self.write("crates/fractal-store/src/store/plain.rs", "fn a() {}\n")
         self.write("crates/fractal-api-core/src/api/routes.rs", "pub fn route() {}\npub struct Reply;\n")
         self.write("docs/readme.md", "x\n")
@@ -90,7 +91,7 @@ class ReviewRisk(unittest.TestCase):
         self.assertEqual(self.rules(result)["workflows"], "medium")
 
     def test_a_policy_file_under_st_is_medium_but_trusted_keys_in_source_are_high(self):
-        self.write(".st/required-lanes.json", "{}\n")
+        self.write(".st/crate-cut.json", "{}\n")
         result = self.risk()
         self.assertEqual(result["level"], "medium")
         self.assertEqual(self.rules(result)["authorization"], "medium")
@@ -113,6 +114,71 @@ class ReviewRisk(unittest.TestCase):
         self.write("scripts/st-test", "#!/bin/sh\n")
         self.write("crates/fractal-store/src/store/plain.rs", 'fn a() { exec("DROP TABLE t"); }\n')
         self.assertEqual(self.risk()["level"], "high")
+
+    def test_trust_files_in_st_are_high_and_the_other_st_files_stay_medium(self):
+        for name in (".st/evidence-keys", ".st/evidence-log-key", ".st/evidence-authors.json", ".st/evidence-skip-policy.json",
+                     ".st/evidence-policy.json", ".st/required-lanes.json", ".st/review-risk.json", ".st/risky-classes.json",
+                     ".st/review-verdict.schema.json", ".st/review-harness.json"):
+            with self.subTest(name):
+                self.git("checkout", "-q", "-B", "change", "main")
+                self.write(name, "x\n")
+                result = self.risk()
+                self.assertEqual(result["level"], "high", result)
+                self.assertEqual(self.rules(result)["trust-files"], "high")
+        for name in (".st/crate-cut.json", ".st/module-layers.json", ".st/rust-test-inputs.json", ".st/evidence-retention.json"):
+            with self.subTest(name):
+                self.git("checkout", "-q", "-B", "change", "main")
+                self.write(name, "x\n")
+                result = self.risk()
+                self.assertEqual(result["level"], "medium", result)
+                self.assertNotIn("trust-files", self.rules(result))
+
+    def test_the_rules_come_from_the_base_so_a_head_cannot_lower_its_own_floor(self):
+        rules = json.loads((self.repo / ".st/review-risk.json").read_text())
+        for rule in rules["rules"]:
+            if rule["name"] == "data-deletion":
+                rule["level"] = "low"
+        rules["classes"]["schema"] = "low"
+        self.write(".st/review-risk.json", json.dumps(rules))
+        self.write("crates/fractal-store/src/store/plain.rs", 'fn a() { exec("DROP TABLE t"); }\n')
+        result = self.risk()
+        self.assertEqual(self.rules(result)["data-deletion"], "high")
+        self.assertEqual(self.rules(result)["trust-files"], "high")
+        self.assertEqual(result["level"], "high")
+
+    def test_the_engine_comes_from_the_base_too(self):
+        self.write("scripts/classify-risk", "RULES = '.st/risky-classes.json'\ndef classify(*a):\n    return []\ndef matches(*a):\n    return False\n")
+        self.write("crates/fractal-store/src/store/plain.rs", 'fn a() { exec("DROP TABLE t"); }\n')
+        self.assertEqual(self.rules(self.risk())["data-deletion"], "high")
+
+    def test_a_base_without_the_rules_fails_unless_the_checkout_is_trusted(self):
+        scratch = tempfile.TemporaryDirectory(prefix="review-risk-bootstrap-")
+        self.addCleanup(scratch.cleanup)
+        other = Path(scratch.name)
+        run = lambda *args: subprocess.run(["git", *args], cwd=other, text=True, capture_output=True, check=True)
+        run("init", "-q", "-b", "main")
+        run("config", "user.email", "t@example.com")
+        run("config", "user.name", "t")
+        (other / "readme").write_text("x\n")
+        run("add", "-A")
+        run("commit", "-q", "-m", "start")
+        run("checkout", "-q", "-b", "change")
+        for path in (".st/review-risk.json", ".st/risky-classes.json", "scripts/classify-risk"):
+            (other / path).parent.mkdir(parents=True, exist_ok=True)
+            (other / path).write_text((ROOT / path).read_text())
+        run("add", "-A")
+        run("commit", "-q", "-m", "introduce the rules")
+        command = [sys.executable, str(HERE / "review-risk"), "main", "change", "--repo", str(other)]
+        done = subprocess.run(command, text=True, capture_output=True)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("holds no", done.stderr)
+        done = subprocess.run([*command, "--rules-from-checkout"], text=True, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["level"], "high")
+
+    def test_a_changed_line_that_starts_like_a_file_header_is_still_read(self):
+        self.write("crates/fractal-store/src/store/plain.rs", "fn a() {}\n++ DROP TABLE t\n")
+        self.assertEqual(self.rules(self.risk())["data-deletion"], "high")
 
 
 if __name__ == "__main__":
