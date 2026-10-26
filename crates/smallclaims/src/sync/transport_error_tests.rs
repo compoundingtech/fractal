@@ -109,6 +109,62 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> usize {
     length
 }
 
+#[tokio::test]
+async fn request_failure_keeps_wire_and_uncompressed_body_lengths() {
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(), url: format!("http://{}", socket.local_addr().unwrap()),
+    };
+    let request = serde_json::json!({"payload": "x".repeat(64 * 1024)});
+    let uncompressed = serde_json::to_vec(&request).unwrap();
+    let client = replication_http_client();
+    let auth = FleetAuth::test("test-fleet", b"test-secret");
+    let fleet = FleetContext::legacy(Default::default());
+    for compress in [false, true] {
+        let error = post_signed_to::<_, serde_json::Value>(
+            &client, &peer, "birch", &auth, &fleet, EXCHANGE_PATH, &request, compress,
+        ).await.unwrap_err();
+        let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+        let wire_bytes = if compress { deflate(&uncompressed).unwrap().len() } else { uncompressed.len() };
+        assert_eq!(failure.request_body_bytes, Some(wire_bytes as u64));
+        assert_eq!(failure.request_body_uncompressed_bytes, Some(uncompressed.len() as u64));
+        assert!(failure.preparation_ms.is_some());
+        assert_eq!(failure.attempt_elapsed_ms, None, "only the dial worker knows the whole attempt");
+        assert_eq!(failure.phase, ReplicationFailurePhase::RequestHeaders);
+    }
+}
+
+#[tokio::test]
+async fn http_failure_elapsed_excludes_preparation_before_the_send_clock() {
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(), url: format!("http://{}", socket.local_addr().unwrap()),
+    };
+    // Model an old preparation origin without sleeping or changing the HTTP deadline.
+    let timing = ExchangeTiming {
+        id: uuid::Uuid::now_v7().to_string(),
+        started: std::time::Instant::now() - Duration::from_secs(60),
+        server: false,
+        boundaries: Default::default(),
+    };
+    let mut stage = crate::replication::ReplicationClientStage::PooledOrUnknown;
+    let mut preparation = None;
+    let error = post_signed_to_timed::<_, serde_json::Value>(
+        &replication_http_client(), &peer, "birch",
+        &FleetAuth::test("test-fleet", b"test-secret"),
+        &FleetContext::legacy(Default::default()), EXCHANGE_PATH,
+        &serde_json::json!({"payload": "x".repeat(64 * 1024)}), true,
+        &timing, &mut stage, &mut preparation,
+    ).await.unwrap_err();
+    let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+    let preparation = preparation.unwrap();
+    assert!(preparation.elapsed_ms >= 60_000);
+    assert!(failure.elapsed_ms < 60_000, "preparation must not inflate the send failure clock");
+    assert!(preparation.body_bytes < preparation.uncompressed_body_bytes);
+}
+
 #[test]
 fn timing_promotes_original_boundaries_only_for_failures_or_slow_exchanges() {
     let timing = ExchangeTiming {

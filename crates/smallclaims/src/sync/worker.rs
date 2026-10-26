@@ -1830,9 +1830,10 @@ async fn dial_peer<B: Backend>(
                     // A shard route pointing at another store is a configuration error.
                     // Repeating the same exchange cannot repair it. Keep the reason visible
                     // until the route changes, without sending any shard envelopes.
-                    let failure = ReplicationExchangeFailure::from_error(
+                    let mut failure = ReplicationExchangeFailure::from_error(
                         &error, ReplicationFailurePhase::Verify, attempt_started.elapsed(), None,
                     );
+                    failure.attempt_elapsed_ms = Some(u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX));
                     let _ = backend
                         .record_failure(
                             &peer.name,
@@ -1881,6 +1882,7 @@ async fn dial_peer<B: Backend>(
                 let mut failure = ReplicationExchangeFailure::from_error(
                     &error, ReplicationFailurePhase::Verify, attempt_started.elapsed(), None,
                 );
+                failure.attempt_elapsed_ms = Some(u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX));
                 if overloaded {
                     failure.code = "replication-overloaded".into();
                 }
@@ -3568,6 +3570,10 @@ fn overloaded_error(
             ReplicationFailurePhase::RequestHeaders
         },
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        attempt_elapsed_ms: None,
+        preparation_ms: None,
+        request_body_bytes: None,
+        request_body_uncompressed_bytes: None,
         http_status,
         correlation_id: None,
         client_stage: None,
@@ -3682,6 +3688,12 @@ fn unsigned_refusal(peer: &str, status: StatusCode, body: &[u8]) -> String {
     }
 }
 
+struct RequestPreparation {
+    elapsed_ms: u64,
+    body_bytes: u64,
+    uncompressed_body_bytes: u64,
+}
+
 /// Send one signed request to a peer path and return the peer's verified answer, as
 /// `post_signed` does for an exchange.
 #[allow(clippy::too_many_arguments)]
@@ -3706,8 +3718,9 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     });
     let timing = &observation.timing;
     let mut stage = crate::replication::ReplicationClientStage::PooledOrUnknown;
+    let mut preparation = None;
     EXCHANGE_CONNECT.scope(Arc::clone(&observation),
-        post_signed_to_timed(http, peer, node, auth, fleet, path, request, compress, timing, &mut stage))
+        post_signed_to_timed(http, peer, node, auth, fleet, path, request, compress, timing, &mut stage, &mut preparation))
         .await
         .map_err(|error| {
             let mut failure = ReplicationExchangeFailure::from_error(
@@ -3722,6 +3735,11 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
                 };
             }
             failure.client_stage = Some(stage);
+            if let Some(preparation) = preparation {
+                failure.preparation_ms = Some(preparation.elapsed_ms);
+                failure.request_body_bytes = Some(preparation.body_bytes);
+                failure.request_body_uncompressed_bytes = Some(preparation.uncompressed_body_bytes);
+            }
             timing.record("client-failed");
             let display = error.to_string();
             error.context(failure).context(display)
@@ -3740,27 +3758,35 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
     compress: bool,
     timing: &ExchangeTiming,
     client_stage: &mut crate::replication::ReplicationClientStage,
+    preparation: &mut Option<RequestPreparation>,
 ) -> Result<(R, bool)> {
     let body = serde_json::to_vec(request)?;
+    let uncompressed_body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
     let request_digest = FleetAuth::body_digest(&body);
     let headers = auth.request_headers_for(path, node, &body)?;
     let endpoint = format!("{}{}", peer.url.trim_end_matches('/'), path);
-    let started = std::time::Instant::now();
     let mut request = http
         .post(&endpoint)
         .headers(headers)
         .header("content-type", "application/json")
         .header("accept-encoding", EXCHANGE_ENCODING)
         .header(EXCHANGE_CORRELATION_HEADER, &timing.id);
-    request = if compress && body.len() >= DEFLATE_MIN_BYTES {
-        request
-            .header("content-encoding", EXCHANGE_ENCODING)
-            .body(deflate(&body)?)
+    let body = if compress && body.len() >= DEFLATE_MIN_BYTES {
+        request = request.header("content-encoding", EXCHANGE_ENCODING);
+        deflate(&body)?
     } else {
-        request.body(body)
+        body
     };
+    let body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
+    let request = request.body(body).build()?;
+    let started = std::time::Instant::now();
+    *preparation = Some(RequestPreparation {
+        elapsed_ms: u64::try_from(started.duration_since(timing.started).as_millis()).unwrap_or(u64::MAX),
+        body_bytes,
+        uncompressed_body_bytes,
+    });
     timing.record("client-send-start");
-    let response = request.send().await
+    let response = http.execute(request).await
         .map_err(request_route_failure)
         .map_err(|error| exchange_failure(error, ReplicationFailurePhase::RequestHeaders, started, None))?;
     *client_stage = crate::replication::ReplicationClientStage::HeadersReceived;
@@ -3921,6 +3947,10 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
                     .unwrap_or(ReplicationFailurePhase::ResponseBody)
             },
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            attempt_elapsed_ms: None,
+            preparation_ms: None,
+            request_body_bytes: None,
+            request_body_uncompressed_bytes: None,
             http_status: Some(status.as_u16()),
             cause: "authenticated peer rejected the exchange; body withheld".into(),
             correlation_id: None,
