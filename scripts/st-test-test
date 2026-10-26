@@ -1704,7 +1704,7 @@ if os.environ.get('CI_TEST_FLAKY'):
 
 
 class PoolQueue(unittest.TestCase):
-    """Pool trees go to waiters in the build host's order (cargo-priority rank by ST_AGENT, aged as the shim ages it, then arrival), not by a race."""
+    """Pool trees go to waiters in the build host's order (cargo-priority rank by ST_AGENT or CARGO_PRIORITY_CALLER, aged as the shim ages it, then arrival), not by a race."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -1755,6 +1755,22 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(got[0][0], 0)
         got[0][1].close()
 
+    def test_a_waiter_sees_a_tree_the_pool_gains_while_it_waits(self):
+        self.root.mkdir(parents=True)
+        holder = open(self.root / 'tree-0.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        self.addCleanup(holder.close)
+        size, got = [1], []                                                     # the host's heavy slots go from 1 to 2 while it waits
+        with contextlib.redirect_stderr(io.StringIO()):
+            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, lambda: size[0], rank=50)))
+            waiter.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])                                           # tree-0 is held, and the pool has no other
+            size[0] = 2
+            waiter.join(5)
+        self.assertEqual(got[0][0], 1)                                          # the new tree, while tree-0 is still held
+        got[0][1].close()
+
     def test_the_queue_orders_by_aged_rank_then_arrival_and_drops_dead_tickets(self):
         queue = Path(self.tmp.name) / 'queue'
         queue.mkdir()
@@ -1767,9 +1783,23 @@ class PoolQueue(unittest.TestCase):
                  'dead': f'001.{now:019d}.999999999'}
         for name in names.values():
             (queue / name).touch()
-        order = [name for _, _, name in st_test.tree_queue(queue, now)]
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):  # tickets from 1970 for a live pid: only the order is asked
+            order = [name for _, _, name in st_test.tree_queue(queue, now)]
         self.assertEqual(order, [names['p0'], names['old-50'], names['new-12'], names['young-50']])
         self.assertFalse((queue / names['dead']).exists())
+
+    def test_a_ticket_whose_pid_was_reused_by_a_younger_process_is_dropped(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        started = st_test.process_started_ns(os.getpid())
+        self.assertIsNotNone(started)
+        self.assertLess(abs(started - time.time_ns()), 3600 * 10**9)              # this test process started within the hour
+        stale = queue / f'050.{started - 60 * 10**9:019d}.{os.getpid()}'        # taken a minute before this pid's process existed
+        own = queue / f'050.{started + 10**9:019d}.{os.getpid()}'
+        stale.touch()
+        own.touch()
+        self.assertEqual([name for _, _, name in st_test.tree_queue(queue, time.time_ns())], [own.name])
+        self.assertFalse(stale.exists())
 
     def test_the_rank_is_the_first_matching_line_of_the_priority_file_and_50_otherwise(self):
         priority = Path(self.tmp.name) / 'cargo-priority'
@@ -1779,6 +1809,11 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(rank('agent/crew/leads/lead-2'), 4)
         self.assertEqual(rank('agent/other'), 12)
         self.assertEqual(rank(''), 50)
+        # The shim's caller: ST_AGENT, else CARGO_PRIORITY_CALLER (st-test and ci-local stages run without ST_* variables).
+        by = lambda environment: st_test.priority_rank(dict(environment, CARGO_PRIORITY_FILE=str(priority)))
+        self.assertEqual(by({'CARGO_PRIORITY_CALLER': 'agent/crew/hot/2026-10-26/hot-builder'}), 3)
+        self.assertEqual(by({'ST_AGENT': 'agent/crew/leads/lead-2', 'CARGO_PRIORITY_CALLER': 'agent/crew/hot/x/hot-builder'}), 4)
+        self.assertEqual(by({'ST_AGENT': '', 'CARGO_PRIORITY_CALLER': 'agent/crew/leads/lead-2'}), 4)
         self.assertEqual(st_test.priority_rank({'ST_AGENT': 'agent/x', 'CARGO_PRIORITY_FILE': str(priority) + '.missing'}), 50)
 
     def test_an_interrupted_waiter_leaves_no_ticket(self):
