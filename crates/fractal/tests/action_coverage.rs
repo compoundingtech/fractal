@@ -3598,11 +3598,13 @@ async fn cli_aged_unread_cleanup_preserves_fresh_and_read_mail_across_restart() 
         return;
     }
     let mut daemon = Daemon::new().await;
-    daemon.apply("version 2\nagent \"example/reader\" { workspace \"/tmp\"; command \"true\"; restart never }\nagent \"example/other\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-cleanup-recipients");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
+    // Seed before the aged mail so the writer's monotonic clock does not make it fresh.
+    daemon.store().set_write_clock_at(now - 7_200_000).unwrap();
+    daemon.apply("version 2\nagent \"example/reader\" { workspace \"/tmp\"; command \"true\"; restart never }\nagent \"example/other\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-cleanup-recipients");
     let mut messages = BTreeMap::new();
     for (name, recipient, phase, fresh) in [
         ("old-sent", READER, "sent", false),
