@@ -76,12 +76,11 @@ xcodebuild() { native /usr/bin/xcodebuild "$@"; }
 sim=''
 gateway_pid=''
 metro_pid=''
-native_log_pid=''
 cleanup() {
-  status=$?
-  trap - EXIT INT TERM
+  local status=$?
+  trap - EXIT INT TERM ERR
   set +e
-  for pid in "$native_log_pid" "$metro_pid" "$gateway_pid"; do
+  for pid in "$metro_pid" "$gateway_pid"; do
     if [[ -n "$pid" ]]; then kill "$pid"; wait "$pid"; fi
   done
   if [[ -n "$sim" ]]; then
@@ -153,8 +152,6 @@ start_service "$out/metro.log" corepack pnpm exec expo start --localhost --port 
 metro_pid="$service_pid"
 wait_service "$metro_pid" 'http://localhost:8081/status' "$out/metro.log"
 run xcrun simctl install "$sim" "$out/DerivedData/Build/Products/Debug-iphonesimulator/fractal.app"
-start_service "$out/native.log" xcrun simctl spawn "$sim" log stream --style compact --level debug --predicate 'process == "fractal"'
-native_log_pid="$service_pid"
 run xcrun simctl launch "$sim" com.compoundingtech.fractal.starter -RCT_jsLocation localhost:8081
 
 cat > "$out/pair.yaml" <<'FLOW'
@@ -168,8 +165,18 @@ appId: com.compoundingtech.fractal.starter
 # Maestro matches text case-insensitively by default; do not tap the navigation title.
 - tapOn: '(?-i:^pair this device$)'
 - extendedWaitUntil:
-    visible: 'Approve the widget release'
+    visible: '.*Approve the widget release.*'
     timeout: 30000
+# Dismiss the Debug warning notification through its visible close control;
+# keep the original warning in metro.log rather than suppressing its source.
+- runFlow:
+    when:
+      visible: '.*Open debugger to view warnings.*'
+    commands:
+      - tapOn:
+          text: '.*Open debugger to view warnings.*'
+          point: '95%,50%'
+      - assertNotVisible: '.*Open debugger to view warnings.*'
 FLOW
 run maestro --device "$sim" test "$out/pair.yaml"
 for view in now conversation; do
