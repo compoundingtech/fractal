@@ -3,7 +3,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import type * as Native from '@fractal/client/schema'
-import { DateTime } from 'effect'
+import { DateTime, Option } from 'effect'
 
 const data = vi.hoisted(() => ({ feed: { _tag: 'Waiting' } as unknown }))
 vi.mock('@stylexjs/stylex', () => ({
@@ -18,21 +18,24 @@ vi.mock('../data/react.tsx', () => ({ useAttention: () => data.feed }))
 import { AlertsPopover, alertsList } from './AlertsPopover.tsx'
 
 const at = Date.parse('2026-10-14T10:00:00Z')
+/** How st presents an item (`Attention.presentation`), as the web app decodes it: every nullable field an Option. */
+const presented = (tier: string, kind: string) =>
+  ({ agent: Option.none(), kind: Option.some(kind), raised_by: Option.none(), tier: Option.some(tier), waiting: Option.none() })
 const row = (fields: Record<string, unknown>): Native.Attention =>
   ({
     id: 'attention/ask', kind: 'attention', revision: 'r1', attention_kind: 'person-step', title: 'Ship it?',
     detail: '', priority: 'high', state: 'open', requested_at: DateTime.makeUnsafe(at), person_id: 'person/avery',
     source_id: 'step-run/example/build', requester_id: 'agent/example/atlas', conversation_id: 'agent/example/atlas',
-    conversation_ids: ['agent/example/atlas'], alert: true, actions: ['work.done'], ...fields,
+    conversation_ids: ['agent/example/atlas'], alert: true, actions: ['work.done'], presentation: presented('stopped', 'request'), ...fields,
   }) as unknown as Native.Attention
 
 const rows = [
-  row({ id: 'attention/launch', attention_kind: 'launch-approval', title: 'Launch the nightly mission', requester_id: 'agent/example/planner', conversation_id: 'agent/example/planner', conversation_ids: ['agent/example/planner'] }),
+  row({ id: 'attention/launch', attention_kind: 'launch-approval', presentation: presented('today', 'launch'), title: 'Launch the nightly mission', requester_id: 'agent/example/planner', conversation_id: 'agent/example/planner', conversation_ids: ['agent/example/planner'] }),
   row({ id: 'attention/ask', requested_at: DateTime.makeUnsafe(at - 3 * 60_000) }),
-  row({ id: 'attention/update', alert: false, update: { about: 'run/example' }, title: 'Nightly finished' }),
-  row({ id: 'attention/message', attention_kind: 'unread-message', alert: false, title: 'hello' }),
+  row({ id: 'attention/update', alert: false, update: { about: 'run/example' }, presentation: presented('later', 'update'), title: 'Nightly finished' }),
+  row({ id: 'attention/message', attention_kind: 'unread-message', alert: false, presentation: undefined, title: 'hello' }),
   row({ id: 'attention/done', state: 'resolved', title: 'Old question?' }),
-  row({ id: 'attention/gate', attention_kind: 'human-gate', title: 'Review the parser', source_id: 'gate/example', requester_id: undefined, conversation_id: undefined, conversation_ids: undefined }),
+  row({ id: 'attention/gate', attention_kind: 'human-gate', presentation: presented('stopped', 'feedback'), title: 'Review the parser', source_id: 'gate/example', requester_id: undefined, conversation_id: undefined, conversation_ids: undefined }),
 ]
 
 describe('alertsList', () => {

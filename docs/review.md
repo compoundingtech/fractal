@@ -28,13 +28,19 @@ against `.st/review-verdict.schema.json` (`scripts/review-validate`); a review w
 nothing is signed**. The signature covers the whole artifact, the review's own output included, so what is signed is exactly what
 was said.
 
+**Status of the tools.** The risk script (`scripts/review-risk`), the schema and its validator
+(`.st/review-verdict.schema.json`, `scripts/review-validate`) are merged. The runner (`scripts/review`) follows in the next pull
+request; until it is merged the reviewer does its steps by hand: it writes the verdict against the table below, runs
+`scripts/review-risk` for the deterministic score and `scripts/review-validate` on the verdict. The daily miss rate starts when the
+independent re-review exists.
+
 | Field | Meaning |
 | --- | --- |
 | `head` | the full 40-character commit the verdict is about; a verdict is void the moment the head moves |
 | `base` | the full `main` commit the head was read against |
 | `round` | 1 to 3: which attempt this is (see the loop) |
 | `verdict` | `GO` or `CHANGES` |
-| `risk.deterministic` | the level (`low`, `medium`, `high`) and reasons computed from the diff alone by `scripts/review-risk`, using the rules named in `.st/review-risk.json`; no model is involved, so two runs agree |
+| `risk.deterministic` | the level (`low`, `medium`, `high`) and reasons computed from the diff alone by `scripts/review-risk`, using the rules named in `.st/review-risk.json`, read from the base and never from the head under review, so a change cannot lower its own floor; no model is involved, so two runs agree. Changing the trust files under `.st/` (keys, authors, the skip, policy and required-lanes files, and the review's own rules, classes, schema and harness) is high |
 | `risk.llm` | the reviewing model's own level, with its reasons |
 | `risk.final` | the **higher** of the two: the model may raise the deterministic floor and never lower it |
 | `findings` | each with `severity` (`blocking` or `advisory`), `file`, `line`, `reason` and the fix that would be accepted |

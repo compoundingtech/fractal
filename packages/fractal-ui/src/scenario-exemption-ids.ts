@@ -1,5 +1,8 @@
 // Every exemption is reviewable by export identity and mode, including count-neutral swaps.
 export const scenarioExemptionIds: readonly string[] = [
+  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#AllStates:contract-fixture',
+  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#DarkBeforeHydration:contract-fixture',
+  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#LightBeforeHydration:contract-fixture',
   './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#AllStates:contract-fixture',
   './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#LongFilename:contract-fixture',
   './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#ResolvedImageFollowup:contract-fixture',
@@ -8,6 +11,9 @@ export const scenarioExemptionIds: readonly string[] = [
   './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#SizeRefusal:contract-fixture',
   './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#UploadCancelled:contract-fixture',
   './../../../apps/fractal-web/src/web/ComposerImages.stories.tsx#UploadInProgress:contract-fixture',
+  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#AllBadStale:contract-fixture',
+  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#FullyDecoded:contract-fixture',
+  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#UndecodableRow:contract-fixture',
   './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#AgentRowDetails:contract-fixture',
   './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#AgentRowDetailsLight:contract-fixture',
   './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#BreakpointDensity:contract-fixture',
@@ -364,6 +370,7 @@ export const scenarioExemptionIds: readonly string[] = [
   './Transcript.stories.tsx#NativeToolOutputLight:contract-fixture',
   './Transcript.stories.tsx#NoGreenAllStates:contract-fixture',
   './Transcript.stories.tsx#NoGreenAllStatesLight:contract-fixture',
+  './Transcript.stories.tsx#NotFoundWithComposer:contract-fixture',
   './Transcript.stories.tsx#PendingSend:contract-fixture',
   './Transcript.stories.tsx#PendingSendLight:contract-fixture',
   './Transcript.stories.tsx#ProseOnly:contract-fixture',
