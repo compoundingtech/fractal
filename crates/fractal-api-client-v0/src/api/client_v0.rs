@@ -13127,7 +13127,7 @@ subscription "watch/source" {
         for owner in [Some("person/ada"), None] {
             let root = tempfile::tempdir().unwrap();
             let state = test_state_named(root.path(), "helper-binding");
-            let source = "version 2\nagent \"launcher\" { workspace \"/tmp\"; harness \"codex\"; }";
+            let source = "version 2\nagent \"launcher\" { workspace \"/tmp\"; harness \"codex\" {}; }";
             let intent = crate::graph::parse_intent(source, "helper-binding").unwrap();
             let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
             state.store.apply_as(&intent, &expected, "declare-launcher", owner).unwrap();

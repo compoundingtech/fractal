@@ -244,7 +244,7 @@ mod tests {
 
     fn declaration(name: &str) -> NormalizedIntent {
         crate::graph::parse_intent(
-            &format!("version 2\nagent \"{name}\" {{ workspace \"/tmp\"; harness \"codex\"; }}"),
+            &format!("version 2\nagent \"{name}\" {{ workspace \"/tmp\"; harness \"codex\" {{}}; }}"),
             "node",
         ).unwrap()
     }
