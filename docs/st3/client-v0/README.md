@@ -1267,12 +1267,24 @@ or checkpoint authority. Existing canonical claims and checkpoint rules are unch
 
 Asks, attention actions, message sends and held effects are not pinned by this local-response
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.
-Client actions keep their durable `custom.client.action-result` receipt; normal claim append
-uses its existing operation identity and checkpoint tombstones. Cleanup never deletes these
-claims. Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
+Client actions keep their server-only `client.action-result` receipt in the owner-local
+observation log, with the same durable retention class and ordinary age/count trimming;
+it is not pinned. This does not extend the existing idempotency retention window.
+Replay and receipt compare-and-set read the owner's local receipts, not peer claims.
+Only `agent.launcher-bound` and `agent.helper-launched` are pinned against local age/count
+trimming. Normal claim append uses its existing operation identity and checkpoint tombstones.
+Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
 follow `retryable`, and this new code is terminal. TypeScript/phone `isTransient` and
 `retryTransient` likewise stop on this code; the phone's fresh-fence `notApplied` retry list
 contains only stale-fence/rate-limited. Swift preserves unknown codes and `retryable: false`.
+
+Legacy `custom.client.action-result` receipts cannot prove server authorship, even
+with a local origin and absent/null actor. A retry whose key has any such receipt
+fails closed with HTTP 409 `legacy-action-receipt-untrusted` before dispatch or
+side effects. This covers both actor-bearing old server receipts and old
+client-forged receipts; neither is silently upgraded or replayed. Inspect the
+original outcome before choosing a new key. New typed receipts replay normally.
+No stored claims are rewritten and no migration is required.
 
 Caller keys have one namespace across actors and nodes that share these claims. Use a fresh,
 globally unique key for each new request; keys are not an authorization boundary. Reusing
@@ -2314,6 +2326,61 @@ in `st agents new`. Workspace paths are absolute on the selected host; omission 
 its usual new-agent directory. The host creates missing agent workspaces. OpenCode does not accept
 `effort`. Message text is nonempty, at most 64 KiB, and uses the native harness startup argument.
 An existing active seat requires a different name; a stopped seat may be deliberately recreated.
+
+Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
+emitted exactly once. Short names retain the usual host qualification.
+
+When an agent with runtime evidence creates another agent, the new agent is a
+run-owned helper, regardless of harness. An agent identity with no runtime
+observation retains the ordinary non-inheriting creation flow: no launcher run or
+credential reference is inferred. The server records an owner-local `agent.launcher-bound`
+receipt with the authenticated launcher, its person owner (if known), the selected
+declaration, and the exact launcher runtime incarnation. Claude and Codex helpers
+must match the launcher's credential-bearing harness and inherit only that
+harness's credential-directory reference; cross-provider creation is refused.
+The helper retains its own agent identity. Credential files and secret values are never copied into
+arguments or environment variables. Absolute credential-directory references remain
+host-local; owner-local action receipts carry only non-authoritative attribution
+labels. Peer-replicated binding and action-result claims cannot grant authority.
+An unowned launcher does not confer person ownership.
+Credential-directory references are local to the launcher's host, so helpers must
+launch on that host. Inheritance also requires kernel-authenticated Unix socket
+peer credentials and proof that the peer descends from the launcher's exact
+daemon-recorded harness PID and Linux process-start token. Inheritance requires
+Linux with `SO_PEERPIDFD` (kernel 6.5 or newer). The server retains the original
+connector's kernel pidfd and refuses exited connectors, even when the socket
+remains open or its PID is reused. There is no PID-only or start-token fallback:
+an unavailable socket pidfd refuses inheritance without changing ordinary authentication.
+Every intermediate ancestor's generation and parent edge is checked
+again before granting. `ST_AGENT`, headers and other environment values cannot
+establish this grant. Old launcher runs without process provenance must be
+relaunched. Platforms without verified process ancestry (currently non-Linux),
+missing peer identity, unreadable procfs or unavailable process evidence fail
+closed with a clear refusal; no alternative account or login is selected.
+
+Socket peer credentials and a pidfd identify the original connector, not the
+current writer of each request. A descriptor handed over by the launcher's
+subtree retains that connector's authority while its identity remains live:
+this is delegation. Ancestry trusts the entire launcher subtree; it is not
+isolation between its descendants. Do not pass an authenticated descriptor to
+an untrusted process.
+
+Reconciliation stops a helper when that exact launcher incarnation ends.
+Spawning and restarting refuse an ended binding, including after a daemon
+restart; the credential reference is no longer usable for a new launch.
+Restarting the launcher ends its helpers: the new incarnation must create them
+again. Historical binding receipts remain for attribution.
+Each successful helper launch atomically records a server-only, durable owner-local
+`agent.helper-launched` receipt with its launcher, person owner, credential-home
+label, launcher incarnation, and operation ID. Age and count retention preserve it.
+Client-writable or peer-replicated receipts cannot grant binding authority.
+A declaration edit cannot silently switch the helper to a different login:
+if it no longer matches its credential receipt, stop and recreate the helper.
+
+This is a Fractal lifecycle bound, not native process containment: while the
+daemon is unavailable, a helper can outlive its launcher until reconciliation
+resumes. Agent Policy accepts this explicit exception; native containment is
+tracked in [#3923](https://github.com/compoundingtech/fractal/issues/3923).
 
 `repo` is an existing repository's absolute path on the selected host. It adds the existing
 `checkout` declaration and creates the agent workspace as a worktree. `base` defaults to
