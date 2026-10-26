@@ -1,4 +1,4 @@
-import type { TerminalModes } from '../../clients/typescript/st3-client/Models.generated';
+import type { TerminalModes } from '../../clients/typescript/fractal-client/Models.generated';
 
 // What the phone's keyboard and key bar send to a terminal, as the bytes a terminal emulator
 // would send for the same keys, so full-screen programs such as vim work.

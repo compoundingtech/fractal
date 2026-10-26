@@ -4,13 +4,14 @@ import { existsSync, mkdtempSync, writeFileSync, readFileSync, mkdirSync, openSy
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('ST_') && !name.startsWith('ST3_') && !name.startsWith('FABRIC_')));
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — an isolated member must inherit neither namespace.
+const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('FRACTAL_') && !name.startsWith('ST_') && !name.startsWith('ST3_') && !name.startsWith('SMALLTALK_') && !name.startsWith('FABRIC_')));
 const kind = 'st-fabric-isolated-proof-v1';
 // The phone is granted inbound-only, which needs fabric 0.2.41 or later.
 const expectedVersion = process.env.FABRIC_EXPECTED_VERSION ?? '0.2.41+84c3208';
 if (expectedVersion !== '0.2.41+84c3208') throw new Error('Unsupported fabric proof pin');
 // The separate offline Debug app (prepare-phone.mjs) has its own scheme; a simulator Debug build uses the starter scheme.
-const scheme = (separate) => `com.compoundingtech.smalltalk.${separate ? 'fabricproof' : 'starter'}://fabric-proof`;
+const scheme = (separate) => `com.compoundingtech.fractal.${separate ? 'fabricproof' : 'starter'}://fabric-proof`;
 const command = (binary, args) => {
   const result = spawnSync(binary, args, { env: environment, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`${binary} test command failed: ${result.stderr}`);

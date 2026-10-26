@@ -31,6 +31,36 @@ assert.equal(fabricTargetFromQuery('node=zz&service=s'), null);
 assert.equal(buildFabricDefault(undefined), null);
 assert.equal(buildFabricDefault(`node=${node}&service=st3-client%2Fdemo`)?.service, 'st3-client/demo');
 
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — exercise the build's literal Expo lookups.
+{
+  const names = ['EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT', 'EXPO_PUBLIC_ST3_FABRIC_DEFAULT'];
+  const saved = names.map(name => process.env[name]);
+  const preferred = `node=${node}&service=preferred`;
+  const legacy = `node=${node}&service=legacy`;
+  try {
+    for (const [current, old, expected] of [
+      [undefined, undefined, undefined],
+      [undefined, legacy, 'legacy'],
+      [preferred, undefined, 'preferred'],
+      [preferred, legacy, 'preferred'],
+      [preferred, preferred, 'preferred'],
+      ['', legacy, undefined],
+    ]) {
+      // These intentionally distinct inputs prove migration precedence, not production dual writes.
+      for (const [index, value] of [current, old].entries()) {
+        if (value === undefined) delete process.env[names[index]];
+        else process.env[names[index]] = value;
+      }
+      assert.equal(buildFabricDefault()?.service, expected);
+    }
+  } finally {
+    for (const [index, value] of saved.entries()) {
+      if (value === undefined) delete process.env[names[index]];
+      else process.env[names[index]] = value;
+    }
+  }
+}
+
 // Stored and read back; a damaged or no longer valid record reads as none.
 const target = { node: lower, service: 'st3-client/demo', address: '{"a":1}' };
 assert.deepEqual(decodeFabricTarget(encodeFabricTarget(target)), target);
@@ -125,4 +155,13 @@ assert.ok(!isFabricGatewayId('http://100.64.1.2:8443') && !isFabricGatewayId('')
   assert.equal(credentialFor(true, c, 'spare-bearer', 'device-bearer'), 'spare-bearer', 'a member paired on its own gets its own');
   assert.equal(credentialFor(true, b, null, 'device-bearer'), null, 'a member not paired yet gets none, never this device\'s');
   assert.equal(credentialFor(true, null, 'spare-bearer', 'device-bearer'), null, 'a member that cannot be named gets none');
+
+  // A build's default target is the member that uses this device's own pairing (it was the only target before the
+  // list), so a phone paired through its form has it to walk; it is not a member waiting for its own pairing.
+  const { builtFabricMembers } = await import('./fabricTarget.ts');
+  const built = buildFabricDefault(`node=${'d'.repeat(64)}&service=st3-client%2Fdemo`);
+  const opened = builtFabricMembers(built);
+  assert.deepEqual(opened.map(m => [m.name, m.device]), [['member 1', true]]);
+  assert.deepEqual(walkableMembers(opened, true, new Set()).map(m => m.name), ['member 1'], 'a paired phone dials the built target at once');
+  assert.deepEqual(builtFabricMembers(null), []);
 }

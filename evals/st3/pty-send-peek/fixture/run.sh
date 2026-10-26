@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-subject="pty/$ST_MISSION_RUN/psp"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+subject="pty/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/psp"
 for _ in $(seq 1 100); do
   st3 terminals peek "$subject" >pre.txt 2>/dev/null && grep -Fq READY pre.txt && break
   sleep 0.05

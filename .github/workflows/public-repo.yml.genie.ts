@@ -1,5 +1,5 @@
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { linuxActionlintConfig } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
@@ -13,6 +13,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
   },
   "on": {
     "pull_request": { types: [...readyPullRequestTypes, 'labeled', 'unlabeled'] },
+    "merge_group": null,
+    "workflow_dispatch": null,
     "push": {
       "branches": [
         "main"
@@ -29,7 +31,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       permissions: { contents: 'read' },
       steps: [
         // PR code executes only on a disposable hosted runner, with no secrets or write token.
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         { name: 'Test changelog requirement policy', run: 'node --test apps/fractal-web/scripts/ci/changelog-policy.unit.test.mjs' },
         {
           name: 'Require a new changelog entry for UI changes',
@@ -54,8 +56,17 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         {
           "name": "Check repository content",
           "run": "python3 scripts/check-public-repo"
-        }
+        },
+        {
+          name: 'Test rolling compatibility baseline policy',
+          run: 'python3 scripts/compat-baseline-release-test\npython3 scripts/compat-baseline-test\n',
+        },
+        {
+          name: 'Check published stable release baseline freshness',
+          env: { GH_TOKEN: '${{ github.token }}', GH_REPO: '${{ github.repository }}' },
+          run: 'python3 scripts/compat-baseline-release check',
+        },
       ]
     }
   }
-}, {"public-repo": "Runs standard-library source checks without downloads or compilation.", "fractal-changelog": "Checks the full Git diff and pure changelog policy without dependencies or compilation."})))
+}, {"public-repo": "Runs standard-library guards and queries published release metadata; builds nothing.", "fractal-changelog": "Checks the full Git diff and pure changelog policy without dependencies or compilation."})))

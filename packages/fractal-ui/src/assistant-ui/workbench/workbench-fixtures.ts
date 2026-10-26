@@ -12,7 +12,10 @@ import { semanticCoverageItems, syntheticMarkdown } from '../embrace-fixtures'
 
 type NewMessage = Parameters<NonNullable<ConversationRuntimeOptions['onNew']>>[0]
 /** Only the stateful story host can turn these facts into a resource with a real submit capability. */
-type FixtureThreadSnapshot = Omit<ThreadResource, 'runtime'> & { readonly runtime: Omit<ConversationRuntimeOptions, 'onNew'> }
+type FixtureThreadSnapshot = Omit<ThreadResource, 'runtime' | 'transcript'> & {
+  readonly runtime: Omit<ConversationRuntimeOptions, 'onNew'>
+  readonly transcript: ThreadResource['transcript'] & { readonly now: number }
+}
 
 export const decidedAppearance: WorkbenchAppearance = { width: 'W3', header: 'H1', chrome: 'P3', dropZones: 'D2' }
 export const fixtureNow = Date.parse('2026-10-09T12:00:30.000Z')

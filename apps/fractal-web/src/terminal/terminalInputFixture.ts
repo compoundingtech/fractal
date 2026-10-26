@@ -1,4 +1,4 @@
-import type { TerminalModes } from '@smalltalk/st3-client/schema'
+import type { TerminalModes } from '@fractal/client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 

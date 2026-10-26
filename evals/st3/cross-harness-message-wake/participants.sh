@@ -1,8 +1,10 @@
 # Sourced by the controller and judges. `WAKE_PAIRS` lists `left:right` participant pairs; each
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # participant is the agent `wake.<name>`. The default is the committed Codex/Claude and Pi/OMP
 # lanes. A variant can declare different seats without changing the protocol or its gates.
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}}"
 
 read -r -a wake_pairs <<<"${WAKE_PAIRS:-codex:claude pi:omp}"
 wake_token_pool=(EMBER ORBIT QUARTZ RIVER)
@@ -19,8 +21,10 @@ for wake_pair in "${wake_pairs[@]}"; do
   wake_left="${wake_pair%%:*}"
   wake_right="${wake_pair#*:}"
   names+=("$wake_left" "$wake_right")
-  agents[$wake_left]="agent/$ST_MISSION_RUN/wake.$wake_left"
-  agents[$wake_right]="agent/$ST_MISSION_RUN/wake.$wake_right"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  agents[$wake_left]="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/wake.$wake_left"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  agents[$wake_right]="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/wake.$wake_right"
   peers[$wake_left]="${agents[$wake_right]}"
   peers[$wake_right]="${agents[$wake_left]}"
   # The pool is in ascending ASCII order, so the left token always sorts first.

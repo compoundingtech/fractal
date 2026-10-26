@@ -17,7 +17,7 @@ function pressScrollOwner(lane: HTMLElement): HTMLElement {
 }
 
 /** Scroll state a conversation keeps while it stays on a surface. */
-export interface ViewportState { readonly top: number; readonly following: boolean; readonly unread: boolean }
+export interface ViewportState { readonly top: number; readonly following: boolean; readonly unread: boolean; readonly firstRenderedId?: string }
 
 /** Per-surface memory, one entry per conversation. Owners drop closed keys and dispose on unmount. */
 export class ViewportStore {
@@ -54,6 +54,37 @@ class ViewportController {
   private readonly pressed = new Set<number>()
   private pressedAnchor: { pointerId: number; element: HTMLElement; scrollOwner: HTMLElement; top: number } | undefined
   private warnedScrollOwner = false
+  firstRenderedId: string | undefined
+  loadEarlier: (() => void) | undefined
+
+  private loadEarlierIfNeeded() {
+    const element = this.element
+    if (element === null || this.loadEarlier === undefined || element.clientHeight === 0) return
+    if (this.following ? element.scrollHeight >= element.clientHeight * 2 : element.scrollTop > element.clientHeight) return
+    this.prepareMaterialize()
+    const load = this.loadEarlier
+    this.loadEarlier = undefined
+    load()
+  }
+  /** Prepending history is not a request to stop following or to move the reader. */
+  readonly prepareMaterialize = () => {
+    if (this.following) return
+    const moved = this.element !== null && Math.abs(this.element.scrollTop - this.lastTop) >= geometryNumbers.scrollEndTolerance
+    // Chunks already preserve this anchor. Re-hit-testing every chunk forces fresh PrePaint work.
+    if (this.captureFrame === undefined && !moved && this.anchor?.element.isConnected) return
+    if (this.captureFrame !== undefined) cancelAnimationFrame(this.captureFrame)
+    this.captureFrame = undefined
+    this.capture()
+  }
+
+  /** Explicit navigation owns history, rather than fighting the tail-follow schedule. */
+  readonly reveal = () => {
+    this.following = false
+    this.pendingTop = undefined
+    this.anchor = undefined
+    if (this.frame !== undefined) cancelAnimationFrame(this.frame)
+    this.frame = undefined
+  }
 
   constructor(saved?: ViewportState) {
     if (saved !== undefined && !saved.following) {
@@ -72,7 +103,7 @@ class ViewportController {
     if (this.jumpButton !== null && this.pressed.size === 0) this.jumpButton.hidden = !this.unread
   }
 
-  readonly released = (): ViewportState => ({ top: this.lastTop, following: this.following, unread: this.unread })
+  readonly released = (): ViewportState => ({ top: this.lastTop, following: this.following, unread: this.unread, firstRenderedId: this.firstRenderedId })
 
   /** Swaps a reused viewport to another conversation without carrying its unread mark across. */
   readonly resume = (saved?: ViewportState) => {
@@ -143,25 +174,30 @@ class ViewportController {
     return true
   }
 
+  /** Commit one window boundary before paint, using the existing following/anchor policy. */
+  readonly settle = () => {
+    const element = this.element
+    if (element === null) return
+    if (this.preservePress()) { this.lastWidth = element.clientWidth; return }
+    if (this.following) this.writeTop(element.scrollHeight)
+    else if (this.pendingTop !== undefined) {
+      this.writeTop(this.pendingTop)
+      if (Math.abs(element.scrollTop - Math.max(0, Math.min(this.pendingTop, element.scrollHeight - element.clientHeight))) < geometryNumbers.scrollEndTolerance) {
+        this.pendingTop = undefined
+        this.scheduleCapture()
+      }
+    } else if (this.captureFrame === undefined && this.anchor?.element.isConnected) {
+      this.writeTop(element.scrollTop + this.anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top - this.anchor.offset)
+    }
+    this.lastWidth = element.clientWidth
+  }
+
   readonly schedule = () => {
     if (this.frame !== undefined) return
     this.frame = requestAnimationFrame(() => {
       this.frame = undefined
-      const element = this.element
-      if (element === null) return
-      // The pressed row takes precedence over the reader's history anchor.
-      if (this.preservePress()) { this.lastWidth = element.clientWidth; return }
-      if (this.following) this.writeTop(element.scrollHeight)
-      else if (this.pendingTop !== undefined) {
-        this.writeTop(this.pendingTop)
-        if (Math.abs(element.scrollTop - Math.max(0, Math.min(this.pendingTop, element.scrollHeight - element.clientHeight))) < geometryNumbers.scrollEndTolerance) {
-          this.pendingTop = undefined
-          this.scheduleCapture()
-        }
-      } else if (this.captureFrame === undefined && this.anchor?.element.isConnected) {
-        this.writeTop(element.scrollTop + this.anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top - this.anchor.offset)
-      }
-      this.lastWidth = element.clientWidth
+      this.settle()
+      this.loadEarlierIfNeeded()
     })
   }
 
@@ -187,6 +223,8 @@ class ViewportController {
     this.element = element
     this.lastWidth = element.clientWidth
     const manual = (event: Event) => {
+      // Focusing the lane itself does not navigate to a row or change the reader's position.
+      if (event.type === 'focusin' && event.target === element) return
       if (event instanceof KeyboardEvent && (navigationKeys[event.key] !== true || (event.target instanceof HTMLElement && event.target.closest('input,textarea,[contenteditable="true"]')))) return
       if (event.type === 'wheel' || event.type === 'touchmove' || event.type === 'keydown') this.pressedAnchor = undefined
       this.following = false
@@ -217,6 +255,7 @@ class ViewportController {
         this.dock()
         this.anchor = undefined
       } else this.scheduleCapture()
+      this.loadEarlierIfNeeded()
     }
     // Document-wide, so presses that start anywhere (a row action included) defer the reveal.
     const page = element.ownerDocument
@@ -307,18 +346,54 @@ function sameRows(previous: readonly ViewportRow[], next: readonly ViewportRow[]
   })
 }
 
-export interface EmbraceScrollViewportProps extends React.HTMLAttributes<HTMLDivElement> {
+export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'children'> {
   readonly items: readonly ViewportRow[]
   readonly contentProps?: React.HTMLAttributes<HTMLDivElement>
   /** Each key keeps its own scroll state across viewport mounts. */
   readonly stateKey?: string
   /** Host command: a changed, defined key resumes following and clears unread; an unchanged key never scrolls. */
   readonly scrollToBottomKey?: string
+  /** Mount the tail first, then fill one extra viewport and prepend on upward navigation. */
+  readonly initialTailCount?: number
+  /** Retained hidden panes pause progressive materialization until they become active again. */
+  readonly active?: boolean
+  /** Persistent controls share the materialization state without becoming part of the scroll content. */
+  readonly renderHeader?: (startIndex: number, revealRow: (id: string, preservePosition?: boolean) => void, materializing: boolean) => React.ReactNode
+  readonly children?: React.ReactNode | ((startIndex: number, revealRow: (id: string, preservePosition?: boolean) => void, materializing: boolean) => React.ReactNode)
 }
 
-export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, children, contentProps, stateKey, scrollToBottomKey, ...props }: EmbraceScrollViewportProps) {
+export const historyBatchSize = 4
+
+export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, active = true, renderHeader, ...props }: EmbraceScrollViewportProps) {
   const store = React.useContext(ViewportStoreContext)
+  const saved = stateKey === undefined ? undefined : store?.get(stateKey)
+  const rememberedFirstId = saved?.following === false ? saved.firstRenderedId : undefined
   const [controller] = React.useState(() => new ViewportController(stateKey === undefined ? undefined : store?.get(stateKey)))
+  // Do not defer a short conversation that fits within the tail plus one history batch.
+  const initialStart = initialTailCount === undefined || items.length <= initialTailCount + historyBatchSize ? 0 : items.length - initialTailCount
+  const [window, setWindow] = React.useState(() => ({ key: stateKey, firstId: rememberedFirstId ?? items[initialStart]?.id }))
+  const [revealTarget, setRevealTarget] = React.useState<{ readonly key: string | undefined; readonly id: string }>()
+  const savedFirstId = window.key === stateKey ? window.firstId : rememberedFirstId
+  const savedIndex = savedFirstId === undefined ? -1 : items.findIndex(item => item.id === savedFirstId)
+  const startIndex = initialStart === 0 ? 0 : savedIndex >= 0 ? savedIndex : initialStart
+  const firstId = items[startIndex]?.id
+  const targetIndex = revealTarget?.key === stateKey ? items.findIndex(item => item.id === revealTarget?.id) : -1
+  const materializing = targetIndex >= 0 && targetIndex < startIndex
+  const revealRow = React.useCallback((id: string, preservePosition = false) => {
+    const index = items.findIndex(item => item.id === id)
+    if (index === -1) return
+    if (!preservePosition) controller.reveal()
+    else if (index < startIndex) controller.prepareMaterialize()
+    setRevealTarget(index < startIndex ? { key: stateKey, id } : undefined)
+  }, [controller, items, stateKey, startIndex])
+  React.useLayoutEffect(() => {
+    if (!active || !materializing) return
+    const frame = requestAnimationFrame(() => {
+      controller.prepareMaterialize()
+      setWindow({ key: stateKey, firstId: items[Math.max(targetIndex, startIndex - historyBatchSize)]?.id })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [active, controller, items, materializing, startIndex, stateKey, targetIndex])
   const previousItems = React.useRef(items)
   const previousKey = React.useRef(stateKey)
   const previousCommand = React.useRef(scrollToBottomKey)
@@ -339,6 +414,15 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
     previousCommand.current = scrollToBottomKey
     previousItems.current = items
   }, [controller, items, store, stateKey, scrollToBottomKey])
+  React.useLayoutEffect(() => {
+    const windowChanged = controller.firstRenderedId !== firstId
+    controller.firstRenderedId = firstId
+    if (window.key !== stateKey || window.firstId === undefined && firstId !== undefined) setWindow({ key: stateKey, firstId })
+    controller.loadEarlier = !active || materializing || startIndex === 0 ? undefined : () => setWindow({ key: stateKey, firstId: items[Math.max(0, startIndex - historyBatchSize)]?.id })
+    if (windowChanged) controller.settle()
+    controller.schedule()
+    return () => { controller.loadEarlier = undefined }
+  }, [active, controller, firstId, items, materializing, stateKey, startIndex, window.key, window.firstId])
   // Every layout commit can insert above a pressed row, including runtime adoption without new items.
   React.useLayoutEffect(() => { controller.preservePress() })
   // Mutation-phase saves precede the owning surface's layout effect that removes closed keys.
@@ -346,7 +430,8 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
     if (previousKey.current !== undefined) store?.save(previousKey.current, controller.released())
   }, [controller, store])
   return <div {...stylex.props(styles.frame)}>
-    <div {...props} style={{ ...props.style, overflowAnchor: 'none' }} ref={controller.attach}><div {...contentProps}>{children}</div></div>
+    {renderHeader?.(startIndex, revealRow, materializing)}
+    <div {...props} style={{ ...props.style, overflowAnchor: 'none' }} ref={controller.attach}><div {...contentProps}>{typeof children === 'function' ? children(startIndex, revealRow, materializing) : children}</div></div>
     <Button ref={controller.attachJump} onPress={controller.jump} hidden {...stylex.props(styles.jump)}>New messages ↓</Button>
   </div>
 })

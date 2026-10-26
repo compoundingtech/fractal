@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""scripts/evidence-lane-trace: the closure control for lane definitions, on small synthetic strace logs."""
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / 'scripts/evidence-lane-trace'
+loader = importlib.machinery.SourceFileLoader('evidence_lane_trace', str(SCRIPT))
+trace = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(trace)
+
+LANES = {'version': 1, 'lanes': {'unit': {
+    'argv': ['make', 'test'], 'definition_paths': ['scripts/run.sh', 'config'], 'tree_inputs': ['src'], 'absent_paths': ['.hooks.cjs', 'src/package.yaml']}}}
+
+
+class Trace(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.realpath(self.tmp.name) + '/repo'
+        os.makedirs(self.root)
+        self.lanes = Path(self.tmp.name) / 'lanes.json'
+        self.lanes.write_text(json.dumps(LANES))
+        self.rules = trace.load_rules(type('A', (), {'lanes_file': str(self.lanes), 'lane': 'unit'}))
+
+    def analyze(self, *lines):
+        return trace.report(self.rules, *trace.analyze(list(lines), self.root))
+
+    def run_main(self, raw, *extra):
+        path = Path(self.tmp.name) / 'raw'
+        path.write_text('\n'.join(raw) + '\n')
+        done = subprocess.run([sys.executable, str(SCRIPT), '--lane', 'unit', '--lanes-file', str(self.lanes), '--root', self.root,
+                               '--analyze', str(path), *extra], capture_output=True)
+        return done.returncode, done.stdout.decode(), done.stderr.decode()
+
+    def test_declared_reads_are_covered_and_an_undeclared_one_is_reported_with_its_ancestors_of_declared_paths_ignored(self):
+        r = self.root
+        result = self.analyze(
+            f'10 openat(AT_FDCWD</>, "{r}/scripts/run.sh", O_RDONLY|O_CLOEXEC) = 3',
+            f'10 openat(AT_FDCWD</>, "{r}/config/a/b.json", O_RDONLY) = 4',
+            f'10 openat(AT_FDCWD</>, "{r}/src/main.rs", O_RDONLY) = 5',
+            f'10 statx(AT_FDCWD</>, "{r}/scripts", AT_STATX_SYNC_AS_STAT, STATX_ALL, {{}}) = 0',
+            f'10 openat(AT_FDCWD</>, "{r}/helpers/extra.sh", O_RDONLY) = 6')
+        self.assertEqual(result['uncovered_reads'], ['helpers/extra.sh'])
+        self.assertEqual(result['uncovered_absence_probes'], [])
+
+    def test_a_path_the_run_looked_for_and_did_not_find_must_be_declared_absent_or_covered(self):
+        r = self.root
+        miss = lambda path, err='ENOENT (No such file or directory)': f'10 newfstatat(AT_FDCWD</>, "{r}/{path}", 0x7ff, 0) = -1 {err}'
+        result = self.analyze(miss('.hooks.cjs'), miss('src/package.yaml'), miss('src/new/file.rs'), miss('config/x.yaml'),
+                              miss('package.json5'), miss('apps/node_modules'), miss('secret', 'EACCES (Permission denied)'),
+                              miss('node_modules/pkg/node_modules'), miss('.git/objects/x'), miss('lib', 'ENOTDIR (Not a directory)'))
+        self.assertEqual(result['uncovered_absence_probes'], ['apps/node_modules', 'lib', 'package.json5'])
+
+    def test_writes_are_not_inputs_node_modules_and_git_are_not_tree_content_and_other_roots_are_ignored(self):
+        r = self.root
+        result = self.analyze(
+            f'10 openat(AT_FDCWD</>, "{r}/out.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3',
+            f'10 openat(AT_FDCWD</>, "{r}/node_modules/a/index.js", O_RDONLY) = 4',
+            f'10 openat(AT_FDCWD</>, "{r}/.git/HEAD", O_RDONLY) = 5',
+            '10 openat(AT_FDCWD</>, "/usr/lib/libc.so", O_RDONLY) = 6',
+            f'10 openat(AT_FDCWD</>, "{r}-other/x", O_RDONLY) = 7',
+            f'10 execve("{r}/scripts/run.sh", ["run.sh"], 0x7ff) = 0')
+        self.assertEqual((result['uncovered_reads'], result['uncovered_absence_probes']), ([], []))
+
+    def test_relative_paths_are_resolved_through_the_directory_annotation_chdir_and_clone(self):
+        r = self.root
+        result = self.analyze(
+            f'10 openat(AT_FDCWD<{r}>, "helpers/a.sh", O_RDONLY) = 3',           # strace -y names the working directory
+            f'10 chdir("{r}/src") = 0',
+            '10 openat(AT_FDCWD, "../elsewhere/b.sh", O_RDONLY) = 4',            # plain relative path after a chdir
+            '10 clone(child_stack=NULL, flags=CLONE_VM) = 11',
+            '11 stat("c.sh", {st_mode=S_IFREG}) = 0',                            # the child inherits the cwd
+            f'12 openat(7<{r}/config>, "x.json", O_RDONLY) = 5',                  # a directory fd named by -y
+            '12 openat(8, "unnamed", O_RDONLY) = 6',                             # an fd the log cannot place
+            '10 statx(3, "", AT_EMPTY_PATH, STATX_ALL, {}) = 0')                 # an fstat of an open file: not a path
+        self.assertEqual(result['uncovered_reads'], ['elsewhere/b.sh', 'helpers/a.sh'])
+        self.assertEqual(result['unresolved_calls'], 1)
+
+    def test_a_whole_tree_lane_leaves_nothing_under_the_root_uncovered_but_unplaced_calls_are_still_counted(self):
+        doc = json.loads(json.dumps(LANES))
+        doc['lanes']['unit']['tree_inputs'] = ['.']
+        self.lanes.write_text(json.dumps(doc))
+        self.rules = trace.load_rules(type('A', (), {'lanes_file': str(self.lanes), 'lane': 'unit'}))
+        r = self.root
+        result = self.analyze(f'10 openat(AT_FDCWD</>, "{r}/anything/at/all.rs", O_RDONLY) = 3',
+                              f'10 stat("{r}/looked-for", {{}}) = -1 ENOENT (No such file or directory)',
+                              '12 openat(8, "unnamed", O_RDONLY) = 6')
+        self.assertEqual((result['uncovered_reads'], result['uncovered_absence_probes'], result['unresolved_calls'], result['whole_tree_lane']),
+                         ([], [], 1, True))
+
+    def test_unfinished_and_resumed_calls_are_joined_by_pid(self):
+        r = self.root
+        result = self.analyze(f'20 openat(AT_FDCWD</>, "{r}/helpers/t.sh", O_RDONLY <unfinished ...>',
+                              '21 getpid() = 1',
+                              '20 <... openat resumed>) = 3')
+        self.assertEqual(result['uncovered_reads'], ['helpers/t.sh'])
+
+    def test_main_exits_zero_when_closed_one_when_not_and_two_for_usage_errors(self):
+        r = self.root
+        closed = [f'10 openat(AT_FDCWD</>, "{r}/scripts/run.sh", O_RDONLY) = 3', f'10 stat("{r}/.hooks.cjs", {{}}) = -1 ENOENT (No such file or directory)']
+        code, out, _ = self.run_main(closed)
+        self.assertEqual((code, json.loads(out)['uncovered_reads']), (0, []))
+        code, out, _ = self.run_main(closed + [f'10 openat(AT_FDCWD</>, "{r}/helpers/x", O_RDONLY) = 4'])
+        self.assertEqual((code, json.loads(out)['uncovered_reads']), (1, ['helpers/x']))
+        self.assertEqual(subprocess.run([sys.executable, str(SCRIPT), '--lane', 'unit', '--lanes-file', str(self.lanes), '--root', self.root],
+                                        capture_output=True).returncode, 2)  # neither --analyze nor a command
+        self.lanes.write_text('not json')
+        self.assertEqual(self.run_main(closed)[0], 2)  # a broken lane file never reads as closed
+        self.lanes.write_text(json.dumps({'version': 1, 'lanes': {}}))
+        self.assertEqual(self.run_main(closed)[0], 2)
+
+    @unittest.skipUnless(shutil.which('strace'), 'strace is not installed')
+    @unittest.skipIf(any(line.startswith('TracerPid:') and line.split()[1] != '0' for line in open('/proc/self/status')),
+                     'already traced: ptrace cannot be nested (this test runs inside a lane trace)')
+    def test_a_real_strace_run_reports_what_the_command_read(self):
+        Path(self.root, 'helpers').mkdir()
+        Path(self.root, 'helpers/x.sh').write_text('x')
+        Path(self.root, 'scripts').mkdir()
+        Path(self.root, 'scripts/run.sh').write_text('run')
+        raw = Path(self.tmp.name) / 'real.raw'
+        done = subprocess.run([sys.executable, str(SCRIPT), '--lane', 'unit', '--lanes-file', str(self.lanes), '--root', self.root,
+                               '--raw', str(raw), '--', 'sh', '-c', 'cat scripts/run.sh helpers/x.sh; ls missing-file 2>/dev/null; true'],
+                              capture_output=True)
+        out = json.loads(done.stdout)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn('helpers/x.sh', out['uncovered_reads'])
+        self.assertNotIn('scripts/run.sh', out['uncovered_reads'])
+        self.assertIn('missing-file', out['uncovered_absence_probes'])
+        failing = subprocess.run([sys.executable, str(SCRIPT), '--lane', 'unit', '--lanes-file', str(self.lanes), '--root', self.root,
+                                  '--raw', str(raw), '--', 'sh', '-c', 'exit 3'], capture_output=True)
+        self.assertEqual(failing.returncode, 1)  # a failing run is not a valid trace
+        self.assertIn(b'not a valid trace', failing.stderr)
+
+
+if __name__ == '__main__':
+    unittest.main()
