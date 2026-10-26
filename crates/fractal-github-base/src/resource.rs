@@ -238,6 +238,9 @@ fn github_client() -> reqwest::Client {
     CLIENT
         .get_or_init(|| {
             reqwest::Client::builder()
+                // Follow REST redirects explicitly so every HTTP hop is admitted.
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .user_agent("st3-resource-observer/0.1")
                 .connect_timeout(GITHUB_CONNECT_TIMEOUT)
                 .timeout(GITHUB_REQUEST_TIMEOUT)
@@ -757,16 +760,32 @@ async fn github_json(
     {
         return Ok(payload.clone());
     }
-    let mut request = client
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28");
-    if let Some(etag) = cached.as_ref().and_then(|payload| payload.etag.as_deref()) {
-        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-    }
-    let response = crate::github_http::send(request, token).await?;
-    record_github_response(response.status(), response.headers());
-    let response = github_response(response).await?;
+    let mut current_url = reqwest::Url::parse(&url)?;
+    let mut redirects = 0;
+    let response = loop {
+        let mut request = client
+            .get(current_url.clone())
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(etag) = cached.as_ref().and_then(|payload| payload.etag.as_deref()) {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        let response = crate::github_http::send(request, token).await?;
+        record_github_response(response.status(), response.headers());
+        let response = github_response(response).await?;
+        if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            let location = response.headers().get(reqwest::header::LOCATION)
+                .context("GitHub redirect has no Location")?.to_str()?;
+            let target = current_url.join(location)?;
+            // Never forward a credential to another origin or downgrade HTTPS.
+            anyhow::ensure!(target.origin() == current_url.origin(), "GitHub redirect changed API origin");
+            anyhow::ensure!(redirects < 10, "GitHub redirect limit exceeded");
+            redirects += 1;
+            current_url = target;
+            continue;
+        }
+        break response;
+    };
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
         let payload = cached
             .as_mut()
@@ -1211,6 +1230,66 @@ async fn observe_github_pull_request_at(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn github_rest_redirects_send_each_hop_explicitly() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in [
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: /renamed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}".to_owned(),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..size]);
+                    if size == 0 || request.windows(4).any(|bytes| bytes == b"\r\n\r\n") { break; }
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        // SOURCE is process-global: isolate configuration from other provider tests.
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().to_owned();
+        let child = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "resource::tests::github_redirect_admission_child", "--ignored", "--nocapture"])
+                .env("OBSERVER_REDIRECT_TEST_URL", format!("{base}/old"))
+                .env("OBSERVER_REDIRECT_TEST_STATE", state_dir)
+                .output().unwrap()
+        }).await.unwrap();
+        assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stdout));
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET /old "));
+        assert!(requests[1].starts_with("GET /renamed "));
+        let rows: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("github-admission.json")).unwrap()
+        ).unwrap();
+        assert_eq!(rows.as_array().unwrap().iter()
+            .filter(|row| row["observer"] == true)
+            .map(|row| row["count"].as_u64().unwrap()).sum::<u64>(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "subprocess fixture for github_rest_redirects_send_each_hop_explicitly"]
+    async fn github_redirect_admission_child() {
+        let config = crate::config::Config {
+            state_dir: std::env::var_os("OBSERVER_REDIRECT_TEST_STATE").unwrap().into(),
+            ..Default::default()
+        };
+        crate::github_http::configure(&config).unwrap();
+        let payload = spend_as("observer/redirect-test".into(), github_json(
+            &github_client(), std::env::var("OBSERVER_REDIRECT_TEST_URL").unwrap(),
+            &GithubAuth::test("fixture"), Duration::ZERO,
+        )).await.unwrap();
+        assert_eq!(payload.value["ok"], true);
+    }
 
     #[tokio::test]
     async fn credentials_recover_after_a_missing_token_and_rotate() {

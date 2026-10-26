@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Only future GitHub Retry-After/reset deadlines are accepted; absent a future deadline, primary and secondary limits wait fifteen minutes. The per-daemon observer cap is unchanged and is classified as a local refusal, not GitHub HTTP 429."
+    "detail": "Only future GitHub Retry-After/reset deadlines are accepted; absent a future deadline, primary and secondary limits wait fifteen minutes. The per-daemon observer cap is unchanged and is classified as a local refusal, not GitHub HTTP 429. Each same-origin REST redirect hop is separately admitted; cross-origin redirects are refused, and implicit transport retries are disabled in observer and authorized gateway clients."
   },
   "compatibility": {
     "status": "changed",
