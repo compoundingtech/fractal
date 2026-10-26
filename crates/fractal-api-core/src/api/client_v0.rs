@@ -86,6 +86,87 @@ pub struct CollectionSubscribe {
     pub capability: Option<String>,
     /// A conversation subscription names an agent or a session.
     pub conversation: Option<String>,
+    /// Proposed frame context, pending #1910. Malformed telemetry never rejects a frame.
+    // Duplicate top-level trace keys remain a serde error: clients must send one key.
+    #[serde(rename = "trace", default, deserialize_with = "deserialize_frame_trace")]
+    pub frame_trace: Option<crate::otel::FrameTraceContext>,
+}
+fn deserialize_frame_trace<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::otel::FrameTraceContext>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // deserialize_any would parse 1e999 before a Visitor can ignore it. RawValue uses
+    // the ignored-value scanner instead, preserving the old unknown-field behavior.
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    if !raw.get().trim_start().starts_with('{') {
+        return Ok(None);
+    }
+    struct TraceFields(crate::otel::FrameTraceContext);
+    impl<'de> Deserialize<'de> for TraceFields {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct FieldsVisitor;
+            impl<'de> serde::de::Visitor<'de> for FieldsVisitor {
+                type Value = TraceFields;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("a trace context object")
+                }
+
+                fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                    let mut fields = crate::otel::FrameTraceContext::default();
+                    while let Some(key) = map.next_key::<String>()? {
+                        match key.as_str() {
+                            "traceparent" | "tracestate" => {
+                                let raw = map.next_value::<&serde_json::value::RawValue>()?;
+                                let value = serde_json::from_str::<String>(raw.get()).ok();
+                                if key == "traceparent" {
+                                    fields.traceparent = value;
+                                } else {
+                                    fields.tracestate = value;
+                                }
+                            }
+                            _ => { map.next_value::<serde::de::IgnoredAny>()?; }
+                        }
+                    }
+                    Ok(TraceFields(fields))
+                }
+            }
+            deserializer.deserialize_map(FieldsVisitor)
+        }
+    }
+    serde_json::from_str::<TraceFields>(raw.get())
+        .map(|fields| Some(fields.0)).map_err(serde::de::Error::custom)
+}
+
+#[cfg(test)]
+mod frame_trace_tests {
+    use super::*;
+
+    #[test]
+    fn otel_frame_trace_preserves_ignored_json_decoding() {
+        let deeply_nested = format!("{}0{}", "[".repeat(256), "]".repeat(256));
+        for trace in [
+            "1e999".to_owned(), deeply_nested.clone(), "null".to_owned(),
+            r#"{"traceparent":1e999}"#.to_owned(),
+            r#"{"traceparent":42,"tracestate":{}}"#.to_owned(),
+            format!(r#"{{"traceparent":{deeply_nested},"tracestate":{deeply_nested},"unknown":{deeply_nested}}}"#),
+        ] {
+            let frame = format!(r#"{{"kind":"subscribe","id":"x","collection":"missions","trace":{trace}}}"#);
+            let decoded: CollectionSubscribe = serde_json::from_str(&frame).unwrap();
+            assert_eq!(decoded.kind, "subscribe");
+            assert_eq!(decoded.collection, "missions");
+            assert!(decoded.frame_trace.as_ref().is_none_or(|context|
+                context.traceparent.is_none() && context.tracestate.is_none()), "{trace}");
+        }
+        let decoded: CollectionSubscribe = serde_json::from_str(
+            r#"{"kind":"subscribe","id":"x","collection":"missions","trace":{"traceparent":"valid-string","tracestate":{}}}"#
+        ).unwrap();
+        let context = decoded.frame_trace.unwrap();
+        assert_eq!(context.traceparent.as_deref(), Some("valid-string"));
+        assert!(context.tracestate.is_none());
+    }
 }
 
 /// A collection's name, with `alerts` read as `attention`: the same rows under the name a person
