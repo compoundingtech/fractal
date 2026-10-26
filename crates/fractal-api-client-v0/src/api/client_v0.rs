@@ -22508,7 +22508,7 @@ mission "example/zero-run" state="ready" {
             assistant_write: None,
             transport: "paired",
             local_peer: false,
-            peer_pid: None,
+            peer_process: None,
             custom_forms: false,
             conversation_blocks: false,
             conversation_delivery_links: false,

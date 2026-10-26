@@ -1,7 +1,7 @@
 //! The accepted socket stays alive after its original connector exits.
 use super::*;
 use std::io::{Read as _, Write as _};
-use std::os::fd::{AsRawFd as _, FromRawFd as _};
+use std::os::fd::FromRawFd as _;
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 
