@@ -428,6 +428,34 @@
   ],
   "cli": [
     {
+      "command": "st harness-questions list",
+      "description": "Read one explicit page of metadata-only native harness questions",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::harness_question_cli_list_forwards_limit_and_encoded_cursor",
+        "crates/fractal/src/main_tests.rs::harness_question_cli_reads_require_an_explicit_person"
+      ],
+      "verification": "CLI parser and handler over a private Unix socket; explicit person, limit and encoded cursor"
+    },
+    {
+      "command": "st harness-questions show",
+      "description": "Read canonical native harness question metadata and answer fences",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::harness_question_cli_reads_require_an_explicit_person",
+        "crates/fractal/src/main_tests.rs::harness_answer_cli_uses_canonical_detail_identity_and_all_fences"
+      ],
+      "verification": "explicit-person parser and generated detail read over a private Unix socket"
+    },
+    {
+      "command": "st harness-questions answer",
+      "description": "Submit positional answers with an explicit person, stable idempotency key and current detail fences",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::harness_answer_cli_uses_canonical_detail_identity_and_all_fences",
+        "crates/fractal/src/main_tests.rs::harness_answer_action_identity_is_retryable_and_question_scoped",
+        "crates/fractal/src/main_tests.rs::harness_answer_cli_requires_positions_file_explicit_person_and_key"
+      ],
+      "verification": "CLI parser and handler over a private Unix socket; canonical question identity, positional file, deterministic action id and all three fences"
+    },
+    {
       "command": "st deploy verify-go",
       "description": "Verify an existing deployment GO against the local signed replica and immutable packaged policy without changing state",
       "tests": [

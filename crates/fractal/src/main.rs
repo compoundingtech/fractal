@@ -328,11 +328,6 @@ enum Command {
         #[command(subcommand)]
         command: LaunchCommand,
     },
-    /// Inspect native harness question metadata or answer with option positions.
-    HarnessQuestions {
-        #[command(subcommand)]
-        command: HarnessQuestionsCommand,
-    },
     /// Show and answer alerts: asks, gates and approvals that wait on a person.
     ///
     /// Each alert belongs to the conversation of the agent behind it. Updates that ask nothing
@@ -438,6 +433,11 @@ enum Command {
     Subject {
         #[command(subcommand)]
         command: SubjectCommand,
+    },
+    /// Inspect native harness question metadata or answer with option positions.
+    HarnessQuestions {
+        #[command(subcommand)]
+        command: HarnessQuestionsCommand,
     },
     /// Watch GitHub issues and pull requests: each comment, review, required-check result and
     /// close wakes this agent once.
