@@ -174,19 +174,27 @@ less than an hour.
 Two targets read it. `max_cores` (1 core) is the member over the hour, `slo/cpu` in `st doctor` and
 `cpu` in `st slo`. `idle_max_cores` (0.5 core) is the mean over the hour's idle minutes,
 `slo/cpu/idle` and `cpu/idle`. A minute is idle only when that is known: its CPU is known, no seat
-on this member was in a working state in it (each seat's harness observations, which only this
-member's drivers make: its newest before the minute and every one inside it must be `ready`,
-`idle`, `blocked` or `ended` with no background jobs; the seats are checked a minute after the
-minute ends, once every observation stamped in it has committed), and none of a daemon start, a
+on this member was in a working state in it, and none of a daemon start, a
 deploy check (`POST` to the deploy verification route) or a replication catch-up with a peer
 (sampled at each boundary and with each worker report) happened in it. A deploy restarts the daemon
-and its worker, so it also shows as a start and as minutes whose worker CPU is unknown. `idle`
+and its worker, so it also shows as a start and as minutes whose worker CPU is unknown.
+
+The seats come from two sources, checked a minute after the minute ends, once every row stamped
+in it has committed. A local driver's `harness.observed` is `latest` retention: every one is a
+row of `local_observations`, and a replicated claim only when the state changes. A seat's newest
+observation before the minute and every one inside it must be `ready`, `idle`, `blocked` or
+`ended` with no background jobs. And this member's reconciler's `runtime.observed` claims say
+which seats run here: a seat whose newest one is not `absent`, `exited`, `vanished` or `stopped`
+is busy unless its newest harness observation names the same incarnation and is quiet, so a
+running seat whose harness observations stop reaching the store fails closed, never quiet. A seat
+that starts inside the minute makes it busy; a seat this member ended no longer counts its last
+harness state. `idle`
 gives the idle `minutes`, their `cores`, and `not_idle`, the minutes each reason kept from being
 idle (`seat`, `start`, `deploy`, `catch-up`, `unknown`; a minute may have several). The idle target
 is judged only over a whole hour holding at least `idle_min_minutes` (10) idle minutes; otherwise
 it, like an hour that is not whole, is unknown: `no-data` in `st slo`, `info` with UNKNOWN in `st
 doctor`, never met. A seat last observed working whose driver stopped reporting keeps every minute
-from being idle until it is observed again. daemon_load holds the daemon to `load_max_cores`
+from being idle until it is observed again or this member records its runtime ended. daemon_load holds the daemon to `load_max_cores`
 (2 cores) under its synthetic load in CI instead of the production target.
 
 The `writer-hold` row names who held the writer, against the transaction target (`max_ms`).

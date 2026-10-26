@@ -1439,8 +1439,8 @@ fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
 /// stamped inside it has committed. The first boundary is this daemon's start.
 pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
     use smallclaims::windows::cpu_minutes::Busy;
-    // Each local seat's newest harness observation before `seats_until`: whether it said quiet.
-    let mut seats = None::<BTreeMap<String, bool>>;
+    // This member's seats as of `seats_until`, which each minute's check carries into the next.
+    let mut seats = None;
     let mut seats_until = 0;
     let mut unsettled = None;
     loop {
