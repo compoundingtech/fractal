@@ -223,3 +223,175 @@ SCG kill must deny catalog paths, cancel pending approvals/read grants/queued in
 Acceptance starts an approved bounded read, pending read/send cards, a queued approved send, and a paused pre-commit send; kills; then probes old bearers/proofs, fresh pairing, direct endpoints, late approval, and restart of all components. Assert no disclosure or append after the kill linearization point, durable denial/audit, and terminal denial of pending/queued subjects.
 
 Code merge, provider consent, and ambient tunnel access do not silently authorize live activation. The coordinated kill test must pass on the exact candidate revisions before live assistant issuance; activation also requires a recorded caller-binding/disclosure policy decision and supported plan/client feasibility. Write enablement requires explicit write scopes and the native action/recipient-trust acceptance above, not recipient allowlist population or a read-hinted workaround.
+
+## E. Remote access over OAuth
+
+Status: specification, not implemented or authorization to expose an adapter.
+OAuth is a front door to the existing assistant grant, not a separate identity
+or permission system. This section builds on A–D and the caller-bound grant
+contract; it does not relax their disclosure, write, or activation gates.
+
+### Components and boundaries
+
+```text
+MCP client (ChatGPT) -- bearer --> OpenAI tunnel --> adapter /mcp
+        |                                           | resource server
+        | discover, authorize, exchange code        | caller bearer per request
+        v                                           v
+Public HTTPS hostname                         fractal daemon
+  /authorize, /token, metadata --------------> single grant authority
+        |
+        +-- browser: pairing code + requested scopes
+                         |
+Owning person -- trusted CLI/stui --> typed client API approve/deny
+```
+
+The adapter is the OAuth resource server. `/mcp` remains on the OpenAI tunnel;
+the separate public HTTPS hostname exposes authorization, token exchange and
+discovery metadata, not the daemon client API or a second public MCP endpoint.
+The authorization server runs inside the fractal daemon/adapter deployment,
+not an external IdP. The daemon alone owns pending requests, consent decisions,
+grant issuance, token digests, refresh eligibility and revocation. Adapter
+transport handling cannot manufacture an approved grant.
+
+Remote mode holds no long-lived adapter grant credential: it forwards each
+caller's bearer to the daemon. `--credential-file` remains a stdio/loopback
+mode, never a fallback when remote authentication fails. Tunnel possession,
+including an API key in the same OpenAI organization, is not authorization.
+
+### Discovery and authorization-code flow
+
+Use OAuth authorization code with PKCE `S256` (RFC 6749 and
+[RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)), following the
+[MCP authorization profile](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)
+and [ChatGPT authentication requirements](https://developers.openai.com/apps-sdk/build/auth).
+The OAuth 2.1 profile excludes implicit and password grants.
+
+| Surface | Endpoint / behavior | Standard |
+| --- | --- | --- |
+| Resource server | Unauthenticated `/mcp` returns `401` with `WWW-Authenticate: Bearer resource_metadata="…"` pointing to its protected-resource metadata | [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750), [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) |
+| Resource metadata | `/.well-known/oauth-protected-resource` describes this MCP resource and its authorization server; published metadata is reachable through the tunnel resource and public metadata surface | RFC 9728 |
+| Authorization-server metadata | Public `/.well-known/oauth-authorization-server` publishes the issuer, `/authorize`, `/token`, supported scopes and `S256` | [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) |
+| Authorization | Public `/authorize` validates the allowlisted client, redirect URI, scopes, `resource`, state and PKCE challenge, then creates a pending daemon request | RFC 6749, RFC 7636, [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707) |
+| Authorization response | After owner approval, redirect to the validated client URI with a short-lived, single-use code, client state and the authorization-server `iss` | [RFC 9207](https://www.rfc-editor.org/rfc/rfc9207) |
+| Token exchange / refresh | Public `/token` binds code redemption to the client, redirect URI, resource and PKCE verifier; refresh remains bound to the same grant | RFC 6749, RFC 7636, RFC 8707 |
+
+```text
+1. Client -> /mcp: no bearer
+   /mcp -> Client: 401 + protected-resource metadata location
+2. Client -> metadata: resource identity, issuer, endpoints, scopes, S256
+3. Client -> /authorize: client_id, redirect_uri, scope, resource,
+                        state, code_challenge, code_challenge_method=S256
+4. Daemon: pending request; browser displays pairing code and requested scopes
+5. Owner -> trusted surface -> client API -> daemon: approve or deny request
+6. If approved: /authorize -> client redirect: code, state, iss
+7. Client -> /token: code, redirect_uri, resource, code_verifier
+   Daemon -> Client: opaque access bearer, expires_in, granted scope, refresh token
+8. Client -> tunnel /mcp: Authorization: Bearer <access token>
+   Adapter -> daemon session(): bearer and this MCP resource identity
+```
+
+Denial never issues a code or token. A pairing code identifies the pending
+request, not a credential or proof of owner consent. Code redemption cannot
+change its approved principal, scopes or resource.
+
+### Surface-independent owner approval
+
+The daemon represents authorization as a pending request, independent of the
+browser, CLI or stui. Its review data binds request ID, owning person, OAuth
+client identity, assistant principal, redirect URI, resource, requested scopes
+and expiry. The trusted surface displays that data before consent.
+
+The client API exposes a typed operation with the semantic signature
+`decideAuthorization(request_id, decision: Approve | Deny) -> AuthorizationDecision`.
+This is a specification signature, not an existing wire operation. The daemon
+authenticates the caller as the configured owning person on a trusted surface,
+checks the request is pending and unexpired, and atomically records its
+terminal decision. An assistant, external MCP caller, public authorization
+page, or possession of the pairing code cannot approve. A decision cannot
+broaden the displayed request; a changed request needs new consent.
+
+The fractal CLI and stui are the first callers, using the existing pairing
+ceremony. Web and iOS clients can call the same typed operation once they meet
+the same owner/trusted-surface requirements; approval logic does not live in
+CLI commands, stui widgets or an OAuth callback.
+
+### Tokens, grants and checks at use
+
+Each authorization creates one assistant grant, as pairing does. An access
+token maps to exactly that grant: it is an opaque bearer of 32 random bytes,
+with only its SHA-256 digest stored by the daemon. Refresh credentials likewise
+use digest-only daemon storage; neither raw token belongs in logs or model
+context. Refresh does not create an independent source of authority.
+
+Scopes are the existing `read.assistant.*` scopes and explicitly selected
+native write scopes from C. The four minimal reads remain mandatory:
+`read.assistant.summary`, `read.assistant.attention`, `read.assistant.missions`
+and `read.assistant.agents`. The first release includes reads plus the existing
+explicit write scopes, but OAuth consent neither implicitly enables writes nor
+replaces the R1 freeze.
+
+Access tokens live for at most one hour, capped by grant expiry. Refresh is
+valid only until that grant expires, at most 30 days, follows the existing
+renewal authority rules, and cannot revive an expired, revoked or disabled
+grant or broaden its scopes. Existing grant revocation invalidates access and
+refresh use immediately; token expiry is not a revocation delay.
+
+The daemon's `session()` checks the bearer at every use, including refresh
+authorization as applicable. Alongside issuer, origin, owner/actor binding,
+expiry, revocation, scopes and the stored signature verdict, it requires the
+token's stored resource audience to equal this MCP resource's identity
+([RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)). The adapter supplies its
+configured resource identity, not a caller-selected substitute. A bearer for
+another resource fails closed even if its grant scopes otherwise match.
+The authorization server binds the validated `resource` to this audience;
+an opaque bearer does not need a readable JWT `aud` claim.
+
+### Client registration and principal mapping
+
+Use Client ID Metadata Documents (CIMD) with an explicit allowlist, initially
+ChatGPT's metadata URL. There is no open Dynamic Client Registration (DCR)
+endpoint. A client-provided URL alone is not registration or authority; its
+metadata and redirect URIs must pass the allowlist policy before a pending
+request can be approved.
+
+| Allowed client | Grant principal |
+| --- | --- |
+| ChatGPT | `assistant/chatgpt` |
+| Other explicitly admitted MCP clients | `assistant/mcp`, as specified by [#3531](https://github.com/compoundingtech/fractal/pull/3531) |
+
+The daemon selects the principal from the admitted client, never from a
+caller-supplied actor. Each grant gets the existing
+`<assistant-principal>/session/<grant>` session actor. An allowlisted OAuth
+client is not a person and does not inherit person authority.
+
+### Preconditions and activation order
+
+```text
+R1 option A -> bearer check at use -> OAuth -> non-loopback exposure
+```
+
+1. Deploy and verify R1 option A: keyed issuers for all four assistant claim
+   kinds ([#3326](https://github.com/compoundingtech/fractal/issues/3326),
+   [#3324](https://github.com/compoundingtech/fractal/pull/3324)).
+2. Enforce the bearer check at use in `session()`: stored signature verdict,
+   authorized issuer/owner and the resource audience, not just a digest lookup.
+3. Enable OAuth issuance against that verified grant authority.
+4. Only then permit non-loopback exposure, subject also to D's activation and
+   coordinated-kill acceptance gates.
+
+The Q32 grant-write freeze remains in force until R1 is deployed and verified;
+OAuth issuance writes the same begun/granted claims and cannot bypass it.
+Native assistant writes remain frozen until R1 as well. This spec or its merge
+does not authorize live issuance, writes or public deployment.
+
+### Open questions
+
+- **DQ-E1 Public hostname:** which public HTTPS hostname and ingress carry
+  `/authorize`, `/token` and metadata? Resolution must preserve the agreed split:
+  `/mcp` on the OpenAI tunnel, authorization server in the daemon/adapter.
+- **DQ-E2 CIMD pinning:** what exact ChatGPT metadata URL is allowlisted, and
+  how are URL/content changes and redirect-URI updates pinned and reviewed?
+- **DQ-E3 Source admission:** does the R1 keyed-writer requirement also apply
+  under `AdmissionAuthority::Source`? Resolve the admission contract before
+  treating that path as satisfying the R1 gate.
