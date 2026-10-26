@@ -400,15 +400,21 @@ pub async fn send(
 ) -> Result<reqwest::Response> {
     // Admission precedes both the credential-bearing local send and the
     // authorized RPC. A failed send remains spent; there is no HTTP retry.
-    if let Some(config) = SOURCE.get() {
-        let resource = request.try_clone().and_then(|copy| copy.build().ok())
-            .map(|copy| request_resource(copy.url().path())).unwrap_or("core");
+    let reservation = if let Some(config) = SOURCE.get() {
+        let (resource, endpoint) = request.try_clone().and_then(|copy| copy.build().ok())
+            .map(|copy| (
+                request_resource(copy.url().path()),
+                crate::github_admission::EndpointClass::from_path(copy.url().path()),
+            )).unwrap_or(("core", crate::github_admission::EndpointClass::Unknown));
         crate::github_admission::before_send(
             config.state_dir.join("github-admission.json"),
-            github_spender(), resource.into(), config.github.observer_requests_per_hour.map(|cap| cap as usize),
-        ).await?;
-    }
-    match auth {
+            github_spender(), resource.into(), endpoint,
+            config.github.observer_requests_per_hour.map(|cap| cap as usize),
+        ).await?
+    } else {
+        None
+    };
+    let result = async { match auth {
         GithubAuth::Authorized { config, profile } => {
             send_authorized_with(
                 config.clone(),
@@ -427,7 +433,13 @@ pub async fn send(
             }
             Ok(response)
         }
+    }}.await;
+    if let Some(reservation) = reservation {
+        crate::github_admission::after_send(
+            reservation, result.as_ref().ok().map(|response| response.status().as_u16()),
+        ).await;
     }
+    result
 }
 
 async fn send_authorized_with<F>(
