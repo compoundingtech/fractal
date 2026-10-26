@@ -3,7 +3,10 @@ use smallclaims::store::PeerSyncProgress;
 
 fn publish(store: &Store, placement: &str, key: &str) -> DesiredSubject {
     super::tests::apply_source(store, &format!(r#"version 2
-schedule "orchard" {{ {placement} every "1h"; anchor "2030-01-01T00:00:00Z" }}"#), key);
+schedule "orchard" {{ {placement}
+ every "1h"; anchor "2030-01-01T00:00:00Z"
+ work {{ mission "orchard"; workspace "/workspace/orchard" }}
+}}"#), key);
     store.desired_subjects().unwrap().into_iter().find(|s| s.kind == "schedule").unwrap()
 }
 
