@@ -63,6 +63,7 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         fleet_id: None,
         configured_peers: Vec::new(),
         client_relay: None,
+        harness_question_sink: None,
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
