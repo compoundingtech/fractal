@@ -1457,6 +1457,14 @@ recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from t
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
+Without `--push`, the run keeps its records in this repository's local refs: per record a tag `refs/tags/evidence/<tree>/<record>` and a note
+`refs/notes/evidence/<tree>/<record>` (per-crate test records add `refs/tags/evidence/input/rust-tests/<key>/<record>` and
+`refs/notes/evidence-input/rust-tests/<key>/<record>`). To publish them yourself, push those refs before the branch, so the first CI run of
+the branch finds them: `git push origin 'refs/tags/evidence/*:refs/tags/evidence/*' 'refs/notes/evidence/*:refs/notes/evidence/*'
+'refs/notes/evidence-input/*:refs/notes/evidence-input/*'`, then `git push origin HEAD:BRANCH`. Each record has its own ref, so pushing all of
+them only adds the missing ones; existing evidence refs are never updated or deleted (a ruleset protects `refs/tags/evidence/**`).
+`scripts/st-test --status` then shows each check as covered, and the pull request's `evidence-gate-<check>` job shows `decision=skip ...
+signer=<principal>`.
 On a host that runs the evidence log (`evidence-log.service` installed as a systemd user unit, see "Portable evidence" in the plan), a
 run with `--push` then starts that unit without waiting (`systemctl --user start --no-block evidence-log.service`, or the JSON argv in
 `ST_EVIDENCE_LOG_NUDGE`): a pass counts only once the log lists it, so the agent's record is logged in seconds instead of at the next
