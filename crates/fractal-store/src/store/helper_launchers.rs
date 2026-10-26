@@ -328,7 +328,7 @@ mod tests {
         claim.id = canonical_hash(&(&claim.batch_id, &claim.subject, &claim.kind, &claim.origin,
             claim.actor.as_deref(), &claim.body, &claim.predecessors)).unwrap();
         assert_eq!(classify_replicated_claim_with_registry(claim, fractal_schema::registry())
-            .unwrap_err().code, "invalid-replicated-claim");
+            .err().unwrap().code, "invalid-replicated-claim");
         let _ = store.import_replication("peer", &replication);
         assert!(store.claim_by_id(&replication.batches[0].claims[0].id).unwrap().is_none());
         assert!(store.helper_launcher_binding(&desired.subject).unwrap().is_none());
