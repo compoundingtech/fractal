@@ -50,9 +50,11 @@ or to the path in ST_TEST_RUNS (`off` records nothing); scripts/st-test-report r
 (docs/st3/gate-evidence.md). Recording never changes the result: a file that cannot be written is one line on stderr.
 
 Exit 0 when every selected check passed and was signed (with --out, exported but not verified); 1 when a check failed, timed out or
-could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered; 4 when nothing failed but a check
-was not signed because the tree edits that check's lane (evidence-wrap would refuse it; CI runs it), or rust-tests left a crate unsigned because one of its
-tests passed only on a retry (CI's own per-crate notes refuse such a crate too, so CI runs it; linux-gate still signs and records them as flaky_tests).
+could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered. A tree that edits
+a check's lane is signed like any other (the note carries the edited lane's digest). The run exits 4 when nothing failed but a check was not signed: only
+against a base whose evidence-wrap still refuses a lane edit (before 2026-10-26) is that check left "not signed" for CI, or rust-tests left a crate unsigned
+because one of its tests passed only on a retry (CI's own per-crate notes refuse such a crate too, so CI runs it; linux-gate still signs and records them
+as flaky_tests).
 """
 import argparse
 import base64
@@ -449,6 +451,12 @@ def run_input_arguments(check, base):
     changes = web_changes(base)
     kit = True if changes is None else bool(changes[1])
     return ['--run-input', f"kit_inputs={'true' if kit else 'false'}"]
+
+
+def edited_lanes_unsigned(base):
+    """True when the base's evidence-wrap refuses a tree that edits its lane (it lacks SIGNS_LANE_EDITS): only then is a lane edit left to CI."""
+    done = git('show', f'{base}:scripts/evidence-wrap', check=False)
+    return done.returncode != 0 or b'\nSIGNS_LANE_EDITS = True\n' not in done.stdout
 
 
 def lane_names(base):
@@ -1408,9 +1416,10 @@ def main(argv):
             verifier = Path(scratch) / 'evidence-verify'
             verifier.write_bytes(git('show', f'{args.base}:scripts/evidence-verify').stdout)
             repository = args.repository or repository_of(remote or 'origin')
-            lanes, rows = lane_names(args.base), []
+            lanes, rows = lane_names(args.base) if edited_lanes_unsigned(args.base) else set(), []
             for name in checks:
-                # A tree that edits a check's lane cannot be signed here (evidence-wrap refuses it): CI runs that check.
+                # Against an older base a tree that edits a check's lane cannot be signed (its evidence-wrap refuses it): CI runs that check.
+                # Otherwise a lane edit is signed, and asked about, like any other tree.
                 edits = lane_edits(str(verifier), Path('.'), lane_base, name, tree) if name in lanes else []
                 unchanged = web_unchanged(args.base) if name == WEB else None
                 if edits:
@@ -1476,6 +1485,7 @@ def main(argv):
             signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
             rows, failed, unsigned = [], False, False
             lanes = lane_names(args.base)
+            unsignable = lanes if edited_lanes_unsigned(args.base) else set()  # lanes whose edits the base's wrapper refuses to sign
             target, target_lock = shared_target(tree_target) if any(name in BUILDS for name in checks) else (None, None)
             warm = target_warm(target) if any(name in BUILDS for name in checks) else None  # before anything builds in it
             # The members are fetched once, and only when a check has to run: a tree whose checks are all signed needs none. The light
@@ -1493,7 +1503,7 @@ def main(argv):
             stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
             def run_one(name, output=None):
                 """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
-                edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in lanes else []
+                edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in unsignable else []
                 if edits:
                     return (name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'), False, True
                 if name == RUST_TESTS:

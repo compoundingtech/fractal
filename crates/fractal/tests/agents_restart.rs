@@ -723,7 +723,7 @@ async fn a_delayed_restart_does_not_stop_a_newer_incarnation() {
 }
 
 #[test]
-fn restart_help_explains_seats_and_the_new_incarnation() {
+fn restart_help_explains_agents_and_the_new_incarnation() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -734,7 +734,7 @@ fn restart_help_explains_seats_and_the_new_incarnation() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(
-        help.contains("restart") && help.contains("mission seat") && help.contains("incarnation")
+        help.contains("restart") && help.contains("mission agent") && help.contains("incarnation")
     );
 }
 
@@ -1197,7 +1197,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
         )
         .await,
     );
-    assert!(running.contains("st agents restart"), "{running}");
+    assert!(running.contains("fractal agents restart"), "{running}");
     succeeded(
         &st(
             &socket,

@@ -118,7 +118,7 @@ pub(super) async fn run_pty(
                 )
                 .await?;
             let history = if all { " --all" } else { "" };
-            let mut command = format!("st terminals ls{history}");
+            let mut command = format!("fractal terminals ls{history}");
             for (name, value) in [("owner", owner.as_deref()), ("state", state.as_deref())] {
                 if let Some(value) = value {
                     let quoted = value.replace('\'', "'\"'\"'");
@@ -140,7 +140,7 @@ pub(super) async fn run_pty(
             let subject = if let Some(deadline) = budget {
                 tokio::time::timeout_at(deadline, resolution)
                     .await
-                    .context("st terminals attach: short-name resolution did not answer within 1 s; name the full subject to attach without the daemon")??
+                    .context("fractal terminals attach: short-name resolution did not answer within 1 s; name the full subject to attach without the daemon")??
             } else {
                 resolution.await?
             };

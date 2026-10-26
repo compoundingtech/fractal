@@ -36,9 +36,10 @@ host cannot run them (CI_TEST_ENV_SKIPS), so the note says which tests did not r
 With EVIDENCE_PUSH_TOKEN set, --push uses it as an HTTP authorization header (never printed).
 
 With --lanes-from BASE the check is held to its lane in .st/required-lanes.json at BASE (the accepted base): the command must be the
-lane's argv, every file at or below the lane's definition paths must be identical in this tree and at BASE (otherwise nothing is signed:
-the change edits the scripts that decide what the check runs, so CI runs the check), and the note records lane_definition_sha256, the
-digest the verifier recomputes from BASE. It is the producer half of `evidence-verify --lanes-from`.
+lane's argv, and the note records lane_definition_sha256, the digest of the lane as THIS tree defines it (the base's argv and paths, this
+tree's bytes at those paths). For a tree that leaves the lane alone that is the digest the verifier recomputes from BASE; for a tree that
+edits its lane it is the edited definition's, which only a level whose policy says by_level lane "tree" accepts (our hosts, since
+2026-10-26: a lane edit is signed like any other change). It is the producer half of `evidence-verify --lanes-from`.
 
 Take this script from the accepted base (main), not from the change under test.
 """
@@ -142,8 +143,12 @@ def run_command(command):
     return process.wait(), digest.hexdigest()
 
 
+# st-test reads this from the base's copy: a base whose wrapper signs a tree that edits its lane (it no longer reports such a check as "not signed").
+SIGNS_LANE_EDITS = True
+
+
 def lane_inputs(verifier_path, base, check, tree, command):
-    """The lane definition digest for `check`, after refusing a command that is not the lane's argv and a tree that edits its own lane."""
+    """The digest of `check`'s lane as `tree` defines it, after refusing a command that is not the lane's argv."""
     loader = importlib.machinery.SourceFileLoader('evidence_verify_for_wrap', verifier_path)
     verifier = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(verifier)
@@ -159,9 +164,9 @@ def lane_inputs(verifier_path, base, check, tree, command):
     if command != rules['argv']:
         raise Failure(f'the command is not the argv of lane {check} at {base}; nothing was signed')
     if definition['changed']:
-        raise Failure(f'this tree changes the definition of lane {check} relative to {base} ({", ".join(definition["changed"][:5])}); '
-                      'nothing was signed and CI will run the check')
-    return definition['sha256']
+        print(f'evidence-wrap: this tree edits lane {check} ({", ".join(definition["changed"][:5])}); the note carries the edited definition\'s digest',
+              file=sys.stderr)
+    return definition['tree_sha256']
 
 
 def main(argv):

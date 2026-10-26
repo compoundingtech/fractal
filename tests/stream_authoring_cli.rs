@@ -1,6 +1,52 @@
 use fractal_legacy_runner::Runner as _;
 
-static RUNTIME_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The runtime tests start real pty sessions, and a session's id and state directory are the user's
+/// by default: a sibling test, another checkout's run of the group, or a session left by a killed run
+/// answers to the same `example-linux.worker` ids, and one in three runs lost a pty spawn to it. Each
+/// test therefore runs against its own `PTY_ROOT` and `XDG_STATE_HOME`, as the other supervision tests
+/// do. They also take turns (an advisory file lock, which spans nextest's process per test; the
+/// environment is the process's), so the variables they set are never read by a sibling thread.
+struct RuntimeTest {
+    _lock: std::fs::File,
+    _root: tempfile::TempDir,
+    saved: [(&'static str, Option<std::ffi::OsString>); 2],
+}
+
+impl RuntimeTest {
+    fn take() -> Self {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(std::env::temp_dir().join("st-stream-authoring-cli-runtime.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        // A short path: the pty socket path must fit the socket address limit.
+        let root = tempfile::Builder::new().prefix("sa").tempdir_in("/tmp").unwrap();
+        let saved = ["PTY_ROOT", "XDG_STATE_HOME"].map(|name| (name, std::env::var_os(name)));
+        // SAFETY: the lock above is held for the guard's life, and every test that reads these
+        // variables through the runner holds it too.
+        unsafe {
+            std::env::set_var("PTY_ROOT", root.path().join("pty"));
+            std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+        }
+        Self { _lock: lock, _root: root, saved }
+    }
+}
+
+impl Drop for RuntimeTest {
+    fn drop(&mut self) {
+        for (name, value) in &self.saved {
+            // SAFETY: as in `take`, under the lock the guard still holds.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -266,7 +312,7 @@ fn command_and_direct_argv_are_mutually_exclusive() {
 
 #[test]
 fn launched_stream_removal_retires_runtime_before_source_publication() {
-    let _runtime = RUNTIME_TEST.lock().unwrap();
+    let _runtime = RuntimeTest::take();
     let catalog = tempfile::tempdir().unwrap();
     write_agent(catalog.path());
     let add = st2(
@@ -355,7 +401,7 @@ fn launched_stream_removal_retires_runtime_before_source_publication() {
 
 #[test]
 fn launched_stream_removal_escalates_an_ignoring_adapter_before_forgetting_it() {
-    let _runtime = RUNTIME_TEST.lock().unwrap();
+    let _runtime = RuntimeTest::take();
     let catalog = tempfile::tempdir().unwrap();
     write_agent(catalog.path());
     let add = st2(
@@ -435,7 +481,7 @@ fn launched_stream_removal_escalates_an_ignoring_adapter_before_forgetting_it() 
 #[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn failed_source_publish_after_stop_keeps_declaration_relaunchable() {
-    let _runtime = RUNTIME_TEST.lock().unwrap();
+    let _runtime = RuntimeTest::take();
     let catalog = tempfile::tempdir().unwrap();
     write_agent(catalog.path());
     assert!(

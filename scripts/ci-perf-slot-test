@@ -31,8 +31,11 @@ def alive(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    stat = Path("/proc/%d/stat" % pid)
-    return stat.exists() and stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    try:
+        stat = Path("/proc/%d/stat" % pid).read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return False  # it exited and was reaped after the kill above: gone, so not running
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
 
 with tempfile.TemporaryDirectory() as tmp:

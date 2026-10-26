@@ -1744,7 +1744,10 @@ mod tests {
     #[tokio::test]
     async fn a_delivery_rebind_reaches_the_title_stream_without_a_tick() {
         let root = tempfile::tempdir().unwrap();
-        let state = crate::api::tests_shared::state(root.path());
+        let mut state = crate::api::tests_shared::state(root.path());
+        // The stream reads the bindings while this test rebinds. On the shared-memory store that
+        // contention returns SQLITE_LOCKED at once (Store::open_memory), so use a file store.
+        state.store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
         let subject = "agent/attachment-push-rebind";
         let (title, delivery) = attachment_seat(&state, subject);
         // A proof window far longer than next()'s 15 s wait (MAILBOX_RECHECK / 2). With the
@@ -1778,7 +1781,10 @@ mod tests {
     #[tokio::test]
     async fn the_pushed_value_is_what_the_poll_answers() {
         let root = tempfile::tempdir().unwrap();
-        let state = crate::api::tests_shared::state(root.path());
+        let mut state = crate::api::tests_shared::state(root.path());
+        // The stream reads the bindings while this test rebinds. On the shared-memory store that
+        // contention returns SQLITE_LOCKED at once (Store::open_memory), so use a file store.
+        state.store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
         let subject = "agent/attachment-push-oracle";
         let (title, mut delivery) = attachment_seat(&state, subject);
         let peer = NativeDeliveryPeer {
