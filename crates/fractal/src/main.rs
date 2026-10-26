@@ -14357,6 +14357,10 @@ struct NativeLoopState {
     /// Admissions for attachment-dependent writes, carried across re-exec with the binding.
     #[serde(default)]
     claude_attachment_admissions: AdmissionBucket,
+    /// When this binding last polled attachment without push. Not carried: a replacement
+    /// image polls once at once.
+    #[serde(skip)]
+    claude_attachment_polled: Option<((String, u64, String), u64)>,
     /// This image's own settle. A replacement image draws a new one, so it is never carried.
     #[serde(skip)]
     settle: ResumeSettle,
@@ -14394,6 +14398,7 @@ struct AdmissionBucket {
 
 const ADMISSION_BURST: u32 = 2;
 const ADMISSION_REFILL_MS: u64 = 10_000;
+const UNPUSHED_ATTACHMENT_RECHECK_MS: u64 = 10_000;
 
 impl AdmissionBucket {
     fn take(&mut self, fence: &fractal_daemon::mailbox::Fence, now_ms: u64) -> bool {
@@ -16983,6 +16988,39 @@ async fn publish_claude_readiness_fallback(
     Ok(false)
 }
 
+/// Whether this control tick checks attachment. With push the check reads the pushed value and
+/// rations its own admissions. Without push (an older daemon, or a reconnect waiting for its
+/// first frame) each check is a GET: a starting phase still checks every tick so readiness is
+/// not delayed, but a settled one (attached or blocked) is rechecked every ten seconds, not
+/// every second.
+fn claude_attachment_check_due(
+    mailbox: &NativeMailbox,
+    state: &mut NativeLoopState,
+    now_ms: u64,
+) -> bool {
+    if mailbox.pushed_attachment().is_some() {
+        return true;
+    }
+    let fence = &mailbox.fence;
+    let binding = (fence.incarnation.clone(), fence.epoch, fence.token.clone());
+    let settled = state.claude_attachment_reconciled
+        && state.claude_attachment_phase != "starting"
+        && state.claude_attachment_pending.is_none()
+        && state.claude_attachment_terminal.is_none();
+    // A replacement binding, or a wall clock stepped backwards, checks at once.
+    if settled
+        && state.claude_attachment_polled.as_ref().is_some_and(|(polled_binding, polled)| {
+            *polled_binding == binding
+                && now_ms >= *polled
+                && now_ms - polled < UNPUSHED_ATTACHMENT_RECHECK_MS
+        })
+    {
+        return false;
+    }
+    state.claude_attachment_polled = Some((binding, now_ms));
+    true
+}
+
 async fn check_claude_attachment(
     client: &Client,
     subject: &str,
@@ -16995,8 +17033,8 @@ async fn check_claude_attachment(
     // On a connection that has pushed attachment, the pushed value alone feeds the phase. Until
     // it has (an older daemon, or a new connection), the GET does, as before; never both.
     let pushed = mailbox.pushed_attachment();
-    // Admissions are rationed only where the phase comes from push; without push every tick
-    // already makes its GET, exactly as before.
+    // Admissions are rationed only where the phase comes from push; without push every check
+    // makes its GET (claude_attachment_check_due spaces those checks).
     let mut from_push = pushed.is_some();
     let mut checked = match pushed {
         Some(attachment) => Ok(attachment),
