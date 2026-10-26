@@ -2012,15 +2012,20 @@ export const ClientDiagnosticsBatch = /*#__PURE__*/ (() => Schema.Struct({
 export type ClientDiagnosticsBatch = typeof ClientDiagnosticsBatch.Type
 export type ClientDiagnosticsBatchEncoded = typeof ClientDiagnosticsBatch.Encoded
 
+/** Proposed in #1910; pending decision. {traceparent: string, tracestate?: string}. Any JSON value is accepted; absent, null, non-object, missing/non-string traceparent or invalid W3C traceparent is ignored. The daemon validates with the W3C propagator, not this schema. */
+export const SubscribeTraceContext = /*#__PURE__*/ (() => Schema.Unknown.annotate({ identifier: "SubscribeTraceContext", description: "Proposed in #1910; pending decision. {traceparent: string, tracestate?: string}. Any JSON value is accepted; absent, null, non-object, missing/non-string traceparent or invalid W3C traceparent is ignored. The daemon validates with the W3C propagator, not this schema." }))()
+export type SubscribeTraceContext = typeof SubscribeTraceContext.Type
+export type SubscribeTraceContextEncoded = typeof SubscribeTraceContext.Encoded
+
 export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
-  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+  Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "trace": optionalKey(SubscribeTraceContext), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext) }),
   Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), /** Follow exactly this current agent rather than the bounded fleet window. */
-"agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+"agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
-"subject": optionalKey(ArrangementId) }),
-  Schema.Struct({ "capability": Schema.String, "collection": Schema.Literal("terminal"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "kind": Schema.Literal("subscribe"), "terminal": Id }),
-  Schema.Struct({ "collection": Schema.Literal("conversation"), "conversation": Id, "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe") }),
+"subject": optionalKey(ArrangementId), "trace": optionalKey(SubscribeTraceContext) }),
+  Schema.Struct({ "capability": Schema.String, "collection": Schema.Literal("terminal"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "kind": Schema.Literal("subscribe"), "terminal": Id, "trace": optionalKey(SubscribeTraceContext) }),
+  Schema.Struct({ "collection": Schema.Literal("conversation"), "conversation": Id, "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "trace": optionalKey(SubscribeTraceContext) }),
   Schema.Struct({ "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("unsubscribe") })
 ], { mode: "oneOf" }).annotate({ identifier: "CollectionCommand" }))()
 export type CollectionCommand = typeof CollectionCommand.Type
@@ -2873,6 +2878,30 @@ export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
 export type UnknownResource = typeof UnknownResource.Type
 export type UnknownResourceEncoded = typeof UnknownResource.Encoded
 
+/** An api-key account's spend so far in the UTC calendar month of the period's end, against its monthly budget. Costs are API-equivalent; tokens with no price are counted apart, never as free. */
+export const UsageCredits = /*#__PURE__*/ (() => Schema.Struct({
+  "budget_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "period_start_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "used_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsageCredits", description: "An api-key account's spend so far in the UTC calendar month of the period's end, against its monthly budget. Costs are API-equivalent; tokens with no price are counted apart, never as free." }))()
+export type UsageCredits = typeof UsageCredits.Type
+export type UsageCreditsEncoded = typeof UsageCredits.Encoded
+
+export const UsageAccount = /*#__PURE__*/ (() => Schema.Struct({
+  /** The label its usage rows and limits carry, joining them to this account. */
+  "account": optionalKey(Schema.String).annotate({ description: "The label its usage rows and limits carry, joining them to this account." }),
+  "credits": optionalKey(UsageCredits),
+  "driver": optionalKey(Schema.String),
+  "kind": Schema.Literals(["subscription","api-key"]),
+  /** The declared name, like nathan/claude-1. */
+  "name": Schema.String.annotate({ description: "The declared name, like nathan/claude-1." }),
+  "plan": optionalKey(Schema.String),
+  "provider": Schema.String
+}).annotate({ identifier: "UsageAccount" }))()
+export type UsageAccount = typeof UsageAccount.Type
+export type UsageAccountEncoded = typeof UsageAccount.Encoded
+
 export const UsageLimit = /*#__PURE__*/ (() => Schema.Struct({
   "account": Schema.String,
   "account_ref": optionalKey(Schema.String),
@@ -2923,6 +2952,8 @@ export type UsagePricingEncoded = typeof UsagePricing.Encoded
 
 export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
   "account": optionalKey(Schema.String),
+  /** The declared account this row's spend is read against, when one claims its label. Absent on older servers. */
+  "account_ref": optionalKey(Schema.String).annotate({ description: "The declared account this row's spend is read against, when one claims its label. Absent on older servers." }),
   "agent": Id,
   "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -2945,6 +2976,8 @@ export type UsageRow = typeof UsageRow.Type
 export type UsageRowEncoded = typeof UsageRow.Encoded
 
 export const UsagePeriod = /*#__PURE__*/ (() => Schema.Struct({
+  /** Every declared account in name order, so each panel lists the same accounts. Absent on older servers. */
+  "accounts": optionalKey(Schema.Array(UsageAccount)).annotate({ description: "Every declared account in name order, so each panel lists the same accounts. Absent on older servers." }),
   "agent_messages": optionalKey(AgentMessageEstimate),
   "limits": optionalKey(Schema.Array(UsageLimit)),
   "rows": Schema.Array(UsageRow),
@@ -3762,16 +3795,16 @@ export type TimelineUsageBodyEncoded = typeof TimelineUsageBody.Encoded
 
 /** One conversation timeline entry. `replace` keeps id, sequence, role and type; `finalize` makes it immutable. */
 export const TimelineEntry = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "body": TimelineMessageBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("message") }),
-  Schema.Struct({ "body": TimelineContentBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("content") }),
-  Schema.Struct({ "body": TimelineToolCallBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("tool_call") }),
-  Schema.Struct({ "body": TimelineToolResultBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("tool_result") }),
-  Schema.Struct({ "body": TimelineStatusBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("status") }),
-  Schema.Struct({ "body": TimelineErrorBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("error") }),
-  Schema.Struct({ "body": TimelineUsageBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("usage") }),
-  Schema.Struct({ "body": TimelineRedactionBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("redaction") }),
-  Schema.Struct({ "body": TimelineTruncationBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("truncation") }),
-  Schema.Struct({ "body": Schema.Record(Schema.String, Schema.Unknown), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": unknownCase(["message","content","tool_call","tool_result","status","error","usage","redaction","truncation"]) })
+  Schema.Struct({ "body": TimelineMessageBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("message") }),
+  Schema.Struct({ "body": TimelineContentBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("content") }),
+  Schema.Struct({ "body": TimelineToolCallBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("tool_call") }),
+  Schema.Struct({ "body": TimelineToolResultBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("tool_result") }),
+  Schema.Struct({ "body": TimelineStatusBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("status") }),
+  Schema.Struct({ "body": TimelineErrorBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("error") }),
+  Schema.Struct({ "body": TimelineUsageBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("usage") }),
+  Schema.Struct({ "body": TimelineRedactionBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("redaction") }),
+  Schema.Struct({ "body": TimelineTruncationBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("truncation") }),
+  Schema.Struct({ "body": Schema.Record(Schema.String, Schema.Unknown), "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": unknownCase(["message","content","tool_call","tool_result","status","error","usage","redaction","truncation"]) })
 ], { mode: "oneOf" }).annotate({ identifier: "TimelineEntry", description: "One conversation timeline entry. `replace` keeps id, sequence, role and type; `finalize` makes it immutable." }))()
 export type TimelineEntry = typeof TimelineEntry.Type
 export type TimelineEntryEncoded = typeof TimelineEntry.Encoded

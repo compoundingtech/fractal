@@ -216,7 +216,7 @@ const meta = {
   title: 'Fractal UI/Sidebar/Agent Row',
   component: SidebarAgentRow,
   // label-content-name-mismatch is an experimental axe rule, so the strict a11y check enables it explicitly for every row story.
-  parameters: { layout: 'fullscreen', a11y: { config: { rules: [{ id: 'label-content-name-mismatch', enabled: true }] } }, docs: { description: { component: 'Baseline agent row: reported facts only. The hover card and reported details omit unreported fields instead of showing placeholders; hovering a row swaps the time slot for a quick Open action; rows without a reported time keep the shared metric track so titles stay aligned.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'controlled agent-row contracts: exact names, descriptions, geometry and interactions are asserted against module-local row fixtures' }, layout: 'fullscreen', a11y: { config: { rules: [{ id: 'label-content-name-mismatch', enabled: true }] } }, docs: { description: { component: 'Baseline agent row: reported facts only. The hover card and reported details omit unreported fields instead of showing placeholders; hovering a row swaps the time slot for a quick Open action; rows without a reported time keep the shared metric track so titles stay aligned.' } } },
 } satisfies Meta
 export default meta
 type Story = StoryObj

@@ -89,7 +89,7 @@ export function NowScreen() {
       refreshControl={refresh}
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
-        {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `st now` lists them all.</Note> : null}
+        {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
       </View>}
       style={{ flex: 1 }}
     />

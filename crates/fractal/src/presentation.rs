@@ -578,16 +578,11 @@ pub(crate) fn render_attention_list(
         let _ = writeln!(output, "    subject: {}", item.subject);
         let _ = writeln!(
             output,
-            "    inspect: st alerts show {} --as {}",
+            "    inspect: fractal alerts show {} --as {}",
             item.subject, item.person
         );
         for action in &item.actions {
-            let command = action
-                .argv
-                .iter()
-                .map(|argument| shell_argument(argument))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let command = shell_command(&action.argv);
             let _ = writeln!(output, "    {}: {command}", action.label);
         }
     }
@@ -630,7 +625,7 @@ pub(crate) fn render_attention_show(
     if let Some(step) = &item.step {
         let _ = writeln!(output, "STEP      {step}");
     }
-    let _ = writeln!(output, "\n{}\n{}", style.heading("DETAIL"), item.detail);
+    let _ = writeln!(output, "\n{}\n{}", style.heading("DETAIL"), human_command_hints(&item.detail));
     if let Some(request) = &item.request {
         output.push_str(&render_structured_request(request, style));
     }
@@ -643,12 +638,7 @@ pub(crate) fn render_attention_show(
     if !item.actions.is_empty() {
         let _ = writeln!(output, "\n{}", style.heading("ACTIONS"));
         for action in &item.actions {
-            let command = action
-                .argv
-                .iter()
-                .map(|argument| shell_argument(argument))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let command = shell_command(&action.argv);
             let _ = writeln!(output, "  {}: {command}", action.label);
         }
     }
@@ -759,6 +749,60 @@ fn render_request_subjects(request: &Value, style: OutputStyle) -> String {
         }
     }
     output
+}
+
+/// Render legacy command hints without changing their structured or stored source.
+pub(crate) fn human_command_hints(text: &str) -> std::borrow::Cow<'_, str> {
+    let mut output = None::<String>;
+    let mut copied = 0;
+    for (start, _) in text.match_indices("st") {
+        if start > 0 && (text.as_bytes()[start - 1].is_ascii_alphanumeric()
+            || matches!(text.as_bytes()[start - 1], b'_' | b'/' | b'-' | b'.')) {
+            continue;
+        }
+        let tail = &text[start..];
+        let length = if tail.starts_with("st ") {
+            2
+        } else if tail.starts_with("st3 ") {
+            3
+        } else {
+            continue;
+        };
+        let command = tail[length..].split_whitespace().next().unwrap_or_default();
+        if !matches!(command.trim_end_matches(['`', '.', ',', ';', ')']),
+            "admission" | "agents" | "alerts" | "blobs" | "claude-channel" |
+            "conversations" | "devices" | "doctor" | "documents" | "fleet" |
+            "gh" | "lanes" | "launch" | "missions" | "repair" | "replication" |
+            "replication-worker" | "sekrets" | "service" | "setup" | "slo" |
+            "subject" | "terminals" | "tiles" | "uninstall" | "up" | "usage" | "work")
+        {
+            continue;
+        }
+        let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
+        output.push_str(&text[copied..start]);
+        output.push_str("fractal");
+        copied = start + length;
+    }
+    if let Some(mut output) = output {
+        output.push_str(&text[copied..]);
+        std::borrow::Cow::Owned(output)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+fn shell_command(argv: &[String]) -> String {
+    argv.iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            shell_argument(if index == 0 && matches!(argument.as_str(), "st" | "st3") {
+                "fractal"
+            } else {
+                argument
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn shell_argument(value: &str) -> String {
@@ -1689,6 +1733,29 @@ mod tests {
     }
 
     #[test]
+    fn human_command_hints_preserve_wire_text_and_noncommands() {
+        let wire = "close them with `st conversations cleanup --all --older-than 1h`; use st fleet join";
+        assert_eq!(human_command_hints(wire),
+            "close them with `fractal conversations cleanup --all --older-than 1h`; use fractal fleet join");
+        assert!(wire.contains("`st conversations cleanup"));
+        assert_eq!(human_command_hints("`st3 subject show daemon/node`"), "`fractal subject show daemon/node`");
+        for unchanged in ["first work", "st cannot retry", "ST_AGENT", "st3/fleet/id", "/usr/bin/st work"] {
+            assert!(matches!(human_command_hints(unchanged), std::borrow::Cow::Borrowed(_)));
+        }
+    }
+
+    #[test]
+    fn action_commands_only_rename_the_displayed_executable() {
+        for program in ["st", "st3", "fractal", "other"] {
+            let argv = vec![program.into(), "subject".into(), "st".into(), "two words".into()];
+            let expected = if program == "other" { "other" } else { "fractal" };
+            assert_eq!(shell_command(&argv), format!("{expected} subject st 'two words'"));
+            assert_eq!(argv[0], program);
+        }
+        assert_eq!(shell_command(&[]), "");
+    }
+
+    #[test]
     fn attention_list_shows_kind_age_targets_and_safe_commands() {
         let item = AttentionItemView {
             kind: "fault".into(),
@@ -1703,7 +1770,7 @@ mod tests {
             message_id: None, answers: Vec::new(), conversation: None,
             prompt_call: None,
             title: "Fabric needs review".into(),
-            detail: "The queue did not recover.".into(),
+            detail: "The queue did not recover. Inspect `st subject show daemon/node`.".into(),
             mission: Some("mission/fabric".into()),
             mission_run: Some("mission-run/fabric/one".into()),
             step: None,
@@ -1736,13 +1803,19 @@ mod tests {
         assert!(rendered.contains("--reason 'It is fixed'"));
         assert!(!rendered.contains("The queue did not recover."));
         assert!(
-            rendered.contains("inspect: st alerts show attention/fabric --as person/alex")
+            rendered.contains("inspect: fractal alerts show attention/fabric --as person/alex")
         );
+        assert!(rendered.contains("resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"));
+        assert_eq!(item.actions[0].argv[0], "st3");
 
         let shown = render_attention_show(&item, OutputStyle::plain(), 180_000);
         assert!(shown.contains("ALERT  Fabric needs review"));
         assert!(shown.contains("The queue did not recover."));
+        assert!(shown.contains("Inspect `fractal subject show daemon/node`."));
+        assert_eq!(serde_json::to_value(&item).unwrap()["detail"],
+            "The queue did not recover. Inspect `st subject show daemon/node`.");
         assert!(shown.contains("TARGETS\n  doc/fabric/report@abc"));
+        assert!(shown.contains("resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"));
     }
 
     #[test]

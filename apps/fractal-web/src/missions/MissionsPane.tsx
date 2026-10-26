@@ -46,7 +46,7 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
         {missions._tag === 'Observed' && missions.freshness === 'stale' ? <span {...stylex.props(styles.meta)}>last observed · live updates pending</span> : null}
         {hidden > 0 || all ? (
           <Aria.Button onPress={() => setAll(!all)} {...stylex.props(styles.button)}>
-            {all ? 'Hide settled and st’s own' : `Show all (${hidden} more)`}
+            {all ? 'Hide settled and Fractal’s own' : `Show all (${hidden} more)`}
           </Aria.Button>
         ) : null}
       </header>

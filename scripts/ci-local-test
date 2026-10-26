@@ -104,6 +104,12 @@ class CiLocal(unittest.TestCase):
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_HEAVY_SLOTS='1', BUILD_ADMISSION_STATE='/elsewhere')
         self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
 
+    def test_the_stages_build_without_debug_info_as_ci_does(self):
+        done, calls = self.run_local('mail-redelivery-canaries', CARGO_PROFILE_TEST_DEBUG='1')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for call in calls:
+            self.assertEqual((call['env'].get('CARGO_PROFILE_DEV_DEBUG'), call['env'].get('CARGO_PROFILE_TEST_DEBUG')), ('0', '0'))
+
     def test_the_stages_run_in_a_home_of_their_own_without_the_account_s_variables(self):
         done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2',
                                      RUSTC_WRAPPER='/nix/store/x-sccache/bin/sccache', CARGO_BUILD_RUSTC_WRAPPER='sccache')
@@ -176,6 +182,23 @@ class CiLocal(unittest.TestCase):
         run, = logs.glob('run-*')
         self.assertIn('compiling', (run / 'tests.log').read_text())
 
+    def test_each_wait_for_a_build_slot_is_written_as_it_starts_and_ends_to_the_queue_log(self):
+        events = Path(self.tmp.name) / 'queue-events'
+        # Two waits that end with a slot, then one the stage never leaves (its cargo gave up): the run's end closes it.
+        queue = ('#!/usr/bin/env bash\necho "cargo: waiting in order for a host build slot (all 6 busy)"\nsleep 1.1\n'
+                 'echo "cargo: next in order; waiting for the build admission gate (load/memory), holding no slot"\n'
+                 'echo "cargo: got build slot 0 and a heavy slot"\n'
+                 'echo "cargo: waiting in order for a host build slot (all 6 busy)" >&2\necho "cargo: got build slot 1" >&2\n'
+                 'echo "cargo: waiting in order for a host build slot (all 6 busy)"\nexit 0\n')
+        done, _ = self.run_local('tests', ci_linux=queue, CI_LOCAL_QUEUE_LOG=str(events))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = [line.split(' ') for line in events.read_text().splitlines()]
+        self.assertEqual([(kind, stage) for kind, _, stage in lines],
+                         [('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests')])
+        at = [int(seconds) for _, seconds, _ in lines]
+        self.assertEqual(at, sorted(at))
+        self.assertGreaterEqual(at[1] - at[0], 1)  # the first wait lasted its second
+
     def test_only_the_latest_ten_runs_keep_their_logs(self):
         home_logs = self.home / '.cache/ci-local-logs'
         for n in range(12):
@@ -202,6 +225,44 @@ class CiLocal(unittest.TestCase):
                 tmpdir = Path(calls[-1]['env']['TMPDIR'])
                 self.assertEqual((str(tmpdir.parent), tmpdir.name[:3]), (root, 'cl.'))
                 self.assertFalse(tmpdir.exists(), 'removed when the run ends')
+
+    def test_the_host_load_limit_is_waited_out_said_every_minute_and_never_silent(self):
+        loadavg = Path(self.tmp.name) / 'loadavg'
+        loadavg.write_text('34.00 20.00 10.00 1/100 1234\n')
+        for name, extra, expected in (('no limit', {}, 0),
+                                      ('under the limit', {'ST_TEST_MAX_LOAD': '40'}, 0)):
+            with self.subTest(name):
+                self.log.unlink(missing_ok=True)
+                done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(loadavg), **extra)
+                self.assertEqual(done.returncode, expected, done.stderr)
+                self.assertNotIn('waiting: load1', done.stderr)
+                self.assertTrue(calls)
+        self.log.unlink(missing_ok=True)
+        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(loadavg), ST_TEST_MAX_LOAD='20',
+                                     ST_TEST_LOAD_WAIT_MINUTES='0.01', CI_LOCAL_LOAD_POLL='0.1')
+        self.assertEqual(done.returncode, 3)
+        self.assertIn('ci-local: waiting: load1 34.00 > 20 (host limit)', done.stderr)
+        self.assertIn('the host stayed above its load limit: load1 34.00 > 20 (host limit)', done.stderr)
+        self.assertEqual(calls, [], 'nothing was started')
+        self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [])
+        # the limit may be a file in the account's config, and a load that drops during the wait lets the run through
+        (self.home / '.config/st-test').mkdir(parents=True)
+        (self.home / '.config/st-test/max-load').write_text('20\n')
+        dropper = subprocess.Popen(['bash', '-c', f'sleep 0.6; echo "5.00 5.00 5.00 1/100 1" > {loadavg}'])
+        self.addCleanup(dropper.wait)
+        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(loadavg), ST_TEST_LOAD_WAIT_MINUTES='1',
+                                     CI_LOCAL_LOAD_POLL='0.1')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('waiting: load1 34.00 > 20 (host limit)', done.stderr)
+        self.assertTrue(calls)
+        done, _ = self.run_local('mail-redelivery-canaries', ST_TEST_MAX_LOAD='lots')
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('must be a number', done.stderr)
+
+    def test_a_failing_property_test_cannot_leave_a_regressions_file_in_the_tree_the_signer_checks(self):
+        done, calls = self.run_local('mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(calls[-1]['env'].get('PROPTEST_DISABLE_FAILURE_PERSISTENCE'), '1')
 
     def test_each_test_process_gets_a_tmpdir_of_its_own_through_the_cargo_target_runner(self):
         done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TARGET_TRIPLE='x86_64-unknown-linux-gnu')

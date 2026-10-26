@@ -413,6 +413,14 @@
   ],
   "cli": [
     {
+      "command": "st deploy verify-go",
+      "description": "Verify an existing deployment GO against the local signed replica and immutable packaged policy without changing state",
+      "tests": [
+        "crates/fractal/tests/deploy_verify.rs::verifier_cli_api_uses_signed_local_replica_and_fixed_policy"
+      ],
+      "verification": "real CLI and API over a private Unix socket; signed replica, missing packaged policy and caller policy-override rejection"
+    },
+    {
       "command": "st schedules ls",
       "description": "Read one explicit page of replicated schedule declarations, then follow its cursor explicitly",
       "tests": [
@@ -1815,7 +1823,7 @@
     },
     {
       "command": "st sekrets",
-      "description": "Run any CLI with credentials no seat can read, through the sekrets gateway",
+      "description": "Run any CLI with credentials no agent can read, through the sekrets gateway",
       "tests": [
         "crates/fractal-secrets/src/sekrets/tests.rs::a_person_runs_their_profile_without_seeing_the_store_or_other_profiles",
         "crates/fractal-secrets/src/sekrets/tests.rs::a_seat_uses_only_what_it_was_granted_and_only_with_its_daemons_word",
