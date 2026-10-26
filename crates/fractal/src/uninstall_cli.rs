@@ -17,7 +17,7 @@ fn remove_uninstall_path(path: &Path, binary_aliases: &[&Path]) -> std::io::Resu
     }
 }
 
-pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
+pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json_output: bool) -> Result<()> {
     fractal_daemon::service::preflight(!args.no_service)?;
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
@@ -223,9 +223,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
     for path in &remaining {
         println!("remains\t{}", path.display());
     }
-    println!(
-        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: fractal claude-channel uninstall-policy"
-    );
+    println!("{}", uninstall_policy_hint(json_output));
     anyhow::ensure!(remaining.is_empty(), "some st3 files remain");
     println!("uninstalled");
     Ok(())
@@ -315,4 +313,19 @@ mod instance_uninstall_tests {
         remove_uninstall_path(&alias, &binary_aliases).unwrap();
         assert!(fs::symlink_metadata(&alias).is_err());
     }
+}
+
+fn uninstall_policy_hint(json_output: bool) -> &'static str {
+    if json_output {
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st claude-channel uninstall-policy"
+    } else {
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: fractal claude-channel uninstall-policy"
+    }
+}
+
+#[test]
+fn uninstall_policy_advice_preserves_json_stdout() {
+    assert_eq!(uninstall_policy_hint(true),
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st claude-channel uninstall-policy");
+    assert!(uninstall_policy_hint(false).ends_with("fractal claude-channel uninstall-policy"));
 }

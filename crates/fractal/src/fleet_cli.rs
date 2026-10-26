@@ -2,6 +2,81 @@ use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
 
+// Some fleet commands historically print prose even with --json. Keep those bytes
+// stable for callers; only the human rendering uses the installed fractal command.
+fn render_fabric_invite_sent(
+    output: &mut impl std::io::Write,
+    invite: &str,
+    name: &str,
+    command: &str,
+    json_output: bool,
+) -> std::io::Result<()> {
+    let program = if json_output { "st" } else { "fractal" };
+    writeln!(
+        output,
+        "Sent invite {invite} to {name}'s Fabric inbox. On {name}, run:\n  {program} fleet {command} --fabric-inbox"
+    )
+}
+
+fn render_offline_leave(
+    output: &mut impl std::io::Write,
+    node: &str,
+    json_output: bool,
+) -> std::io::Result<()> {
+    let program = if json_output { "st" } else { "fractal" };
+    writeln!(
+        output,
+        "Left without reaching a member. On another member run: {program} fleet remove {node} --reason \"left offline\""
+    )
+}
+
+fn leave_restart_hint(json_output: bool) -> &'static str {
+    if json_output {
+        "Stop st3 replication-worker; st3 up now runs local-only after a restart."
+    } else {
+        "Stop fractal replication-worker; fractal up now runs local-only after a restart."
+    }
+}
+
+fn render_removed_member_hint(
+    output: &mut impl std::io::Write,
+    name: &str,
+    json_output: bool,
+) -> std::io::Result<()> {
+    let program = if json_output { "st" } else { "fractal" };
+    writeln!(
+        output,
+        "Writes {name} made after this node's last exchange with it are not accepted. On {name}, if it still runs: {program} uninstall"
+    )
+}
+
+fn legacy_removal_hint(json_output: bool) -> &'static str {
+    if json_output {
+        "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until st fleet migrate --finish."
+    } else {
+        "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until fractal fleet migrate --finish."
+    }
+}
+
+fn fleet_restart_hint(json_output: bool) -> &'static str {
+    if json_output {
+        "Restart st3 daemon and st3 replication-worker for the change to take effect.\n\
+         The old worker no longer publishes endpoints after its settings change; restart it to resume publication.\n"
+    } else {
+        "Restart fractal daemon and fractal replication-worker for the change to take effect.\n\
+         The old worker no longer publishes endpoints after its settings change; restart it to resume publication.\n"
+    }
+}
+
+fn migration_restart_hint(legacy_toggle: bool, json_output: bool) -> &'static str {
+    match (legacy_toggle, json_output) {
+        (true, true) => "Restart st3 replication-worker for this to take effect.",
+        (true, false) => "Restart fractal replication-worker for this to take effect.",
+        (false, true) => "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.",
+        (false, false) => "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.",
+    }
+}
+
 fn parse_fleet_duration(text: &str) -> Result<u64> {
     let text = text.trim();
     let (number, unit) = text
@@ -281,11 +356,13 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     sent?.success(),
                     "fabric send-file to {name} failed; the invite stays open until it expires"
                 );
-                let program = if json_output { "st" } else { "fractal" };
-                println!(
-                    "Sent invite {} to {name}'s Fabric inbox. On {name}, run:\n  {program} fleet {command} --fabric-inbox",
-                    created.invite
-                );
+                render_fabric_invite_sent(
+                    &mut cli_output::stdout(),
+                    &created.invite,
+                    name,
+                    command,
+                    json_output,
+                )?;
             } else if args.code_only {
                 println!("{}", created.code);
             } else if json_output {
@@ -503,8 +580,8 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             println!("{}", render_caught_up(&caught_up, now_ms()));
             Ok(())
         }
-        FleetCommand::Remove(args) => run_fleet_remove(&client, &config, args).await,
-        FleetCommand::Migrate(args) => run_fleet_migrate(&client, &config, args).await,
+        FleetCommand::Remove(args) => run_fleet_remove(&client, &config, args, json_output).await,
+        FleetCommand::Migrate(args) => run_fleet_migrate(&client, &config, args, json_output).await,
         FleetCommand::Mode(args) => {
             let lock = lock_fleet_settings(&config.state_dir).await?;
             let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
@@ -527,11 +604,11 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 "This member is now {}; it announces the change when its replication worker starts.",
                 file.mode.as_str()
             );
-            refresh_fleet_services(args.no_service)?;
+            refresh_fleet_services(args.no_service, json_output)?;
             Ok(())
         }
         FleetCommand::Transports { command } => {
-            run_fleet_transports(&client, &config, command).await
+            run_fleet_transports(&client, &config, command, json_output).await
         }
         FleetCommand::Leave(args) => {
             let person = fleet_person(args.actor.clone(), &config)?;
@@ -554,18 +631,13 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             .await?;
             match confirmed {
                 Some(member) => println!("{member} holds everything this machine wrote."),
-                None => println!(
-                    "Left without reaching a member. On another member run: fractal fleet remove {} --reason \"left offline\"",
-                    config.node
-                ),
+                None => render_offline_leave(&mut cli_output::stdout(), &config.node, json_output)?,
             }
             if use_services {
                 fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
                 println!("st3 now runs local-only on this machine.");
             } else {
-                println!(
-                    "Stop fractal replication-worker; fractal up now runs local-only after a restart."
-                );
+                println!("{}", leave_restart_hint(json_output));
             }
             Ok(())
         }
@@ -631,7 +703,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
     }
 }
 
-async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArgs) -> Result<()> {
+async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArgs, json_output: bool) -> Result<()> {
     let person = fleet_person(args.actor, config)?;
     let removal: fractal_daemon::store::FleetRemoval = client
         .post(
@@ -650,14 +722,9 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
     for invite in &removal.revoked_invites {
         println!("revoked\t{invite}");
     }
-    println!(
-        "Writes {} made after this node's last exchange with it are not accepted. On {}, if it still runs: fractal uninstall",
-        removal.name, removal.name
-    );
+    render_removed_member_hint(&mut cli_output::stdout(), &removal.name, json_output)?;
     if fractal_daemon::config::FleetFile::load(&config.state_dir)?.is_some_and(|file| file.legacy_peers) {
-        println!(
-            "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until fractal fleet migrate --finish."
-        );
+        println!("{}", legacy_removal_hint(json_output));
     }
     Ok(())
 }
@@ -720,14 +787,11 @@ async fn save_and_publish_fleet_settings(
     Ok(())
 }
 
-fn refresh_fleet_services(no_service: bool) -> Result<()> {
+fn refresh_fleet_services(no_service: bool, json_output: bool) -> Result<()> {
     if !no_service && services_installed()? {
         fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
     } else {
-        println!("Restart fractal daemon and fractal replication-worker for the change to take effect.");
-        println!(
-            "The old worker no longer publishes endpoints after its settings change; restart it to resume publication."
-        );
+        print!("{}", fleet_restart_hint(json_output));
     }
     Ok(())
 }
@@ -736,6 +800,7 @@ async fn run_fleet_transports(
     client: &Client,
     config: &Config,
     command: FleetTransportsCommand,
+    json_output: bool,
 ) -> Result<()> {
     use fractal_daemon::fleet::transport::{Fabric, default_fabric_protocol, resolve_tool};
     let lock = lock_fleet_settings(&config.state_dir).await?;
@@ -776,7 +841,7 @@ async fn run_fleet_transports(
             file.save(&config.state_dir)?;
             drop(lock);
             println!("Fabric is now preferred; its existing protocol is unchanged.");
-            return refresh_fleet_services(*no_service);
+            return refresh_fleet_services(*no_service, json_output);
         }
         println!("Fabric is already enabled; remove it before changing its protocol.");
         return Ok(());
@@ -901,7 +966,7 @@ async fn run_fleet_transports(
             };
             drop(lock);
             // Refresh even when cleanup fails: relay and worker must stop using the carrier.
-            refresh_fleet_services(no_service)?;
+            refresh_fleet_services(no_service, json_output)?;
             if let Err(error) = result {
                 println!(
                     "Fabric endpoint removed; unexposure still needs cleanup: {error:#}. When Fabric is available, run fabric unexpose {protocol}"
@@ -915,7 +980,7 @@ async fn run_fleet_transports(
         }
     };
     drop(lock);
-    refresh_fleet_services(no_service)
+    refresh_fleet_services(no_service, json_output)
 }
 
 /// Settings for a migrating node: its existing replication port unless one is given.
@@ -931,7 +996,7 @@ fn migration_settings(args: &FleetMemberArgs, config: &Config) -> fractal_daemon
     settings
 }
 
-async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateArgs) -> Result<()> {
+async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateArgs, json_output: bool) -> Result<()> {
     if args.finish || args.unfinish {
         let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
             .context("this machine has not migrated yet")?;
@@ -971,7 +1036,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         if !args.no_service && services_installed()? {
             fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
         } else {
-            println!("Restart fractal replication-worker for this to take effect.");
+            println!("{}", migration_restart_hint(true, json_output));
         }
         return Ok(());
     }
@@ -1094,9 +1159,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
             "The st3 services now run as a fleet member, with legacy exchanges still accepted."
         );
     } else {
-        println!(
-            "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish."
-        );
+        println!("{}", migration_restart_hint(false, json_output));
     }
     Ok(())
 }
@@ -1218,4 +1281,85 @@ fn report_first_sync(first: &fractal_daemon::model::ReplicationFirstSync, json_o
     );
     println!("{}", render_first_sync(first, now_ms()));
     Ok(())
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn fabric_invite_join_and_migrate_preserve_json_stdout() {
+        for command in ["join", "migrate"] {
+            for (json_output, program) in [(true, "st"), (false, "fractal")] {
+                let mut output = Vec::new();
+                render_fabric_invite_sent(
+                    &mut output, "fleet-invite/example", "other", command, json_output,
+                ).unwrap();
+                assert_eq!(
+                    String::from_utf8(output).unwrap(),
+                    format!("Sent invite fleet-invite/example to other's Fabric inbox. On other, run:\n  {program} fleet {command} --fabric-inbox\n")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn offline_leave_preserves_json_stdout() {
+        for (json_output, program) in [(true, "st"), (false, "fractal")] {
+            let mut output = Vec::new();
+            render_offline_leave(&mut output, "local", json_output).unwrap();
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                format!("Left without reaching a member. On another member run: {program} fleet remove local --reason \"left offline\"\n")
+            );
+        }
+    }
+
+    #[test]
+    fn leave_without_services_preserves_json_stdout() {
+        assert_eq!(leave_restart_hint(true), "Stop st3 replication-worker; st3 up now runs local-only after a restart.");
+        assert_eq!(leave_restart_hint(false), "Stop fractal replication-worker; fractal up now runs local-only after a restart.");
+    }
+
+    #[test]
+    fn remove_preserves_json_stdout() {
+        for (json_output, program) in [(true, "st"), (false, "fractal")] {
+            let mut output = Vec::new();
+            render_removed_member_hint(&mut output, "other", json_output).unwrap();
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                format!("Writes other made after this node's last exchange with it are not accepted. On other, if it still runs: {program} uninstall\n")
+            );
+        }
+    }
+
+    #[test]
+    fn remove_with_legacy_peers_preserves_json_stdout() {
+        assert_eq!(legacy_removal_hint(true), "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until st fleet migrate --finish.");
+        assert_eq!(legacy_removal_hint(false), "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until fractal fleet migrate --finish.");
+    }
+
+    #[test]
+    fn mode_and_transport_refresh_without_services_preserves_json_stdout() {
+        assert_eq!(
+            fleet_restart_hint(true),
+            "Restart st3 daemon and st3 replication-worker for the change to take effect.\nThe old worker no longer publishes endpoints after its settings change; restart it to resume publication.\n"
+        );
+        assert_eq!(
+            fleet_restart_hint(false),
+            "Restart fractal daemon and fractal replication-worker for the change to take effect.\nThe old worker no longer publishes endpoints after its settings change; restart it to resume publication.\n"
+        );
+    }
+
+    #[test]
+    fn migrate_finish_and_unfinish_without_services_preserve_json_stdout() {
+        assert_eq!(migration_restart_hint(true, true), "Restart st3 replication-worker for this to take effect.");
+        assert_eq!(migration_restart_hint(true, false), "Restart fractal replication-worker for this to take effect.");
+    }
+
+    #[test]
+    fn migrate_anchor_and_join_without_services_preserve_json_stdout() {
+        assert_eq!(migration_restart_hint(false, true), "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.");
+        assert_eq!(migration_restart_hint(false, false), "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.");
+    }
 }

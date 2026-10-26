@@ -4973,7 +4973,6 @@ fn record_daemon_commands(args: &UpArgs) {
 #[tokio::main]
 async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     let native_driver = matches!(&cli.command, Command::Driver(_));
-    let agent_continuation = matches!(&cli.command, Command::Wait { .. } | Command::Gh { .. });
     if native_driver {
         fractal_daemon::telemetry::local_only();
     }
@@ -5007,17 +5006,7 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
             if let Some(exit) = error.downcast_ref::<CommandExit>() {
                 return ExitCode::from(exit.0);
             }
-            let message = if native_driver {
-                plain_error(&error)
-            } else {
-                doctor_cli::human_outage_message(&error)
-                    .unwrap_or_else(|| plain_error(&error))
-            };
-            let message = if native_driver || agent_continuation {
-                std::borrow::Cow::Borrowed(message.as_str())
-            } else {
-                presentation::human_command_hints(&message)
-            };
+            let message = cli_error_message(&error, native_driver);
             eprintln!("st: {message}");
             if refused_command(&error) {
                 fractal_daemon::gate_report::note_refusal(&plain_error(&error));
@@ -5037,6 +5026,16 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
                 ExitCode::from(2)
             }
         }
+    }
+}
+
+fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
+    // Only this known human outage diagnostic is product-name presentation.
+    // Other errors may carry agent-only commands, including harness actor refusals.
+    if native_driver {
+        plain_error(error)
+    } else {
+        doctor_cli::human_outage_message(error).unwrap_or_else(|| plain_error(error))
     }
 }
 
@@ -5134,7 +5133,8 @@ async fn run(cli: Cli) -> Result<()> {
     );
     let mission_run = fractal_drivers::contracts::env("ST_MISSION_RUN");
     guard_mutating_cli_actor(&cli.command, own.as_deref(), mission_run.as_deref())?;
-    if let Command::Setup(args) = cli.command {
+    if let Command::Setup(mut args) = cli.command {
+        args.json_output = cli.json;
         return crate::setup::run(args).await.map(|_| ());
     }
     // Staging must bypass normal service-family conflict checks and all install
@@ -5440,7 +5440,7 @@ async fn run(cli: Cli) -> Result<()> {
             run_replication(&client, &config, command, cli.json).await
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
-        Command::Uninstall(args) => run_uninstall(&endpoint, args).await,
+        Command::Uninstall(args) => run_uninstall(&endpoint, args, cli.json).await,
         Command::Migrate { command: MigrateCommand::Host(args) } => {
             migrate_cli::run(&endpoint, args, cli.json).await
         }

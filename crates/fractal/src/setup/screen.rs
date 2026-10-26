@@ -117,8 +117,8 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
     let home = home(environment);
     let login_note = if cfg!(target_os = "macos") {
         format!(
-            "Installs a launch agent for st in {}/Library/LaunchAgents. No admin rights. Remove it with fractal service uninstall.",
-            home.display()
+            "Installs a launch agent for st in {}/Library/LaunchAgents. No admin rights. Remove it with {} service uninstall.",
+            home.display(), start.args.program()
         )
     } else {
         let config_home = environment
@@ -126,8 +126,8 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"));
         format!(
-            "Installs a systemd user service at {}/systemd/user/st3.service. No admin rights. Remove it with fractal service uninstall.",
-            config_home.display()
+            "Installs a systemd user service at {}/systemd/user/st3.service. No admin rights. Remove it with {} service uninstall.",
+            config_home.display(), start.args.program()
         )
     };
     Form {
@@ -526,6 +526,7 @@ async fn stages(
             &start.path,
             form.login,
             form.linger.unwrap_or(false),
+            start.args.program(),
         )
         .await?;
     } else if !daemon_ready(&next).await {
@@ -563,7 +564,7 @@ async fn stages(
         if daemon_ready(&next).await {
             reporter.step("Starting the Assistant");
             let subject =
-                crate::onboarding::start(&next, &harness, &ready, start.args.onboarding).await?;
+                crate::onboarding::start(&next, &harness, &ready, start.args.onboarding, start.args.program()).await?;
             let mut shared = shared.lock().expect("result lock");
             shared.started_assistant = true;
             shared.harness = Some(harness);
@@ -573,7 +574,7 @@ async fn stages(
                 !start.args.onboarding,
                 "rerunning onboarding needs a running daemon; pass --start true"
             );
-            said("Start the st daemon and run fractal setup to begin onboarding.");
+            said(format!("Start the st daemon and run {} setup to begin onboarding.", start.args.program()));
         }
     }
     Ok(())

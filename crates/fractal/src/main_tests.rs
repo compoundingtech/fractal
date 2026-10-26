@@ -1343,6 +1343,19 @@ fn a_harness_cannot_mutate_as_a_peer_or_person() {
 }
 
 #[test]
+fn harness_actor_rejection_keeps_st_work_ask_at_the_error_rendering_boundary() {
+    let cli = Cli::try_parse_from([
+        "fractal", "work", "wake", "step-run/example/work", "--as", "person/operator",
+    ]).unwrap();
+    let error = guard_mutating_cli_actor(&cli.command, Some("agent/worker"), None).unwrap_err();
+    for native_driver in [false, true] {
+        let output = cli_error_message(&error, native_driver);
+        assert!(output.contains("`st work ask --as \"$ST_AGENT\"`"), "{output}");
+        assert!(!output.contains("fractal work ask"), "{output}");
+    }
+}
+
+#[test]
 fn a_claim_prints_each_host_document_under_its_reference() {
     let documents = [(
         "doc/hosts/example@abc".to_owned(),

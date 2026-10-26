@@ -2184,7 +2184,7 @@ async fn a_removed_member_is_refused() {
         message.contains("this node was removed from fleet"),
         "{check}"
     );
-    assert!(message.contains("fractal fleet leave --offline"), "{check}");
+    assert!(message.contains("st fleet leave --offline"), "{check}");
     let waited = b.st(&["fleet", "wait", "--timeout", "30s"]);
     assert!(!waited.status.success());
     assert!(

@@ -1318,3 +1318,12 @@ fn skipping_sets_up_st_and_no_agent() {
     assert_eq!(table["person"].as_str(), Some("person/ada"));
     assert!(table.get("codex_work_without_asking").is_none(), "no Codex, so no setting");
 }
+
+#[test]
+fn setup_advice_preserves_json_stdout_without_changing_human_commands() {
+    for (flags, program) in [(&["--json"][..], "st"), (&[][..], "fractal")] {
+        let fixture = Fixture::new();
+        let output = success(&fixture.setup_config_only(flags));
+        assert!(output.contains(&format!("then run {program} setup. No onboarding seat was created.")), "{output}");
+    }
+}

@@ -46,10 +46,14 @@ pub(super) fn developer_tools(environment: &BTreeMap<String, String>) -> DoctorC
 }
 
 pub(super) fn human_outage_message(error: &anyhow::Error) -> Option<String> {
-    outage_message(error).map(|message| super::presentation::human_command_hints(&message).into_owned())
+    outage_message_for_program(error, "fractal")
 }
 
 pub(super) fn outage_message(error: &anyhow::Error) -> Option<String> {
+    outage_message_for_program(error, "st")
+}
+
+fn outage_message_for_program(error: &anyhow::Error, program: &str) -> Option<String> {
     // Keep native drivers and seats on their existing retry/recovery messages.
     if ["ST_AGENT", "ST_MISSION_RUN", "ST3_INCARNATION"]
         .iter()
@@ -69,7 +73,7 @@ pub(super) fn outage_message(error: &anyhow::Error) -> Option<String> {
         return None;
     }
     Some(format!(
-        "the st daemon at {} is unavailable. Run `st` to open Fractal, or `st setup` to set up or start its background service, then retry this command",
+        "the st daemon at {} is unavailable. Run `{program}` to open Fractal, or `{program} setup` to set up or start its background service, then retry this command",
         outage.endpoint()
     ))
 }

@@ -125,6 +125,7 @@ pub async fn start(
     harness: &str,
     ready: &[String],
     rerun: bool,
+    program: &str,
 ) -> Result<Option<String>> {
     let client = client(config)?;
     if !rerun && has_run_on(&client).await? {
@@ -145,9 +146,9 @@ pub async fn start(
             subject.desired_token.is_some() && subject.kind.as_deref() != Some("agent")
         })
     {
-        said(
-            "The built-in Fractal Assistant is stopped; setup leaves it stopped. Use fractal setup --onboarding to begin again explicitly."
-        );
+        said(format!(
+            "The built-in Fractal Assistant is stopped; setup leaves it stopped. Use {program} setup --onboarding to begin again explicitly."
+        ));
         return Ok(None);
     }
     let versions: DocumentListResponse = client
@@ -223,7 +224,7 @@ pub async fn start(
             .into_iter()
             .collect::<Vec<_>>();
         if definition_preview.subject_tokens.get(ASSISTANT_SUBJECT) != Some(&expected) {
-            return declaration_changed(rerun);
+            return declaration_changed(rerun, program);
         }
         definition_preview
             .subject_tokens
@@ -231,7 +232,7 @@ pub async fn start(
     }
     if let Err(error) = apply(&client, definition_preview, config).await {
         if !rerun && fractal_daemon::client::http_status(&error) == Some(409) {
-            return declaration_changed(false);
+            return declaration_changed(false, program);
         }
         return Err(error);
     }
@@ -272,7 +273,7 @@ pub async fn start(
     let mut preview = preview(&client, &run.to_string()).await?;
     let expected = vec![token];
     if preview.subject_tokens.get(ASSISTANT_SUBJECT) != Some(&expected) {
-        return declaration_changed(rerun);
+        return declaration_changed(rerun, program);
     }
     preview
         .subject_tokens
@@ -281,7 +282,7 @@ pub async fn start(
     if let Err(error) = result {
         // A concurrent first setup may have won the same named run's publication fence.
         if !rerun && fractal_daemon::client::http_status(&error) == Some(409) {
-            return declaration_changed(false);
+            return declaration_changed(false, program);
         }
         return Err(error);
     }
@@ -291,14 +292,14 @@ pub async fn start(
     Ok(Some(ASSISTANT_SUBJECT.into()))
 }
 
-fn declaration_changed(rerun: bool) -> Result<Option<String>> {
+fn declaration_changed(rerun: bool, program: &str) -> Result<Option<String>> {
     anyhow::ensure!(
         !rerun,
         "the built-in Fractal Assistant changed during setup; retry setup to inspect its new state"
     );
-    said(
-        "The onboarding declarations changed concurrently; ordinary setup preserves their current state. Run fractal setup again if onboarding has not started."
-    );
+    said(format!(
+        "The onboarding declarations changed concurrently; ordinary setup preserves their current state. Run {program} setup again if onboarding has not started."
+    ));
     Ok(None)
 }
 
