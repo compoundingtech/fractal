@@ -1582,7 +1582,7 @@ export type FabricGrant = {
   detail?: string;
   peer?: string;
   service?: string;
-  state: "granted" | "already-trusted" | "not-enabled" | "failed";
+  state: "granted" | "already-trusted" | "not-enabled" | "not-requested" | "failed";
 };
 
 export type Fence = {
@@ -2374,6 +2374,7 @@ export type PersonPairedSession = {
 export type PersonPairingBegin = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   device_name: string;
+  fabric_gateway?: boolean;
   full_control?: boolean;
   person_id: string;
   scopes?: Array<"read.projections" | "write.client-diagnostics" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;

@@ -3957,7 +3957,7 @@ export const FabricGrant = /*#__PURE__*/ (() => Schema.Struct({
   "detail": optionalKey(Schema.String),
   "peer": optionalKey(Schema.String),
   "service": optionalKey(Schema.String),
-  "state": Schema.Literals(["granted","already-trusted","not-enabled","failed"])
+  "state": Schema.Literals(["granted","already-trusted","not-enabled","not-requested","failed"])
 }).annotate({ identifier: "FabricGrant" }))()
 export type FabricGrant = typeof FabricGrant.Type
 export type FabricGrantEncoded = typeof FabricGrant.Encoded
@@ -4430,6 +4430,8 @@ export type PairingAdvertisementEncoded = typeof PairingAdvertisement.Encoded
 export const PersonPairingBegin = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
   "device_name": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(120)),
+  /** Let this pairing grant the device the client gateway over Fabric. Absent or false: it grants nothing. */
+  "fabric_gateway": optionalKey(Schema.Boolean).annotate({ description: "Let this pairing grant the device the client gateway over Fabric. Absent or false: it grants nothing." }),
   "full_control": optionalKey(Schema.Boolean),
   "person_id": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/]+$", "u"))),
   /** Narrows the default limited grant. Must not be combined with full_control. */

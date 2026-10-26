@@ -4276,6 +4276,9 @@ pub struct PersonPairingBegin {
     pub person_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub full_control: Option<bool>,
+    /// Let this pairing grant the device the client gateway over Fabric; off unless true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fabric_gateway: Option<bool>,
     /// Narrows the default limited grant to these limited pairing scopes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
