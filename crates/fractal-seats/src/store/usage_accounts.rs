@@ -111,6 +111,16 @@ impl<'a> Attribution<'a> {
     }
 }
 
+/// The rows of the month so far. Credits need each series at the month's two ends and nothing
+/// between, so this seeks two boundaries, not the daily ones the planning estimate reads.
+fn month_rows(store: &Store, month_start: u64, until_ms: u64) -> Result<Vec<Value>> {
+    store.read_snapshot(|_| {
+        let boundaries = BTreeSet::from([month_start, until_ms]);
+        let rows = super::usage_period::boundary_rows(&store.readers.get(), &boundaries)?;
+        Ok(Store::usage_period_data_from_rows(rows.into_iter().map(Ok), month_start, until_ms)?.0)
+    })
+}
+
 /// The usage of a period against the declared accounts: every row and limit, and each
 /// account's credits used so far in the calendar month of `until_ms`.
 pub(super) fn attributed_usage(
@@ -128,7 +138,7 @@ pub(super) fn attributed_usage(
     let month_start = month_start_ms(until_ms);
     let mut month_rows = if declared.iter().any(|account| account.monthly_credits_usd.is_some())
     {
-        let (mut rows, _) = store.usage_period_data(month_start, until_ms)?;
+        let mut rows = month_rows(store, month_start, until_ms)?;
         attribution.attribute(&connection, &mut rows);
         rows
     } else {
@@ -252,6 +262,30 @@ agent "keyed" { workspace "/tmp"; harness "omp" {}; }
         assert_eq!(key["credits"]["budget_microusd"], 200_000_000);
         assert!(key["credits"]["used_microusd"].as_u64().unwrap() > 0, "{key}");
         assert!(usage.accounts.iter().filter(|a| a["name"] != "ada/key").all(|a| a.get("credits").is_none()));
+    }
+
+    #[test]
+    fn the_two_ended_month_read_returns_the_rows_the_daily_read_does() {
+        let store = Store::open_memory("alder").unwrap();
+        let intent = crate::graph::parse_internal_intent(DECLARATIONS, "alder").unwrap();
+        store.apply_internal(&intent, "declare-accounts").unwrap();
+        spend(&store, "agent/alder.keyed", "omp", None, "claude-sonnet-5-5", "m1");
+        spend(&store, "agent/alder.other", "omp", None, "claude-sonnet-5-5", "m2");
+
+        let until = now_ms() as u64 + 1;
+        let start = month_start_ms(until);
+        let key = |rows: &[Value]| {
+            let mut keyed = rows
+                .iter()
+                .map(|row| (row["agent"].as_str().unwrap().to_owned(), row["cost_microusd"].clone(), row["input_tokens"].clone()))
+                .collect::<Vec<_>>();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            keyed
+        };
+        let (daily, _) = store.usage_period_data(start, until).unwrap();
+        let ends = month_rows(&store, start, until).unwrap();
+        assert_eq!(key(&ends).len(), 2, "{ends:?}");
+        assert_eq!(key(&ends), key(&daily));
     }
 
     #[test]
