@@ -4674,7 +4674,7 @@ mod tests {
                     if let AttentionKind::Prompt { question, answers, call, .. } = &mut item.kind {
                         *question = native_kind;
                         answers.clear();
-                        if native_kind { *call = Some(None); }
+                        if native_kind { *call = None; }
                     }
                 }
             }
@@ -7817,7 +7817,8 @@ mod tests {
         // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
         let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
         assert!(barred >= 6, "{shown}");
-        assert!(shown.matches("terminal (Ctrl+]) or open it in Inbox").count() == 2, "{shown}");
+        assert!(shown.matches("Fractal does not say which call this asks about").count() == 2, "{shown}");
+        assert!(shown.matches("(Ctrl+]) or open it in Inbox").count() == 2, "{shown}");
         assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
     }
 
