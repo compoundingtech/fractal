@@ -55,8 +55,12 @@ const iframe = (report, probes = [], navigation) => `<!doctype html><meta charse
 const policyFixtureIds = [
   'fractal-ui-transcript--no-green-all-states-light',
   'fractal-ui-transcript--no-green-all-states',
-  'fractal-ui-composer--footer-width-budget-light',
-  'fractal-ui-composer--footer-width-budget',
+  'fractal-ui-composer--footer-width-budget-320-light',
+  'fractal-ui-composer--footer-width-budget-320',
+  'fractal-ui-composer--footer-width-budget-360-light',
+  'fractal-ui-composer--footer-width-budget-360',
+  'fractal-ui-composer--footer-width-budget-451-light',
+  'fractal-ui-composer--footer-width-budget-451',
   'fractal-ui-sidebar-tree--filter-keystroke-to-paint',
   'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed',
 ]
@@ -127,7 +131,7 @@ test('full set with a11y requires one passed a11y report per case', { timeout: 6
   const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: '', KIT_PLAY_A11Y: '', KIT_PLAY_MAX_SECONDS: '' } })
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
-  assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 8, 21])
+  assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 12, 29])
   assert.ok(receipt.cpu.count > 0 && receipt.cpu.busyCoreMinutes >= 0 && receipt.cpu.loadavgEnd.length === 3)
   for (const row of receipt.rows) {
     assert.equal(row.storyFile, './Kit.stories.tsx', 'receipt paths join entry.id, not the index key')
@@ -182,7 +186,7 @@ test('fixture code can inject its policy through the runner parameter, not proce
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
   assert.deepEqual(receipt.caseOverrides, {})
-  assert.equal(receipt.cases, 32)
+  assert.equal(receipt.cases, 48)
 })
 
 test('the production policy still requires the app cleanup story in the complete build', { timeout: 60000 }, async () => {
