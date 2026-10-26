@@ -116,20 +116,34 @@ export function keepClosed(previous: readonly KeptAttention[], next: readonly At
   return over > 0 ? kept.filter(item => !(item.closedElsewhere && over-- > 0)) : kept;
 }
 
+function rowOf(item: KeptAttention, place: { tier: Tier; kind: HomeKind }, now: number, unplaced = 'st names a card this app does not know'): HomeRow {
+  const step = plain(item.presentation?.waiting)?.path;
+  const waiting = item.closedElsewhere ? 'closed; stays until you clear it'
+    : !item.presentation ? 'st does not say what this is: this host\'s st is older, or has not presented it yet'
+    : place.kind === 'unplaced' ? unplaced
+    : step ? `step ${step}` : null;
+  return { item, ...place, ...kindGlyph(place.kind), title: cleanTitle(item.title), waiting, age: ago(item.requested_at, now) };
+}
+
 export function homeRows(items: KeptAttention[], actor: string | undefined, now = Date.now()): HomeRow[] {
   const rows = items.filter(item => onHome(item, actor)).flatMap((item): HomeRow[] => {
     const place = homeKind(item);
-    if (!place) return [];
-    const step = plain(item.presentation?.waiting)?.path;
-    const waiting = item.closedElsewhere ? 'closed; stays until you clear it'
-      : !item.presentation ? 'st does not say what this is: this host\'s st is older, or has not presented it yet'
-      : place.kind === 'unplaced' ? 'st names a card this app does not know'
-      : step ? `step ${step}` : null;
-    return [{ item, ...place, ...kindGlyph(place.kind), title: cleanTitle(item.title), waiting, age: ago(item.requested_at, now) }];
+    return place ? [rowOf(item, place, now)] : [];
   });
   // A stable sort by tier keeps st's order within each tier; what st closed sits last, apart.
   const rank = (row: HomeRow) => (row.item.closedElsewhere ? TIERS.length : 0) + TIERS.indexOf(row.tier);
   return rows.map((row, index) => ({ row, index })).sort((a, b) => rank(a.row) - rank(b.row) || a.index - b.index).map(({ row }) => row);
+}
+
+/**
+ * The row an item's own screen shows: the row Home lists, or, for an item Home does not list
+ * (st puts it on no Now, as a fault or a message, opened by a link), an unplaced row where st's
+ * alert flag puts it, so the screen always has one to read.
+ */
+export function detailRow(item: KeptAttention, now = Date.now()): HomeRow {
+  const place = homeKind(item);
+  if (place) return rowOf(item, place, now);
+  return rowOf(item, { tier: isAlert(item) ? 'stopped' : 'later', kind: 'unplaced' }, now, 'st keeps this off Now');
 }
 
 export type HomeSection = { tier: Tier; title: string; count: number; rows: HomeRow[]; closed?: boolean };
