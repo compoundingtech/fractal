@@ -61,6 +61,49 @@ fn with_request(mut body: Value, request: &Value) -> Value {
     body
 }
 
+/// The shortest and longest deadline an ask may name.
+const MIN_ASK_DEADLINE_MS: u64 = 60_000;
+const MAX_ASK_DEADLINE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// When the ask resolves by itself, and the answer that then applies. Every ask has a deadline:
+/// the one it names or the fleet's default. Only a structured request's named answer can be a
+/// default; without one the ask resolves as timed out.
+fn deadline_and_default(
+    input: &PersonAskRequest,
+    structured: &Value,
+    default_ms: u64,
+    now: u128,
+) -> Result<(u128, Option<String>), St3Error> {
+    let deadline_ms = input.deadline_ms.unwrap_or(default_ms);
+    if input.deadline_ms.is_some()
+        && !(MIN_ASK_DEADLINE_MS..=MAX_ASK_DEADLINE_MS).contains(&deadline_ms)
+    {
+        return Err(St3Error::new(
+            "invalid-ask-deadline",
+            "an ask's deadline must be between 1m and 30d",
+        ));
+    }
+    if let Some(default) = &input.default_answer {
+        if structured.is_null() {
+            return Err(St3Error::new(
+                "invalid-default-answer",
+                "a free-text ask has no named answers; at its deadline it resolves as timed out",
+            ));
+        }
+        StructuredRequest::parse(structured)?.0.check_default(default)?;
+    }
+    Ok((now + u128::from(deadline_ms), input.default_answer.clone()))
+}
+
+/// Adds the deadline and default answer to an ask claim body.
+fn with_deadline(mut body: Value, (deadline, default): &(u128, Option<String>)) -> Value {
+    body["fields"]["deadline_unix_ms"] = json!(*deadline as u64);
+    if let Some(default) = default {
+        body["fields"]["default_answer"] = json!(default);
+    }
+    body
+}
+
 /// The answer the person gives and the summary history keeps. A free-text ask takes text
 /// only; a structured ask resolves the named answer against its request.
 fn resolve_answer(
@@ -155,10 +198,17 @@ fn send_answer_tx(
     };
     let fields = &ask.body["fields"];
     let title = fields["title"].as_str().unwrap_or_default();
-    let person = response.body["fields"]["acted_for"]
-        .as_str()
-        .unwrap_or_else(|| response.actor.as_deref().unwrap_or("the person"));
-    let verb = if answer.is_some_and(|answer| answer["outcome"] == "dismissed") {
+    let timed_out = response.body["fields"]["resolved_by"] == "deadline";
+    let person = if timed_out {
+        fields["person"].as_str().unwrap_or("the person")
+    } else {
+        response.body["fields"]["acted_for"]
+            .as_str()
+            .unwrap_or_else(|| response.actor.as_deref().unwrap_or("the person"))
+    };
+    let verb = if timed_out {
+        "did not answer, by its deadline,"
+    } else if answer.is_some_and(|answer| answer["outcome"] == "dismissed") {
         "dismissed"
     } else {
         "answered"
@@ -196,8 +246,9 @@ fn send_answer_tx(
     if let Some(run) = fields["owner_run"].as_str() {
         tags.push(Value::String(format!("mission-run:{run}")));
     }
+    let heading = if timed_out { "Timed out" } else { "Answered" };
     let body = json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
-        "title": format!("Answered: {title}"), "in_reply_to": null, "tags": tags}, "evidence": [response.id]});
+        "title": format!("{heading}: {title}"), "in_reply_to": null, "tags": tags}, "evidence": [response.id]});
     if let Some(authorization) = authorization {
         append_claim_tx_with_assistant_answer(tx, origin, &subject, "message.sent", Some("assistant/chatgpt"), &body,
             &[], None, Some(authorization)).map_err(claim_append_error)?;
@@ -206,6 +257,14 @@ fn send_answer_tx(
     append_claim_tx(tx, origin, &subject, "message.sent", Some("daemon/runtime"), &body,
         &[], None).map_err(claim_append_error)?;
     Ok(())
+}
+
+/// What one pass over the open person asks did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PersonAskPass {
+    pub changed: bool,
+    /// The earliest deadline still to come among the asks this node resolves.
+    pub next_deadline: Option<u128>,
 }
 
 pub trait PersonWorkStore {
@@ -236,6 +295,12 @@ pub trait PersonWorkStore {
     /// whom it asks: what a blob read needs to authorize the person looking at them.
     fn ask_images(&self, step_subject: &str) -> Result<Option<AskImages>>;
     fn reconcile_person_asks(&self) -> Result<bool>;
+    /// Ends the asks whose owner ended and resolves the ones whose deadline passed by `now`,
+    /// and says when the next deadline this node resolves falls.
+    fn reconcile_person_asks_at(&self, now: u128) -> Result<PersonAskPass>;
+    /// Resolves an unanswered ask at its deadline with its default answer, recorded as resolved
+    /// by the deadline and not by the person, and resumes whatever waited on it.
+    fn resolve_at_deadline(&self, tx: &Transaction<'_>, ask: &ClaimRecord, view: &StepRunView) -> Result<bool>;
     /// Brings a person information they asked for. Nothing waits on an update: it stays on the
     /// person's home until they open or read it, and it is refused unless `about` names the
     /// person's own run or step, or their message to the poster.
@@ -285,6 +350,7 @@ impl PersonWorkStore for Store {
         if input.step.is_none() || input.new_run.is_some() {
             return self.ask_person_in_new_run(input);
         }
+        let now = now_ms();
         self.connection.batched(|tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
@@ -294,6 +360,7 @@ impl PersonWorkStore for Store {
                 &stable_input
             };
             let structured = canonical_request(input)?;
+            let deadline = deadline_and_default(input, &structured, self.default_ask_deadline_ms(), now)?;
             let named = step(tx, &normalize_step_run(input.step.as_deref().unwrap())).map_err(internal)?
                 .ok_or_else(|| St3Error::new("missing-step-run", "the asking step does not exist"))?;
             // A revision moves a step into the run's new generation, and its worker may still
@@ -309,7 +376,8 @@ impl PersonWorkStore for Store {
                     || existing.body["fields"]["person"] != input.person
                     || existing.body["fields"]["title"] != input.title
                     || existing.body["fields"]["reason"] != input.reason
-                    || existing.body["fields"]["request"] != structured {
+                    || existing.body["fields"]["request"] != structured
+                    || existing.body["fields"]["default_answer"] != json!(input.default_answer) {
                     return Err(St3Error::new("idempotency-conflict", "this ask key already names a different question"));
                 }
                 return step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the ask is no longer retained"));
@@ -343,10 +411,10 @@ impl PersonWorkStore for Store {
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(&input.actor),
-                &with_request(json!({"fields": {"run": origin.run, "generation": origin.generation,
+                &with_deadline(with_request(json!({"fields": {"run": origin.run, "generation": origin.generation,
                     "origin_step": origin_subject, "origin_attempt": origin.attempt,
                     "person": input.person, "title": input.title, "reason": input.reason,
-                    "key": input.idempotency_key, "attempt": 1, "status": "ready", "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &evidence, None).map_err(claim_append_error)?;
+                    "key": input.idempotency_key, "attempt": 1, "status": "ready", "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             let pause = append_claim_tx(tx, &self.origin, &origin_subject, "step-run.state", Some("daemon/runtime"),
                 &json!({"fields": {"status": "waiting-person", "reason": subject, "attempt": origin.attempt}}), &[claim.id], None).map_err(claim_append_error)?;
@@ -533,6 +601,10 @@ impl PersonWorkStore for Store {
     }
 
     fn reconcile_person_asks(&self) -> Result<bool> {
+        Ok(self.reconcile_person_asks_at(now_ms())?.changed)
+    }
+
+    fn reconcile_person_asks_at(&self, now: u128) -> Result<PersonAskPass> {
         /// How many asks one pass ends, each with its cancellation, message and update.
         const ENDED_ASKS_PER_PASS: usize = 32;
         // Drop this read connection before submitting any cancellation transaction.
@@ -544,11 +616,13 @@ impl PersonWorkStore for Store {
         };
         if !has_asks {
             // A concurrent new ask is handled by the next notified reconcile pass.
-            return Ok(false);
+            return Ok(PersonAskPass::default());
         }
-        self.connection.batched(|tx| -> Result<bool> {
+        let default_ms = self.default_ask_deadline_ms();
+        self.connection.batched(|tx| -> Result<PersonAskPass> {
             let asks = person_asks_for_reconcile(tx)?;
-            let mut changed = false;
+            let since = ask_deadlines_since(tx)?;
+            let mut pass = PersonAskPass::default();
             let mut ended = 0;
             for ask in asks {
                 // Each ending writes a cancellation, a message and an update while holding the
@@ -559,28 +633,74 @@ impl PersonWorkStore for Store {
                 // A previous candidate may have cancelled this same subject. Recheck the raw
                 // status inside this transaction; the joined candidate list is not authority.
                 let Some(view) = step(tx, &ask.subject)? else { continue };
-                if matches!(view.status.as_str(), "ready" | "pending") && !current(tx, &ask, now_ms())? {
-                    let claim = append_claim_tx(tx, &self.origin, &ask.subject, "work.person-cancelled", Some("daemon/runtime"),
-                        &json!({"fields": {"attempt": view.attempt, "status": "cancelled", "summary": "the requester, origin or owning run ended", "key": format!("person-owner-ended:{}", ask.id)}}), std::slice::from_ref(&ask.id), None)?;
-                    project(tx, &claim).map_err(anyhow::Error::new)?;
-                    // Telling is best effort: a notice that cannot be written must never undo
-                    // this cancellation or the others in this pass.
-                    if !is_update(&ask) {
-                        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h582aabe243d0 owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ "SAVEPOINT tell_ask_ended")?;
-                        match self.tell_ask_ended(tx, &ask) {
-                            Ok(()) => tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hd4edb41125ef owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ "RELEASE tell_ask_ended")?,
-                            Err(error) => {
-                                tx.execute_batch(/* sqlite-large-value: allow-for-now lv-he8f7682c718f owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ "ROLLBACK TO tell_ask_ended; RELEASE tell_ask_ended")?;
-                                tracing::warn!("the ended ask {} could not be told: {error:#}", ask.subject);
-                            }
+                if !matches!(view.status.as_str(), "ready" | "pending") {
+                    continue;
+                }
+                if current(tx, &ask, now)? {
+                    // The member that took the ask resolves it, so one answer ends it.
+                    if ask.origin != self.origin {
+                        continue;
+                    }
+                    let Some(deadline) = ask_deadline(&ask, since, default_ms) else { continue };
+                    if deadline > now {
+                        pass.next_deadline = Some(pass.next_deadline.map_or(deadline, |next| next.min(deadline)));
+                        continue;
+                    }
+                    if self.resolve_at_deadline(tx, &ask, &view)? {
+                        ended += 1;
+                        pass.changed = true;
+                    }
+                    continue;
+                }
+                // The requester, origin or owning run ended.
+                let claim = append_claim_tx(tx, &self.origin, &ask.subject, "work.person-cancelled", Some("daemon/runtime"),
+                    &json!({"fields": {"attempt": view.attempt, "status": "cancelled", "summary": "the requester, origin or owning run ended", "key": format!("person-owner-ended:{}", ask.id)}}), std::slice::from_ref(&ask.id), None)?;
+                project(tx, &claim).map_err(anyhow::Error::new)?;
+                // Telling is best effort: a notice that cannot be written must never undo
+                // this cancellation or the others in this pass.
+                if !is_update(&ask) {
+                    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h582aabe243d0 owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ "SAVEPOINT tell_ask_ended")?;
+                    match self.tell_ask_ended(tx, &ask) {
+                        Ok(()) => tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hd4edb41125ef owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ "RELEASE tell_ask_ended")?,
+                        Err(error) => {
+                            tx.execute_batch(/* sqlite-large-value: allow-for-now lv-he8f7682c718f owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ "ROLLBACK TO tell_ask_ended; RELEASE tell_ask_ended")?;
+                            tracing::warn!("the ended ask {} could not be told: {error:#}", ask.subject);
                         }
                     }
-                    ended += 1;
-                    changed = true;
+                }
+                ended += 1;
+                pass.changed = true;
+            }
+            Ok(pass)
+        }).map_err(anyhow::Error::msg)?
+    }
+
+    fn resolve_at_deadline(&self, tx: &Transaction<'_>, ask: &ClaimRecord, view: &StepRunView) -> Result<bool> {
+        // An ask from a newer build whose request this build cannot read waits for that build.
+        let Ok(request) = structured_request(ask) else { return Ok(false) };
+        let answer = request.map(|request| request.timed_out(ask_default_answer(ask)));
+        let summary = answer.as_ref().map_or_else(|| "Timed out without an answer".to_owned(), answer_summary);
+        let mut body = json!({"fields": {"attempt": view.attempt, "status": "completed", "summary": summary,
+            "key": format!("person-deadline:{}", ask.id), "episode": ask.id, "resolved_by": "deadline"}});
+        if let Some(answer) = &answer {
+            body["fields"]["answer"] = answer.clone();
+        }
+        let claim = append_claim_tx(tx, &self.origin, &ask.subject, "work.person-done", Some("daemon/runtime"),
+            &body, std::slice::from_ref(&ask.id), None)?;
+        project(tx, &claim).map_err(anyhow::Error::new)?;
+        match ask.body["fields"]["origin_step"].as_str() {
+            Some(origin) => {
+                if let Some(origin_view) = step(tx, origin)?.filter(|origin| origin.status == "ready") {
+                    let response = append_claim_tx(tx, &self.origin, origin, "step-run.state", Some("daemon/runtime"),
+                        &json!({"fields": {"status": "ready", "attempt": origin_view.attempt, "readiness_epoch": origin_view.readiness_epoch,
+                            "reason": format!("Person response: {summary}")}}), &[claim.id], None)?;
+                    project_mission_run_update(tx, &response).map_err(anyhow::Error::new)?;
                 }
             }
-            Ok(changed)
-        }).map_err(anyhow::Error::msg)?
+            None => send_answer_tx(tx, &self.origin, ask, &claim, &summary, answer.as_ref(), None)
+                .map_err(anyhow::Error::new)?,
+        }
+        Ok(true)
     }
 
     fn post_update(&self, input: &PersonAskRequest) -> Result<StepRunView, St3Error> {
@@ -588,6 +708,12 @@ impl PersonWorkStore for Store {
             return Err(St3Error::new(
                 "ambiguous-ask-owner",
                 "an update names the work it is about in its request, not with a step or new run",
+            ));
+        }
+        if input.deadline_ms.is_some() || input.default_answer.is_some() {
+            return Err(St3Error::new(
+                "invalid-ask-deadline",
+                "an update waits for nobody, so it has no deadline or default answer",
             ));
         }
         let structured = canonical_request(input)?;
@@ -698,6 +824,7 @@ impl PersonWorkStore for Store {
             ));
         }
         let structured = canonical_request(input)?;
+        let deadline = deadline_and_default(input, &structured, self.default_ask_deadline_ms(), now_ms())?;
         self.connection.batched(|tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
@@ -722,7 +849,8 @@ impl PersonWorkStore for Store {
             let subject = format!("step-run/{generation}/ask");
             if let Some(existing) = request(tx, &subject).map_err(internal)? {
                 if existing.body["fields"]["person"] != input.person || existing.body["fields"]["title"] != input.title || existing.body["fields"]["reason"] != input.reason
-                    || existing.body["fields"]["request"] != structured {
+                    || existing.body["fields"]["request"] != structured
+                    || existing.body["fields"]["default_answer"] != json!(input.default_answer) {
                     return Err(St3Error::new("idempotency-conflict", "this ask key already names another question"));
                 }
                 return step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the ask is no longer retained"));
@@ -735,10 +863,10 @@ impl PersonWorkStore for Store {
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(&input.actor),
-                &with_request(json!({"fields": {"run": run, "generation": format!("run-generation/{generation}"),
+                &with_deadline(with_request(json!({"fields": {"run": run, "generation": format!("run-generation/{generation}"),
                     "person": input.person, "title": input.title, "reason": input.reason, "key": input.idempotency_key,
                     "attempt": 1, "status": "ready", "mission_spec": mission, "owner_run": desired.owner_run,
-                    "owner_generation": desired.owner_generation, "requester_declaration": desired.claim_id, "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &evidence, None).map_err(claim_append_error)?;
+                    "owner_generation": desired.owner_generation, "requester_declaration": desired.claim_id, "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the ask could not be projected"))
         }).map_err(internal)?

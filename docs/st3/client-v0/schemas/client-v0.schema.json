@@ -2762,7 +2762,7 @@
     "TerminalCreateParameters": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1}, "host": {"type": "string", "minLength": 1}, "cwd": {"type": "string", "minLength": 1}}},
     "PersonAskParameters": {
       "type": "object", "additionalProperties": false, "required": ["person_id", "title", "reason"],
-      "properties": {"person_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string"}, "reason": {"type": "string"}, "step_id": {"$ref": "#/$defs/Id"}, "new_run": {"type": "string"}, "request": {"$ref": "#/$defs/StructuredRequest"}}
+      "properties": {"person_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string"}, "reason": {"type": "string"}, "step_id": {"$ref": "#/$defs/Id"}, "new_run": {"type": "string"}, "request": {"$ref": "#/$defs/StructuredRequest"}, "deadline_ms": {"type": "integer", "minimum": 60000, "maximum": 2592000000, "description": "How long the person has to answer. Absent, the fleet's default deadline applies (24 hours unless configured)."}, "default_answer": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,47}$", "description": "The request's answer id that applies at the deadline. Absent, the ask resolves as timed out."}}
     },
     "PersonStepParameters": {
       "type": "object", "additionalProperties": false, "required": ["target_id", "summary", "episode"],
@@ -2844,7 +2844,8 @@
           "custom",
           "feedback",
           "read",
-          "dismissed"
+          "dismissed",
+          "timed_out"
         ]},
         "id": {"type": "string"},
         "label": {"type": "string"},
@@ -2865,6 +2866,7 @@
         "assistant_session_actor": {"type": "string", "description": "Server-owned grant-bound assistant session audit actor, separate from the answering principal."},
         "answered_at_unix_ms": {"type": "integer", "minimum": 0},
         "answer": {"$ref": "#/$defs/PersonAnswer"},
+        "resolved_by": {"enum": ["deadline"], "description": "The ask resolved by itself at its deadline, not by the person."},
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/Id"}}
       }
     },

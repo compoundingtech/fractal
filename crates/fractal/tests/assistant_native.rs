@@ -143,6 +143,8 @@ impl Harness {
 
     fn ask(&self, key: &str, title: &str) -> String {
         self.state.store.ask_person(&PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None, person: OWNER.into(), title: title.into(), reason: "Owner must choose".into(),
             actor: AGENT.into(), step: None, new_run: Some(key.into()), incarnation: None,
             request: Some(json!({"version":1,"type":"choice","question":"Which option?","why_person":"Owner chooses.","answers":[{"id":"yes","label":"Yes","consequence":"Record yes."},{"id":"no","label":"No","consequence":"Record no."}]})),

@@ -3026,6 +3026,14 @@ pub struct PersonAskRequest {
     /// is free text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<Value>,
+    /// How long the person has to answer, in milliseconds. Absent, the fleet's default deadline
+    /// applies. At the deadline the ask resolves by itself with `default_answer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+    /// The answer id of the structured request that applies when the deadline passes. Absent,
+    /// the ask resolves as timed out with no answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<String>,
     pub idempotency_key: String,
 }
 
@@ -3080,9 +3088,13 @@ pub struct PersonAnswerView {
     /// The answering principal, including `assistant/chatgpt` for assistant responses.
     pub respondent: String,
     pub answered_at_unix_ms: u128,
-    /// The typed answer: `type`, `outcome`, and `id`, `label` and `text` when present.
+    /// The typed answer: `type`, `outcome`, and `id`, `label` and `text` when present. An ask
+    /// that timed out records `timed_out`, with the default answer's `id` and `label` if one applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<Value>,
+    /// `deadline` when the ask resolved by itself at its deadline, not by the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
 }

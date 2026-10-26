@@ -2309,6 +2309,7 @@ export type PersonAnswer = {
   | "feedback"
   | "read"
   | "dismissed"
+  | "timed_out"
 ;
   text?: string;
   type: "decision" | "choice" | "feedback" | "update";
@@ -2328,6 +2329,7 @@ export type PersonAnswerRecord = {
   assistant_owner?: PersonId;
   assistant_session_actor?: string;
   evidence?: Array<Id>;
+  resolved_by?: "deadline";
   respondent: SenderRef;
   sender_class?: string;
   status: "completed" | "cancelled";
@@ -2335,6 +2337,8 @@ export type PersonAnswerRecord = {
 };
 
 export type PersonAskParameters = {
+  deadline_ms?: number;
+  default_answer?: string;
   new_run?: string;
   person_id: Id;
   reason: string;

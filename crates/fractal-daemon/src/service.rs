@@ -1458,6 +1458,7 @@ mod tests {
             trim: crate::config::TrimConfig::default(),
             limits: crate::config::LimitsConfig::default(),
             reconcile: crate::config::ReconcileConfig::default(),
+            asks: crate::config::AsksConfig::default(),
             codex_work_without_asking: None,
             fleet: None,
         };

@@ -936,6 +936,78 @@ fn rollout_rechecks_pending_replies_and_the_physical_render_fence() {
     assert!(reconciler.rollout_render_guard(&seat.desired()).is_err());
 }
 
+/// Nothing writes when an unanswered ask's deadline passes, so the pass that sees the ask arms
+/// a wake for its deadline, and the pass that wake starts resolves the ask and readies its step.
+#[tokio::test(start_paused = true)]
+async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
+    use futures_util::FutureExt;
+    let seat = Seat::new();
+    let run = seat.work();
+    let origin = run.steps[0].subject.clone();
+    seat.store
+        .work_action(&origin, "claim", &crate::model::WorkRequest {
+            wait_ms: None,
+            actor: Some(SUBJECT.into()),
+            incarnation: Some("original-1".into()),
+            summary: None,
+            reason: None,
+            evidence: Vec::new(),
+            idempotency_key: "claim".into(),
+        })
+        .unwrap();
+    let ask = seat
+        .store
+        .ask_person(&crate::model::PersonAskRequest {
+            deadline_ms: Some(3_600_000),
+            default_answer: None,
+            legacy_request: None,
+            person: "person/operator".into(),
+            title: "Which bed?".into(),
+            reason: "Choose the next bed".into(),
+            actor: SUBJECT.into(),
+            step: Some(origin.clone()),
+            new_run: None,
+            incarnation: Some("original-1".into()),
+            request: None,
+            idempotency_key: "bed".into(),
+        })
+        .unwrap();
+    let deadline = u128::from(
+        seat.store.claims_for(&ask.subject, Some("work.person-asked")).unwrap()[0].body["fields"]
+            ["deadline_unix_ms"]
+            .as_u64()
+            .unwrap(),
+    );
+    let reconciler = Reconciler::new(
+        seat.store.clone(),
+        seat.runtime.clone(),
+        "amber".into(),
+        Arc::new(Notify::new()),
+    );
+    assert!(!reconciler.reconcile_person_asks().unwrap());
+    assert_eq!(
+        reconciler.step_deadlines.lock().unwrap().get("person-ask-deadline"),
+        Some(&deadline)
+    );
+    let _ = reconciler.notify.notified().now_or_never();
+    tokio::task::yield_now().await;
+    let remaining = deadline.saturating_sub(now_ms()) as u64;
+    tokio::time::advance(Duration::from_millis(remaining.saturating_sub(1_000))).await;
+    assert!(reconciler.notify.notified().now_or_never().is_none());
+    // The timer was armed a little before `remaining` was read.
+    tokio::time::advance(Duration::from_millis(2_000)).await;
+    tokio::task::yield_now().await;
+    assert!(reconciler.notify.notified().now_or_never().is_some(), "the deadline wakes the reconciler");
+    smallclaims::store::set_thread_clock(Some(deadline));
+    let resolved = reconciler.reconcile_person_asks();
+    smallclaims::store::set_thread_clock(None);
+    assert!(resolved.unwrap());
+    assert_eq!(seat.store.step_run(&ask.subject).unwrap().unwrap().status, "completed");
+    let resumed = seat.store.step_run(&origin).unwrap().unwrap();
+    assert_eq!(resumed.status, "ready");
+    assert_eq!(resumed.person_answers[0].resolved_by.as_deref(), Some("deadline"));
+}
+
 #[test]
 fn rollout_pending_person_work_can_resume_and_finish_while_new_work_waits() {
     for (retire, answered_before_drain) in
@@ -958,6 +1030,8 @@ fn rollout_pending_person_work_can_resume_and_finish_while_new_work_waits() {
         let ask = seat
             .store
             .ask_person(&crate::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/operator".into(),
                 title: "Which bed?".into(),

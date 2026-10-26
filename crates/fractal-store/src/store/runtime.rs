@@ -378,6 +378,8 @@ impl Runtime for FractalRuntime {
             let _ = rebuilt;
         }
         migrate_occurrence_creation_projections_tx(transaction)?;
+        // Asks already open when this build first runs count their deadline from now.
+        super::person_work::start_counting_ask_deadlines(transaction, now_ms())?;
         Ok(())
     }
 
