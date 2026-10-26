@@ -34,7 +34,7 @@ was said.
 | `base` | the full `main` commit the head was read against |
 | `round` | 1 to 3: which attempt this is (see the loop) |
 | `verdict` | `GO` or `CHANGES` |
-| `risk.deterministic` | the level (`low`, `medium`, `high`) and reasons computed from the diff alone by `scripts/review-risk`, using the rules named in `.st/review-risk.json`; no model is involved, so two runs agree |
+| `risk.deterministic` | the level (`low`, `medium`, `high`) and reasons computed from the diff alone by `scripts/review-risk`, using the rules named in `.st/review-risk.json`, read from the base and never from the head under review, so a change cannot lower its own floor; no model is involved, so two runs agree. Changing the trust files under `.st/` (keys, authors, the skip, policy and required-lanes files, and the review's own rules, classes, schema and harness) is high |
 | `risk.llm` | the reviewing model's own level, with its reasons |
 | `risk.final` | the **higher** of the two: the model may raise the deterministic floor and never lower it |
 | `findings` | each with `severity` (`blocking` or `advisory`), `file`, `line`, `reason` and the fix that would be accepted |

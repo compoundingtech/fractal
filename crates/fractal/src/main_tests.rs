@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
+    let value = "fabric://devbox/st3-client-v0";
+    let cli = Cli::try_parse_from(["st", "--endpoint", value, "now"]).unwrap();
+    let endpoint = Endpoint::parse(cli.endpoint.unwrap()).unwrap();
+    assert!(matches!(endpoint, Endpoint::Fabric(_)));
+    assert_eq!(endpoint_label(&endpoint), value);
+    let client = generated_client(&endpoint, Some("person/operator")).unwrap();
+    assert!(!client.is_local_socket());
+}
+
+#[test]
+fn malformed_native_fabric_endpoint_is_not_a_local_socket() {
+    for value in [
+        "fabric://devbox", "fabric://devbox/replication",
+        "fabric://devbox/st3-client-v0/../admin",
+    ] {
+        assert!(Endpoint::parse(value).is_err(), "{value}");
+    }
+}
+
+#[test]
 fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
     let plan = OperationalRepairPlan {
         api_version: "st3.operational-repair.v0".into(),
@@ -475,6 +496,96 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
         "start the terminal: st changed while this was on its way, so it was not applied (stale-fence)"
     );
     assert_eq!(plain_error(&anyhow::anyhow!("plain")), "plain");
+    assert_eq!(
+        cli_error_message(&error, false),
+        "start the terminal: Fractal changed while this was on its way, so it was not applied (stale-fence)"
+    );
+    assert_eq!(cli_error_message(&error, true), plain_error(&error));
+}
+
+#[test]
+fn gate_subprocess_stderr_keeps_stable_client_errors() {
+    const CHILD: &str = "ST_TEST_GATE_ERROR_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let api: fractal_client::ErrorEnvelope = serde_json::from_value(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/gate-test",
+            "code": "internal",
+            "message": "the store failed",
+            "retryable": false
+        })).unwrap();
+        let error = anyhow::Error::from(fractal_client::ClientError::Api(
+            api.code.clone(), api.message.clone(), Box::new(api),
+        ));
+        eprintln!("{}", cli_error_message(&error, false));
+        let mut stalled = None;
+        // Exercise the actual Resync notice sink, including duplicate suppression.
+        for _ in 0..2 {
+            conversations_cli::report_resync(
+                Some(&fractal_client::ErrorCode::Internal),
+                "the stream failed",
+                &mut stalled,
+            );
+        }
+        return;
+    }
+    for gate in [false, true] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "tests::gate_subprocess_stderr_keeps_stable_client_errors", "--nocapture"])
+            .env(CHILD, "1")
+            .env_remove(fractal_daemon::gate_report::ENV);
+        if gate {
+            command.env(fractal_daemon::gate_report::ENV, "/unused/gate-report");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(stderr.trim(), if gate {
+            "st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
+        } else {
+            "Fractal hit a problem: the store failed (internal)\nst: Fractal hit a problem: the stream failed · trying again"
+        });
+    }
+}
+
+#[tokio::test]
+async fn blob_errors_keep_their_type_until_the_rendering_boundary() {
+    use axum::{Json, Router, http::StatusCode};
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("blob.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = Router::new().fallback(|| async {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/blob-test",
+            "code": "internal",
+            "message": "the blob store failed",
+            "retryable": false
+        })))
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let endpoint = Endpoint::Unix(socket);
+    let file = directory.path().join("image.png");
+    fs::write(&file, b"image").unwrap();
+    let upload = upload_attachment(&endpoint, "person/test", &file, Some("image/png"))
+        .await.unwrap_err();
+    let read = run_blobs(&endpoint, None, BlobCommand::Get {
+        reference: format!("blob/{}", "a".repeat(64)),
+        message: None,
+        output: None,
+        actor: Some("person/test".into()),
+    }, false).await.unwrap_err();
+    for error in [upload, read] {
+        assert!(error.downcast_ref::<fractal_client::ClientError>().is_some(), "{error:#}");
+        assert_eq!(render_client_error(&error, ClientMessage::Human),
+            "Fractal hit a problem: the blob store failed (internal)");
+        assert_eq!(plain_error(&error),
+            "st hit a problem: the blob store failed (internal)");
+    }
+    server.abort();
+    let _ = server.await;
 }
 
 #[test]
@@ -945,6 +1056,30 @@ fn usage_marks_a_reading_older_than_the_limits_cadence_as_stale() {
     let output = render_usage_report(&report, 24, None);
     assert!(output.contains("  ada/claude-1 (claude/aaaa)  stale\n"), "{output}");
     assert!(output.contains("  claude/bbbb\n"), "{output}");
+}
+
+#[test]
+fn usage_lists_every_declared_account_with_its_limit_or_credits() {
+    let report = json!({
+        "rows": [],
+        "limits": [
+            {"account": "claude/aaaa", "account_ref": "ada/claude-1", "weekly_percent": 24.0,
+             "weekly_resets_at_unix_ms": 1_799_500_000_000_u64, "stale": false,
+             "measured_at_unix_ms": 1_799_000_000_000_u64},
+        ],
+        "accounts": [
+            {"name": "ada/claude-1", "account": "claude/aaaa", "provider": "anthropic", "kind": "subscription"},
+            {"name": "ada/claude-2", "account": "claude/bbbb", "provider": "anthropic", "kind": "subscription"},
+            {"name": "ada/key", "account": "omp/cccc", "provider": "anthropic", "kind": "api-key",
+             "credits": {"budget_microusd": 200_000_000_u64, "used_microusd": 154_300_000_u64,
+                         "unpriced_tokens": 7, "period_start_ms": 0}},
+        ],
+    });
+    let output = render_usage_report(&report, 24, None);
+    assert!(output.contains("ACCOUNTS  3 · every declared account\n"), "{output}");
+    assert!(output.contains("ada/claude-1  weekly 24% resets 2027-01-09 "), "{output}");
+    assert!(output.contains("ada/claude-2  no limits reported\n"), "{output}");
+    assert!(output.contains("ada/key  credits $154+ of $200 this month\n"), "{output}");
 }
 
 #[test]
@@ -2703,6 +2838,8 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const SCHEDULES_SOURCE: &str = include_str!("schedules_cli.rs");
     #[cfg(test)]
     const DEPLOY_SOURCE: &str = include_str!("deploy_cli.rs");
+    #[cfg(test)]
+    const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -2720,6 +2857,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("schedules", SCHEDULES_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
+        ("waiting_on", WAITING_ON_SOURCE),
         ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
     ];
     let main_source = /* sqlite-large-value: allow-for-now lv-h47a0a723f1b0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("main.rs");
@@ -5673,6 +5811,32 @@ fn agent_new_args(arguments: &[&str]) -> AgentNewArgs {
         panic!("agents new did not parse");
     };
     args
+}
+
+#[test]
+fn agent_new_cli_normalizes_qualified_ids_without_changing_host_scoping() {
+    for (identity, expected) in [
+        ("worker", "agent/test.worker"),
+        ("team/worker", "agent/team/worker"),
+        ("test.worker", "agent/test.worker"),
+    ] {
+        for name in [identity.to_owned(), format!("agent/{identity}")] {
+            let args = agent_new_args(&[&name, "--harness", "codex"]);
+            let source = agent_new_document(&args, "/work/worker", false);
+            let intent = fractal_daemon::graph::parse_intent(&source, "test").unwrap();
+            assert_eq!(intent.subjects.len(), 1, "{source}");
+            assert!(intent.subjects.contains_key(expected), "{source}");
+        }
+    }
+}
+
+#[test]
+fn agent_lifecycle_subject_normalization_accepts_bare_and_qualified_ids() {
+    for identity in ["worker", "test.worker", "team/worker"] {
+        let subject = format!("agent/{identity}");
+        assert_eq!(normalize_agent_subject(identity), subject);
+        assert_eq!(normalize_agent_subject(&subject), subject);
+    }
 }
 
 #[test]

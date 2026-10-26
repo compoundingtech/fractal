@@ -8774,8 +8774,11 @@ impl Store {
             .load(std::sync::atomic::Ordering::Relaxed);
         // Projection caches include committed local batches before their envelopes are sealed.
         // Equal sealed inventories cannot diagnose those pending writes as peer divergence.
+        // Only batches past the sealing cursor can be unsealed. `+origin` keeps SQLite on that
+        // rowid range: on the origin index it walked every local batch ever written to find none
+        // (0.9 s per status read on a 50 GB store).
         let unsealed_local: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM batches WHERE rowid>?1 AND origin=?2)",
+            "SELECT EXISTS(SELECT 1 FROM batches WHERE rowid>?1 AND +origin=?2)",
             params![self.seeded_batch_rowid.load(Ordering::Acquire), self.origin],
             |row| row.get(0),
         )?;

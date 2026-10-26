@@ -22,6 +22,31 @@ Send one JSON command per subscription:
 {"kind":"subscribe","id":"missions-tab","collection":"missions","limit":50}
 ```
 
+**Proposed trace context, pending [#1910](https://github.com/compoundingtech/smalltalk/pull/1910)
+and Nathan's decision:** subscribe frames may add
+`"trace": {"traceparent": "W3C value", "tracestate": "optional W3C value"}`.
+The lowercase `trace` wire key belongs to the repository-local client_v0 namespace;
+its members use W3C Trace Context, not a separate identifier format. Every
+collection-socket subscribe variant accepts the field, but it affects only `missions`,
+`attention`, `agents`, `work`, `glasses`, `arrangements`, `conversation`, and `terminal`,
+the collections that emit `st.subscription.first_frame`.
+It grants no authority and changes no subscription fields.
+
+The daemon accepts absent, null, and malformed `trace` values without rejecting the
+frame. It uses the W3C propagator to validate the parent; an invalid or non-string
+`traceparent`, or a non-object field, is ignored entirely. A valid context parents the
+bounded `st.subscription.first_frame` SERVER span, which also links to the upgrade.
+It records `st.parent.sampled` using the same policy as HTTP SERVER spans. Without a
+valid context the first-frame span remains an INTERNAL root linked to the upgrade.
+Later changes, rereads, and resyncs emit no spans. Existing older collection decoders
+ignore the unknown field; frames without it remain unchanged.
+
+Dedicated conversation and terminal streams have no subscribe frame, so their
+upgrade-linked behavior is unchanged. Unsubscribe, command frames, and strict HTTP
+bodies do not acquire this field. The generated TypeScript client exposes `trace`
+as an opaque `SubscribeTraceContext`. Typed SDK helpers and Swift client support
+are follow-up work after the #1910 decision.
+
 Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, and `arrangements`,
 plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,
 `person` to attention, and `status` plus exact `agent` to agents. For `arrangements`, `person: "person/NAME"`

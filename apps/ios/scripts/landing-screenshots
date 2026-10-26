@@ -61,12 +61,15 @@ exec > >(tee "$out/commands.log") 2>&1
 # Clear DEVELOPER_DIR during discovery too: xcode-select otherwise echoes it.
 apple_developer_dir="$(env -u DEVELOPER_DIR /usr/bin/xcode-select -p)"
 native() {
-  env -i \
+  local -a launch=()
+  if [[ "${native_replace_process:-0}" = 1 ]]; then launch=(exec); fi
+  "${launch[@]}" env -i \
     HOME="$HOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" TMPDIR="${TMPDIR:-/tmp}" \
     PATH="$apple_developer_dir/Toolchains/XcodeDefault.xctoolchain/usr/bin:$apple_developer_dir/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH" \
     DEVELOPER_DIR="$apple_developer_dir" NODE_BINARY="$(command -v node)" \
     LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 APP_VARIANT=dev EXPO_NO_DOTENV=1 \
     EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT='' \
+    EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1 \
     EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK="${EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK:-}" \
     EXPO_PUBLIC_FRACTAL_TEST_TAB=Now EXPO_PUBLIC_FRACTAL_TEST_LINKS='' \
     "$@"
@@ -76,10 +79,42 @@ xcodebuild() { native /usr/bin/xcodebuild "$@"; }
 sim=''
 gateway_pid=''
 metro_pid=''
+pairing_log_pid=''
+stop_pairing_log() {
+  if [[ -n "$pairing_log_pid" ]]; then
+    kill "$pairing_log_pid"
+    wait "$pairing_log_pid" || :
+    # A successful wait reaps the exec-replaced logger, not a wrapper shell.
+    if kill -0 "$pairing_log_pid" 2>/dev/null; then
+      printf 'Pairing logger did not stop\n' >&2
+      return 1
+    fi
+    pairing_log_pid=''
+    printf 'Pairing logger stopped and reaped\n'
+    # The simulator's log executable can outlive simctl. Its predicate includes
+    # this disposable simulator's UUID, so never match another capture's stream.
+    local remaining pid attempt
+    printf '$ /usr/bin/pgrep -fl "log stream.*%s"\n' "$sim"
+    if remaining=$(/usr/bin/pgrep -f "log stream.*$sim"); then
+      printf 'Stopping remaining simulator log process(es): %s\n' "$remaining"
+      for pid in $remaining; do kill "$pid"; done
+      for ((attempt=0; attempt<30; attempt++)); do
+        if ! /usr/bin/pgrep -f "log stream.*$sim" >/dev/null; then break; fi
+        sleep 0.1
+      done
+    fi
+    if /usr/bin/pgrep -fl "log stream.*$sim"; then
+      printf 'Simulator log stream still running\n' >&2
+      return 1
+    fi
+    printf 'PASS: no log stream remains for simulator %s\n' "$sim"
+  fi
+}
 cleanup() {
   local status=$?
   trap - EXIT INT TERM ERR
   set +e
+  stop_pairing_log
   for pid in "$metro_pid" "$gateway_pid"; do
     if [[ -n "$pid" ]]; then kill "$pid"; wait "$pid"; fi
   done
@@ -99,6 +134,7 @@ run corepack pnpm install --frozen-lockfile
 cd apps/ios
 export APP_VARIANT=dev
 export EXPO_NO_DOTENV=1
+export EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1
 export EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT=''
 export EXPO_PUBLIC_FRACTAL_FABRIC_PROOF_LINK=''
 export EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK=''
@@ -152,33 +188,57 @@ start_service "$out/metro.log" corepack pnpm exec expo start --localhost --port 
 metro_pid="$service_pid"
 wait_service "$metro_pid" 'http://localhost:8081/status' "$out/metro.log"
 run xcrun simctl install "$sim" "$out/DerivedData/Build/Products/Debug-iphonesimulator/fractal.app"
+# Stream before launch so pairing-stage native alert/presentation diagnostics survive
+# a failed Maestro flow. The existing *.log artifact retains this on every outcome.
+# Replace the background shell with xcrun, so $! owns the actual logger.
+(
+  native_replace_process=1
+  native /usr/bin/xcrun simctl spawn "$sim" log stream --style compact --level debug \
+    --predicate "(process == \"fractal\" OR subsystem BEGINSWITH \"com.apple.UIKit\") AND \"$sim\" == \"$sim\"" \
+    > "$out/pairing-simulator.log" 2>&1
+) &
+pairing_log_pid=$!
 run xcrun simctl launch "$sim" com.compoundingtech.fractal.starter -RCT_jsLocation localhost:8081
 
 cat > "$out/pair.yaml" <<'FLOW'
 appId: com.compoundingtech.fractal.starter
 ---
 - extendedWaitUntil:
-    visible: 'pair without a trusted fingerprint…'
+    visible:
+      text: 'pair without a trusted fingerprint…'
+      enabled: true
     timeout: 120000
-- tapOn: 'pair without a trusted fingerprint…'
+# Capture-only LogBox policy prevents notification overlays; fail if one appears.
+- assertNotVisible: '.*Open debugger to view warnings.*'
+# Only the pre-confirmation press is repeatable, never the pairing submission.
+# Stop when the alert appears or the enabled pre-confirmation control disappears.
+- repeat:
+    times: 3
+    while:
+      visible:
+        text: 'pair without a trusted fingerprint…'
+        enabled: true
+      notVisible: 'Pair without identity verification\?|Use unpinned pairing'
+    commands:
+      - tapOn:
+          text: 'pair without a trusted fingerprint…'
+          enabled: true
+      - waitForAnimationToEnd
+- extendedWaitUntil:
+    visible: 'Pair without identity verification\?'
+    timeout: 10000
+- assertVisible: 'Use unpinned pairing'
 - tapOn: 'Use unpinned pairing'
+- assertVisible: 'require fingerprint again'
 # Maestro matches text case-insensitively by default; do not tap the navigation title.
 - tapOn: '(?-i:^pair this device$)'
 - extendedWaitUntil:
     visible: '.*Approve the widget release.*'
     timeout: 30000
-# Dismiss the Debug warning notification through its visible close control;
-# keep the original warning in metro.log rather than suppressing its source.
-- runFlow:
-    when:
-      visible: '.*Open debugger to view warnings.*'
-    commands:
-      - tapOn:
-          text: '.*Open debugger to view warnings.*'
-          point: '95%,50%'
-      - assertNotVisible: '.*Open debugger to view warnings.*'
+- assertNotVisible: '.*Open debugger to view warnings.*'
 FLOW
 run maestro --device "$sim" test "$out/pair.yaml"
+stop_pairing_log
 for view in now conversation; do
   if [[ "$view" = now ]]; then
     link='com.compoundingtech.fractal.starter://tab/Now'

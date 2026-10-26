@@ -391,6 +391,19 @@ final class FractalClientTests: XCTestCase {
         guard case .error = timeline.items[9].body else { return XCTFail("error body lost") }
     }
 
+    func testOptionalMessageAuthorAndRecipientsSurviveCodec() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/timeline-message-participants.json"))
+        let page = try JSONDecoder().decode(Envelope<TimelinePage>.self, from:data).value
+        guard case .message(let body) = page.items[0].body else { return XCTFail("missing message") }
+        XCTAssertEqual(body.author,"daemon/runtime"); XCTAssertNil(body.from)
+        XCTAssertEqual(body.recipients,["agent/worker"]); XCTAssertEqual(body.to,"agent/worker")
+        let again = try JSONDecoder().decode(TimelineEntry.self,from:JSONEncoder().encode(page.items[0]))
+        guard case .message(let echoed) = again.body else { return XCTFail("missing echoed message") }
+        XCTAssertEqual(echoed.author,body.author); XCTAssertEqual(echoed.recipients,body.recipients)
+    }
+
     func testNativeDeliveryLinksAreOptionalAndSurviveEncoding() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }

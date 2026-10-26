@@ -70,6 +70,8 @@ mod alert_action_tests;
 mod stream_start_tests;
 #[cfg(test)]
 mod conversation_delivery_tests;
+#[cfg(test)]
+mod conversation_participants_tests;
 
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
@@ -208,6 +210,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         )
 }
 
+/// Socket ownership ends this span only after the first data frame reaches the client.
 struct FirstFrame {
     span: tracing::Span,
     read_pending: bool,
@@ -219,6 +222,7 @@ fn subscription_first_frame(
     collection: &str,
     id: &str,
     upgrade: Option<&opentelemetry::trace::SpanContext>,
+    frame_trace: Option<&crate::otel::FrameTraceContext>,
 ) -> Option<FirstFrame> {
     let profile = (collection == "conversation")
         .then(|| crate::profile::Op::start("stream conversation/first-frame", None))
@@ -237,12 +241,14 @@ fn subscription_first_frame(
         "terminal" => "terminal",
         _ => return None,
     };
+    let remote = crate::otel::extract_frame_context(frame_trace);
     let span = tracing::info_span!(
         parent: None,
         "st.subscription.first_frame",
-        otel.kind = "internal",
+        otel.kind = if remote.is_some() { "server" } else { "internal" },
         st.collection = collection,
         st.subscription.id = id,
+        st.parent.sampled = tracing::field::Empty,
         st.projection.hit = false,
         st.projection.cold = false,
         st.projection.incremental = false,
@@ -251,7 +257,7 @@ fn subscription_first_frame(
         st.page.bytes = tracing::field::Empty,
         span.label = collection,
     );
-    span.set_parent(opentelemetry::Context::new());
+    crate::otel::set_remote_parent(&span, remote.unwrap_or_default());
     if let Some(upgrade) = upgrade.filter(|context| context.is_valid()) {
         span.add_link(upgrade.clone());
     }
@@ -2062,7 +2068,8 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         // replacements, so queued collection/conversation results cannot reuse it.
                         generation += 1;
                         first_frames.remove(&request.id);
-                        if let Some(first_frame) = subscription_first_frame(&request.collection, &request.id, upgrade.as_ref()) {
+                        // Initial telemetry must not be retained or cloned on later rereads.
+                        if let Some(first_frame) = subscription_first_frame(&request.collection, &request.id, upgrade.as_ref(), request.frame_trace.take().as_ref()) {
                             first_frames.insert(request.id.clone(), first_frame);
                         }
                         if request.collection == "conversation" {
@@ -4895,7 +4902,7 @@ pub async fn conversation_stream(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
-    let first_frame = subscription_first_frame("conversation", "conversation", upgrade.as_ref());
+    let first_frame = subscription_first_frame("conversation", "conversation", upgrade.as_ref(), None);
     require_scope(&session, "read.projections")?;
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
@@ -5716,7 +5723,7 @@ pub async fn terminal_stream(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
-    let first_frame = subscription_first_frame("terminal", "terminal", upgrade.as_ref());
+    let first_frame = subscription_first_frame("terminal", "terminal", upgrade.as_ref(), None);
     require_scope(&session, "terminal.read")?;
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
@@ -7210,6 +7217,15 @@ async fn publish_creation(
             )));
         }
     }
+    if kind == "agent" && session.authority_actor.starts_with("agent/")
+        && state.store.latest_actual_value(&session.authority_actor).map_err(ApiError::internal)?.is_some()
+    {
+        let desired = intent.subjects.values().find(|member| member.subject == subject).unwrap();
+        let harness = desired.member.as_ref().and_then(|member| member.driver.as_deref())
+            .ok_or_else(|| validation("helper creation requires a typed harness"))?;
+        state.store.bind_helper_launcher_from_peer(desired, &key, &session.authority_actor, harness, session.peer_process.as_ref())
+            .map_err(|error| validation(error.to_string()))?;
+    }
     let mut scoped = request.clone();
     scoped.idempotency_key = format!("client-create:{key}");
     apply_runtime_control_intent(state, snapshot, &scoped, &session.authority_actor, kdl).await?;
@@ -8601,16 +8617,35 @@ async fn action_inner(
         Some(guard) => guard,
         None => gate.lock_owned().await,
     };
+    if request.action_type == "agent.create" && session.authority_actor.starts_with("agent/")
+        && state.store.latest_actual_value(&session.authority_actor).map_err(ApiError::internal)?.is_some()
+    {
+        state.store.verify_helper_launcher_peer(&session.authority_actor, session.peer_process.as_ref())
+            .map_err(|error| validation(error.to_string()))?;
+    }
     let request_digest = action_request_digest(&request)?;
     let receipt_digest = hex::encode(Sha256::digest(
         format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
     ));
     let receipt_subject = format!("custom/client/action-{}", &receipt_digest[..32]);
+    // The old open custom namespace admitted client receipts with absent/null actors.
+    // Never dispatch an already-used legacy key or infer authorship from those fields.
+    if !state.store.claims_for(&receipt_subject, Some("custom.client.action-result"))
+        .map_err(ApiError::internal)?.is_empty()
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "legacy-action-receipt-untrusted".into(),
+            message: "this idempotency key has an unverifiable legacy receipt; inspect the original outcome before choosing a new key".into(),
+            details: Box::default(),
+        });
+    }
     if let Some(receipt) = state
         .store
-        .claims_for(&receipt_subject, Some("custom.client.action-result"))
+        .observations_for(&receipt_subject, "client.action-result")
         .map_err(ApiError::internal)?
-        .last()
+        .into_iter()
+        .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
     {
         let old_digest = receipt
             .body
@@ -8840,6 +8875,12 @@ async fn action_inner(
     if let Some(claim) = arrangement_claim {
         result["arrangement_revision"] = json!(claim.id);
     }
+    if request.action_type == "agent.create"
+        && let Some(subject) = affected.first()
+        && let Some(binding) = state.store.helper_launcher_binding(subject).map_err(ApiError::internal)?
+    {
+        result["launcher_binding"] = binding.attribution();
+    }
     let mut persisted_result = result.clone();
     persisted_result
         .as_object_mut()
@@ -8847,8 +8888,8 @@ async fn action_inner(
         .remove("terminal_attachment");
     let receipt_write = state.store.append_claim(&ClaimInput {
         subject: receipt_subject.clone(),
-        kind: "custom.client.action-result".into(),
-        actor: Some(session_claim_actor(&session)),
+        kind: "client.action-result".into(),
+        actor: None,
         fields: BTreeMap::from([
             (
                 "authority_actor".into(),
@@ -8870,10 +8911,10 @@ async fn action_inner(
         }
         let receipt = state
             .store
-            .claims_for(&receipt_subject, Some("custom.client.action-result"))
+            .observations_for(&receipt_subject, "client.action-result")
             .map_err(ApiError::internal)?
             .into_iter()
-            .last()
+            .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
             .ok_or_else(|| ApiError::internal("action receipt CAS lost without a winner"))?;
         if receipt
             .body
@@ -12588,7 +12629,7 @@ mission "differential" state="ready" {
             .claims_for(&sent.subject, Some("message.sent"))
             .unwrap()
             .remove(0);
-        let body = session_message_body(&state, &claim);
+        let body = session_message_body(&state, &claim, false);
         assert_eq!(
             body["attachments"],
             json!([{
@@ -12621,10 +12662,10 @@ mission "differential" state="ready" {
             .claims_for(&plain.subject, Some("message.sent"))
             .unwrap()
             .remove(0);
-        assert!(session_message_body(&state, &claim).get("attachments").is_none());
+        assert!(session_message_body(&state, &claim, false).get("attachments").is_none());
         // What a person wrote carries its provenance (here no signature: the fixture seals
         // nothing); what an agent wrote carries none.
-        let provenance = session_message_body(&state, &claim)["provenance"].clone();
+        let provenance = session_message_body(&state, &claim, false)["provenance"].clone();
         assert_eq!(provenance["verdict"], "unsigned", "{provenance}");
         assert!(provenance.get("signer").is_none());
         let agent_claim = state
@@ -12634,7 +12675,7 @@ mission "differential" state="ready" {
             .remove(0);
         let mut agent_claim = agent_claim;
         agent_claim.body["fields"]["from"] = json!("agent/terminal-test.seat");
-        assert!(session_message_body(&state, &agent_claim).get("provenance").is_none());
+        assert!(session_message_body(&state, &agent_claim, false).get("provenance").is_none());
     }
 
     #[test]
@@ -13105,6 +13146,167 @@ subscription "watch/source" {
         assert_eq!(gate("watch"), "watch");
         assert_eq!(gate("flag"), "predicate");
         assert_eq!(gate("command"), "command");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn helper_creation_uses_authenticated_launcher_and_persists_binding_in_receipt() {
+        fn pidfd(pid: u32) -> std::os::fd::OwnedFd {
+            use std::os::fd::FromRawFd as _;
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+            // A successful pidfd_open transfers a fresh descriptor to this fixture.
+            unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) }
+        }
+
+        for owner in [Some("person/ada"), None] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "helper-binding");
+            let source = "version 2\nagent \"launcher\" { workspace \"/tmp\"; harness \"codex\" {}; }";
+            let intent = crate::graph::parse_intent(source, "helper-binding").unwrap();
+            let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
+            state.store.apply_as(&intent, &expected, "declare-launcher", owner).unwrap();
+            let launcher = "agent/helper-binding.launcher";
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running", "incarnation_id":"launcher-1"})),
+                ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":"launcher-1",
+                    "harness":"codex", "credential_home":"/logins/launcher-codex",
+                    "runtime_pid":std::process::id(),
+                    "runtime_pid_start_token":fractal_runtime::process_start_token(std::process::id()).unwrap().to_string()})),
+            ] {
+                state.store.append_claim(&ClaimInput {
+                    subject: launcher.into(), kind: kind.into(), actor: None,
+                    fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                    expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            let mut session = ClientSession::local(Some(launcher)).unwrap();
+            session.peer_process = Some(fractal_runtime::PeerProcessIdentity::capture(std::process::id(), pidfd(std::process::id())).unwrap());
+            let snapshot = new_client_snapshot(&state);
+            let request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id: "action/helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "create-helper-launcher-binding".into(),
+                fence: Fence { snapshot_id: snapshot.id.clone(), ..Default::default() },
+                parameters: json!({"name":"helper", "harness":"codex", "workspace":"/tmp"}),
+            };
+            let mut unproven = session.clone();
+            unproven.peer_process = None;
+            let refused = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(unproven), Json(request.clone())).await.unwrap_err();
+            assert!(refused.message.contains("kernel-authenticated"));
+            for field in ["launcher", "person", "credential_home", "launcher_binding"] {
+                let mut forged = request.clone();
+                forged.parameters[field] = json!("person/intruder");
+                let before = state.store.index().unwrap();
+                assert!(dispatch_action(&state, &snapshot, &session, &forged).await.is_err());
+                assert_eq!(state.store.index().unwrap(), before);
+            }
+            let result = action(State(state.clone()), Extension(snapshot), Extension(session.clone()), Json(request.clone()))
+                .await.unwrap().0;
+            let subject = result["affected_ids"][0].as_str().unwrap();
+            let binding = state.store.helper_launcher_binding(subject).unwrap().unwrap();
+            assert_eq!(binding.launcher, launcher);
+            assert_eq!(binding.person.as_deref(), owner);
+            assert_eq!(binding.credential_home.as_deref(), Some("/logins/launcher-codex"));
+            assert_eq!(binding.incarnation, "launcher-1");
+            assert_eq!(state.store.agent_person(subject).unwrap().as_deref(), owner);
+            assert_eq!(result["launcher_binding"], binding.attribution());
+            assert_eq!(result["launcher_binding"]["credential_home_label"], "launcher-codex");
+            assert!(!result.to_string().contains("/logins/"));
+            let receipts = state.store.local_observations_after(0, 100).unwrap();
+            let persisted = receipts.iter().find(|receipt| receipt.kind == "client.action-result").unwrap();
+            assert_eq!(persisted.body["fields"]["result"]["launcher_binding"], binding.attribution());
+            assert!(!persisted.body.to_string().contains("/logins/"));
+            let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)), Extension(session), Json(request))
+                .await.unwrap().0;
+            assert_eq!(replay["launcher_binding"], result["launcher_binding"]);
+            assert!(!replay.to_string().contains("/logins/"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn helper_launcher_socket_child() {
+        use std::io::{Read as _, Write as _};
+        let Ok(socket) = std::env::var("ST3_HELPER_TEST_SOCKET") else { return };
+        let payload = std::env::var("ST3_HELPER_TEST_REQUEST").unwrap();
+        let actor = std::env::var("ST_AGENT").unwrap();
+        let expected = std::env::var("ST3_HELPER_TEST_EXPECTED").unwrap();
+        let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(15))).unwrap();
+        write!(stream, "POST /v1/client/actions HTTP/1.1\r\nHost: localhost\r\nx-st3-person: {actor}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        if expected == "refused" {
+            assert!(response.starts_with("HTTP/1.1 422"), "{response}");
+            assert!(response.contains("not a descendant"), "{response}");
+        } else {
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert!(response.contains("\"launcher\":\"agent/helper-socket.launcher\""), "{response}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn helper_launcher_socket_provenance_refuses_forged_environment_and_accepts_descendant() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "helper-socket");
+        let source = "version 2\nagent \"launcher\" { workspace \"/tmp\"; harness \"codex\" {} }\nagent \"victim\" { workspace \"/tmp\"; harness \"codex\" {} }";
+        let intent = crate::graph::parse_intent(source, "helper-socket").unwrap();
+        let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
+        state.store.apply_as(&intent, &expected, "declare-socket-launchers", Some("person/ada")).unwrap();
+        let mut victim = tokio::process::Command::new("sleep").arg("60").kill_on_drop(true).spawn().unwrap();
+        for (name, pid) in [("launcher", std::process::id()), ("victim", victim.id().unwrap())] {
+            let subject = format!("agent/helper-socket.{name}");
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running", "incarnation_id":name})),
+                ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":name,
+                    "harness":"codex", "credential_home":format!("/logins/{name}"),
+                    "runtime_pid":pid, "runtime_pid_start_token":fractal_runtime::process_start_token(pid).unwrap().to_string()})),
+            ] {
+                state.store.append_claim(&ClaimInput {
+                    subject: subject.clone(), kind: kind.into(), actor: None,
+                    fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+                    expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+        }
+        let socket = root.path().join("api.sock");
+        let serving_socket = socket.clone();
+        let state_socket = root.path().join("state.sock");
+        let app = crate::api::router(state.clone());
+        let store = state.store.clone();
+        let (ready, listening) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            crate::api::serve_unix_bound_with_ready(&serving_socket, &state_socket, app, store,
+                || { let _ = ready.send(()); }).await.unwrap();
+        });
+        listening.await.unwrap();
+        for (name, outcome) in [("victim", "refused"), ("launcher", "accepted")] {
+            let actor = format!("agent/helper-socket.{name}");
+            let request = json!({
+                "api_version":CLIENT_API_VERSION, "id":format!("action/socket-{name}"),
+                "type":"agent.create", "idempotency_key":format!("helper-socket-provenance-{name}"),
+                "fence":{"snapshot_id":new_client_snapshot(&state).id},
+                "parameters":{"name":format!("{name}-helper"), "harness":"codex", "workspace":root.path()}
+            });
+            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "api::client_v0::tests::helper_launcher_socket_child", "--nocapture"])
+                .env("ST3_HELPER_TEST_SOCKET", &socket)
+                .env("ST3_HELPER_TEST_REQUEST", request.to_string())
+                .env("ST3_HELPER_TEST_EXPECTED", outcome)
+                .env("ST_AGENT", actor)
+                .env_remove("FRACTAL_AGENT")
+                .output().await.unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "child test did not execute");
+        }
+        assert!(state.store.desired_subjects_named(&["agent/helper-socket.victim-helper".into()]).unwrap().is_empty());
+        assert_eq!(state.store.helper_launcher_binding("agent/helper-socket.launcher-helper").unwrap().unwrap().launcher,
+            "agent/helper-socket.launcher");
+        victim.kill().await.unwrap();
+        victim.wait().await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -14679,17 +14881,12 @@ subscription "watch/source" {
         .unwrap()
         .0;
         assert_eq!(replay["affected_ids"], first["affected_ids"]);
-        for kind in ["message.sent", "custom.client.action-result"] {
-            assert_eq!(
-                state
-                    .store
-                    .claims_for_kind_at(kind, None, true, 100)
-                    .unwrap()
-                    .claims
-                    .len(),
-                1
-            );
-        }
+        assert_eq!(
+            state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
+            1
+        );
+        assert_eq!(state.store.local_observations_after(0, 100).unwrap().iter()
+            .filter(|receipt| receipt.kind == "client.action-result").count(), 1);
         let mut changed = request;
         changed.parameters["content"] = json!("A different send must conflict");
         assert_eq!(
@@ -14780,17 +14977,12 @@ subscription "watch/source" {
         .unwrap()
         .0;
         assert!(!receipt["affected_ids"].as_array().unwrap().is_empty());
-        for kind in ["message.sent", "custom.client.action-result"] {
-            assert_eq!(
-                state
-                    .store
-                    .claims_for_kind_at(kind, None, true, 100)
-                    .unwrap()
-                    .claims
-                    .len(),
-                1
-            );
-        }
+        assert_eq!(
+            state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
+            1
+        );
+        assert_eq!(state.store.local_observations_after(0, 100).unwrap().iter()
+            .filter(|receipt| receipt.kind == "client.action-result").count(), 1);
     }
 
     #[test]
@@ -14805,6 +14997,125 @@ subscription "watch/source" {
         assert_eq!(envelope["retryable"], false);
         assert_eq!(envelope["details"]["applied"], "unknown");
         assert_eq!(envelope["details"]["idempotency_key"], "example-exact-key");
+    }
+
+    #[tokio::test]
+    async fn forged_action_receipts_cannot_replay_launcher_attribution() {
+        for (peer, null_actor) in [(false, false), (false, true), (true, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let session = ClientSession::local(Some("person/alex")).unwrap();
+            // A valid creation must be refused before dispatch when a legacy receipt exists.
+            let request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id: "action/forged-helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "forged-helper-key".into(),
+                fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+                parameters: json!({"name":"forged-helper", "harness":"codex", "workspace":root.path()}),
+            };
+            let digest = hex::encode(Sha256::digest(
+                format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
+            let forged = ClaimInput {
+                subject: format!("custom/client/action-{}", &digest[..32]),
+                kind: "custom.client.action-result".into(),
+                actor: if null_actor { None } else { Some(session_claim_actor(&session)) },
+                fields: BTreeMap::from([
+                    ("request_digest".into(), json!(action_request_digest(&request).unwrap())),
+                    ("result".into(), json!({"status":"completed", "affected_ids":["agent/forged"],
+                        "launcher_binding":{"launcher":"agent/attacker", "person":"person/intruder"}})),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            };
+            assert_eq!(state.store.append_client_claim(&forged).unwrap_err().code, "claim-write-forbidden");
+            let mut reserved = forged.clone();
+            reserved.kind = "client.action-result".into();
+            assert_eq!(state.store.append_client_claim(&reserved).unwrap_err().code, "claim-write-forbidden");
+            if peer {
+                let source = Store::open_memory("malicious-peer").unwrap();
+                source.append_claim(&forged).unwrap();
+                const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+                source.bind_fleet(FLEET).unwrap();
+                state.store.bind_fleet(FLEET).unwrap();
+                let exchange = source.export_replication_exchange(FLEET,
+                    &crate::model::ReplicationInventory::default()).unwrap();
+                state.store.receive_replication_exchange("malicious-peer", FLEET, &exchange).unwrap();
+            } else {
+                // Simulate a pre-hardening client-authored local claim already on disk.
+                state.store.append_claim(&forged).unwrap();
+            }
+            let before = state.store.status(None).unwrap().store_index;
+            let outcome = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session), Json(request)).await;
+            if peer {
+                // Unadmitted peer claims cannot become local replay authority.
+                let result = outcome.unwrap().0;
+                assert!(result.get("launcher_binding").is_none());
+                assert_ne!(result["affected_ids"], json!(["agent/forged"]));
+            } else {
+                assert_eq!(outcome.unwrap_err().code, "legacy-action-receipt-untrusted");
+                assert_eq!(state.store.status(None).unwrap().store_index, before);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn admitted_peer_action_receipt_cannot_occupy_local_cas_subject() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let source = Store::open_memory("admitted-peer").unwrap();
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        source.bind_fleet(FLEET).unwrap();
+        state.store.bind_fleet(FLEET).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let request = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(), id: "action/peer-cas".into(),
+            action_type: "agent.create".into(), idempotency_key: "peer-cas-idempotency-key".into(),
+            fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+            parameters: json!({"name":"peer-cas-helper", "harness":"codex", "workspace":root.path()}),
+        };
+        let digest = hex::encode(Sha256::digest(
+            format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
+        let subject = format!("custom/client/action-{}", &digest[..32]);
+        source.append_claim(&ClaimInput {
+            subject: "host/admitted-peer".into(), kind: "transport.observed".into(), actor: None,
+            fields: BTreeMap::from([("status".into(), json!("up"))]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        // Model the older peer's replicated typed receipt using the transaction writer:
+        // the current append entrypoint deliberately routes this kind to the local log.
+        let forged = {
+            let mut connection = source.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let receipt = crate::store::append_claim_tx(
+                &transaction, source.origin(), &subject, "client.action-result", None,
+                &json!({"fields": {
+                    "request_digest": action_request_digest(&request).unwrap(),
+                    "result": {"affected_ids": ["agent/forged"]},
+                }}), &[], None,
+            ).unwrap();
+            transaction.commit().unwrap();
+            receipt
+        };
+        let exchange = source.export_replication_exchange(FLEET,
+            &state.store.replication_inventory().unwrap()).unwrap();
+        state.store.receive_replication_exchange("admitted-peer", FLEET, &exchange).unwrap();
+        let admission = state.store.validate_replication_backlog().unwrap();
+        assert!(admission.valid > 0, "the peer must be admitted, not merely received");
+        assert!(admission.invalid > 0, "the peer action receipt must be rejected");
+        state.store.project_replication_backlog().unwrap();
+        assert!(state.store.latest_claim("host/admitted-peer", Some("transport.observed")).unwrap().is_some());
+        assert!(state.store.claim_by_id(&forged.id).unwrap().is_none());
+        assert!(state.store.claims_for(&subject, Some("client.action-result")).unwrap().is_empty());
+        assert!(state.store.observations_for(&subject, "client.action-result").unwrap().is_empty());
+        let first = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session.clone()), Json(request.clone())).await.unwrap().0;
+        assert_ne!(first["affected_ids"], json!(["agent/forged"]));
+        let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session), Json(request)).await.unwrap().0;
+        assert_eq!(first["affected_ids"], replay["affected_ids"]);
+        let receipts = state.store.observations_for(&subject, "client.action-result").unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].origin, state.store.origin());
+        assert!(state.store.claims_for(&subject, Some("client.action-result")).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -14831,7 +15142,7 @@ subscription "watch/source" {
         state.store.append_claim(&ClaimInput {
             subject: format!("custom/client/action-{}", &key_digest[..32]),
             kind: "custom.client.action-result".into(),
-            actor: Some(session_claim_actor(&session)),
+            actor: None,
             fields: BTreeMap::from([
                 ("request_digest".into(), json!(legacy_digest)),
                 ("result".into(), json!({"status":"completed"})),
@@ -14848,7 +15159,7 @@ subscription "watch/source" {
             Json(request),
         ).await.unwrap_err();
         assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "idempotency-conflict");
+        assert_eq!(error.code, "legacy-action-receipt-untrusted");
         assert_eq!(state.store.status(None).unwrap().store_index, before);
         assert!(state.store.claims_for_kind_at("message.sent", None, true, 100)
             .unwrap().claims.is_empty());
@@ -21639,14 +21950,15 @@ mission "example/zero-run" state="ready" {
                 .count(),
             1
         );
+        let local = state.store.local_observations_tail(100).unwrap();
         assert_eq!(
-            page.claims
+            local
                 .iter()
-                .filter(|claim| claim.kind == "custom.client.action-result")
+                .filter(|claim| claim.kind == "client.action-result")
                 .count(),
             1
         );
-        let stored = serde_json::to_string(&page).unwrap();
+        let stored = serde_json::to_string(&(page, local)).unwrap();
         assert!(!stored.contains(capability));
         assert!(!stored.contains("st3.cap."));
         assert!(!stored.contains("stream_capability"));
@@ -22211,9 +22523,10 @@ mission "example/zero-run" state="ready" {
             assistant_write: None,
             transport: "paired",
             local_peer: false,
+            peer_process: None,
             custom_forms: false,
             conversation_blocks: false,
-            conversation_delivery_links: false,
+            conversation_delivery_links: false, conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),

@@ -301,7 +301,7 @@ export const AnswerAlert = ({
     setStatus(`Sending “${choice.label}”…`)
     void onAct(alert, choice.action(words)).then((result) => {
       setSending(false)
-      setStatus(result._tag === 'Sent' ? 'Answered. The alert clears once st records it.' : result.detail)
+      setStatus(result._tag === 'Sent' ? 'Answered. The alert clears once Fractal records it.' : result.detail)
     })
   }
   const step = alert.blocked?.step ?? alert.step_run_id?.split('/').pop()
@@ -318,11 +318,11 @@ export const AnswerAlert = ({
           {alert.attention_kind === 'harness-login'
             ? 'Sign in from the seat\'s terminal. One sign-in answers every seat that shares it.'
             : alert.attention_kind === 'revision-approval'
-              ? 'Approve or cancel a revision with st work revision approve or cancel, as in the terminal app.'
-              : 'Answer this one in st for now.'}
+              ? 'Approve or cancel a revision with fractal work revision approve or cancel, as in the terminal app.'
+              : 'Answer this one in Fractal for now.'}
         </div>
       ) : onAct === undefined ? (
-        <div {...stylex.props(styles.note)}>This device cannot answer alerts. Answer it in st.</div>
+        <div {...stylex.props(styles.note)}>This device cannot answer alerts. Answer it in Fractal.</div>
       ) : (
         <>
           {takesWords ? (
