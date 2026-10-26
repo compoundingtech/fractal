@@ -1952,6 +1952,21 @@ completed historical moves and removed standbys rather than guessing when a move
 Staged or conflicting owned-set changes remain fenced by the existing ownership guard,
 including at the due callback. No elapsed timeout grants takeover authority.
 
+If a locally due tick remains replication-blocked for fifteen minutes of continuous
+observation, the existing operational-failure attention surface warns the operator.
+The warning names the schedule, host, first blocked occurrence and due instant, and
+lists peer-only/local-only counts, staleness and measurement times (or explicitly
+unknown comparisons), plus projection/catch-up/first-sync state. It is one pending
+warning per schedule and observing host, not a warning per retry or per tick.
+Short intervals and `skip` do not restart the warning clock as later ticks pass.
+Already requested work blocked at its admission boundary is included.
+
+The fifteen-minute clock is monotonic and local: a daemon restart begins a new
+observation window, not a new stored-state schema. A revision change or replicated
+completion retires the old observation. Admission recovery, stopping, or moving the
+schedule away from the observing member recovers its warning. A future tick alone
+does not warn. The warning never changes admission, catch-up, or standby eligibility.
+
 The mission steps are normal claimable work. A schedule does not start another occurrence while its prior mission run remains active.
 
 Only the schedule's owning host arms occurrences, requests work, and creates its workspaces and
