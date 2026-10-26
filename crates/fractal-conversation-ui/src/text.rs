@@ -337,13 +337,18 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
                 theme.dim(),
             )));
             index += 1;
+            // Code keeps its indentation: wrapping drops spaces that start a line, so each line's
+            // own indent (past the fence's) goes into its prefix.
+            let fence = line.len() - trimmed.len();
             while index < source.len() && !source[index].trim_start().starts_with("```") {
                 let code = source[index];
+                let spaces = code.len() - code.trim_start_matches(' ').len();
+                let indent = run(format!("  {}", " ".repeat(spaces.saturating_sub(fence))), base);
                 lines.extend(wrap(
-                    &[run(code, Style::default().fg(theme.subtext1))],
+                    &[run(&code[spaces..], Style::default().fg(theme.subtext1))],
                     width,
-                    &[run("  ", base)],
-                    &[run("  ", base)],
+                    std::slice::from_ref(&indent),
+                    std::slice::from_ref(&indent),
                     None,
                 ));
                 index += 1;
@@ -636,6 +641,17 @@ mod tests {
             "ab    cd⚠"
         );
         assert_eq!(sanitize("x\u{1b}]8;;http://a\u{7}y"), "xy");
+    }
+
+    #[test]
+    fn code_keeps_its_indentation_past_the_fence() {
+        let theme = Theme::default();
+        let source = "```kdl\nstep \"plant\" {\n  document \"doc/a\"\n}\n```\n- Run it:\n    ```sh\n    garden plant\n      --bed north\n    ```";
+        let text = markdown(source, 40, Style::default(), &theme).iter().map(plain).collect::<Vec<_>>();
+        assert_eq!(
+            text,
+            vec!["```kdl", "  step \"plant\" {", "    document \"doc/a\"", "  }", "```", "• Run it:", "```sh", "  garden plant", "    --bed north", "```"]
+        );
     }
 
     #[test]

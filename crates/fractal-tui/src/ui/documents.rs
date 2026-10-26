@@ -9,7 +9,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use fractal_client::{ClientError, DocumentContent, DocumentReferences, DocumentsPage};
 use fractal_ui_model::documents::{DocumentList, DocumentTrail, DocumentView, Unavailable, parse_reference};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// A document page or the list asks again this long after it could not be read: a document not
@@ -85,6 +87,9 @@ pub(crate) struct Documents {
     trails: HashMap<String, DocumentTrail>,
     /// The link (on a page) or row (in the list) n and p have chosen, by pane key.
     chosen: HashMap<String, usize>,
+    /// Each page's Markdown as drawn, by reference and width: a frame copies it rather than
+    /// rendering the whole document again, so typing elsewhere stays as quick with a page shown.
+    rendered: RefCell<HashMap<(String, usize), Rc<Vec<Line<'static>>>>>,
 }
 
 fn list_key(prefix: Option<&str>) -> String {
@@ -168,6 +173,7 @@ impl Documents {
                 DocumentView::unavailable(reference, why)
             }
         };
+        self.rendered.borrow_mut().retain(|(drawn, _), _| drawn != reference);
         self.views.insert(reference.to_owned(), view);
     }
 
@@ -329,7 +335,13 @@ impl Documents {
                 if document.text.trim().is_empty() {
                     doc.line(Line::from(Span::styled("This document is empty.", theme::dim())));
                 } else {
-                    doc.lines(text::markdown(&document.text, width, theme::text()));
+                    let lines = self
+                        .rendered
+                        .borrow_mut()
+                        .entry((reference.to_owned(), width))
+                        .or_insert_with(|| Rc::new(text::markdown(&document.text, width, theme::text())))
+                        .clone();
+                    doc.lines(lines.iter().cloned());
                 }
                 if !document.links.is_empty() {
                     doc.blank();

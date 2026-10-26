@@ -1804,6 +1804,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "message-send-unconfirmed"
         | "response-budget-exceeded"
         | "content-not-text"
+        | "document-not-synced"
+        | "invalid-document-reference"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
         "launch-review-not-authorized"

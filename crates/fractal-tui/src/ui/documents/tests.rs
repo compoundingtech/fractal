@@ -164,6 +164,18 @@ fn following_links_goes_back_and_a_cycle_never_grows_the_trail() {
 }
 
 #[test]
+fn a_page_read_again_draws_its_new_text() {
+    let mut documents = Documents::default();
+    let reference = "doc/garden/plan";
+    documents.got(reference, Ok(content(&format!("{reference}@{HASH_A}"), "First draft.", true)));
+    assert!(plain(&documents.page(reference, None, 80, NOW)).contains(&"First draft.".to_owned()));
+    assert!(plain(&documents.page(reference, None, 80, NOW)).contains(&"First draft.".to_owned()), "drawn again from what was rendered");
+    documents.got(reference, Ok(content(&format!("{reference}@{HASH_B}"), "Second draft.", true)));
+    let lines = plain(&documents.page(reference, None, 80, NOW));
+    assert!(lines.contains(&"Second draft.".to_owned()) && !lines.contains(&"First draft.".to_owned()), "{lines:?}");
+}
+
+#[test]
 fn n_and_p_choose_a_link_that_enter_opens() {
     let mut documents = Documents::default();
     let reference = format!("doc/garden/plan@{HASH_A}");
