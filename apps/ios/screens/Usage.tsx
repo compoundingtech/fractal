@@ -2,8 +2,8 @@ import { useFocusEffect, useNavigation, useRoute, type RouteProp } from '@react-
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
-import type { UsagePeriod } from '../../../clients/typescript/st3-client';
-import { plainError } from '../../../clients/typescript/st3-client';
+import type { UsagePeriod } from '../../../clients/typescript/fractal-client';
+import { plainError } from '../../../clients/typescript/fractal-client';
 import { agentName } from '../agentsView';
 import { Banners, StatusLine, useMissionsOnFocus } from '../chrome';
 import type { StackParams } from '../navigation';
@@ -35,7 +35,7 @@ export function useUsage(hours: typeof PERIODS[number]) {
     } catch (error) {
       const text = plainError(error);
       // A daemon from before the read answers its path with a bare 404.
-      setIssue(/404|not-found|it is gone/i.test(text) ? 'This st does not serve usage yet: its daemon needs an update.' : `Could not read usage: ${text}`);
+      setIssue(/404|not-found|it is gone/i.test(text) ? 'This Fractal version does not serve usage yet; it needs an update.' : `Could not read usage: ${text}`);
     } finally {
       setReading(false);
     }

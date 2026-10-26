@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { AppState, ScrollView, Share, View } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { API_VERSION, St3Client } from '../../../clients/typescript/st3-client';
+import { API_VERSION, FractalClient } from '../../../clients/typescript/fractal-client';
 import { verifyUnpairedFabricGateway } from '../fabricGatewayProof';
 import { dialFabric, fabricIdentity, fabricStats, stopFabric } from '../modules/st-fabric';
 import type { FabricProfile, FabricProofInput } from '../fabricProof';
@@ -40,7 +40,7 @@ export function FabricProofScreen({ input, onClose, renderClient }: {
     const held = new FabricSession({
       dial: () => dialFabric(input.node, input.service, input.address, input.mode),
       pair: async url => {
-        const unpaired = new St3Client({ baseUrl: url });
+        const unpaired = new FractalClient({ baseUrl: url });
         await verifyUnpairedFabricGateway(url);
         const publicKey = Array.from(Crypto.getRandomBytes(32), byte => byte.toString(16).padStart(2, '0')).join('');
         const pairing = await unpaired.completePairing(input.id!, { api_version: API_VERSION, code: input.code!, device_public_key: publicKey });
@@ -48,7 +48,7 @@ export function FabricProofScreen({ input, onClose, renderClient }: {
       },
       authenticate: async (url, credential) => {
         try {
-          const caps = await new St3Client({ baseUrl: url, credential: () => credential }).capabilities();
+          const caps = await new FractalClient({ baseUrl: url, credential: () => credential }).capabilities();
           return caps.value.session_actor;
         } catch (error) {
           if (nativeRefusedAfter(await fabricStats(), admissionFloor)) await held.refuse();

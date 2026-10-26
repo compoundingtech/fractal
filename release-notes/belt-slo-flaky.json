@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "st slo's flakes objective also counts tests nextest passed only on a retry in Workspace CI's test lanes",
+  "replay": {"status": "none", "detail": "No replay or rebuild."},
+  "schema": {"status": "none", "detail": "No tables, columns, indexes or triggers, no new observed facts and no wire format: each run's flaky test count is held in the daemon's memory with the runs, and the rows keep the existing SloRow fields."},
+  "rules": {"status": "none", "detail": "Claim kinds, rules, permissions and digests are unchanged. The reads use the repository observer's existing GitHub token and Actions read access; the workflow's upload uses the actions/upload-artifact step its lanes already use, with no new permission."},
+  "compatibility": {"status": "changed", "detail": "Workspace CI's four test lanes (linux-tests and linux-tests-shard-2, -3, -4) count nextest's flaky tests from the Summary line, set the nextest step's flaky output and, when it is not 0, upload a one-day artifact named nextest-flaky-<lane>-<N>. A github.repository observer with main_performance_failures lists the artifacts of each Workspace CI run that finished in the last hour once, at most 20 runs a poll, about one request per run (a few hundred a day). On that member the flakes row of st slo, GET /v1/slo and GET /v1/client/slo counts ejected merge groups plus those flaky tests in the last hour, and is no-data only when no pull request or merge group run finished in the hour. Pull request runs are read only when they succeeded."},
+  "downtime": {"status": "none", "detail": "None. The reads happen on the observer's existing cadence and the rows are computed on read."},
+  "manual": {"status": "none", "detail": "No manual step. The workflow change takes effect for runs on the merged workflow."},
+  "recovery": {"status": "none", "detail": "Binary rollback stops the artifact listings and returns flakes to counting ejected groups only; reverting the workflow stops the uploads, and the one-day artifacts expire. Nothing was stored, so nothing needs cleaning up."}
+}

@@ -37,7 +37,7 @@ function RosterRender() {
   const [mounted, setMounted] = React.useState(false)
   return <main data-roster-perf {...stylex.props(styles.root)}><Button isDisabled={mounted} onPress={() => { performance.mark('sidebar-roster-render-start'); setMounted(true) }}>Render 100-agent roster</Button><div data-frame-rows {...stylex.props(styles.rows)}>{mounted && roster.map(({ row, layout }) => <SidebarAgentRow key={row.ref} item={row} layout={layout} now={storyNow} />)}</div></main>
 }
-const meta = { title: 'Fractal UI/Sidebar/Roster', component: RosterRender, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof RosterRender>
+const meta = { title: 'Fractal UI/Sidebar/Roster', component: RosterRender, parameters: { scenario: { _tag: 'contract-fixture', reason: "A fixed 100-row cohort with varied metric branches measures render and fitting contracts." }, layout: 'fullscreen' } } satisfies Meta<typeof RosterRender>
 export default meta
 type Story = StoryObj<typeof meta>
 

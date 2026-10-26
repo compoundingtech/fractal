@@ -7,6 +7,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+import { identityEnv } from '../fractal-env.mjs';
 
 const harness = process.env.STUB_HARNESS;
 if (process.argv.includes('--version')) {
@@ -14,15 +16,18 @@ if (process.argv.includes('--version')) {
   console.log(harness === 'omp' ? 'omp v18.4.4' : 'pi 0.0.0-stub');
   process.exit(0);
 }
-if (process.env.ST_ADMISSION_TRACE) {
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+if (process.env.FRACTAL_ADMISSION_TRACE ?? process.env.ST_ADMISSION_TRACE) {
   const { admit } = await import('./admission-omp.mjs');
   await admit();
 } else {
-const agent = process.env.ST_AGENT ?? 'unknown';
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+const agent = identityEnv('FRACTAL_AGENT', 'ST_AGENT') ?? 'unknown';
 const receiptPath = `${process.cwd()}/receipts-${agent.replace(/[^A-Za-z0-9]/g, '-')}.jsonl`;
 const record = (event, fields = {}) => fs.appendFileSync(receiptPath,
   JSON.stringify({ event, at: Date.now() / 1000, pid: process.pid, ...fields }) + '\n');
-const st = (...args) => childProcess.spawnSync(process.env.ST3_BIN, args, { encoding: 'utf8', timeout: 60000 });
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+const st = (...args) => childProcess.spawnSync(process.env.FRACTAL_BIN ?? process.env.ST3_BIN, args, { encoding: 'utf8', timeout: 60000 });
 
 // What a model does when woken: read the message, then run the command the wake gives, exactly as
 // written. Nothing is added: a wake a model cannot follow verbatim fails the canary.

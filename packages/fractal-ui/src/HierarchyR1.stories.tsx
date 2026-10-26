@@ -101,7 +101,7 @@ function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none', showSeat
   </main>
 }
 const meta = {
-  title: 'Fractal UI/Hierarchy r1', component: Hierarchy, parameters: { layout: 'fullscreen' },
+  title: 'Fractal UI/Hierarchy r1', component: Hierarchy, parameters: { scenario: { _tag: 'contract-fixture', reason: "Local regression toggles and reasoning fixtures isolate hierarchy acceptance contracts." }, layout: 'fullscreen' },
   args: { scheme: 'dark', narrow: false, failure: 'none' },
   argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, narrow: { control: 'boolean' }, failure: { control: 'select', options: failures, description: 'Select one old behavior. Its production-component play must fail after Apply selected regression re-renders the tree.' } },
 } satisfies Meta<typeof Hierarchy>
@@ -150,9 +150,17 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   for (const entry of rows) {
     const duration = entry.querySelector<HTMLElement>('[data-call-duration]')!
     await expect(getComputedStyle(duration).fontVariantNumeric).toBe('tabular-nums')
-    const text = document.createRange()
-    text.selectNodeContents(duration)
-    await expect(Math.abs(text.getBoundingClientRect().right - edge)).toBeLessThan(1)
+    // Every row retains the pinned duration track, but running calls have no measured end yet.
+    await expect(Math.abs(duration.getBoundingClientRect().right - edge)).toBeLessThan(1)
+    if (entry.parentElement!.getAttribute('data-tool-status') === 'running') {
+      await expect(duration).toBeEmptyDOMElement()
+      await expect(entry.querySelector('[data-call-word]')).toHaveTextContent(/^Running$/)
+    } else {
+      await expect(duration.textContent).not.toBe('')
+      const text = document.createRange()
+      text.selectNodeContents(duration)
+      await expect(Math.abs(text.getBoundingClientRect().right - edge)).toBeLessThan(1)
+    }
     await expect(duration.scrollWidth).toBeLessThanOrEqual(duration.clientWidth)
   }
   const status = (state: string) => children.querySelector<HTMLElement>(`[data-tool-status="${state}"]`)!.firstElementChild as HTMLElement

@@ -177,6 +177,13 @@ fn store(runtime: &Arc<StageRuntime>, pending: usize) -> (tempfile::TempDir, Sto
     );
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("claims.sqlite3"), "node", runtime.clone()).unwrap();
+    // Each stage is timed against an injected sleep. A loaded disk's fsync once took 147 ms of a
+    // commit and failed a stage that was not the one slowed; durability is not what this checks.
+    store
+        .connection
+        .write()
+        .pragma_update(None, "synchronous", "OFF")
+        .unwrap();
     assert!(store.project_replication_backlog().unwrap());
     for index in 0..pending {
         store
@@ -308,7 +315,7 @@ fn each_point_inside_the_loan_is_charged_to_its_own_stage() {
                     .unwrap();
                 writer
                     .execute_batch(
-                        "CREATE TEMP TRIGGER stage_test_health BEFORE UPDATE ON projection_health
+                        /* sqlite-large-value: allow-for-now lv-hebc8bd0672dc owner=smallclaims::store::projection_stage_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER stage_test_health BEFORE UPDATE ON projection_health
                          BEGIN SELECT stage_test_pause(); END",
                     )
                     .unwrap();

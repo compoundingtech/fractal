@@ -1,4 +1,4 @@
-import type * as Native from '@smalltalk/st3-client/schema'
+import type * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 
@@ -14,7 +14,7 @@ import {
   promptCalls,
   questionAnswer,
   type PendingCall,
-} from '../../../../../clients/typescript/st3-views/homeView.ts'
+} from '../../../../../clients/typescript/fractal-views/homeView.ts'
 import { geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useAttention, useDataSource } from '../../data/react.tsx'
 import type { UxTelemetry } from '../../telemetry/ux.ts'

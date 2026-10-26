@@ -3,7 +3,14 @@
 import type * as React from 'react'
 import type { StyleXStyles } from '@stylexjs/stylex'
 
-export type SidebarAgent = { readonly _tag: 'Agent'; readonly id: string; readonly subject: string; readonly label: string }
+export type SidebarAgent = {
+  readonly _tag: 'Agent'; readonly id: string; readonly subject: string; readonly label: string
+  readonly children?: readonly SidebarAgent[]
+  readonly collapsed?: boolean
+  /** Native children belong to this seat, not the arrangement roster. */
+  readonly parent?: string
+  readonly childId?: string
+}
 export type SidebarFolder = { readonly _tag: 'Folder'; readonly id: string; readonly label: string; readonly collapsed: boolean; readonly children: readonly SidebarNode[] }
 export type SidebarGroup = { readonly _tag: 'Group'; readonly id: string; readonly label: string; readonly collapsed: boolean; readonly children: readonly SidebarNode[] }
 export type SidebarNode = SidebarFolder | SidebarGroup | SidebarAgent
@@ -33,8 +40,13 @@ export type AgentFoldersProps = {
   readonly treeStatus?: React.ReactNode
   readonly unavailable?: React.ReactNode
   readonly selectedId?: string
+  /** Search changes request a selected-row reveal without treating clock ticks as navigation. */
+  readonly revealKey?: string
+  /** Native RAC item name; the host supplies displayed title and observed status. */
+  readonly accessibleNames?: ReadonlyMap<string, string>
   readonly onSelect?: (id: string) => void
-  readonly renderAgent?: (agent: SidebarAgent) => React.ReactNode
+  readonly renderAgent?: (agent: SidebarAgent, touchDisclosure?: React.ReactNode) => React.ReactNode
+  readonly renderFolderSignal?: (folder: SidebarFolder | SidebarGroup) => React.ReactNode
   readonly ariaLabel?: string
   readonly style?: StyleXStyles
 }

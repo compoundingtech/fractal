@@ -9,7 +9,7 @@ import { AGENT_LEGEND, agentGlyph, agentRows, OLDER_ST_NOTE, agentSections, agen
 import { Banners, Empty, StatusLine, useDebugScroll, useListsOnFocus, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu, type MenuAction } from '../menu';
 import type { RootParams } from '../navigation';
-import { sessionDetail } from '@smalltalk/st3-views';
+import { sessionDetail } from '@fractal/views';
 import { useStore } from '../store';
 import { theme } from '../theme';
 import { Button, Legend, ListRow, Note, Screen, SectionHeader, T } from '../ui';

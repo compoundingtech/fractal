@@ -1,6 +1,6 @@
 // Match st3-client/device/grant_proof.rs. Crypto is supplied by Expo/CryptoKit in the app and
 // node:crypto in tests; no gateway value can supply the independently trusted fingerprint.
-import type { PersonPairedSession } from '../../clients/typescript/st3-client';
+import type { PersonPairedSession } from '../../clients/typescript/fractal-client';
 
 export type ProofCrypto = {
   hash(bytes: Uint8Array): Promise<Uint8Array>;

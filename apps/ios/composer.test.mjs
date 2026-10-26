@@ -33,5 +33,5 @@ assert.equal(restoreDraft('typed', ''), 'typed');
 
 // What the person reads.
 assert.match(sendReason('st took too long to answer; it may or may not have done it', true), /Sending again will not send it twice/);
-assert.match(sendReason('an inline message cannot exceed 4 KiB; post a document first', false), /only takes messages up to 4 KiB/);
+assert.equal(sendReason('an inline message cannot exceed 4 KiB; post a document first', false), 'This Fractal version only takes messages up to 4 KiB. Shorten the message, or update Fractal. Your text is kept.');
 assert.equal(sendReason('the full text is too large', false), 'the full text is too large. Your text is kept.');

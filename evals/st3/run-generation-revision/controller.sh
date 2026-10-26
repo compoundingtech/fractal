@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 
 readonly EVAL_ROOT=$PWD
@@ -46,8 +47,9 @@ wait_for_event() {
 }
 
 st3 publish "$EVAL_ROOT/initial.kdl" --as "$REQUESTER" >/dev/null
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 st3 --json missions start generation-proof \
-  --id "generation-proof/${ST_MISSION_RUN}" \
+  --id "generation-proof/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}" \
   --workspace "$EVAL_ROOT" \
   --as "$REQUESTER" > "$EVAL_ROOT/initial-run.json"
 

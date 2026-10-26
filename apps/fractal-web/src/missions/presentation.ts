@@ -1,12 +1,14 @@
-import type * as St3 from '@smalltalk/st3-client/schema'
+import type * as St3 from '@fractal/client/schema'
+import type { DecodedAgent } from '@fractal/sdk/effect'
 import { DateTime, Option } from 'effect'
 
 import words from '../../../../fixtures/clients/words.json' with { type: 'json' }
+import { leafText } from '../data/projections.ts'
 
 // The mission presentation of docs/clients/ui-contract.md ("Presentation projections",
 // "Mission"), derived in the app until st serves it on the missions collection (#2646). The
 // fields and words are the contract's, so reading st's projection replaces only this file. The
-// precedence is `st3-ui-model::missions::adapt`'s, first match wins.
+// precedence is `fractal-ui-model::missions::adapt`'s, first match wins.
 
 export type MissionWord = (typeof words.mission)[number]['id']
 export type StepWord = 'needs_you' | 'done' | 'working' | 'ready' | 'waiting' | 'cancelled' | 'failed' | 'pending'
@@ -54,11 +56,10 @@ const missionSteps = (mission: Row): readonly Step[] => {
   return shown.flatMap((run) => Option.getOrElse(run.steps, () => [] as readonly St3.MissionStep[]))
 }
 
-const queuedFor = (agents: readonly St3.Agent[], work: string) =>
+const queuedFor = (agents: readonly DecodedAgent[], work: string) =>
   agents.find((agent) => Option.getOrUndefined(agent.next_work_id) === work || (agent.upcoming_work_ids ?? []).some((id) => id === work))
 
-const agentState = (agent: St3.Agent): string => (typeof agent.state === 'string' ? agent.state : agent.state.raw)
-const broken = (agent: St3.Agent) => ['failed', 'stopped'].includes(agentState(agent)) || Option.isSome(agent.fault)
+const broken = (agent: DecodedAgent) => ['failed', 'stopped'].includes(leafText(agent.state)) || Option.isSome(agent.fault)
 const seatOf = (step: Step): string | undefined =>
   step.agentless === true ? undefined : Option.getOrUndefined(step.claimant) ?? Option.getOrUndefined(step.assignee)
 
@@ -82,7 +83,7 @@ export const presentMission = ({
 }: {
   readonly mission: St3.Mission
   /** The agents collection: names, and who queues each ready step. */
-  readonly agents: readonly St3.Agent[]
+  readonly agents: readonly DecodedAgent[]
   /** Open attention, already the reader's. */
   readonly attention: readonly St3.Attention[]
 }): MissionPresentation => {
@@ -112,7 +113,7 @@ export const presentMission = ({
                           : 'done'
   const owner = (step: Step, stepWordValue: StepWord): Who => {
     if (stepWordValue === 'needs_you') return { kind: 'you', label: 'you' }
-    if (step.agentless === true) return { kind: 'st', label: 'st' }
+    if (step.agentless === true) return { kind: 'st', label: 'Fractal' }
     const seat = seatOf(step)
     return seat === undefined ? { kind: 'nobody', label: 'nobody yet' } : { kind: 'agent', agent: seat, label: label(seat) }
   }
@@ -124,7 +125,7 @@ export const presentMission = ({
       const note = queuing !== undefined
         ? busy !== undefined && !broken(queuing)
           ? `queued for ${queuing.name}, which is busy with ${Option.getOrUndefined(busy.title) ?? busy.path}`
-          : `queued for ${queuing.name}, which is ${agentState(queuing)}`
+          : `queued for ${queuing.name}, which is ${leafText(queuing.state)}`
         : ['waiting', 'blocked'].includes(step.state) ? Option.getOrNull(step.blocked_reason) : null
       return {
         id: step.id,
@@ -153,7 +154,7 @@ export const presentMission = ({
   const who: Who =
     word === 'decision' ? { kind: 'you', label: 'you' }
       : ['working', 'queued', 'unstaffed', 'stalled', 'failed'].includes(word) && whoSeat !== undefined ? { kind: 'agent', agent: whoSeat, label: label(whoSeat) }
-        : open.length > 0 && open.every((step) => step.agentless === true) ? { kind: 'st', label: 'st' }
+        : open.length > 0 && open.every((step) => step.agentless === true) ? { kind: 'st', label: 'Fractal' }
           : { kind: 'nobody', label: 'nobody' }
   const latest = (mission.run_details ?? []).at(-1)
   const settled = latest === undefined ? undefined : Option.getOrUndefined(latest.outcome)
@@ -168,7 +169,7 @@ export const presentMission = ({
       word: stepWord(stuckStep, gated),
       attempts: stuckStep.attempt,
       blockers: stuckStep.blockers ?? [],
-      agent: stuckAgent === undefined ? stuckSeat === undefined ? null : { id: stuckSeat, label: label(stuckSeat), state: 'unknown' } : { id: stuckAgent.id, label: stuckAgent.name, state: agentState(stuckAgent) },
+      agent: stuckAgent === undefined ? stuckSeat === undefined ? null : { id: stuckSeat, label: label(stuckSeat), state: 'unknown' } : { id: stuckAgent.id, label: stuckAgent.name, state: leafText(stuckAgent.state) },
     },
     progress: { done: work.filter((step) => step.state === 'completed').length, total: work.length },
     last_progress: inHand === undefined ? null : Option.getOrNull(inHand.last_progress),
