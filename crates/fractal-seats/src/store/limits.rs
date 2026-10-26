@@ -58,6 +58,10 @@ impl LimitsPolicy {
                 .as_ref()
                 .is_some_and(|name| self.exempt_accounts.contains(name))
             || self.exempt_accounts.contains(&episode_account(limit))
+            || limit
+                .identity
+                .as_ref()
+                .is_some_and(|label| self.exempt_accounts.contains(label))
     }
 }
 
@@ -113,9 +117,15 @@ pub trait LimitsStore {
             policy: &LimitsPolicy,
             now: u128,
         ) -> Result<LimitsOutcome, St3Error>;
+    /// The usage of a period against the declared accounts: every row and limit, and each
+    /// account's credits used so far in the calendar month of `until_ms`.
+    fn attributed_usage(&self, since_ms: u64, until_ms: u64) -> Result<super::usage_accounts::AttributedUsage>;
 }
 
 impl LimitsStore for Store {
+    fn attributed_usage(&self, since_ms: u64, until_ms: u64) -> Result<super::usage_accounts::AttributedUsage> {
+        super::usage_accounts::attributed_usage(self, since_ms, until_ms)
+    }
 
     fn account_limits(&self) -> Result<Vec<AccountLimit>> {
         if !self.account_limits_ready()? {
@@ -1583,6 +1593,63 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         // The same readings stop both once the account is no longer exempt, so a reload applies.
         let outcome = store.enforce_account_limits(&policy(), now + 2).unwrap();
         assert_eq!(outcome.stopped, [first, later]);
+    }
+
+    #[test]
+    fn a_kept_seat_is_never_stopped_or_switched_whatever_account_it_is_bound_to() {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        let [pooled, single, unbound] = [
+            "agent/alder.pooled",
+            "agent/alder.single",
+            "agent/alder.coordinator",
+        ];
+        declare(&store, unbound, "alder");
+        let now = now_ms();
+        // One account of the pool is past the stop and the other has room, so an unkept pooled
+        // seat would move; a single-account seat would stop; an unbound seat would stop.
+        read_account(&store, pooled, "ada/one", "codex/aaaa", 100.0, now - 60_000);
+        read_account(&store, single, "ada/one", "codex/aaaa", 100.0, now - 90_000);
+        read(&store, unbound, Some("claude/cccc"), 100.0, now - 30_000);
+        read_account(
+            &store,
+            "agent/alder.other",
+            "ada/two",
+            "codex/bbbb",
+            10.0,
+            now - 30_000,
+        );
+        let kept = LimitsPolicy {
+            keep: BTreeSet::from([pooled.to_owned(), single.to_owned(), unbound.to_owned()]),
+            ..policy()
+        };
+
+        for later in [0, 60_000, 3_600_000 / 2] {
+            let outcome = store.enforce_account_limits(&kept, now + later).unwrap();
+            assert!(outcome.stopped.is_empty(), "{outcome:?}");
+            assert!(outcome.switched.is_empty(), "{outcome:?}");
+            assert!(live(&store, pooled) && live(&store, single) && live(&store, unbound));
+        }
+        assert_eq!(
+            store.seat_account_choice(pooled).unwrap(),
+            None,
+            "the kept pooled seat's account is not changed"
+        );
+        assert!(
+            store
+                .claims_for(pooled, Some("runtime.action.requested"))
+                .unwrap()
+                .is_empty(),
+            "no restart was asked of a kept seat"
+        );
+
+        // The same readings act on all three once none is kept, so only `keep` held them.
+        let outcome = store.enforce_account_limits(&policy(), now).unwrap();
+        assert_eq!(outcome.stopped, [unbound, single], "{outcome:?}");
+        assert_eq!(
+            outcome.switched,
+            [(pooled.to_owned(), "ada/two".to_owned())]
+        );
     }
 
     #[test]

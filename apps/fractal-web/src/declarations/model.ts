@@ -82,10 +82,10 @@ const unread = (feed: Unread): DeclarationPanelState =>
 export const agentDeclarationState = (feed: Feed<AgentDeclaration>): DeclarationPanelState =>
   feed._tag === 'Waiting' ? { _tag: 'Loading' }
     : feed._tag === 'Unavailable' ? unread(feed)
-    : { _tag: 'Ready', text: feed.value.kdl, language: 'kdl', source: `Canonical KDL from st · revision ${feed.value.revision} · environment values redacted${feed.freshness === 'stale' ? ' · last verified copy, reconnecting' : ''}` }
+    : { _tag: 'Ready', text: feed.value.kdl, language: 'kdl', source: `Canonical KDL from Fractal · revision ${feed.value.revision} · environment values redacted${feed.freshness === 'stale' ? ' · last verified copy, reconnecting' : ''}` }
 
 /** The mission's structured definition, labelled as a fallback; never presented as KDL. */
 export const missionDeclarationState = (feed: Feed<PublicationDefinition>): DeclarationPanelState =>
   feed._tag === 'Waiting' ? { _tag: 'Loading' }
     : feed._tag === 'Unavailable' ? unread(feed)
-    : { _tag: 'Ready', text: `${JSON.stringify(redactMissionDefinition(feed.value.declaration), null, 2)}\n`, language: 'json', source: `Structured definition · revision ${feed.value.revision} · st serves no mission KDL; environment values redacted${feed.freshness === 'stale' ? ' · last verified copy, reconnecting' : ''}` }
+    : { _tag: 'Ready', text: `${JSON.stringify(redactMissionDefinition(feed.value.declaration), null, 2)}\n`, language: 'json', source: `Structured definition · revision ${feed.value.revision} · Fractal serves no mission KDL; environment values redacted${feed.freshness === 'stale' ? ' · last verified copy, reconnecting' : ''}` }

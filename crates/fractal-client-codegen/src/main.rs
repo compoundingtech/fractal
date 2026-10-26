@@ -765,6 +765,8 @@ fn validate_surfaces(
         "ClientConnections",
         "ClientConnection",
         "UsageLimit",
+        "UsageAccount",
+        "UsageCredits",
         "LaunchPreview",
         "MissionRunSummary",
         "MissionStep",
