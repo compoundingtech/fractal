@@ -173,6 +173,17 @@ const mount = async (ux?: UxTelemetry, strictMode = false) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('keeps the not-found composer pinned without promising that the missing conversation will load', async () => {
+    source.sendable = true
+    source.feed = { _tag: 'Unavailable', reason: 'failed', code: 'not-found', detail: 'synthetic diagnostic' }
+    await mount()
+    expect(container.querySelector('[data-testid="transcript-unavailable"]')?.textContent).toContain('Conversation not found')
+    expect(container.querySelector('[data-testid="composer-footer"]')?.textContent).toContain('Conversation not found')
+    expect(text()).not.toContain('Messages can be sent once this conversation loads.')
+    expect(source.composerProps.at(-1)?.disabledReason).toBe('Conversation not found')
+    expect(container.querySelector<HTMLTextAreaElement>('textarea')?.disabled).toBe(true)
+    expect(container.querySelector<HTMLElement>('[data-testid="conversation-composer-dock"]')?.style.flexShrink).toBe('0')
+  })
   it('registers the real composer field and only the latest turn, including a newly mounted transcript tail', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
@@ -249,7 +260,6 @@ describe('ConversationPane composition activation', () => {
     expect([...container.querySelectorAll('[data-testid="thinking-entry"] [data-conversation-entry-id]')].map(element => element.textContent))
       .toEqual(reasoning.map(item => item._tag === 'Reasoning' ? item.text : ''))
   })
-
   it('insets the composer dock so its focus outline stays inside the viewport', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     await mount()
