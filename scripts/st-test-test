@@ -743,9 +743,9 @@ class StTest(unittest.TestCase):
     def fake_unit(self, base, repo, n, kilobytes, used):
         directory = base / repo
         (directory / f'tree-{n}').mkdir(parents=True, exist_ok=True)
-        (directory / f'tree-{n}' / 'blob').write_bytes(b'x' * kilobytes * 1024)
+        (directory / f'tree-{n}' / 'blob').write_bytes(os.urandom(kilobytes * 1024))
         (directory / f'target-{n}').mkdir(parents=True, exist_ok=True)
-        (directory / f'target-{n}' / 'blob').write_bytes(b'y' * kilobytes * 1024)
+        (directory / f'target-{n}' / 'blob').write_bytes(os.urandom(kilobytes * 1024))
         lock = directory / f'tree-{n}.lock'
         lock.write_text('')
         os.utime(lock, (used, used))
@@ -1284,7 +1284,7 @@ class StTest(unittest.TestCase):
         for path in (self.home / '.local/bin/cargo', bin_dir / 'systemd-run'):
             path.write_text(recorder.format(calls=calls))
             path.chmod(0o755)
-        env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime)}
+        env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime), 'ST_EVIDENCE_GOVERN': 'on'}
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
@@ -1300,7 +1300,7 @@ class StTest(unittest.TestCase):
             self.assertFalse(calls.exists())
             self.commit('d.txt', 'four')
             (tmp / 'no-bus').mkdir()
-            code, out, err = self.run_st_test('--check', 'demo', extra_env={'XDG_RUNTIME_DIR': str(tmp / 'no-bus')})  # no user bus: runs anyway, and says so
+            code, out, err = self.run_st_test('--check', 'demo', extra_env=dict(env, XDG_RUNTIME_DIR=str(tmp / 'no-bus')))  # no user bus: runs anyway, and says so
             self.assertEqual(code, 0, err)
             self.assertIn('st-test: demo runs without the host build cap (no user systemd bus for a builds.slice scope)', err)
             self.assertFalse(calls.exists())  # neither a scope nor a ticket
@@ -1946,7 +1946,7 @@ class PerCrate(StTest):
 
     def hook(self, body):
         path = Path(self.tmp.name) / 'origin.git/hooks/pre-receive'
-        path.write_text('#!/bin/bash\n' + body)
+        path.write_text('#!/usr/bin/env bash\n' + body)
         path.chmod(0o755)
 
     def push_refs(self, count):
