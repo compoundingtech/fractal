@@ -2592,9 +2592,10 @@ exit 0
         let mut metadata: serde_json::Value = serde_json::from_str(&original).unwrap();
         metadata["daemonStartToken"] = serde_json::json!("linux:0");
         fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
-        let missing = session.runtime.process_identity_if(&session.id, &incarnation).unwrap();
+        let changed = session.runtime.process_identity_if(&session.id, &incarnation);
         fs::write(&metadata_path, original).unwrap();
-        assert_eq!(missing, None, "PID reuse must not establish provenance");
+        assert!(changed.unwrap_err().to_string().contains("changed incarnation"),
+            "PID reuse must not establish provenance");
     }
 
     #[test]
