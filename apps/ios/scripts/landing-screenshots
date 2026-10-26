@@ -53,6 +53,12 @@ for name in now-light now-dark conversation-light conversation-dark; do
   [[ ! -e "$out/$name.png" ]] || { printf 'Already exists: %s\n' "$out/$name.png" >&2; exit 2; }
 done
 exec > >(tee "$out/commands.log") 2>&1
+# Nix shells can shadow Apple's tools and point DEVELOPER_DIR/SDKROOT at a
+# macOS-only SDK. Use the host's selected Xcode for native simulator operations.
+# Unset DEVELOPER_DIR while querying too: xcode-select otherwise echoes it.
+apple_developer_dir="$(env -u DEVELOPER_DIR /usr/bin/xcode-select -p)"
+xcrun() { env -u SDKROOT DEVELOPER_DIR="$apple_developer_dir" /usr/bin/xcrun "$@"; }
+xcodebuild() { env -u SDKROOT DEVELOPER_DIR="$apple_developer_dir" /usr/bin/xcodebuild "$@"; }
 sim=''
 gateway_pid=''
 metro_pid=''
