@@ -2597,6 +2597,7 @@ export type ResourceHeader = {
   | "summary"
   | "connected-client"
   | "usage"
+  | "harness-question"
  | string);
   operational?: Operational;
   revision: Revision;

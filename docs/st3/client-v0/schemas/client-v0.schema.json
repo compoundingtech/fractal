@@ -19,7 +19,16 @@
   ],
   "$defs": {
     "HarnessQuestionAnswerabilityReason": {"anyOf": [{"enum": ["adapter_missing", "adapter_unavailable", "resolved"]}, {"type": "string"}]},
-    "HarnessInvalidAnswerReason": {"enum": ["unknown_option", "too_many", "required_missing", "empty_single", "too_long", "unknown_question", "other_not_allowed", "note_not_allowed"]},
+    "HarnessInvalidAnswerReason": {"enum": [
+      "unknown_option",
+      "too_many",
+      "required_missing",
+      "empty_single",
+      "too_long",
+      "unknown_question",
+      "other_not_allowed",
+      "note_not_allowed"
+    ]},
     "HarnessQuestionItem": {"type": "object", "additionalProperties": false, "required": ["id", "options", "multi", "required"], "properties": {"id": {"type": "string", "pattern": "^(q([0-9]|1[0-5])|sha256:[0-9a-f]{64})$"}, "options": {"type": "integer", "minimum": 0, "maximum": 64}, "multi": {"type": "boolean"}, "required": {"type": "boolean"}}},
     "HarnessAnswerInput": {"type": "object", "additionalProperties": false, "required": ["positions"], "properties": {"positions": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "integer", "minimum": 0, "maximum": 63}}}},
     "HarnessResolvedAnswer": {"type": "object", "additionalProperties": false, "required": ["positions", "timed_out"], "properties": {"positions": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "integer", "minimum": 0, "maximum": 63}}, "timed_out": {"type": "boolean"}}},
@@ -616,7 +625,8 @@
           "arrangement",
           "summary",
           "connected-client",
-          "usage"
+          "usage",
+          "harness-question"
         ]}, {"type": "string"}], "description": "Resource family."},
         "revision": { "$ref": "#/$defs/Revision" },
         "updated_at": { "$ref": "#/$defs/Timestamp" },

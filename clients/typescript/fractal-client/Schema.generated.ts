@@ -4659,7 +4659,8 @@ export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "arrangement",
   "summary",
   "connected-client",
-  "usage"
+  "usage",
+  "harness-question"
 ]).annotate({ description: "Resource family." }),
   "operational": optionalKey(Operational),
   "revision": Revision,
