@@ -850,6 +850,7 @@ const PROBES: &[Probe] = &[
         "/v1/subscription-requests?subscription=subscription/bench/missing",
     ),
     get("GET /v1/messages", "/v1/messages?to={seat}"),
+    get("GET /v1/messages/recipient", "/v1/messages/recipient?to={seat}"),
     get(
         "GET /v1/messages/by-key",
         "/v1/messages/by-key?key=cost-fixture-message",
