@@ -124,14 +124,22 @@ async fn follow_conversation(
                 message: Some(message),
                 ..
             }) => {
-                let message = fractal_client::plain_message(code.as_ref(), &message);
-                if stalled.as_deref() != Some(message.as_str()) {
-                    eprintln!("st: {message} · trying again");
-                    stalled = Some(message);
-                }
+                report_resync(code.as_ref(), &message, &mut stalled);
             }
             Some(_) => {}
         }
+    }
+}
+
+pub(super) fn report_resync(
+    code: Option<&fractal_client::ErrorCode>,
+    message: &str,
+    stalled: &mut Option<String>,
+) {
+    let message = ClientMessage::for_output(false).message(code, message);
+    if stalled.as_deref() != Some(message.as_str()) {
+        eprintln!("st: {message} · trying again");
+        *stalled = Some(message);
     }
 }
 

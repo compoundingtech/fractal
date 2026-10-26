@@ -133,6 +133,10 @@ struct Cli {
     read_contract_inventory_json: bool,
     #[arg(long, global = true, hide = true)]
     checkpoint_space_gate_capabilities: bool,
+    /// Daemon Unix socket, HTTP URL, or fabric://NODE-OR-NAME/st3-client-v0.
+    /// Native Fabric product requests use FRACTAL_CLIENT_CREDENTIAL for the paired bearer.
+    /// Fabric supports client-v0 and health only, not terminal/mailbox WebSockets,
+    /// backups, drivers, or other local-only daemon commands.
     #[arg(long, global = true)]
     endpoint: Option<String>,
     /// Run a second, fully separate fractal on this machine: its own state, config, sockets, node
@@ -4789,7 +4793,7 @@ fn plain_ui_requested(arguments: usize, stdin: bool, stdout: bool, seat: bool) -
 fn run_terminal_ui(mut options: fractal_tui::Args, endpoint: Option<&str>) -> ExitCode {
     let result = (|| -> Result<()> {
         if let Some(endpoint) = endpoint {
-            match Endpoint::parse(endpoint) {
+            match Endpoint::parse(endpoint)? {
                 Endpoint::Unix(path) => options = options.with_endpoint(path),
                 _ => anyhow::bail!(
                     "fractal ui uses a local Unix socket; pair remote devices with fractal devices complete"
@@ -4921,6 +4925,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
         .or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"))
         .as_deref()
         .map(Endpoint::parse)
+        .transpose()?
         .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -5037,19 +5042,51 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     }
 }
 
-fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
-    // Only this known human outage diagnostic is product-name presentation.
-    // Other errors may carry agent-only commands, including harness actor refusals.
-    if native_driver {
-        plain_error(error)
-    } else {
-        doctor_cli::human_outage_message(error).unwrap_or_else(|| plain_error(error))
+/// CLI presentation is stable inside exec gates: both output streams enter JSON.
+#[derive(Clone, Copy)]
+enum ClientMessage {
+    Stable,
+    Human,
+}
+
+impl ClientMessage {
+    fn for_output(native_driver: bool) -> Self {
+        static IN_GATE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            std::env::var_os(fractal_daemon::gate_report::ENV).is_some()
+        });
+        if native_driver || *IN_GATE { Self::Stable } else { Self::Human }
+    }
+
+    fn error(self, error: &fractal_client::ClientError) -> String {
+        match self {
+            Self::Stable => error.plain(),
+            Self::Human => error.human(),
+        }
+    }
+
+    fn message(self, code: Option<&fractal_client::ErrorCode>, message: &str) -> String {
+        match self {
+            Self::Stable => fractal_client::plain_message(code, message),
+            Self::Human => fractal_client::human_message(code, message),
+        }
     }
 }
 
-/// The error chain as printed, with an st client-API error said in plain words and its code in
-/// parentheses for scripts, rather than a Rust enum name (`StaleFence`).
+fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
+    let mode = ClientMessage::for_output(native_driver);
+    if let ClientMessage::Human = mode {
+        doctor_cli::human_outage_message(error).unwrap_or_else(|| render_client_error(error, mode))
+    } else {
+        render_client_error(error, mode)
+    }
+}
+
+/// Stable words and codes for scripts, gate output and refusal reports.
 fn plain_error(error: &anyhow::Error) -> String {
+    render_client_error(error, ClientMessage::Stable)
+}
+
+fn render_client_error(error: &anyhow::Error, mode: ClientMessage) -> String {
     let full = format!("{error:#}");
     let Some(api) = error
         .chain()
@@ -5064,7 +5101,8 @@ fn plain_error(error: &anyhow::Error) -> String {
         .ok()
         .and_then(|code| code.as_str().map(str::to_owned))
         .unwrap_or_default();
-    full.replace(&api.to_string(), &format!("{} ({code})", api.plain()))
+    let message = mode.error(api);
+    full.replace(&api.to_string(), &format!("{message} ({code})"))
 }
 
 static DAEMON_WAIT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
@@ -5276,6 +5314,7 @@ async fn run(cli: Cli) -> Result<()> {
         .or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"))
         .as_deref()
         .map(Endpoint::parse)
+        .transpose()?
         .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
     let _ = DAEMON_WAIT.set(Duration::from_secs(cli.daemon_wait));
     let client = cli_client(&endpoint);
@@ -7427,6 +7466,7 @@ fn endpoint_label(endpoint: &Endpoint) -> String {
     match endpoint {
         Endpoint::Unix(socket) => socket.display().to_string(),
         Endpoint::Http(url) => url.clone(),
+        Endpoint::Fabric(endpoint) => endpoint.to_string(),
     }
 }
 
@@ -7842,10 +7882,22 @@ fn trace_scalar(value: &Value) -> String {
 }
 
 fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<GeneratedClient> {
-    let Endpoint::Unix(socket) = endpoint else {
-        anyhow::bail!(
-            "client-v0 product commands require the trusted local Unix endpoint; remote clients must use a paired Fabric credential"
-        );
+    let socket = match endpoint {
+        Endpoint::Unix(socket) => socket,
+        Endpoint::Fabric(endpoint) => {
+            let mut client = GeneratedClient::fabric(endpoint.clone());
+            if let Some(credential) = std::env::var_os("FRACTAL_CLIENT_CREDENTIAL") {
+                let credential = credential.into_string().map_err(|_| {
+                    anyhow::anyhow!("FRACTAL_CLIENT_CREDENTIAL must contain valid UTF-8")
+                })?;
+                client = client.with_credential(credential);
+            }
+            return Ok(client
+                .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true));
+        }
+        Endpoint::Http(_) => anyhow::bail!(
+            "client-v0 product commands require a trusted local Unix or native Fabric endpoint"
+        ),
     };
     if let Some(startup) = fractal_daemon::startup::read(socket)
         && startup.status == "starting"
@@ -9512,6 +9564,50 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let declared_accounts = report["accounts"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if !declared_accounts.is_empty() && only.is_none() {
+        // Every declared account, whether or not it spent or reported a limit, so a missing
+        // account is visible as missing and never as absent from the list.
+        output.push('\n');
+        let _ = writeln!(
+            output,
+            "ACCOUNTS  {} · every declared account",
+            declared_accounts.len()
+        );
+        for account in declared_accounts {
+            let name = account["name"].as_str().unwrap_or("unknown");
+            let limit = limits
+                .iter()
+                .find(|limit| limit["account"] == account["account"] && !account["account"].is_null());
+            let dollars = |microusd: &Value| {
+                format!("${}", microusd.as_u64().unwrap_or(0) / 1_000_000)
+            };
+            let detail = if let Some(credits) = account.get("credits") {
+                format!(
+                    "credits {}{} of {} this month",
+                    dollars(&credits["used_microusd"]),
+                    if credits["unpriced_tokens"].as_u64().unwrap_or(0) > 0 { "+" } else { "" },
+                    dollars(&credits["budget_microusd"])
+                )
+            } else if let Some(limit) = limit {
+                let weekly = limit["weekly_percent"]
+                    .as_f64()
+                    .map_or_else(|| "?".to_owned(), |value| format!("{value:.0}%"));
+                let reset = limit["weekly_resets_at_unix_ms"]
+                    .as_u64()
+                    .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+                    .map_or_else(String::new, |at| format!(" resets {}", at.format("%Y-%m-%d %H:%M UTC")));
+                let stale = if limit["stale"].as_bool() == Some(true) { "  stale" } else { "" };
+                format!("weekly {weekly}{reset}{stale}")
+            } else {
+                "no limits reported".to_owned()
+            };
+            let _ = writeln!(output, "{name}  {detail}");
+        }
+    }
     if !limits.is_empty() && only.is_none() {
         let percent = |value: &Value| {
             value
@@ -9579,6 +9675,11 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
     let declared = limits
         .iter()
         .filter_map(|limit| Some((limit["account"].as_str()?, limit["account_ref"].as_str()?)))
+        .chain(
+            declared_accounts
+                .iter()
+                .filter_map(|account| Some((account["account"].as_str()?, account["name"].as_str()?))),
+        )
         .collect::<BTreeMap<_, _>>();
     let groups = only
         .map(|by| vec![by])
@@ -11344,8 +11445,7 @@ async fn upload_attachment(
     };
     let uploaded = generated_client(endpoint, Some(actor))?
         .upload_blob(bytes, &media_type)
-        .await
-        .map_err(|error| anyhow::anyhow!("{}", error.plain()))?
+        .await?
         .value;
     Ok(fractal_daemon::model::AttachmentInput {
         blob: uploaded.blob,
@@ -11386,8 +11486,7 @@ async fn run_blobs(
             let hash = fractal_daemon::blobs::parse_reference(&reference)?;
             let bytes = generated_client(endpoint, Some(&actor))?
                 .blob(&hash, message.as_deref())
-                .await
-                .map_err(|error| anyhow::anyhow!("{}", error.plain()))?;
+                .await?;
             match output {
                 Some(path) => {
                     fs::write(&path, &bytes)

@@ -117,6 +117,6 @@ export const nativeUsageSource = ({
   ),
   history: () => Effect.fail({
     kind: 'unavailable',
-    reason: 'Native st usage does not publish ledger account history.',
+    reason: 'Native Fractal usage does not publish ledger account history.',
   }),
 })

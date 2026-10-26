@@ -79,8 +79,9 @@ describe('presentMission', () => {
       attention: [gated],
     })
     expect(presented.steps.map((each) => [each.path, each.word, each.owner.label])).toEqual([
-      ['fetch', 'done', 'st'], ['review', 'needs_you', 'you'], ['build', 'working', 'builder'], ['deploy', 'waiting', 'builder'],
+      ['fetch', 'done', 'Fractal'], ['review', 'needs_you', 'you'], ['build', 'working', 'builder'], ['deploy', 'waiting', 'builder'],
     ])
+    expect(presented.steps[0]?.owner).toEqual({ kind: 'st', label: 'Fractal' })
     expect(presented.progress).toEqual({ done: 1, total: 4 })
     expect(presented.last_progress).toBe('linking')
     expect(presented.who).toEqual({ kind: 'agent', agent: 'agent/example/builder', label: 'builder' })
