@@ -1,4 +1,4 @@
-//! An invented fleet for `stui --demo`. Nothing here reads st3.
+//! An invented fleet for `fractal tui --demo`. Nothing here reads st3.
 //!
 //! Every name is made up. The world moves: one agent streams a reply, a tool runs and
 //! finishes, a message arrives, so the scrolling and "new below" behaviour can be felt.
@@ -347,6 +347,7 @@ fn usage() -> Vec<fractal_client::UsageRow> {
         } else {
             "anthropic"
         })),
+        account_ref: None,
         host: Some(s(host)),
         pricing: Some(s("list-2026-10-02")),
         native_session_id: None,

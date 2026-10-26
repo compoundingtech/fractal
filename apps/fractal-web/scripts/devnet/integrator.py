@@ -134,12 +134,12 @@ def require_candidate_path(path):
 # This loop deploys only the web app, never the daemon it connects to.
 # A changed generated contract requires a coordinated deployment elsewhere.
 WIRE_CONTRACT_PATHS = frozenset((
-    'clients/typescript/st3-client/Schema.generated.ts',
-    'clients/typescript/st3-client/Models.generated.ts',
-    'clients/typescript/st3-client/Client.generated.ts',
-    'clients/swift/St3Client/Sources/St3Client/Contract.generated.swift',
-    'crates/st3-client/src/generated.rs',
-    'crates/st3-client/src/contract.rs',
+    'clients/typescript/fractal-client/Schema.generated.ts',
+    'clients/typescript/fractal-client/Models.generated.ts',
+    'clients/typescript/fractal-client/Client.generated.ts',
+    'clients/swift/FractalClient/Sources/FractalClient/Contract.generated.swift',
+    'crates/fractal-client/src/generated.rs',
+    'crates/fractal-client/src/contract.rs',
     'docs/st3/client-v0/schemas/client-v0.schema.json',
     'docs/st3/client-v0/schemas/operations.json',
 ))

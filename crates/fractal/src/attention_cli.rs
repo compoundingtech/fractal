@@ -117,7 +117,7 @@ pub(super) async fn run_attention(
                 .attention_list(cursor.as_deref(), Some(limit), all)
                 .await?;
             let history = if all { " --all" } else { "" };
-            let command = format!("st alerts ls --as {actor}{history}");
+            let command = format!("fractal alerts ls --as {actor}{history}");
             if json_output {
                 print_value(&response, true)?;
             } else {
@@ -190,7 +190,7 @@ pub(super) async fn run_attention(
                     .context("this alert names no agent to talk to; pass --to AGENT")?,
             };
             let id = card_id.unwrap_or_else(|| item.subject.clone());
-            // The same words stui's "Chat about this" sends.
+            // The same words Fractal TUI's "Chat about this" sends.
             let mut body = format!("{}\n\n---\nThis is about {} ({id}", args.body, item.title);
             if let Some(mission) = &item.mission {
                 body.push_str(&format!(", mission {mission}"));

@@ -1283,8 +1283,38 @@ class LaneDefinitions(unittest.TestCase):
         unbound, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy(lane=None)})
         self.assertEqual(self.agent_cli(tree, unbound)[0], 0)
 
-    def test_by_level_lane_must_be_a_boolean(self):
-        for bad in ('yes', 1, None, []):
+    def test_a_level_held_to_the_trees_own_lane_accepts_a_lane_edit_signed_with_that_trees_definition(self):
+        agent = self.f.key('agent', 'agent/seat-one')
+        base, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy(lane='tree')})
+        base_tree = self.f.git('rev-parse', base + '^{tree}')
+        at_base = evidence_verify.lane_definition(str(self.f.repo), base_tree, base_tree, self.rules())
+        self.assertEqual(at_base['tree_sha256'], at_base['sha256'])  # an unchanged definition: one digest
+
+        def agent_note(commit, tree, digest, seconds):
+            self.f.note(commit, tree, agent, 'agent/seat-one', runner='wrapper', command=('make', 'test'),
+                        inputs={'lane_definition_sha256': digest}, seconds=seconds)
+
+        # A tree that does not edit the lane: the base's digest, as with lane true.
+        commit, tree = self.files({'src/code.rs': 'tree mode\n'})
+        agent_note(commit, tree, at_base['sha256'], 1)
+        self.assertEqual(self.agent_cli(tree, base)[0], 0)
+        # A tree that edits the lane's own script: the base's digest is not its definition; the tree's own is.
+        changed, changed_tree = self.files({'scripts/run.sh': 'edited by the change\n'})
+        edited = evidence_verify.lane_definition(str(self.f.repo), base_tree, changed_tree, self.rules())
+        self.assertEqual(edited['changed'], ['scripts/run.sh'])
+        self.assertNotEqual(edited['tree_sha256'], edited['sha256'])
+        agent_note(changed, changed_tree, edited['sha256'], 2)
+        self.assertEqual(self.agent_cli(changed_tree, base)[1]['reason'], 'wrong_definition')
+        agent_note(changed, changed_tree, edited['tree_sha256'], 3)
+        code, result = self.agent_cli(changed_tree, base)
+        self.assertEqual((code, result['trust_level']), (0, 'agent'), result)
+        # The same note under lane true is still refused: the switch is the policy's, per level.
+        self.f.git('checkout', '-q', '--detach', base)
+        strict, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy(lane=True)})
+        self.assertEqual(self.agent_cli(changed_tree, strict)[1]['reason'], 'definition_changed')
+
+    def test_by_level_lane_must_be_true_false_or_tree(self):
+        for bad in ('yes', 'Tree', 1, None, []):
             doc = json.loads(self.agent_policy())
             doc['checks']['unit']['kinds']['wrapper']['by_level']['agent']['lane'] = bad
             with self.assertRaises(evidence_verify.Failure, msg=repr(bad)) as raised:
@@ -1296,7 +1326,7 @@ class CommittedPolicy(unittest.TestCase):
 
     def rules(self, check):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
-        return evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')
+        return evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')
 
     def test_the_committed_lane_file_is_valid_exists_at_head_and_matches_what_st_test_runs(self):
         text = (ROOT / '.st/required-lanes.json').read_text()
@@ -1309,7 +1339,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(rules['argv'], command, lane)  # the lane is what the local producer runs
             for path in rules['definition_paths']:
                 self.assertTrue((ROOT / path).exists(), path)
-            declared = evidence_verify.policy_rules(policy, lane, 'compoundingtech/smalltalk')['inputs']
+            declared = evidence_verify.policy_rules(policy, lane, 'compoundingtech/fractal')['inputs']
             if declared is not None:
                 self.assertEqual(rules['tree_inputs'], declared, lane)  # what the lane tests is what the policy declares as inputs
         self.assertEqual(set(json.loads(text)['lanes']), set(module.LOCAL))
@@ -1324,7 +1354,7 @@ class CommittedPolicy(unittest.TestCase):
             for path in rules['definition_paths']:
                 target = f.repo / path / 'file' if (ROOT / path).is_dir() else f.repo / path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(f'{path}\n')
+                target.write_text('# fixture\n' if target.name == '.gitignore' else f'{path}\n')  # a .gitignore naming itself is not added
             f.git('add', '-A')
             f.git('commit', '-q', '--allow-empty', '-m', f'base {lane}')
             base_tree = f.git('rev-parse', 'HEAD^{tree}')
@@ -1345,7 +1375,7 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
-        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
+        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')['require'] for check in json.loads(text)['checks']}
         self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'ci-script-tests': 'shadow', 'fractal-web': 'off',
                                  'rust-tests': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
@@ -1388,9 +1418,8 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(sorted(rules['inputs']) if rules['inputs'] else None, declared.get(check), check)
             for path in rules['inputs'] or ():
                 self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
-        self.assertEqual(self.rules('typescript-client')['sample_one_in'], 5)
-        for check in ('linux-gate', 'fractal-web'):
-            self.assertEqual(self.rules(check)['sample_one_in'], 5, check)
+        for check in ('linux-gate', 'typescript-client', 'fractal-web'):
+            self.assertEqual(self.rules(check)['sample_one_in'], 1, check)  # no sampling on pull requests (Nathan, 2026-10-26)
 
     def test_the_fractal_web_inputs_cover_every_tracked_path_the_web_lane_detector_matches(self):
         # The detector decides whether the lane runs at all; a path it matches that the key left out would let a change to it reuse a
@@ -1447,7 +1476,8 @@ class CommittedPolicy(unittest.TestCase):
                          {check: check in ENFORCED for check in policy['checks']})
         for check in ENFORCED:
             self.assertEqual(policy['checks'][check].get('events'), ['pull_request'], check)
-            self.assertGreaterEqual(policy['checks'][check].get('sample_one_in', 1), 2, f'{check}: an enforced check keeps a comparison sample')
+            # Our pull requests skip CI entirely (Nathan, 2026-10-26): no comparison sample; the merge queue's full run is the comparison.
+            self.assertEqual(policy['checks'][check].get('sample_one_in', 1), 1, check)
         with_host = {}
         for check, entry in policy['checks'].items():
             for kind, rule in entry['kinds'].items():
@@ -1463,8 +1493,9 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent', 'queue'], check)
             override = dict(rule['by_level']['host'])
             # The first two checks admitted a host note unbound (cooperative machine trust); every check added since holds the host
-            # to the lane as well (Factory, 2026-10-22), so a tree that edits its own lane never skips on a local note.
-            self.assertIs(override.pop('lane', False), check in HOST_LANE_BOUND, check)
+            # to the lane as well (Factory, 2026-10-22); since 2026-10-26 to the lane as the signed tree defines it, so a tree that edits
+            # its own lane skips on a host note made with that edited definition (Nathan: our pull requests skip CI entirely).
+            self.assertEqual(override.pop('lane', False), 'tree' if check in HOST_LANE_BOUND else False, check)
             # The agent level: the host's rule exactly, with the lane binding.
             agent = dict(rule['by_level']['agent'])
             self.assertIs(agent.pop('lane'), True, check)
@@ -1516,9 +1547,9 @@ class CommittedPolicy(unittest.TestCase):
             self.assertIsNone(rules['max_age_s'], check)  # no age limit by default
             self.assertIs(rules['enforce'], check in ENFORCED, check)  # skipping is off until the policy says otherwise
             observed = rules['kinds']['observed']
-            self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/smalltalk',
+            self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/fractal',
                                                    '.github/workflows/fleet.yml', check])
-            self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/smalltalk/')
+            self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/fractal/')
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
         for check in ('isolation-vm', 'mail-redelivery-canaries'):  # daily only: nothing in the per-PR policy waits on them

@@ -189,7 +189,7 @@ impl LocalTarget {
         let config = fractal_daemon::config::Config::load_client_unvalidated(None).ok()?.0;
         let endpoint = endpoint_word(words).or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"));
         let socket = match endpoint.map(fractal_daemon::client::Endpoint::parse) {
-            Some(fractal_daemon::client::Endpoint::Unix(socket)) => socket,
+            Some(Ok(fractal_daemon::client::Endpoint::Unix(socket))) => socket,
             Some(_) => return None,
             None => config.socket,
         };

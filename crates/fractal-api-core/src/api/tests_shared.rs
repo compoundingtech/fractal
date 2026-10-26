@@ -1,4 +1,4 @@
-//! Fixtures of `api::tests` that the tests of the crates above (st3-api-mailbox) use too.
+//! Fixtures of `api::tests` that the tests of the crates above (fractal-api-mailbox) use too.
 use super::*;
 use std::path::PathBuf;
 

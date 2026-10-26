@@ -2,7 +2,7 @@
 name = "fractal-daemon"
 version = "0.1.0"
 edition = "2024"
-description = "Claims-graph agent reconciler: the st3 library"
+description = "Claims-graph agent reconciler: the Fractal daemon library"
 license = "MIT"
 
 [features]
@@ -40,9 +40,9 @@ opentelemetry = "0.30"
 opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-json", "reqwest-blocking-client", "internal-logs", "logs"] }
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
 opentelemetry-appender-tracing = { version = "0.30", features = ["experimental_use_tracing_span_context"] }
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
-pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "6336c376fe3d1657d825f4278465b6192b770b40" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "6336c376fe3d1657d825f4278465b6192b770b40" }
+pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "6336c376fe3d1657d825f4278465b6192b770b40" }
 resvg = "0.48"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
