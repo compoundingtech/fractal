@@ -103,7 +103,7 @@ coverage checks remain enforced. The characterization run used
 
 `claims-v9.json` captures the current helper-launcher registry, including
 `agent.launcher-bound`, `agent.helper-launched` and `client.action-result`.
-Versions 1 through 8 stay frozen. Generate v9 from the merged registry on dev3 with
+Versions 1 through 8 stay frozen. Generate v9 from the merged registry with
 `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v9.json`;
 do not hand-edit or overwrite v8. The simulation selects v9 and records its filename
 in audit summaries.
@@ -116,12 +116,12 @@ local observations do not enter the replicated claim set or the oracle. Their
 claim fallback; the internal append path is the same path used for other generated
 system observations.
 
-The v9 never-trim set has not yet been measured. After generating v9, characterize
-all 17 fixed seeds on dev3 with
-`cargo test -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
-The currently retained `NEVER_TRIMS` value `[13, 34, 144, 987]` is v8's measured set,
-not a v9 result. Update it from the observed v9 outcomes and record those outcomes
-here; preserve the exact per-seed equality and majority trim-coverage checks.
+The measured v9 never-trim set is `[3]`: seeds 1, 2, 5, 8, 13, 17, 21, 34, 55,
+89, 144, 233, 377, 610, 987 and 1597 trim (16/17 coverage). All 17 fixed seeds
+converge. Characterization used
+`cargo test -p fractal --test integration convergence:: -- --nocapture --test-threads=4`
+on a gated Linux build host. The first v9 run failed only the five stale v8
+trim expectations; exact per-seed equality and majority trim coverage remain.
 
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&fractal_schema::registry().claims)`

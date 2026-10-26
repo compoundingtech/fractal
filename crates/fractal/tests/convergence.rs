@@ -1730,11 +1730,11 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. The last measured
-/// characterization, with corpus v8 and schema-valid deployment inputs, had seeds
-/// 13, 34, 144 and 987 never reach a trim. Recharacterize all 17 fixed seeds for v9:
-/// claim generation consumes the schedule's RNG. Keep the exact per-seed equality.
-const NEVER_TRIMS: &[u64] = &[13, 34, 144, 987];
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v9,
+/// all 17 fixed seeds converge; only seed 3 never reaches a trim. This measured
+/// characterization includes the owner-local helper and action-receipt kinds.
+/// Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
+const NEVER_TRIMS: &[u64] = &[3];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
