@@ -1098,7 +1098,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                     card.line(Line::from(vec![
                         span(format!("  {:<12}", step.name), theme::text()),
                         span(
-                            format!("{:<18}", super::adapt::human_presentation(&step.assignee)),
+                            format!("{:<18}", step.assignee),
                             if step.asks_you {
                                 theme::fg(theme::PERSON)
                             } else {
@@ -1460,7 +1460,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
     if let Some(who) = &item.raised_by {
         card.line(Line::from(vec![
             span(format!("{:<10}", "raised by"), theme::dim()),
-            span(super::adapt::human_presentation(who).into_owned(), theme::soft()),
+            span(who.clone(), theme::soft()),
         ]));
     }
     if item.related.is_empty() && item.mission.is_none() && item.agent.is_none() {
@@ -3448,6 +3448,53 @@ pub fn devices_card(world: &World, width: usize) -> Doc {
 #[cfg(test)]
 mod tree_tests {
     use super::*;
+
+    #[test]
+    fn attention_identity_labels_named_st_are_not_product_names() {
+        let mut world = crate::ui::demo::world();
+        let Load::Ready(items) = &mut world.attention else {
+            panic!("the demo world has attention items");
+        };
+        let item = items.first_mut().unwrap();
+        item.raised_by = Some("st".into());
+        item.kind = AttentionKind::Message { from: "st".into(), body: "hello".into() };
+        let id = item.id.clone();
+        let drafts = Drafts {
+            text: None, cursor: 0, editing: false, confirm: None,
+            answering: None, needs_words: None, chat: None,
+        };
+        let shown = home_detail(&world, Some(&id), 120, &drafts)
+            .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("raised by st"), "{shown}");
+        assert!(shown.contains("from  st"), "{shown}");
+    }
+
+    #[test]
+    fn launch_assignee_labels_named_st_are_not_product_names() {
+        let mut world = crate::ui::demo::world();
+        let Load::Ready(items) = &mut world.attention else {
+            panic!("the demo world has attention items");
+        };
+        let item = items.first_mut().unwrap();
+        item.kind = AttentionKind::Launch {
+            planner: "planner".into(),
+            name: "audit".into(),
+            preview: Load::Ready(MissionPreview {
+                name: "audit".into(), goals: vec![], agents: vec![], workspace: String::new(),
+                steps: vec![PreviewStep {
+                    name: "scan".into(), assignee: "st".into(), after: vec![], asks_you: false,
+                }],
+            }),
+        };
+        let id = item.id.clone();
+        let drafts = Drafts {
+            text: None, cursor: 0, editing: false, confirm: None,
+            answering: None, needs_words: None, chat: None,
+        };
+        let shown = home_detail(&world, Some(&id), 120, &drafts)
+            .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains(&format!("  {:<12}{:<18}", "scan", "st")), "{shown}");
+    }
 
     #[test]
     fn mission_copy_is_fractal_only_at_the_rendering_boundary() {

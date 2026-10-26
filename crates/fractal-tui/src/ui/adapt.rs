@@ -133,7 +133,6 @@ pub fn offline_grace() -> std::time::Duration {
 pub(super) fn human_presentation(text: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     match text {
-        "st" => Cow::Borrowed("Fractal"),
         "a step is ready; st has not said which agent takes it" => {
             Cow::Borrowed("a step is ready; Fractal has not said which agent takes it")
         }
@@ -1051,7 +1050,7 @@ mod tests {
             human_presentation(word.explain()),
             "Fractal keeps this open and starts other missions when something happens"
         );
-        assert_eq!(human_presentation("st"), "Fractal");
+        assert_eq!(human_presentation("st"), "st");
         assert_eq!(human_presentation("blocked · st does not say"), "blocked · Fractal does not say");
         assert_eq!(
             human_presentation("Its st channel is not attached, so its mail is held (reason)"),
@@ -1829,6 +1828,19 @@ mod tests {
         assert_eq!(preview.steps[1].after, vec!["scan"]);
         assert!(preview.steps[1].asks_you);
         assert_eq!(preview.agents.len(), 1);
+    }
+
+    #[test]
+    fn an_agent_named_st_keeps_its_launch_assignment_label() {
+        let normalized = json!({
+            "goals": [],
+            "display_order": ["scan"],
+            "steps": {
+                "scan": {"path": "scan", "work_selector": {"kind": "assigned", "agent": "agent/st"}, "dependencies": [], "gates": []}
+            }
+        });
+        let preview = preview("audit", &normalized);
+        assert_eq!(preview.steps[0].assignee, "st");
     }
 
     #[test]

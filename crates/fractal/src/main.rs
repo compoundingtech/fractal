@@ -4608,6 +4608,7 @@ fn main() -> ExitCode {
 }
 
 fn cli_main() -> ExitCode {
+    let _ = *STDERR_MESSAGE;
     // A recorder link starts st3 as `git` or `gh`. It must not build the async runtime.
     if let Some(program) = fractal_daemon::recorder::invoked_program() {
         fractal_daemon::recorder::run(program);
@@ -4682,7 +4683,6 @@ fn cli_main() -> ExitCode {
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(fractal_daemon::driver_hook::SUBCOMMAND))
     {
-        let _ = STDERR_MESSAGE.set(ClientMessage::Stable);
         return run_driver_hook();
     }
     // Cargo bakes the target name into each executable. The installed st3 binary cannot
@@ -4742,7 +4742,6 @@ fn cli_main() -> ExitCode {
     reject_web_global_flags(&mut command, &matches)
         .unwrap_or_else(|error| exit_usage_error(error));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
-    let _ = STDERR_MESSAGE.set(ClientMessage::for_output(matches!(&cli.command, Command::Driver(_))));
     if let Command::ActorContract { effective } = &cli.command {
         return match actor_contract::print(*effective) {
             Ok(()) => ExitCode::SUCCESS,
@@ -5065,10 +5064,30 @@ enum ClientMessage {
     Human,
 }
 
-static STDERR_MESSAGE: std::sync::OnceLock<ClientMessage> = std::sync::OnceLock::new();
+static STDERR_MESSAGE: std::sync::LazyLock<ClientMessage> = std::sync::LazyLock::new(|| {
+    ClientMessage::for_output(native_driver_requested(std::env::args_os().skip(1)))
+});
+
+fn native_driver_requested(arguments: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    let mut skip_value = false;
+    for argument in arguments {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if matches!(argument.to_str(), Some("--endpoint" | "--instance" | "--catalog" | "--daemon-wait")) {
+            skip_value = true;
+        } else if argument.as_encoded_bytes().starts_with(b"-") {
+            continue;
+        } else {
+            return argument == "driver" || argument == fractal_daemon::driver_hook::SUBCOMMAND;
+        }
+    }
+    false
+}
 
 fn stderr_message(legacy_prefix: &'static str, message: std::fmt::Arguments<'_>) {
-    let mode = STDERR_MESSAGE.get().copied().unwrap_or_else(|| ClientMessage::for_output(false));
+    let mode = *STDERR_MESSAGE;
     eprintln!("{}: {message}", mode.diagnostic_prefix(legacy_prefix));
 }
 
