@@ -114,6 +114,14 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "POST /v1/task-grants",
+        "production caller authority denies all until P3 binds op-proxy to kernel identity; a probe would measure only the pre-store 403, not claim-backed creation; task_grants API/store tests cover creation with a trusted test authority",
+    ),
+    (
+        "POST /v1/task-grants/{id}/revoke",
+        "production caller authority denies all until P3 binds op-proxy to kernel identity; a probe would measure only the pre-store 403, not claim-backed revocation; task_grants API/store tests cover revocation with a trusted test authority",
+    ),
+    (
         "POST /v1/deploy/verify-go",
         "requires an immutable packaged deployment policy and genuinely signed local GO/principal/STOP history, absent from generated cost stores; deploy_verify.rs covers the real CLI/API refusal boundary; successful verification scans eligible-origin and deployment history, whose growth is not measured here",
     ),
@@ -504,6 +512,7 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get("GET /v1/task-grants/{id}", "/v1/task-grants/{task_grant}"),
     post("POST /v1/client/push-registration", "/v1/client/push-registration", |_, _| push_body()),
     Probe {
         route: "DELETE /v1/client/push-registration",
@@ -2480,6 +2489,25 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         store.append_claim(&running).unwrap();
     }
     let mut fixture = fixture(&person, &client, subjects).await;
+    // Mutations are transport-denied until P3, but reads serve durable grants today.
+    // Seed through the native store so the GET probe measures a populated lookup.
+    let manifest = serde_json::from_value(json!({
+        "version":1,"title":"Invented cost grant",
+        "requester":{"principal":"person/bench-operator","run":"cost-run","step":"cost-step","incarnation":"cost-1"},
+        "window":{"notBefore":"2026-10-20T00:00:00Z","notAfter":"2026-10-20T01:00:00Z"},
+        "provider":{"name":"example","browserProfile":"example","origins":["https://example.com"]},
+        "browserSteps":[],"writes":[],"readers":[]
+    })).unwrap();
+    let mut grant = fractal_schema::task_grants::CreateTaskGrantRequest {
+        manifest, op_proxy_case_id: "cost-case".into(), digest: String::new(),
+    };
+    grant.digest = grant.manifest.digest().unwrap();
+    let receipt = store.create_task_grant(&grant).unwrap();
+    let grant_id = urlencoding::encode(&receipt.grant_id).into_owned();
+    let record = client.get::<Value>(&format!("/v1/task-grants/{grant_id}")).await
+        .expect("the populated task-grant read must succeed");
+    assert_eq!(record["digest"], receipt.digest);
+    fixture.items.insert("task_grant", grant_id);
     fixture.items.insert("usage_since", usage_window.0.to_string());
     fixture.items.insert("usage_until", usage_window.1.to_string());
     fixture.items.insert(
