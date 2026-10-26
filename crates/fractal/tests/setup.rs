@@ -649,7 +649,7 @@ fn harness_probe_uses_login_path_order_and_flags_without_starting_a_seat() {
 fn an_explicit_claude_choice_never_falls_back_after_channel_install_failure() {
     let fixture = Fixture::new();
     for (harness, script) in [
-        ("claude", "#!/bin/sh\necho 'Claude Code is older than the minimum version required by your organization' >&2\nexit 1\n"),
+        ("claude", "#!/bin/sh\nif [ \"$*\" = 'plugin disable --help' ]; then echo 'Usage: claude plugin disable'; exit 0; fi\necho 'Claude Code is older than the minimum version required by your organization' >&2\nexit 1\n"),
         ("codex", "#!/bin/sh\nexit 0\n"),
     ] {
         let path = fixture.path(&format!("bin/{harness}"));
