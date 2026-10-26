@@ -2204,7 +2204,20 @@ async fn obsolete_restart_cannot_release_failed_start(change: &str) {
     let request = fixture.request(&subject, "pending-retry").await;
     let attempts = fixture.runtime.attempts.lock().unwrap().len();
     let pending = fixture.store.runtime_start_for(&subject).unwrap().unwrap().id;
-    if change == "suspend" {
+    if change == "revoke" {
+        fixture.store.append_claim(&ClaimInput {
+            subject: subject.clone(),
+            kind: "runtime.action.requested".into(),
+            actor: None,
+            fields: std::collections::BTreeMap::from([
+                ("action".into(), json!("terminate")),
+                ("operation".into(), json!(pending)),
+            ]),
+            evidence: vec![request.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some("later-revocation".into()),
+        }).unwrap();
+    } else if change == "suspend" {
         let suspended = fixture.store.append_claim(&ClaimInput {
             subject: subject.clone(),
             kind: "runtime.action.requested".into(),
@@ -2269,6 +2282,11 @@ async fn a_changed_declaration_retires_a_failed_start_restart_request() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_retires_a_failed_start_restart_request() {
     obsolete_restart_cannot_release_failed_start("stop").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_retires_a_failed_start_restart_request() {
+    obsolete_restart_cannot_release_failed_start("revoke").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

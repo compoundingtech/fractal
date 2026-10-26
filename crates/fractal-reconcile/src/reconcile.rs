@@ -8146,7 +8146,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let later_control = self.store.claims_for(&subject.subject, Some("runtime.action.requested"))?
             .into_iter().rev().take_while(|claim| claim.id != request.id)
-            .any(|claim| claim.actor.is_some() && matches!(
+            .any(|claim| matches!(
                 claim.body["fields"]["action"].as_str(),
                 Some("suspend" | "resume" | "stop" | "terminate")
             ));
