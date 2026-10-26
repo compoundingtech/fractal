@@ -101,7 +101,7 @@ pub fn agent_glyph(state: AgentState, spinner: &'static str) -> (&'static str, C
 /// st reports, marked so.
 pub fn agent_shown_word(agent: &Agent) -> String {
     match &agent.reported {
-        Some(state) => format!("{state} · older st"),
+        Some(state) => format!("{state} · older Fractal"),
         None => agent_word(agent.state).to_owned(),
     }
 }
@@ -1456,7 +1456,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
     }
     if item.related.is_empty() && item.mission.is_none() && item.agent.is_none() {
         card.line(Line::from(span(
-            "st names no agent, mission or step for this item.",
+            "Fractal names no agent, mission or step for this item.",
             theme::dim(),
         )));
     }
@@ -1573,7 +1573,7 @@ pub fn agent_order(world: &World) -> Vec<&Agent> {
 
 fn agent_group(agent: &Agent) -> &'static str {
     if agent.unmanaged {
-        return "found running · not started by st";
+        return "found running · not started by Fractal";
     }
     match agent.state {
         AgentState::NeedsYou => "waiting on you",
@@ -1688,7 +1688,7 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
         .into_iter()
         .chain(world.agents.items().iter().any(|agent| agent.reported.is_some()).then(|| {
             Line::from(span(
-                "This host's st is older: agent states show as st reports them.",
+                "This host's Fractal is older: agent states show as Fractal reports them.",
                 theme::dim(),
             ))
         }))
@@ -1939,7 +1939,7 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
                 .count()
         };
         let kinds = [
-            (count(|mission| mission.system), "from st"),
+            (count(|mission| mission.system), "from Fractal"),
             (
                 count(|mission| !mission.system && mission.word == Word::NotStarted),
                 "not started",
@@ -2180,7 +2180,7 @@ pub fn mission_kdl(world: &World, id: Option<&str>, width: usize) -> Doc {
         }
         None => doc.wrap(
             &[run(
-                "st does not send mission declarations to clients yet. Until it does, read it with: fractal missions show",
+                "Fractal does not send mission declarations to clients yet. Until it does, read it with: fractal missions show",
                 theme::dim(),
             )],
             width,
@@ -2411,7 +2411,7 @@ pub fn fleet_detail(world: &World, id: Option<&str>, width: usize, spinner: &'st
             if machine.you_are_here {
                 "This is the machine Fractal TUI is talking to."
             } else {
-                "st reports no link to this machine."
+                "Fractal reports no link to this machine."
             },
             theme::dim(),
         )));
@@ -2673,7 +2673,7 @@ pub fn worktree_detail(
 fn demo_banner(doc: &mut Doc, width: usize) {
     doc.lines(text::wrap(
         &[run(
-            "st does not track worktrees yet. Everything on this tab is invented.",
+            "Fractal does not track worktrees yet. Everything on this tab is invented.",
             theme::fg(theme::YELLOW),
         )],
         width,
@@ -2918,7 +2918,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
 pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'static str) -> Doc {
     let mut doc = Doc::new();
     let details = &agent.details;
-    let unknown = || span("st has not said", theme::dim());
+    let unknown = || span("Fractal has not said", theme::dim());
     // A close control on the pane itself, not only on the header rule.
     let close = "× close";
     doc.targets.push(super::doc::Target {

@@ -399,7 +399,7 @@ async fn no_longer_asked(client: &Client, source: &str) -> String {
             format!("This review is no longer asked: the step is {state}")
         }
         Some(state) => format!(
-            "This review is no longer asked: the step is {state}; a new card appears if st asks again"
+            "This review is no longer asked: the step is {state}; a new card appears if Fractal asks again"
         ),
         None => {
             "This review is no longer asked: it was answered, or what it reviewed moved on".into()
@@ -791,7 +791,7 @@ impl Args {
 
     // Keep the renderer's option handling together; the CLI owns validation and help.
     fn render_args(&self) -> Vec<String> {
-        let mut args = vec!["st ui".to_owned()];
+        let mut args = vec!["fractal ui".to_owned()];
         for (enabled, flag) in [
             (self.demo, "--demo"),
             (self.local, "--local"),
@@ -831,7 +831,7 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
     let pane = ui::requests::pane_for(&open.subject).map_err(anyhow::Error::msg)?;
     let person = configured_person()?
         .filter(|person| person.starts_with("person/") && person.len() > 7)
-        .context("fractal ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config")?;
+        .context("fractal ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config")?;
     let dir = ui::requests::dir(&person).context("fractal ui open needs a state directory: set HOME")?;
     let place = match (open.split, open.below) {
         (false, _) => Place::Tab,
@@ -871,7 +871,7 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
             open.subject
         ),
         Some(Answer::NotFound) => anyhow::bail!(
-            "st has no {}: nothing was opened. Check the name with fractal agents ls or fractal missions ls",
+            "Fractal has no {}: nothing was opened. Check the name with fractal agents ls or fractal missions ls",
             open.subject
         ),
         None => anyhow::bail!(
@@ -939,7 +939,7 @@ pub fn run(mut options: Args) -> Result<()> {
         person
             .as_deref()
             .is_some_and(|person| person.starts_with("person/") && person.len() > 7),
-        "fractal ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config"
+        "fractal ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config"
     );
     let (clients, cache_path) = match &profile {
         Some(profile) => {

@@ -261,7 +261,7 @@ enum Command {
     /// Configure this machine and start fractal, with flags for unattended setup.
     Setup(crate::setup::SetupArgs),
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
-    #[command(version = fractal_drivers::version::display_version())]
+    #[command(alias = "tui", version = fractal_drivers::version::display_version())]
     Ui(fractal_tui::Args),
     /// Open the daemon's local web session in a browser.
     ///
@@ -4631,7 +4631,6 @@ fn cli_main() -> ExitCode {
         }
         None => {}
     }
-    fractal::dispatch(arguments.as_mut_slice());
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());
