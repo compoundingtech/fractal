@@ -276,6 +276,31 @@ The OAuth 2.1 profile excludes implicit and password grants.
 | Authorization response | After owner approval, redirect to the validated client URI with a short-lived, single-use code, client state and the authorization-server `iss` | [RFC 9207](https://www.rfc-editor.org/rfc/rfc9207) |
 | Token exchange / refresh | Public `/token` binds code redemption to the client, redirect URI, resource and PKCE verifier; refresh remains bound to the same grant | RFC 6749, RFC 7636, RFC 8707 |
 
+The RFC 8414 authorization-server metadata advertises this complete contract;
+the issuer's public HTTPS hostname remains DQ-E1:
+
+| Field | Value |
+| --- | --- |
+| `issuer` | The authorization server's public HTTPS issuer identifier |
+| `authorization_endpoint` | Absolute public HTTPS URL for `/authorize` |
+| `token_endpoint` | Absolute public HTTPS URL for `/token` |
+| `code_challenge_methods_supported` | `["S256"]` |
+| `client_id_metadata_document_supported` | `true` |
+| `token_endpoint_auth_methods_supported` | `["none"]` (public clients using PKCE) |
+| `authorization_response_iss_parameter_supported` | `true` (RFC 9207) |
+| `grant_types_supported` | `["authorization_code", "refresh_token"]` |
+| `response_types_supported` | `["code"]` |
+| `scopes_supported` | The supported assistant read and explicit native write scopes |
+
+The RFC 9728 protected-resource metadata advertises:
+
+| Field | Value |
+| --- | --- |
+| `resource` | This MCP resource's absolute HTTPS identity on the OpenAI tunnel |
+| `authorization_servers` | Array containing the authorization server's issuer identifier |
+| `scopes_supported` | The assistant scopes accepted by this MCP resource |
+| `bearer_methods_supported` | `["header"]` (`Authorization: Bearer`, not query/body credentials) |
+
 ```text
 1. Client -> /mcp: no bearer
    /mcp -> Client: 401 + protected-resource metadata location
@@ -336,6 +361,22 @@ valid only until that grant expires, at most 30 days, follows the existing
 renewal authority rules, and cannot revive an expired, revoked or disabled
 grant or broaden its scopes. Existing grant revocation invalidates access and
 refresh use immediately; token expiry is not a revocation delay.
+
+For public clients, rotate the refresh token on every successful use, as
+required by OAuth 2.1 and [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700).
+The daemon atomically consumes the old refresh token and issues its replacement.
+Retain rotated-token digests for reuse detection: presenting an already-rotated
+refresh token revokes the entire token family, meaning its grant, through the
+existing grant revoke. No access or refresh credential in that family remains
+usable after revocation.
+
+Access and refresh credentials have distinct token types and distinct digest
+namespaces. A refresh token is never accepted as a bearer at use; an access
+token is never accepted as a credential at `/token`. Type checks precede
+credential lookup, so a digest match cannot cross the boundary.
+Sender-constrained tokens (DPoP) are not chosen because rotation and reuse
+detection provide the public-client refresh replay protection without an
+additional proof-of-possession protocol.
 
 The daemon's `session()` checks the bearer at every use, including refresh
 authorization as applicable. Alongside issuer, origin, owner/actor binding,
