@@ -266,13 +266,15 @@ async fn overload_poll_exhaustion_retains_authenticated_response_details() {
     let _ = server.await;
     let _ = awake.await;
     assert!(error.is::<PeerOverloaded>());
+    let inner_elapsed = error.downcast_ref::<ReplicationExchangeFailure>().unwrap().elapsed_ms;
     let failure = ReplicationExchangeFailure::from_error(
         &error, ReplicationFailurePhase::Verify, Duration::from_secs(300), None,
     );
     assert_eq!(failure.code, "replication-overloaded");
     assert_eq!(failure.phase, ReplicationFailurePhase::ResponseBody);
     assert_eq!(failure.http_status, Some(503));
-    assert_eq!(failure.elapsed_ms, 300_000);
+    assert_eq!(failure.elapsed_ms, inner_elapsed);
+    assert!(failure.preparation_ms.is_some());
     assert!(!failure.cause.contains("private"));
 }
 

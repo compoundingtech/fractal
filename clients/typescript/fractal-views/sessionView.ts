@@ -203,7 +203,7 @@ export async function readOlder<T extends Entry>(
     if (!oldest || (first && before(first, oldest) < 0) || !page.hasMore || !page.cursor) return page;
     cursor = page.cursor;
   }
-  throw new Error('this session is too long to read further back here; st conversations timeline reads it all');
+  throw new Error('this session is too long to read further back here; fractal conversations timeline reads it all');
 }
 
 /** The quiet line above the oldest entry: how to see more, that more is on its way, why it could
@@ -214,7 +214,7 @@ export function olderNote(conversation: Conversation<Entry>): string | null {
   if (older.failed) return `Could not load earlier entries: ${older.failed} · scroll up to try again`;
   if (conversation.hasOlder) return 'Scroll up for earlier entries';
   if (!conversation.entries.length) return null;
-  return 'Start of this session · earlier ones: st conversations sessions';
+  return 'Start of this session · earlier ones: fractal conversations sessions';
 }
 
 export type ConversationRow<T> = { kind: 'older' } | { kind: 'entry'; entry: T };

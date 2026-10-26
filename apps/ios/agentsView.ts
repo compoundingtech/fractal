@@ -73,11 +73,11 @@ export function agentState(agent: Pick<Agent, 'presentation'>): AgentState {
 /** The word for an agent from an st too old to serve its presentation: the state st reports,
  *  marked so. Undefined when st serves a presentation. */
 export function agentReported(agent: Pick<Agent, 'presentation' | 'state'>): string | undefined {
-  return agent.presentation ? undefined : `${agent.state} · older st`;
+  return agent.presentation ? undefined : `${agent.state} · older Fractal`;
 }
 
 /** What the Agents list says when a row came from an older st. */
-export const OLDER_ST_NOTE = "This host's st is older: agent states show as st reports them.";
+export const OLDER_ST_NOTE = "This host runs an older Fractal version: agent states appear as reported.";
 
 export const SPINNER = '⠿';
 export function agentGlyph(state: AgentState, spinner = SPINNER): { glyph: string; color: string } {
@@ -112,7 +112,7 @@ export function agentWord(state: AgentState): string {
   }
 }
 
-export const UNMANAGED_GROUP = 'found running · not started by st';
+export const UNMANAGED_GROUP = 'found running · not started by Fractal';
 export function agentGroup(row: Pick<AgentRowView, 'state' | 'unmanaged'>): string {
   if (row.unmanaged) return UNMANAGED_GROUP;
   switch (row.state) {
