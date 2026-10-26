@@ -82,7 +82,16 @@ pub fn start_attention_list(state: &AppState) {
                 };
                 waiting(&mut results, false);
                 results.push(("attention", crate::performance::task("attention/refresh", || {
-                    if attention { refresh_attention_list(&reader) } else { Ok(()) }
+                    if !attention {
+                        return Ok(());
+                    }
+                    // A prompt card reads its seat's conversation on this node.
+                    let pending = |seat: &str| super::prompt_card::seat_pending_calls(&summary_state, seat);
+                    refresh_attention_list_reading(
+                        &reader,
+                        |previous| attention_fleet(&reader, previous),
+                        Some(&pending),
+                    )
                 })));
                 // As the daemon starts, the counts every summary shares, once attention is
                 // published and before any window asks for a summary.
@@ -238,6 +247,16 @@ pub fn refresh_attention_list_with(
     store: &Store,
     fleet: impl FnOnce(Option<&Arc<AttentionFleet>>) -> Option<Arc<AttentionFleet>>,
 ) -> anyhow::Result<()> {
+    refresh_attention_list_reading(store, fleet, None)
+}
+
+/// `refresh_attention_list_with`, giving each prompt card the calls `pending` reads for its
+/// seat. Without it a prompt card carries no prompt.
+fn refresh_attention_list_reading(
+    store: &Store,
+    fleet: impl FnOnce(Option<&Arc<AttentionFleet>>) -> Option<Arc<AttentionFleet>>,
+    pending: Option<super::prompt_card::PendingCalls>,
+) -> anyhow::Result<()> {
     let (generation, previous) = store.newest_attention_list();
     let clock = ATTENTION_LIST_CLOCK.as_millis();
     // Read before the snapshot: a roster published in between presents again at the next wake.
@@ -279,6 +298,7 @@ pub fn refresh_attention_list_with(
                 let rows = if fleet_changed {
                     let mut rows = (*previous.rows).clone();
                     present_attention(store, &mut rows, fleet.as_deref())?;
+                    present_prompts(&mut rows, pending);
                     if rows == *previous.rows {
                         Arc::clone(&previous.rows)
                     } else {
@@ -293,6 +313,7 @@ pub fn refresh_attention_list_with(
                 store.note_attention_list_fold(cause.as_deref().unwrap_or("first"));
                 let mut rows = client_attention_resources_at(store, None, false, now)?;
                 present_attention(store, &mut rows, fleet.as_deref())?;
+                present_prompts(&mut rows, pending);
                 let rows = match &previous {
                     Some(previous) if *previous.rows == rows => Arc::clone(&previous.rows),
                     _ => Arc::new(rows),
@@ -402,6 +423,25 @@ pub fn present_attention(
     fleet: Option<&AttentionFleet>,
 ) -> anyhow::Result<()> {
     crate::performance::task("attention/present", || present_rows(store, rows, fleet))
+}
+
+/// Give each prompt card's presentation its prompt: the calls without a result `pending` reads
+/// in its seat's conversation. The calls are as of this fold: a conversation changes no claim
+/// attention reads, so a card shows a newer call at the next fold, within a clock period.
+fn present_prompts(rows: &mut [Value], pending: Option<super::prompt_card::PendingCalls>) {
+    let Some(pending) = pending else {
+        return;
+    };
+    for row in rows
+        .iter_mut()
+        .filter(|row| row["attention_kind"] == "harness-prompt" && row["presentation"].is_object())
+    {
+        let calls = match row["source_id"].as_str() {
+            Some(seat) => pending(seat),
+            None => Err("st does not know which seat shows this prompt".to_owned()),
+        };
+        row["presentation"]["prompt"] = super::prompt_card::prompt_card(row, calls);
+    }
 }
 
 fn present_rows(
@@ -573,5 +613,44 @@ pub fn published_view_not_ready(collection: &str) -> ApiError {
         code: format!("{collection}-not-ready"),
         message: format!("the {collection} view is still being prepared; retry shortly"),
         details: Box::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_prompt_card_reads_its_seat_and_no_other_card_reads_one() {
+        let mut rows = vec![
+            json!({
+                "attention_kind": "harness-prompt",
+                "source_id": "agent/example/oak",
+                "action_parameters": {"prompt.respond": {"answers": ["allow", "deny"], "call_id": "call-a"}},
+                "presentation": {"kind": "prompt"},
+            }),
+            json!({"attention_kind": "human-gate", "source_id": "agent/example/elm", "presentation": {"kind": "review"}}),
+            json!({"attention_kind": "harness-prompt", "source_id": "agent/example/ash", "presentation": {"kind": "prompt"}}),
+        ];
+        let read = std::sync::Mutex::new(Vec::new());
+        let pending = |seat: &str| {
+            read.lock().unwrap().push(seat.to_owned());
+            match seat {
+                "agent/example/oak" => Ok(vec![json!({"call_id": "call-a", "name": "Bash", "arguments": {"command": "ls"}})]),
+                _ => Err("the seat runs elsewhere".to_owned()),
+            }
+        };
+        present_prompts(&mut rows, Some(&pending));
+        assert_eq!(*read.lock().unwrap(), ["agent/example/oak", "agent/example/ash"]);
+        assert_eq!(rows[0]["presentation"]["prompt"]["calls"][0]["tool"], "Bash");
+        assert_eq!(rows[0]["presentation"]["prompt"]["allow"], true);
+        assert!(rows[1]["presentation"].get("prompt").is_none());
+        assert_eq!(rows[2]["presentation"]["prompt"]["unknown_reason"], "the seat runs elsewhere");
+        assert_eq!(rows[2]["presentation"]["prompt"]["answers"], json!([]));
+
+        // Without a reader, as in a fold that is not the refresher's, a card carries no prompt.
+        let mut rows = vec![json!({"attention_kind": "harness-prompt", "source_id": "agent/example/oak", "presentation": {}})];
+        present_prompts(&mut rows, None);
+        assert!(rows[0]["presentation"].get("prompt").is_none());
     }
 }

@@ -12180,3 +12180,86 @@ mission "overview-renamed" state="ready" {
         );
     }
 }
+
+#[test]
+fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let transcript = home.join(".codex/sessions/2026/09/24/prompted.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let owner = "agent/example/prompted";
+    let incarnation = "native-pty:one";
+    let provider_incarnation = "provider-one";
+    let native_id = "native-prompted-codex-test";
+    let lines = [
+        json!({"type":"session_meta","timestamp":"2026-09-24T12:00:00Z","payload":{"id":native_id,"cwd":root.path(),"source":"test"}}),
+        json!({"type":"response_item","timestamp":"2026-09-24T12:00:01Z","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"ls\"]}","call_id":"call-done"}}),
+        json!({"type":"response_item","timestamp":"2026-09-24T12:00:02Z","payload":{"type":"function_call_output","call_id":"call-done","output":"README.md"}}),
+        json!({"type":"response_item","timestamp":"2026-09-24T12:00:03Z","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"make\",\"release\"]}","call_id":"call-waiting"}}),
+    ];
+    fs::write(&transcript, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+    let mut state = state(root.path());
+    state.native_session_home = Some(home);
+    let directory = state
+        .state_dir
+        .join("drivers")
+        .join(&hex::encode(Sha256::digest(owner.as_bytes()))[..24])
+        .join("state");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join("runtime.json"),
+        serde_json::to_vec(&json!({"agent":"example/prompted","incarnation":provider_incarnation})).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        directory.join("binding.json"),
+        serde_json::to_vec(&json!({"agent":"example/prompted","runtimeIncarnation":provider_incarnation,"threadId":native_id})).unwrap(),
+    )
+    .unwrap();
+    for (kind, fields) in [
+        (
+            "runtime.observed",
+            BTreeMap::from([
+                ("status".into(), Value::String("running".into())),
+                ("runtime_id".into(), Value::String("prompted-pty".into())),
+                ("incarnation_id".into(), Value::String(incarnation.into())),
+                ("terminal".into(), Value::Bool(true)),
+            ]),
+        ),
+        (
+            "harness.observed",
+            BTreeMap::from([
+                ("state".into(), Value::String("blocked".into())),
+                ("driver".into(), Value::String("codex".into())),
+                ("incarnation_id".into(), Value::String(incarnation.into())),
+                ("evidence_incarnation".into(), Value::String(provider_incarnation.into())),
+            ]),
+        ),
+    ] {
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: owner.into(),
+                kind: kind.into(),
+                actor: Some(owner.into()),
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    let calls = prompt_card::seat_pending_calls(&state, owner).unwrap();
+    assert_eq!(
+        calls,
+        [json!({"call_id":"call-waiting","name":"shell","arguments":{"command":["make","release"]}})]
+    );
+    let row = json!({"action_parameters": {"prompt.respond": {"answers": ["approve", "deny"], "call_id": "call-waiting"}}});
+    let prompt = prompt_card::prompt_card(&row, Ok(calls));
+    assert_eq!(prompt["calls"][0]["input"], r#"{"command":["make","release"]}"#);
+    assert_eq!(prompt["allow"], true);
+
+    // A seat st has no session for says why, and the card offers no answer.
+    let reason = prompt_card::seat_pending_calls(&state, "agent/example/absent").unwrap_err();
+    assert!(reason.starts_with("st cannot read this seat's conversation"), "{reason}");
+}
