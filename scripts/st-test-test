@@ -55,7 +55,7 @@ def git(repo, *args, stdin=None):
     return done.stdout.decode().strip()
 
 
-def apparent_gb(path):
+def apparent_gb(path, quiet=False):
     """Pool-cap policy fixtures count file lengths, independently of filesystem allocation and compression."""
     return sum(file.stat().st_size for file in path.rglob('*') if file.is_file()) / 1e9
 
@@ -896,7 +896,7 @@ class StTest(unittest.TestCase):
         base = self.home / '.cache/st-test'
         code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_POOL_MAX_GB': '50'})
         self.assertEqual(code, 0, err)
-        own, = list(base.iterdir())
+        own, = list((base / "pools").iterdir())
         record = json.loads((own / 'tree-0.size').read_text())
         self.assertGreater(record['gb'], 0)
         self.assertTrue(st_test.read_unit_size(own, 0)[1])  # newer than the tree's and the target's own directories
