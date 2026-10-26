@@ -182,12 +182,12 @@ New standing declarations use `every "3m"`. User-authored non-standing observers
 retain their explicit intervals, including faster thirty-second polling.
 
 Cadence is local scheduling state keyed by observer/revision, independent of the
-retained provider cursor, ETags and response bodies. A new revision or process
-starts active cadence; explicit refresh runs immediately and resets cadence.
-The persisted successful-observation deadline is the conservative three-minute
-restart bound; effective six/ten-minute deadlines live in the scheduler, not in
-the receipt. Backoff uses the writer's canonical observation outcome across all
-fields, not raw delta JSON or whether a health/refresh receipt was written.
+retained provider cursor. After a new revision or daemon restart, the observer polls
+once immediately, then follows three-minute active cadence and quiet backoff.
+Explicit refresh also runs immediately and resets cadence. Scheduling deadlines
+are not persisted in receipts (only their hashes are recorded); effective
+six/ten-minute deadlines live in the scheduler. Backoff uses the writer's canonical
+observation outcome across all fields, not raw delta JSON or receipt writes.
 An identity-only quiet delta after an item change advances to six minutes;
 re-emitting the same item does not count as another change.
 Pagination still continues at one second without advancing quiet backoff, and
