@@ -510,7 +510,8 @@ async fn dispatch_telemetry_is_correlated_and_content_free() {
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
     let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket.as_path()).build().unwrap(),
         bearer: "BEARER_SECRET_SENTINEL".into() };
-    assert_eq!(call(&adapter, "fractal_alerts_list", &json!({"cursor":"CURSOR_SECRET_SENTINEL"})).await.unwrap()["request_id"], id);
+    // A cached alias call must be observed under its canonical name.
+    assert_eq!(call(&adapter, "st_alerts_list", &json!({"cursor":"CURSOR_SECRET_SENTINEL"})).await.unwrap()["request_id"], id);
     let mut args = send_arguments();
     args["content"] = json!("ARGUMENT_CONTENT_SENTINEL");
     assert_eq!(call(&adapter, "fractal_message_send", &args).await.unwrap_err()["code"], "daemon-denied");
@@ -523,6 +524,7 @@ async fn dispatch_telemetry_is_correlated_and_content_free() {
         "tool=\"unknown\"", "duration_ms=", id, &format!("response_bytes={expected_bytes}")] {
         assert!(text.contains(field), "{field}: {text}");
     }
+    assert!(!text.contains("tool=\"st_alerts_list\""), "{text}");
     assert!(!text.contains("SENTINEL"), "{text}");
     server.abort();
 }

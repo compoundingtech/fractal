@@ -178,8 +178,8 @@ The corresponding `st_*` names are deprecated, callable aliases for the adapter'
 0.1.0 release only and are removed in `fractal-chatgpt` 0.2.0. They are hidden from
 `tools/list` so refreshed clients discover only canonical names while Johannes's
 ChatGPT connector can still call its cached names. Refresh that connector before
-0.2.0. Descriptions and input schemas remain unchanged during this compatibility
-release; old names in their cross-references denote these same handlers.
+0.2.0. Description cross-references use canonical names; all other wording and input
+constraints remain unchanged.
 
 The four conversation discovery tools use only `read.assistant.conversation`; they do
 not require mission, agent, work or new scopes. `fractal_conversations_list` returns the
