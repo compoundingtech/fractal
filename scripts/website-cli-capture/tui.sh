@@ -8,7 +8,8 @@
 #   CAPTURE_DIR=/tmp/cli-capture scripts/website-cli-capture/tui.sh > tui-now.ansi
 #   CAPTURE_DIR=/tmp/cli-capture scripts/website-cli-capture/tui.sh C-k > tui-open.ansi
 #
-# Start the fixture daemon first, as in capture.sh. Needs tmux.
+# Start the fixture daemon first, as in capture.sh. Needs tmux. CAPTURE_PERSON is the TUI's person
+# (run.sh, default person/robin).
 set -euo pipefail
 : "${CAPTURE_DIR:?set CAPTURE_DIR to the directory the capture test serves from}"
 here=$(dirname "$(realpath "$0")")
@@ -19,7 +20,7 @@ tmux=(tmux -S "${CAPTURE_TMUX_SOCKET:-$CAPTURE_DIR/tmux.sock}" -f /dev/null)
 "${tmux[@]}" kill-server 2>/dev/null || true
 trap '"${tmux[@]}" kill-server 2>/dev/null || true' EXIT
 "${tmux[@]}" new-session -d -x 100 -y 32 -c "$PWD" \
-  "env CAPTURE_DIR=$(printf '%q' "$CAPTURE_DIR") CAPTURE_COLS=100 CAPTURE_ROWS=32 $(printf '%q' "$here/run.sh") tui"
+  "env CAPTURE_DIR=$(printf '%q' "$CAPTURE_DIR") CAPTURE_PERSON=$(printf '%q' "${CAPTURE_PERSON:-person/robin}") CAPTURE_COLS=100 CAPTURE_ROWS=32 $(printf '%q' "$here/run.sh") tui"
 # Waits until two captures a second apart match, so live data has arrived. A screen with a spinner
 # never matches: after 10 seconds it is taken as it stands.
 settle() {
