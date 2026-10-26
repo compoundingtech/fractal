@@ -36,8 +36,10 @@ sys.dont_write_bytecode = True
 # any maximum age. This script only adds what no policy can say: who may skip and when.
 SKIP_EVENTS = ('pull_request', 'merge_group')
 VERIFIER_TIMEOUT = int(os.environ.get('GATE_VERIFIER_TIMEOUT', '30'))
-# A change that touches anything that decides a skip is never skipped: those files are what
-# a forged skip would have to edit. Compared between the accepted base and this run's tree.
+# A change that touches anything that decides a skip is not skipped on a note alone: those files are what a forged skip would
+# have to edit. Compared between the accepted base and this run's tree. One exception (decide): a pull_request run covered by a note
+# of one of OWN_LEVELS, our dev hosts, which ran the PR's own scripts. It is judged by THIS gate and verifier as the base has them
+# (the workflow fetches both from BASE_SHA), never the PR's copies, and the merge queue runs every check in full before it lands.
 PROTECTED = (
     'scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
     '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts', '.github/workflows/workspace-ci.ts',
@@ -57,6 +59,8 @@ PROTECTED = (
 # merge tree, as before head trees existed. 24 is about 8 hours of main at 3 merges an hour and covered 99% of pull request runs
 # (2026-10-17 to 2026-10-19: median 2, 99th percentile 22).
 HEAD_TREE_MAX_BEHIND = 24
+# The signer levels whose notes cover a pull request that edits protected files (see PROTECTED).
+OWN_LEVELS = ('host',)
 
 NOTES = 'refs/notes/evidence'  # records live under refs/notes/evidence/<tree>/: one prefix per tree
 TAGS = 'refs/tags/evidence'  # and, protected by a ruleset, under refs/tags/evidence/<tree>/ (docs/st3/gate-evidence.md, "Records as tags")
@@ -120,7 +124,9 @@ def decide(context, outcome, result, tree):
         return 'run', 'event does not allow skipping'
     if context.get('tree_of') == 'head' and context['event'] != 'pull_request':
         return 'run', 'a head-tree note covers pull request runs only'
-    if context.get('protected_changed') != []:
+    protected = context.get('protected_changed')
+    if protected != [] and not (own_pull_request(context, result) and isinstance(protected, list)
+                                and all(isinstance(p, str) and p and not p.startswith('<') for p in protected)):
         return 'run', 'a file that decides skipping changed, or could not be compared'
     checks = [
         (not sampled(context, result, tree), 'sampled: the real job runs anyway, to compare it with the note'),
@@ -143,6 +149,11 @@ def decide(context, outcome, result, tree):
         if not ok:
             return 'run', why
     return 'skip', 'covered by a trusted full-tier note'
+
+
+def own_pull_request(context, result):
+    """A pull_request run whose note is one of our hosts' (OWN_LEVELS): it covers the run even when the change edits protected files."""
+    return context['event'] == 'pull_request' and result.get('trust_level') in OWN_LEVELS
 
 
 def sampled(context, result, tree):
@@ -414,6 +425,32 @@ def base_signing_module(base):
     return module
 
 
+def branch_point_verdict(branch_point, head, base, current, context=None):
+    """How far the branch is behind main, when the pull request head's own tree may be asked about; else a Fallback naming why not.
+
+    The history half of the head-tree rule, with no CI context in it so that scripts/st-test asks the very same question before a push: the
+    branch is not more than HEAD_TREE_MAX_BEHIND commits behind (first-parent count from the branch point to `current`, the base tip the
+    merge commit was made on), and no protected file differs between the branch point and the base or `current` (main moved one since
+    the branch). The branch's OWN protected edits do not make it fall back: they are the run's `protected_changed` (choose_tree), which
+    decide weighs against the note's signer. Runs git in the current directory."""
+    behind = git_out('rev-list', '--count', '--first-parent', f'{branch_point}..{current}')
+    if not behind.isdigit():
+        raise Fallback('could not count how far the branch is behind')
+    if context is not None:
+        context['behind'] = int(behind)  # reported even when it is the reason for the fallback
+    if int(behind) > HEAD_TREE_MAX_BEHIND:
+        raise Fallback(f'the branch is {behind} commits behind main, more than {HEAD_TREE_MAX_BEHIND}')
+    changed = []
+    for first, second in ((branch_point, base), (branch_point, current)):
+        diff = run('git', 'diff', '--no-renames', '--name-only', '-z', first, second)
+        if diff.returncode != 0:
+            raise Fallback('could not compare protected files')
+        changed += [p for p in diff.stdout.decode(errors='replace').split('\0') if p in PROTECTED]
+    if changed:
+        raise Fallback('protected files differ from the branch point')
+    return int(behind)
+
+
 def choose_tree(context):
     """The revision whose tree this run asks about, and why not the pull request head when it is the merge.
 
@@ -421,8 +458,9 @@ def choose_tree(context):
     the payload head is a full object id that is present or fetchable; the checked-out commit is the merge whose
     second parent IS that head (or the head itself); the PR author, the actor and the triggering actor are on the
     author list at the BASE and every non-merge commit in the branch has a listed author and committer (the signing
-    guard's own check, taken from the base); and no protected file differs between the branch point and the head, nor
-    between the branch point and the base (main's protected files moved since the branch). Any failure is a Fallback."""
+    guard's own check, taken from the base); and no protected file differs between the branch point and the base (main's protected
+    files moved since the branch). Any failure is a Fallback. The protected files the branch itself changes (branch point to head) are
+    returned as the run's protected changes."""
     merge_tree = git_out('rev-parse', '--verify', 'HEAD^{tree}', check=False) or None
     context['merge_tree'] = merge_tree
     if context['event'] != 'pull_request':
@@ -460,25 +498,16 @@ def choose_tree(context):
             raise Fallback(f'authors: {str(error)[:120]}')
         branch_point = git_out('merge-base', base, head)
         current = git_out('rev-parse', '--verify', '-q', 'HEAD^1', check=False) if checked_out != head else base
-        behind = git_out('rev-list', '--count', '--first-parent', f'{branch_point}..{current or base}')
-        if not behind.isdigit():
-            raise Fallback('could not count how far the branch is behind')
-        context['behind'] = int(behind)
-        if int(behind) > HEAD_TREE_MAX_BEHIND:
-            raise Fallback(f'the branch is {behind} commits behind main, more than {HEAD_TREE_MAX_BEHIND}')
-        changed = []
-        for first, second in ((branch_point, head), (branch_point, base), (branch_point, current or base)):
-            diff = run('git', 'diff', '--no-renames', '--name-only', '-z', first, second)
-            if diff.returncode != 0:
-                raise Fallback('could not compare protected files')
-            changed += [p for p in diff.stdout.decode(errors='replace').split('\0') if p in PROTECTED]
-        if changed:
-            raise Fallback('protected files differ from the branch point')
+        branch_point_verdict(branch_point, head, base, current or base, context)
+        own = run('git', 'diff', '--no-renames', '--name-only', '-z', branch_point, head)
+        if own.returncode != 0:
+            raise Fallback('could not compare protected files')
+        edits = [p for p in own.stdout.decode(errors='replace').split('\0') if p in PROTECTED]
         context['tree_of'], context['head_tree'] = 'head', 'used'
         # The head's lane definition is judged from the branch point, not main's tip: a branch that only lags main changed no lane
         # file itself (docs/st3/gate-evidence.md, "Which lane definition a pull request is held to").
         context['lane_base'] = branch_point
-        return head, []
+        return head, edits
     except Fallback as reason:
         context['head_tree'] = 'fallback:' + str(reason).replace(' ', '_')
     except Exception as error:

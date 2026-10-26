@@ -937,8 +937,22 @@ export type AttentionPresentation = {
   | null
 ;
   raised_by: (AttentionActor | null);
+  revision?: AttentionRevision;
   tier: "stopped" | "alert" | "today" | "later" | null;
   waiting: (AttentionWaiting | null);
+};
+
+export type AttentionRevision = {
+  from_revision: string;
+  lines: Array<AttentionRevisionLine>;
+  reason: string;
+  to_revision: string;
+  truncated: boolean;
+};
+
+export type AttentionRevisionLine = {
+  op: "+" | "-" | "~";
+  text: string;
 };
 
 export type AttentionTargetState = {
@@ -3017,6 +3031,7 @@ export type TimelineEntry = Omit<{
   body: {
 
 };
+  delivers?: string;
   final: boolean;
   id: TimelineEntryId;
   revision: number;

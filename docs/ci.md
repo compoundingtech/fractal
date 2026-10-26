@@ -17,7 +17,8 @@ The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces t
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
 on `main` are `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (`ci-script-tests`, the CI scripts' own tests on their
-declared inputs, runs beside `genie-freshness` and joins the required list once it has run green on `main`),
+declared inputs, runs beside `genie-freshness` and is not a required context of its own: the `linux-gate` job, which every head reports,
+needs it and fails when it failed or was cancelled; a head from before it existed has no run of it and is not blocked),
 and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)). The VM tests
 (`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
 requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
@@ -550,23 +551,43 @@ both generations continue to coordinate with Claude's own config lock.
 `tests/transport_isolation.rs` proves that a task st2 starts in its own systemd user scope
 survives a SIGKILL of its supervisor's cgroup, for both exec and pty tasks. The managed-agent
 color contract also checks environment propagation through a real user scope, including a
-PTY restart. These three tests need a real systemd user manager, which Namespace's runner
-image does not boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily
-`daily-isolation-vm` job (`daily-long.yml`):
+PTY restart. The current runtime adds three ignored tests in the `fractal-runtime` package's
+`scope_cascade` binary:
+
+| Test | Guarantee |
+| --- | --- |
+| `exec_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | An exec scope survives its parent service's cgroup SIGKILL, keeps its incarnation and cgroup, then stops cleanly. |
+| `pty_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | A PTY scope survives the same cascade with its incarnation and cgroup intact, then stops cleanly. |
+| `literal_environment_is_preserved_across_a_work_scope` | Literal environment values cross a real user scope unchanged. |
+
+The landed `fractal-runtime` library test
+`isolate::retirement::native_tests::a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor`
+adds the fourth current-runtime control. It checks that a changed original request cannot
+signal either workload, then retires an escaped descendant while its neighboring scope
+survives. The test remains ignored in ordinary CI; the VM explicitly selects it by package,
+`fractal_runtime` binary, `lib` kind and full name. This execution does not authorize production
+activation of the retirement primitive.
+
+All seven controls need a real systemd user manager, which Namespace's runner image does not
+boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily `daily-isolation-vm`
+job (`daily-long.yml`):
 
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
    `systemd-detect-virt` reports `kvm`, so it never falls back to emulation.
 2. The producer prebuilds the preserved workspace selection into one archive, including the
-   existing st2 integration test binary and its executable for these three VM tests.
+   existing st2 integration binary and executable plus the fractal-runtime `scope_cascade` and
+   library binaries.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
    NixOS with a lingering user, copies in the archive, extracts it at the checkout's path (the
-   test binary has st2's path compiled in) and runs both cascade tests and
-   `nomad_survival::managed_agent_color_contract_crosses_systemd_scope` with nextest as a
-   transient service of that user's systemd manager. The VM compiles nothing.
+   st2 test binary has its executable's path compiled in) and runs the seven controls with
+   nextest as a transient service of that user's systemd manager. The VM compiles nothing.
 
-The VM requires all three tests to run and pass, with no isolation opt-out. The job summary
-records the KVM probe and each phase's elapsed time.
+The archive inventory must match the seven exact package, binary, kind and test identities.
+Both listing and execution use `--run-ignored all`, and execution sets retries to zero.
+The JUnit report must contain exactly those seven distinct successful results, with no missing,
+extra, skipped, rerun or flaky result. All seven tests must run and pass, with no isolation
+opt-out. The job summary records the KVM probe and each phase's elapsed time.
 
 ### TypeScript client
 

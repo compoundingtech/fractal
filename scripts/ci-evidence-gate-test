@@ -166,6 +166,22 @@ class Decide(unittest.TestCase):
         result['events'] = None
         self.assertEqual(gate.decide(context, 'satisfied', result, tree)[0], 'skip')
 
+    def test_a_pull_request_note_of_our_hosts_covers_a_change_to_protected_files_and_no_other_does(self):
+        context, result, tree = self.good()
+        edits = {'protected_changed': ['scripts/ci-evidence-gate', '.st/evidence-skip-policy.json']}
+        host = {**result, 'trust_level': 'host', 'signer': 'host/box'}
+        self.assertEqual(gate.decide({**context, **edits, 'event': 'pull_request'}, 'satisfied', host, tree)[0], 'skip')
+        for name, (c, r) in {
+            'merge group': ({**context, **edits}, host),
+            'fleet note': ({**context, **edits, 'event': 'pull_request'}, result),
+            'agent note': ({**context, **edits, 'event': 'pull_request'}, {**host, 'trust_level': 'agent'}),
+            'comparison failed': ({**context, 'protected_changed': ['<comparison failed>'], 'event': 'pull_request'}, host),
+            'no base': ({**context, 'protected_changed': ['<no base>'], 'event': 'pull_request'}, host),
+            'not compared': ({k: v for k, v in context.items() if k != 'protected_changed'} | {'event': 'pull_request'}, host),
+        }.items():
+            with self.subTest(name):
+                self.assertEqual(gate.decide(c, 'satisfied', r, tree), ('run', 'a file that decides skipping changed, or could not be compared'))
+
     def test_removing_any_one_condition_runs(self):
         context, result, tree = self.good()
         cases = {
@@ -451,14 +467,14 @@ class EndToEnd(unittest.TestCase):
 
     LANES = {'version': 1, 'lanes': {'linux-gate': {'argv': ['make', 'test'], 'definition_paths': ['scripts/lane.sh', 'scripts/lane.json']}}}
 
-    def lane_bound(self, head_files=None):
-        """A pull request whose base admits a host note held to the lane (by_level lane: true), after main changed a lane script."""
+    def lane_bound(self, head_files=None, lane=True):
+        """A pull request whose base admits a host note held to the lane (by_level lane: true, or "tree"), after main changed a lane script."""
         self.host = self.f.key('host', 'host/box')
         policy = skip_policy(trust_levels=['fleet', 'host'], kinds={
             'observed': {'command': ['github-actions', '{repository}', '.github/workflows/fleet.yml', '{check}'],
                          'runner_prefix': 'github:{repository}/'},
             'wrapper': {'command': ['make', 'test'], 'trust_levels': ['host'],
-                        'by_level': {'host': {'command': ['make', 'test'], 'events': ['pull_request'], 'lane': True}}}})
+                        'by_level': {'host': {'command': ['make', 'test'], 'events': ['pull_request'], 'lane': lane}}}})
         return self.pull_request(policy=policy, base_files={'scripts/lane.sh': 'run the tests\n', 'scripts/lane.json': '{}\n',
                                                                    '.st/required-lanes.json': json.dumps(self.LANES)},
                                  main_files={'scripts/lane.sh': 'run the tests, and more, on main\n'}, head_files=head_files)
@@ -484,6 +500,19 @@ class EndToEnd(unittest.TestCase):
         fields, _ = self.run_gate(s['base'], **self.pr_env(s, BASE_SHA=s['tip']))
         self.assertEqual((fields['decision'], fields['tree_of'], fields['outcome']), ('run', 'head', 'rejected'), fields)
         self.assertIn('wrong_definition', fields['reason'])
+
+    def test_a_host_held_to_its_trees_lane_covers_a_head_that_edits_the_lane_with_that_trees_definition(self):
+        s = self.lane_bound(head_files={'scripts/lane.json': '{"fewer": true}\n'}, lane='tree')
+        definition = self.lane_digest(s, s['base'])
+        self.assertEqual(definition['changed'], ['scripts/lane.json'])
+        self.host_note(s, definition['sha256'])  # made with the base's definition: not what this tree runs
+        fields, _ = self.run_gate(s['base'], **self.pr_env(s, BASE_SHA=s['tip']))
+        self.assertEqual((fields['decision'], fields['outcome']), ('run', 'rejected'), fields)
+        self.assertIn('wrong_definition', fields['reason'])
+        record = self.note(s['head'], s['head_tree'], key=self.host, signer='host/box', runner='wrapper', command=('make', 'test'),
+                           inputs={'lane_definition_sha256': definition['tree_sha256']}, seconds=2)
+        fields, outputs = self.run_gate(s['base'], **self.pr_env(s, BASE_SHA=s['tip']))
+        self.assertEqual((fields['decision'], fields['tree_of'], outputs['record']), ('skip', 'head', record), fields)
 
     def test_a_head_that_edits_its_own_lane_still_runs(self):
         s = self.lane_bound(head_files={'scripts/lane.json': '{"fewer": true}\n'})
@@ -676,6 +705,23 @@ class EndToEnd(unittest.TestCase):
         self.assertNotIn('POISON', printed)
         self.assertIn('evidence-decision v1', printed)
 
+    def test_the_base_gate_judges_a_branch_that_edits_the_gate_and_skips_it_on_our_hosts_note(self):
+        for edit in ('poison', 'comment'):
+            with self.subTest(edit):
+                self.tmp_reset()
+                self.host = self.f.key('host', 'host/box')
+                text = ("import os\nopen(os.environ['GITHUB_OUTPUT'], 'a').write('outcome=satisfied\\nskip=true\\nrecord=" + 'a' * 40 +
+                        "\\n')\nprint('POISON evidence-decision v1 decision=skip')\n") if edit == 'poison' else \
+                    (ROOT / 'scripts/ci-evidence-gate').read_text() + '\n# edited by the branch\n'
+                s = self.pull_request(head_files={'scripts/ci-evidence-gate': text}, policy=skip_policy(trust_levels=['fleet', 'host']))
+                record = self.note(s['head'], s['head_tree'], key=self.host, signer='host/box', seconds=1)
+                outputs, printed = self.run_step(s['base'], **self.pr_env(s))
+                self.assertNotIn('POISON', printed)
+                fields = decision(printed)
+                with open(ROOT / 'scripts/ci-evidence-gate', 'rb') as handle:  # the base carries this checkout's gate
+                    self.assertEqual(fields['gate_sha256'], gate.hashlib.sha256(handle.read()).hexdigest())
+                self.assertEqual((outputs['skip'], outputs['record'], fields['tree_of'], fields['trust_level']), ('true', record, 'head', 'host'))
+
     def test_after_a_fallback_the_old_merge_tree_note_still_works_as_before(self):
         s = self.pull_request()
         self.note(s['merge'], s['merge_tree'], seconds=1)
@@ -689,15 +735,26 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(fields['tree_of'], 'merge')
         self.assertIn('authors', fields['head_tree'])
 
-    def test_a_branch_that_edits_a_protected_file_falls_back_even_with_a_valid_head_note(self):
+    def test_a_branch_that_edits_a_protected_file_skips_on_a_host_note_for_its_head_and_runs_on_any_other(self):
         for path in ('scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
-                     '.github/workflows/fleet.yml'):
+                     '.st/required-lanes.json', '.st/rust-test-inputs.json', '.github/workflows/fleet.yml'):
             with self.subTest(path):
                 self.tmp_reset()
-                s = self.pull_request(head_files={path: 'edited by the branch\n'})
+                self.host = self.f.key('host', 'host/box')
+                s = self.pull_request(head_files={path: 'edited by the branch\n'}, policy=skip_policy(trust_levels=['fleet', 'host']))
+                # A fleet note for the head: the head tree is asked about (no fallback), and the protected edit runs the check.
                 self.note(s['head'], s['head_tree'], seconds=1)
                 fields = self.assertRuns(s['base'], path, **self.pr_env(s))
-                self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:protected_files_differ_from_the_branch_point'))
+                self.assertEqual((fields['tree_of'], fields['head_tree'], fields['outcome']), ('head', 'used', 'satisfied'))
+                self.assertIn('decides_skipping', fields['reason'])
+                # Our host's note for the same head covers the pull request run, judged by the base's gate and verifier.
+                record = self.note(s['head'], s['head_tree'], key=self.host, signer='host/box', seconds=2)
+                fields, outputs = self.run_gate(s['base'], **self.pr_env(s))
+                self.assertEqual((fields['decision'], fields['tree_of'], fields['trust_level'], outputs['record']), ('skip', 'head', 'host', record))
+                # The merge queue keeps running it: the same host note on the merge group's tree does not skip a protected change.
+                self.note(s['merge'], s['merge_tree'], key=self.host, signer='host/box', seconds=3)
+                fields = self.assertRuns(s['base'], 'merge group ' + path, HEAD_SHA=s['merge'])
+                self.assertEqual((fields['event'], fields['outcome']), ('merge_group', 'satisfied'))
 
     def test_main_changing_a_protected_file_after_the_branch_point_falls_back(self):
         s = self.pull_request(main_files={'.st/evidence-skip-policy.json': skip_policy(trust_levels=['fleet']) + '\n'})
@@ -1202,7 +1259,9 @@ class EndToEnd(unittest.TestCase):
         for name, level in wrapper['by_level'].items():
             self.assertEqual(level['command'], ['nix', 'develop', '.#web', '-c', 'bash', 'scripts/ci-local-web'])
             # host and agent cover pull requests only; the (inert) queue level covers the merge queue only, like the other host checks'.
-            self.assertEqual((level['events'], level['lane']), (['merge_group' if name == 'queue' else 'pull_request'], True), name)
+            # A host note is held to the lane as its own tree defines it (a change may edit the lane: our hosts sign it too).
+            self.assertEqual((level['events'], level['lane']), (['merge_group' if name == 'queue' else 'pull_request'],
+                                                                'tree' if name == 'host' else True), name)
         self.assertRegex((ROOT / '.github/workflows/fleet.yml').read_text(), re.compile(r'^  evidence-gate-fractal-web:', re.M))
         shard_inputs = {'job': 'fractal-web', 'steps': 'run', 'step_outcomes': 'run=success'}
         for shard in ({'kit_shard': '1', 'kit_shard_count': '2', 'kit_play_set': 'all', 'app_test_set': 'all'},
@@ -2046,6 +2105,22 @@ class WorkflowStructure(unittest.TestCase):
         self.assertEqual(condition.count('head.repo.full_name == github.repository'), 1)
         self.assertNotIn('true', condition)
         self.assertEqual(condition.count('||'), 3 + condition.count("github.event_name != 'pull_request' ||"))
+
+    def test_ci_script_tests_is_enforced_through_the_linux_gate_job_not_as_a_required_context_of_its_own(self):
+        # A required context blocks every head from before the check existed (no run at that head). linux-gate is reported by every head
+        # and always waits for the long stages, so it carries ci-script-tests' verdict at no extra latency.
+        block = self.job_text('linux-gate')
+        self.assertRegex(block, r'needs:[^\n]*\bci-script-tests\b[^\n]*|needs:\n(?:\s+- .*\n)*?\s+- ci-script-tests\n')
+        self.assertIn('evidence-gate-ci-script-tests', block)
+        step = block.split('- name: Require ci-script-tests to pass', 1)[1].split('\n      - name:', 1)[0]
+        self.assertIn('needs.ci-script-tests.result', step)
+        self.assertIn('needs.evidence-gate-ci-script-tests.outputs.skip', step)
+        self.assertIn('[ "$SCRIPT_TESTS_RESULT" = success ] && exit 0', step)
+        self.assertNotIn('failure', step)  # a failure or a cancellation falls through to exit 1
+        self.assertTrue(step.rstrip().endswith('exit 1'))
+        settings = json.loads((ROOT / '.github/repo-settings.json').read_text())
+        required = re.findall(r'"context":\s*"([^"]+)"', json.dumps(settings))
+        self.assertNotIn('ci-script-tests', required)
 
     def test_every_evidence_test_script_runs_in_a_required_check(self):
         # The self-tests that read only the CI scripts run in ci-script-tests; the ones that read the whole tree run in genie-freshness.
