@@ -3371,8 +3371,9 @@ fn app_server_log_tail(path: &Path, start: u64) -> Result<String> {
 fn diagnostic_output_tail(bytes: &[u8]) -> String {
     let bytes = &bytes[bytes.len().saturating_sub(8 * 1024)..];
     let text = String::from_utf8_lossy(bytes);
-    let lines: Vec<_> = text.lines().rev().take(20).collect();
-    lines.into_iter().rev().collect::<Vec<_>>().join("\n")
+    let mut lines: Vec<_> = text.lines().rev().take(20).collect();
+    lines.reverse();
+    lines.join("\n")
 }
 
 /// A preloaded resume that fails drops its completion sender, which reads as "channel is empty and
