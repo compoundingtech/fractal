@@ -3983,7 +3983,7 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let reason = claim.fields["reason"].as_str().unwrap();
         assert!(reason.contains("admissionNativeConsumption") && reason.contains("99.42.7"));
         assert!(reason.contains(driver.as_str()));
-        assert!(reason.contains(&format!("fractal admission override {} --binary", driver.as_str())));
+        assert!(reason.contains(&format!("st admission override {} --binary", driver.as_str())));
         assert_eq!(
             claim.idempotency_key,
             admission_diagnostic("agent/node.fixture", "first", &observed)
