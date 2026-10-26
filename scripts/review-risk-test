@@ -180,6 +180,40 @@ class ReviewRisk(unittest.TestCase):
         self.write("crates/fractal-store/src/store/plain.rs", "fn a() {}\n++ DROP TABLE t\n")
         self.assertEqual(self.rules(self.risk())["data-deletion"], "high")
 
+    def on_main(self, files):
+        """Commit FILES on main and start a fresh change branch from it."""
+        self.git("checkout", "-q", "main")
+        for path, text in files.items():
+            self.write(path, text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "main moves")
+        self.git("checkout", "-q", "-B", "change", "main")
+
+    def test_a_rename_scores_the_old_path_too(self):
+        self.on_main({".st/evidence-keys": "key\n"})
+        self.git("mv", ".st/evidence-keys", "docs/moved-keys")
+        result = self.risk()
+        self.assertEqual(self.rules(result)["trust-files"], "high")
+        self.assertEqual(result["level"], "high")
+
+    def test_non_ascii_and_spaced_paths_are_scored_by_path_and_by_content(self):
+        self.on_main({"crates/fractal-wire/src/caf\u00e9.rs": "pub fn f() {}\n"})
+        self.write("crates/fractal-store/src/store/\u00e9t\u00e9 plain.rs", 'fn a() { exec("DROP TABLE t"); }\n')
+        (self.repo / "crates/fractal-wire/src/caf\u00e9.rs").write_text("")
+        result = self.risk()
+        self.assertEqual(self.rules(result)["data-deletion"], "high")
+        self.assertEqual(self.rules(result)["breaking-public-contract"], "high")
+
+    def test_a_risky_class_the_rules_do_not_map_scores_high(self):
+        rules = json.loads((self.repo / ".st/review-risk.json").read_text())
+        del rules["classes"]["release-notes"]
+        self.on_main({".st/review-risk.json": json.dumps(rules)})
+        self.write("release-notes/x.json", "{}\n")
+        result = self.risk()
+        self.assertEqual(self.rules(result)["release-notes"], "high")
+        self.assertEqual(result["level"], "high")
+        self.assertTrue(any("no level for this class" in line for reason in result["reasons"] for line in reason["lines"]))
+
 
 if __name__ == "__main__":
     unittest.main()
