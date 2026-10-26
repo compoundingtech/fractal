@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createTranscriptImages, transcriptImagesFor } from './transcriptImages.ts'
 import type { AttachmentPort, ConversationPortResult } from '../data/source.ts'
 import type { BlobChunk } from '@fractal/client/schema'
@@ -7,6 +7,15 @@ const sha = 'a'.repeat(64)
 const attachment = { id: `blob/${sha}`, mediaType: 'image/png', name: 'review.png' }
 const chunk = (data = 'aGVsbG8=', offset = 0, size = 5) => ({ _tag: 'Success' as const, value: { sha256: sha, data, offset, size } })
 const urls = () => ({ createObjectURL: vi.fn((_blob: Blob) => 'blob:viewer'), revokeObjectURL: vi.fn() })
+const decode = vi.fn<() => Promise<void>>()
+beforeEach(() => {
+  decode.mockReset().mockResolvedValue()
+  vi.stubGlobal('Image', class {
+    src = ''
+    decode = decode
+  })
+})
+afterEach(() => vi.unstubAllGlobals())
 
 describe('transcript image byte reads', () => {
   it('does not read before consent; assembles chunks and includes the native authorization carrier', async () => {
@@ -40,12 +49,12 @@ describe('transcript image byte reads', () => {
     expect(read).toHaveBeenCalledTimes(1)
     finish(chunk())
     await pending
-    expect(listener).toHaveBeenCalledTimes(2)
+    expect(listener).toHaveBeenCalledTimes(3)
     expect(cache.snapshot()).not.toBe(snapshot)
     cache.dispose()
     expect(objectUrls.revokeObjectURL).toHaveBeenCalledWith('blob:viewer')
     expect(cache.state(attachment.id)).toEqual({ _tag: 'Deferred' })
-    expect(listener).toHaveBeenCalledTimes(2)
+    expect(listener).toHaveBeenCalledTimes(3)
     unsubscribe()
   })
 
@@ -93,6 +102,55 @@ describe('transcript image byte reads', () => {
     await pending
     expect(objectUrls.createObjectURL).not.toHaveBeenCalled()
     expect(cache.snapshot().size).toBe(0)
+  })
+
+  it('keeps a complete image loading until decoding finishes', async () => {
+    const decoding = Promise.withResolvers<void>()
+    decode.mockReturnValueOnce(decoding.promise)
+    const objectUrls = urls()
+    const cache = createTranscriptImages({ chunk: async () => chunk() }, { urls: objectUrls })
+    const pending = cache.load(attachment, 'message/native')
+    await vi.waitFor(() => expect(decode).toHaveBeenCalledOnce())
+    expect(cache.state(attachment.id)).toEqual({ _tag: 'Loading' })
+    decoding.resolve()
+    await pending
+    expect(cache.state(attachment.id)).toEqual({ _tag: 'Loaded', src: 'blob:viewer' })
+  })
+
+  it('rejects undecodable PNG-signature bytes, revokes the URL and permits a fresh read on retry', async () => {
+    // The PNG magic is valid, but there are no chunks or pixels for a browser to decode.
+    const data = btoa(String.fromCharCode(137, 80, 78, 71, 13, 10, 26, 10))
+    const read = vi.fn<AttachmentPort['chunk']>().mockResolvedValue(chunk(data, 0, 8))
+    const objectUrls = urls()
+    decode.mockRejectedValueOnce(new DOMException('The source image cannot be decoded.', 'EncodingError'))
+    const cache = createTranscriptImages({ chunk: read }, { urls: objectUrls })
+    await cache.load(attachment, 'message/native')
+    expect(new Uint8Array(await objectUrls.createObjectURL.mock.calls[0]![0].arrayBuffer())).toEqual(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]))
+    expect(cache.state(attachment.id)).toEqual({ _tag: 'Failed' })
+    expect(objectUrls.revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:viewer')
+    await cache.load(attachment, 'message/native')
+    expect(read).toHaveBeenCalledTimes(2)
+    expect(decode).toHaveBeenCalledTimes(2)
+    expect(cache.state(attachment.id)._tag).toBe('Loaded')
+    cache.dispose()
+    expect(objectUrls.revokeObjectURL).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['dispose', 'evict'] as const)('revokes an in-flight decode on %s and ignores its late completion', async action => {
+    const decoding = Promise.withResolvers<void>()
+    decode.mockReturnValueOnce(decoding.promise)
+    const objectUrls = urls()
+    const cache = createTranscriptImages({ chunk: async request => ({ ...chunk(), value: { ...chunk().value, sha256: request.sha256 } }) }, { maxEntries: 1, urls: objectUrls })
+    const pending = cache.load(attachment, 'message/native')
+    await vi.waitFor(() => expect(decode).toHaveBeenCalledOnce())
+    if (action === 'dispose') cache.dispose()
+    else await cache.load({ ...attachment, id: `blob/${'b'.repeat(64)}` }, 'message/other')
+    expect(objectUrls.revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:viewer')
+    decoding.resolve()
+    await pending
+    expect(cache.state(attachment.id)).toEqual({ _tag: 'Deferred' })
+    expect(objectUrls.revokeObjectURL).toHaveBeenCalledTimes(1)
+    cache.dispose()
   })
 
   it.each([

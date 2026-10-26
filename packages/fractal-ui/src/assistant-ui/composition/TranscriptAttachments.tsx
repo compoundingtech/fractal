@@ -46,7 +46,8 @@ const formatSize = (bytes: number | undefined) => {
 }
 
 /**
- * A sent message's attachments. The kit never fetches one. Each is a quiet file card named `Image: <name>, <type>`
+ * A sent or received message's attachments (user prompts, assistant answers and incoming mail bodies alike). The kit
+ * never fetches one. Each is a quiet file card named `Image: <name>, <type>`
  * showing its kind and byte size (`Size unavailable` when the message carries none). With a host's
  * `attachmentImages`, an image card offers **Show image**, which asks the host to read it for `messageId` (the
  * attachment's own carrier message when it has one); the card then reads **Loading image**, **Not authorized**

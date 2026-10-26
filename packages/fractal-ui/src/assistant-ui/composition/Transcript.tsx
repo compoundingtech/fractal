@@ -71,7 +71,7 @@ export interface TranscriptProps {
   readonly onLoadImage?: MarkdownImageOpener
   /** The host's own inline references in message Markdown, such as a `doc/…` name it can open. */
   readonly renderInlineReference?: InlineReferenceRenderer
-  /** Host-owned reads of user-message image attachments, started only by Show image or Retry. Omit to keep every attachment a deferred card. */
+  /** Host-owned reads of image attachments on user and received (assistant or mailbox) prose, started only by Show image or Retry. Omit to keep every attachment a deferred card. */
   readonly attachmentImages?: TranscriptAttachmentImages
   readonly availability?: TranscriptAvailability
   readonly history?: TranscriptHistory
@@ -134,7 +134,11 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
   return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} />{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}{item.sendState?._tag === 'Unconfirmed' && <SendUnconfirmed state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
 const messageTimeFormatter = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit' })
-/** Sender, time and Copy share one header line; Copy shows on pointer hover or keyboard focus. A prose run shows the header once. */
+/**
+ * Sender, time and Copy share one header line; Copy shows on pointer hover or keyboard focus. A prose run shows the header once.
+ * Received prose (an assistant answer or the paired body of incoming mail) shows its attachments below the text through the
+ * same `TranscriptAttachments` as a user message, read for the attachment's carrier message, else this item's id.
+ */
 export function SeatProse({ item, senderLine, continuation = false }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string; readonly continuation?: boolean }) {
   const streaming = item._tag === 'Text' && item.streaming
   const completed = streaming ? NaN : Date.parse(item.at)
@@ -147,7 +151,7 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
       {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
       {!streaming && <span {...stylex.props(styles.answerMeta)}>{runText === undefined ? <ActionBarPrimitive.Copy aria-label="Copy answer" {...stylex.props(styles.copy, hovered && styles.copyVisible)}><Icon name="copy" size={12} /></ActionBarPrimitive.Copy> : <RunCopy text={runText} visible={hovered} />}{Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{messageTimeFormatter.format(completed)}</time>}</span>}
     </div>}
-    {item._tag === 'Text' ? <Markdown text={item.text} streaming={item.streaming} /> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
+    {item._tag === 'Text' ? <><Markdown text={item.text} streaming={item.streaming} /><TranscriptAttachments attachments={item.attachments} messageId={item.id} /></> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
   </MessagePrimitive.Root>
 }
 /**

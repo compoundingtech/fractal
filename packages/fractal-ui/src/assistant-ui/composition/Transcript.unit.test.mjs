@@ -118,6 +118,35 @@ test('a sent image is a named file card until the host loads it, and never an em
   assert.match(loaded, /<span role="status" aria-live="polite" data-testid="transcript-attachment-status"[^>]*><\/span><button[^>]*aria-label="Open layout.png"/)
 })
 
+test('received prose renders its image attachments through the same cards and host as a prompt', () => {
+  const at = new Date(now).toISOString()
+  const sender = { kind: 'agent', label: 'reviewer' }
+  const answer = { _tag: 'Text', id: 'timeline-entry/answer', role: 'assistant', text: 'Here is the rendered layout.', attachments: [{ id: 'blob/answer', mediaType: 'image/png', name: 'answer.png' }], streaming: false, at }
+  const header = { _tag: 'Message', id: 'timeline-entry/mail-message', messageId: 'message/mail', from: 'agent/reviewer', to: 'agent/example', title: 'Layout screenshot', at, sender }
+  const body = { _tag: 'Text', id: 'timeline-entry/mail-content', role: 'assistant', text: 'This is the layout I meant.', attachments: [{ id: 'blob/mail', mediaType: 'image/png', name: 'mail.png', messageId: 'message/mail' }], streaming: false, at, sender }
+  const items = [answer, header, body]
+  const render = (props = {}) => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {
+    options: { messages: [prompt, ...items], isRunning: false, onNew: async () => {} },
+  }, React.createElement(Transcript, { turns: [{ ...turn, items }], title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now, ...props })))
+  // Without a host each image is a named card with nothing to press, below the agent row's own text.
+  const cards = render()
+  assert.match(cards, /data-item-id="timeline-entry\/answer"[^]*Here is the rendered layout\.[^]*role="group" aria-label="Image: answer.png, PNG"/)
+  assert.match(cards, /data-item-id="timeline-entry\/mail-content"[^]*This is the layout I meant\.[^]*role="group" aria-label="Image: mail.png, PNG"/)
+  assert.doesNotMatch(cards, /<img|Show image/)
+  // The mailbox header row carries no attachments; only its paired body shows the image.
+  assert.match(cards, /data-item-id="timeline-entry\/mail-message"(?:(?!data-item-id=)[^])*data-item-id="timeline-entry\/mail-content"/)
+  assert.doesNotMatch(cards, /data-item-id="timeline-entry\/mail-message"(?:(?!data-item-id=)[^])*transcript-attachments/)
+  const asked = []
+  const deferred = render({ attachmentImages: { state: (id, mediaType) => { asked.push([id, mediaType]); return { _tag: 'Deferred' } }, load: () => {} } })
+  assert.deepEqual(asked.slice(0, 2), [['blob/answer', 'image/png'], ['blob/mail', 'image/png']])
+  assert.match(deferred, /<button type="button" aria-label="Show image answer.png" data-testid="transcript-attachment-show"/)
+  assert.match(deferred, /<button type="button" aria-label="Show image mail.png" data-testid="transcript-attachment-show"/)
+  assert.match(deferred, /role="group" aria-label="Image: mail.png, PNG" tabindex="-1"/)
+  const loaded = render({ attachmentImages: { state: id => id === 'blob/mail' ? { _tag: 'Loaded', src: 'data:image/png;base64,AA==' } : { _tag: 'Deferred' }, load: () => {} } })
+  assert.match(loaded, /aria-label="Open mail.png"[^>]*><img src="data:image\/png;base64,AA==" alt="mail.png"/)
+  assert.match(loaded, /aria-label="Show image answer.png"/)
+})
+
 test('host-owned header omits only the duplicate band, including unavailable history', () => {
   for (const availability of [{ _tag: 'Available' }, { _tag: 'Unavailable', reason: 'Not available' }]) {
     const render = (showHeader) => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {

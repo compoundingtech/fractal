@@ -41,6 +41,7 @@ export function createTranscriptImages(port: Pick<AttachmentPort, 'chunk'> | und
   const urls = options.urls ?? URL
   let states: ReadonlyMap<string, TranscriptImageState> = new Map()
   const sizes = new Map<string, number>()
+  const decodingUrls = new Map<string, string>()
   const listeners = new Set<() => void>()
   let bytes = 0
   let owners = 0
@@ -51,6 +52,11 @@ export function createTranscriptImages(port: Pick<AttachmentPort, 'chunk'> | und
   const remove = (next: Map<string, TranscriptImageState>, id: string) => {
     const state = next.get(id)
     if (state?._tag === 'Loaded') urls.revokeObjectURL(state.src)
+    const decoding = decodingUrls.get(id)
+    if (decoding !== undefined) {
+      urls.revokeObjectURL(decoding)
+      decodingUrls.delete(id)
+    }
     bytes -= sizes.get(id) ?? 0
     sizes.delete(id)
     next.delete(id)
@@ -79,7 +85,7 @@ export function createTranscriptImages(port: Pick<AttachmentPort, 'chunk'> | und
     const sha256 = attachment.id.slice('blob/'.length)
     const pending: TranscriptImageState = { _tag: 'Loading' }
     put(attachment.id, pending)
-    // Disposal or eviction invalidates an in-flight read; its late answer cannot allocate a URL.
+    // Disposal or eviction invalidates an in-flight read or decode and releases its URL.
     const current = () => states.get(attachment.id) === pending
     try {
       const parts: ArrayBuffer[] = []
@@ -105,7 +111,16 @@ export function createTranscriptImages(port: Pick<AttachmentPort, 'chunk'> | und
       } while (offset < total)
       if (!current()) return
       const blob = new Blob(parts, { type: attachment.mediaType })
-      put(attachment.id, { _tag: 'Loaded', src: urls.createObjectURL(blob) }, blob.size)
+      put(attachment.id, pending, blob.size)
+      if (!current()) return
+      const src = urls.createObjectURL(blob)
+      decodingUrls.set(attachment.id, src)
+      const image = new Image()
+      image.src = src
+      await image.decode()
+      if (!current()) return
+      decodingUrls.delete(attachment.id)
+      put(attachment.id, { _tag: 'Loaded', src }, blob.size)
     } catch {
       if (current()) put(attachment.id, { _tag: 'Failed' })
     }
