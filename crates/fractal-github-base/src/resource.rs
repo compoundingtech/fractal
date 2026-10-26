@@ -809,6 +809,8 @@ pub struct GithubListing {
     pub values: Vec<Value>,
     pub versions: Vec<String>,
     pub truncated: bool,
+    /// Exact unconsumed Link URL when a resumable listing reaches its page budget.
+    pub next: Option<String>,
     /// An object-wrapped listing's `total_count` on its first page, when it names one.
     pub total_count: Option<u64>,
 }
@@ -841,12 +843,14 @@ async fn github_listing_at_field(
         values: Vec::new(),
         versions: Vec::new(),
         truncated: false,
+        next: None,
         total_count: None,
     };
     while let Some(url) = next {
         if listing.versions.len() == pages {
             anyhow::ensure!(resumable, "the GitHub listing has more than {pages} pages");
             listing.truncated = true;
+            listing.next = Some(url);
             break;
         }
         let payload = github_json(client, url, token, cache_for).await?;

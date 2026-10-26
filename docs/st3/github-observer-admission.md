@@ -101,3 +101,51 @@ The existing conditional cache retains JSON and pagination links on a 304 and
 authenticates every revalidation. Standing observers with no live watch or
 mission subscription stop; stopping a seat's runtime alone does not end its
 watches. These behaviors have dedicated regression coverage.
+
+## Stable inclusive listing boundaries
+
+Repository item and comment cursors advance only to returned `updated_at`
+timestamps, not the polling clock, so idle polls keep stable request URLs.
+GitHub documents `since` as exclusive: requests subtract one second from the
+stored watermark and deduplicate overlap by item/comment identity and update
+time. The cursor retains only boundary versions. When the ten-page read budget
+is exhausted, it saves the exact next Link URL; continuation must not rebuild
+page offsets against an advanced watermark. Optional cursor fields default on
+old records; no storage version change, migration or backfill is required.
+
+Cold caches, changed URLs and endpoints without ETags still need ordinary
+responses. Authenticated idle revalidations return 304 and preserve full bodies
+and pagination links. Cache warmup after restart is not quota-free.
+
+## Bounded admission attribution
+
+Existing minute/caller/resource rows also carry closed endpoint and response
+classes, never raw URLs or query strings. Repository, issues and issue-comments
+are separate classes. Responses distinguish 200, conditional 304, other success,
+redirect, client/server errors and transport errors. Legacy rows default to
+unknown without losing reservations. Doctor reports the endpoint/status counts,
+conditional 304 hits and conservatively possible quota-bearing reservations.
+The local cap still includes 304s: provider quota and local admission are not the
+same meter. Completed sends add a durable attribution publication; failures of
+that publication expose a gap without replacing the original HTTP response.
+
+## Shared-token fleet budget: design only
+
+Two complementary options remain outside this local change:
+
+* **Single observer owner per repository across the fleet:** use a lease/election
+  and replicated observations, defining failover/freshness before suppressing
+  duplicate owners. Alias grouping uses the existing ownership model; it is not
+  a shared-token reservation service.
+* **Backoff from `X-RateLimit-Remaining` and `X-RateLimit-Reset`:** defer observer
+  reads below an agreed shared reserve while foreground merges and agent `gh`
+  calls retain headroom. Scope metadata to credential and quota resource, handle
+  concurrent out-of-order responses conservatively, and spread reset wakeups.
+  Headers observe shared quota; they do not atomically reserve it.
+
+No header backoff is implemented: reserve sizing and starvation/freshness policy
+need fleet ownership and operational evidence. Desired-stop watches remain a
+follow-up: suppressing them without catch-up can permanently miss a terminal
+transition if another subscription advances the shared repository facts. Retired
+seat declarations already end their watches in normal reconciliation. No stored
+watch backfill or live-daemon change is part of this patch.

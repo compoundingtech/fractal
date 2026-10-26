@@ -38,6 +38,92 @@ impl std::fmt::Display for ProviderRateLimit {
 
 impl std::error::Error for ProviderRateLimit {}
 
+/// A bounded path classification: never persist URLs, repository names or query strings.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointClass {
+    #[default]
+    Unknown,
+    Graphql,
+    Search,
+    Pulls,
+    Checks,
+    Statuses,
+    Commits,
+    Issues,
+    IssueComments,
+    Actions,
+    Contents,
+    Repository,
+    Other,
+}
+
+impl EndpointClass {
+    pub fn from_path(path: &str) -> Self {
+        let path = path.strip_prefix("/api/v3").unwrap_or(path);
+        let mut parts = path.trim_matches('/').split('/');
+        match parts.next() {
+            Some("graphql") => Self::Graphql,
+            Some("api") if parts.next() == Some("graphql") => Self::Graphql,
+            Some("search") => Self::Search,
+            Some("repos") => {
+                let _owner = parts.next();
+                let _repo = parts.next();
+                match parts.next() {
+                    Some("pulls") => Self::Pulls,
+                    Some("check-runs" | "check-suites") => Self::Checks,
+                    Some("statuses") => Self::Statuses,
+                    Some("commits") => match (parts.next(), parts.next()) {
+                        (_, Some("check-runs" | "check-suites")) => Self::Checks,
+                        (_, Some("status" | "statuses")) => Self::Statuses,
+                        _ => Self::Commits,
+                    },
+                    Some("issues") => match (parts.next(), parts.next()) {
+                        (Some("comments"), _) | (_, Some("comments")) => Self::IssueComments,
+                        _ => Self::Issues,
+                    },
+                    Some("actions") => Self::Actions,
+                    Some("contents" | "git") => Self::Contents,
+                    None => Self::Repository,
+                    _ => Self::Other,
+                }
+            }
+            _ => Self::Other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ResponseClass {
+    #[default]
+    Unknown,
+    Pending,
+    Http200,
+    Http304,
+    OtherSuccess,
+    Redirect,
+    ClientError,
+    ServerError,
+    OtherStatus,
+    Error,
+}
+
+impl ResponseClass {
+    fn from_status(status: Option<u16>) -> Self {
+        match status {
+            Some(200) => Self::Http200,
+            Some(304) => Self::Http304,
+            Some(200..=299) => Self::OtherSuccess,
+            Some(300..=399) => Self::Redirect,
+            Some(400..=499) => Self::ClientError,
+            Some(500..=599) => Self::ServerError,
+            Some(_) => Self::OtherStatus,
+            None => Self::Error,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Reservation {
@@ -46,6 +132,17 @@ struct Reservation {
     resource: String,
     observer: bool,
     count: u64,
+    #[serde(default)]
+    endpoint: EndpointClass,
+    #[serde(default)]
+    response: ResponseClass,
+}
+
+/// Identifies a coalesced pending reservation; cancellation leaves it conservatively spent.
+#[derive(Debug)]
+pub struct SendReservation {
+    path: std::path::PathBuf,
+    row: Reservation,
 }
 
 #[derive(Default)]
@@ -194,10 +291,11 @@ fn admit(
     rows: &mut Vec<Reservation>,
     caller: &str,
     resource: &str,
+    endpoint: EndpointClass,
     observer: bool,
     now: u128,
     limit: Option<usize>,
-) -> Result<()> {
+) -> Result<Reservation> {
     ensure!(
         !caller.is_empty() && caller.len() <= 512,
         "invalid GitHub admission caller"
@@ -228,6 +326,7 @@ fn admit(
     let minute = now / MINUTE * MINUTE;
     if let Some(row) = rows.iter_mut().find(|r| {
         r.at == minute && r.caller == caller && r.resource == resource && r.observer == observer
+            && r.endpoint == endpoint && r.response == ResponseClass::Pending
     }) {
         row.count = row
             .count
@@ -240,9 +339,19 @@ fn admit(
             resource: resource.into(),
             observer,
             count: 1,
+            endpoint,
+            response: ResponseClass::Pending,
         });
     }
-    Ok(())
+    Ok(Reservation {
+        at: minute,
+        caller: caller.into(),
+        resource: resource.into(),
+        observer,
+        count: 1,
+        endpoint,
+        response: ResponseClass::Pending,
+    })
 }
 
 /// Called before BOTH local reqwest and authorized RPC sends. A task-local
@@ -254,8 +363,9 @@ pub async fn before_send(
     path: std::path::PathBuf,
     caller: Option<String>,
     resource: String,
+    endpoint: EndpointClass,
     limit: Option<usize>,
-) -> Result<()> {
+) -> Result<Option<SendReservation>> {
     let observer = caller.is_some();
     let enforcing = observer && limit.is_some();
     let caller = caller.unwrap_or_else(|| "unattributed".into());
@@ -268,17 +378,17 @@ pub async fn before_send(
             .context("GitHub admission clock precedes epoch")?
             .as_millis();
         held.limit = limit;
-        let result: Result<()> = (|| {
+        let result: Result<Option<SendReservation>> = (|| {
             if held.path.as_ref() != Some(&path) {
                 held.rows = read(&path, now)?;
                 held.path = Some(path.clone());
             }
             let mut rows = held.rows.clone();
-            admit(&mut rows, &caller, &resource, observer, now, limit)?;
+            let row = admit(&mut rows, &caller, &resource, endpoint, observer, now, limit)?;
             publish(&path, &rows)?;
             held.rows = rows;
             held.gap = None;
-            Ok(())
+            Ok(Some(SendReservation { path: path.clone(), row }))
         })();
         if let Err(error) = &result {
             // A rename may have committed before a directory fsync error. Force
@@ -295,7 +405,7 @@ pub async fn before_send(
                 tracing::warn!(
                     "GitHub meter-only or unscoped request admitted with meter gap: {error}"
                 );
-                return Ok(());
+                return Ok(None);
             }
         }
         result
@@ -305,9 +415,61 @@ pub async fn before_send(
     .and_then(|result| result);
     if !enforcing && result.is_err() {
         tracing::warn!("GitHub unscoped request admitted with unavailable admission worker");
-        return Ok(());
+        return Ok(None);
     }
     result
+}
+
+fn record_response(rows: &mut Vec<Reservation>, ticket: &Reservation, status: Option<u16>) {
+    let same_bucket = |r: &Reservation| {
+        r.at == ticket.at && r.caller == ticket.caller && r.resource == ticket.resource
+            && r.observer == ticket.observer && r.endpoint == ticket.endpoint
+    };
+    let Some(pending) = rows.iter_mut().find(|r| same_bucket(r) && r.response == ResponseClass::Pending) else {
+        // The reservation may already have expired during a long send.
+        return;
+    };
+    pending.count -= 1;
+    rows.retain(|r| r.count > 0);
+    let response = ResponseClass::from_status(status);
+    if let Some(row) = rows.iter_mut().find(|r| same_bucket(r) && r.response == response) {
+        row.count += 1;
+    } else {
+        let mut row = ticket.clone();
+        row.response = response;
+        rows.push(row);
+    }
+}
+
+/// Attribute the result without refunding admission. A meter failure must never hide
+/// the actual HTTP result; pending/unknown reservations remain visible as uncertainty.
+pub async fn after_send(ticket: SendReservation, status: Option<u16>) {
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut held = state().lock()
+            .map_err(|_| anyhow::anyhow!("GitHub admission mutex poisoned"))?;
+        if held.path.as_ref() != Some(&ticket.path) {
+            return Ok(());
+        }
+        let mut rows = held.rows.clone();
+        record_response(&mut rows, &ticket.row, status);
+        if let Err(error) = publish(&ticket.path, &rows) {
+            held.path = None;
+            held.gap = Some(format!("GitHub response attribution: {error}"));
+            return Err(error);
+        }
+        held.rows = rows;
+        Ok(())
+    }).await;
+    if !matches!(result, Ok(Ok(()))) {
+        tracing::warn!("GitHub response attribution failed; reservation remains spent");
+    }
+}
+
+#[derive(Default)]
+struct Usage {
+    count: u128,
+    conditional: u128,
+    attribution: BTreeMap<(EndpointClass, ResponseClass), u128>,
 }
 
 pub fn doctor_lines(now: u128) -> Vec<crate::model::DoctorCheck> {
@@ -319,23 +481,26 @@ pub fn doctor_lines(now: u128) -> Vec<crate::model::DoctorCheck> {
             message: "local admission state unavailable".into(),
         }];
     };
-    let mut counts = BTreeMap::<(String, String), u128>::new();
+    let mut counts = BTreeMap::<(String, String), Usage>::new();
     for r in &held.rows {
         if now.saturating_sub(r.at) < HOUR + MINUTE {
-            *counts
-                .entry((r.caller.clone(), r.resource.clone()))
-                .or_default() += u128::from(r.count);
+            let entry = counts.entry((r.caller.clone(), r.resource.clone())).or_default();
+            entry.count += u128::from(r.count);
+            if r.response == ResponseClass::Http304 {
+                entry.conditional += u128::from(r.count);
+            }
+            *entry.attribution.entry((r.endpoint, r.response)).or_default() += u128::from(r.count);
         }
     }
     for key in held.refused.keys() {
         counts.entry(key.clone()).or_default();
     }
     let omitted_groups = counts.len().saturating_sub(127);
-    let omitted_count = counts.values().skip(127).copied().sum::<u128>();
-    let mut lines = counts.into_iter().take(127).map(|((caller, resource), count)| crate::model::DoctorCheck {
+    let omitted_count = counts.values().skip(127).map(|entry| entry.count).sum::<u128>();
+    let mut lines = counts.into_iter().take(127).map(|((caller, resource), Usage { count, conditional, attribution })| crate::model::DoctorCheck {
         name: format!("github-requests/admitted/{caller}/{resource}"),
         status: if held.gap.is_some() { "warn" } else { "pass" }.into(),
-        message: format!("{count} durable request reservations in the conservative61-minute window (including failed sends and 304s); {} admission refusals/meter failures since start; per-minute buckets retain up to61minutes conservatively; observer aggregate/per-caller limit {:?}/{resource}/hour (None=meter-only); GraphQL points unknown; unscoped callers metered but uncapped", held.refused.get(&(caller.clone(),resource.clone())).copied().unwrap_or(0), held.limit),
+        message: format!("{count} durable request reservations in the conservative 61-minute window; {conditional} conditional 304 responses (not charged to primary quota); {} possible quota requests (includes pending/legacy/failed sends; actual provider charge unknown); endpoint/response counts: {attribution:?}; {} admission refusals/meter failures since start; observer aggregate/per-caller limit {:?}/{resource}/hour (None=meter-only); GraphQL points unknown; unscoped callers metered but uncapped", count - conditional, held.refused.get(&(caller.clone(),resource.clone())).copied().unwrap_or(0), held.limit),
     }).collect::<Vec<_>>();
     if omitted_groups > 0 {
         lines.push(crate::model::DoctorCheck {
@@ -358,6 +523,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn endpoint_classes_are_bounded_and_enterprise_paths_match() {
+        for (path, expected) in [
+            ("/graphql", EndpointClass::Graphql),
+            ("/api/graphql", EndpointClass::Graphql),
+            ("/search/issues", EndpointClass::Search),
+            ("/api/v3/search/issues", EndpointClass::Search),
+            ("/repos/private/repository/pulls/42", EndpointClass::Pulls),
+            ("/api/v3/repos/private/repository/commits/sha/check-runs", EndpointClass::Checks),
+            ("/repos/private/repository/commits/sha/status", EndpointClass::Statuses),
+            ("/repos/private/repository/actions/runs", EndpointClass::Actions),
+            ("/repos/private/repository/issues", EndpointClass::Issues),
+            ("/repos/private/repository/issues/42", EndpointClass::Issues),
+            ("/repos/private/repository/issues/comments", EndpointClass::IssueComments),
+            ("/repos/private/repository/issues/42/comments", EndpointClass::IssueComments),
+            ("/api/v3/repos/private/repository/issues/comments", EndpointClass::IssueComments),
+            ("/repos/private/repository", EndpointClass::Repository),
+            ("/arbitrary/private/path", EndpointClass::Other),
+        ] {
+            assert_eq!(EndpointClass::from_path(path), expected);
+        }
+    }
+
+    #[test]
+    fn old_ledger_defaults_to_unknown_without_losing_reservations() {
+        let rows: Vec<Reservation> = serde_json::from_str(
+            r#"[{"at":60000,"caller":"observer/test","resource":"core","observer":true,"count":17}]"#,
+        ).unwrap();
+        assert_eq!(rows[0].count, 17);
+        assert_eq!(rows[0].endpoint, EndpointClass::Unknown);
+        assert_eq!(rows[0].response, ResponseClass::Unknown);
+        let roundtrip: Vec<Reservation> =
+            serde_json::from_slice(&serde_json::to_vec(&rows).unwrap()).unwrap();
+        assert_eq!(roundtrip[0].count, 17);
+    }
+
+    #[test]
+    fn response_attribution_coalesces_and_never_refunds_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("ledger");
+        let mut rows = Vec::new();
+        let now = 10_020_000;
+        let statuses = [
+            (Some(200), ResponseClass::Http200),
+            (Some(304), ResponseClass::Http304),
+            (Some(201), ResponseClass::OtherSuccess),
+            (Some(302), ResponseClass::Redirect),
+            (Some(403), ResponseClass::ClientError),
+            (Some(429), ResponseClass::ClientError),
+            (Some(503), ResponseClass::ServerError),
+            (Some(101), ResponseClass::OtherStatus),
+            (None, ResponseClass::Error),
+        ];
+        for _ in 0..2 {
+            for (status, expected) in statuses {
+                let ticket = admit(
+                    &mut rows, "observer/test", "core", EndpointClass::Checks,
+                    true, now, None,
+                ).unwrap();
+                record_response(&mut rows, &ticket, status);
+                assert!(rows.iter().any(|r| r.response == expected));
+            }
+        }
+        // A canceled send has no completion and remains conservatively pending.
+        admit(&mut rows, "observer/test", "core", EndpointClass::Checks, true, now, None).unwrap();
+        publish(&path, &rows).unwrap();
+        let rows = read(&path, now).unwrap();
+        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.iter().map(|r| r.count).sum::<u64>(), 19);
+        assert_eq!(rows.iter().filter(|r| r.response == ResponseClass::Http304)
+            .map(|r| r.count).sum::<u64>(), 2);
+        assert_eq!(rows.iter().filter(|r| r.response == ResponseClass::ClientError)
+            .map(|r| r.count).sum::<u64>(), 4);
+    }
+
+    #[test]
     fn restart_retains_spent_requests_and_refusal_does_not_append() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("admission.json");
@@ -368,6 +608,7 @@ mod tests {
                 &mut rows,
                 "observer/github/repo",
                 "core",
+                EndpointClass::Pulls,
                 true,
                 now,
                 Some(CAP),
@@ -381,6 +622,7 @@ mod tests {
                 &mut restarted,
                 "observer/github/repo",
                 "core",
+                EndpointClass::Pulls,
                 true,
                 now,
                 Some(CAP)
@@ -394,6 +636,7 @@ mod tests {
                 &mut restarted,
                 "observer/github/another",
                 "core",
+                EndpointClass::Pulls,
                 true,
                 now,
                 Some(CAP)
@@ -404,6 +647,7 @@ mod tests {
             &mut restarted,
             "observer/github/repo",
             "graphql",
+            EndpointClass::Graphql,
             true,
             now,
             Some(CAP),
@@ -413,6 +657,7 @@ mod tests {
             &mut restarted,
             "unattributed",
             "core",
+            EndpointClass::Pulls,
             false,
             now,
             Some(CAP),
@@ -422,6 +667,7 @@ mod tests {
             &mut restarted,
             "observer/github/repo",
             "core",
+            EndpointClass::Pulls,
             true,
             now + HOUR + MINUTE,
             Some(CAP),
@@ -445,6 +691,8 @@ mod tests {
                 resource: "core".into(),
                 observer: true,
                 count: 1,
+                endpoint: EndpointClass::Unknown,
+                response: ResponseClass::Unknown,
             })
             .collect::<Vec<_>>();
         publish(&path, &rows).unwrap();
@@ -453,6 +701,7 @@ mod tests {
             path.clone(),
             Some("observer/github/repo".into()),
             "core".into(),
+            EndpointClass::Pulls,
             Some(CAP),
         )
         .await
@@ -473,6 +722,7 @@ mod tests {
             path.clone(),
             Some("observer/github/repo".into()),
             "graphql".into(),
+            EndpointClass::Graphql,
             Some(CAP),
         )
         .await
@@ -492,7 +742,7 @@ mod tests {
         let mut rows = Vec::new();
         let now = 10_000_000;
         for _ in 0..100_000 {
-            admit(&mut rows, "unattributed", "core", false, now, Some(CAP)).unwrap();
+            admit(&mut rows, "unattributed", "core", EndpointClass::Pulls, false, now, Some(CAP)).unwrap();
         }
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].count, 100_000);
@@ -500,6 +750,7 @@ mod tests {
             &mut rows,
             "observer/github/repo",
             "core",
+            EndpointClass::Pulls,
             true,
             now,
             Some(CAP),
@@ -518,6 +769,7 @@ mod tests {
                 &mut rows,
                 "observer/github/repo",
                 "core",
+                EndpointClass::Pulls,
                 true,
                 10_020_000,
                 None,
@@ -543,13 +795,14 @@ mod tests {
                 path.clone(),
                 Some("observer/test".into()),
                 "core".into(),
+                EndpointClass::Pulls,
                 Some(CAP)
             )
             .await
             .is_err()
         );
         assert!(
-            before_send(path.clone(), None, "core".into(), Some(CAP))
+            before_send(path.clone(), None, "core".into(), EndpointClass::Pulls, Some(CAP))
                 .await
                 .is_ok()
         );
@@ -595,6 +848,8 @@ mod tests {
                 resource: "core".into(),
                 observer: true,
                 count: 1,
+                endpoint: EndpointClass::Unknown,
+                response: ResponseClass::Unknown,
             }],
         )
         .unwrap();
