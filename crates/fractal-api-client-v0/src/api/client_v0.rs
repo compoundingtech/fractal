@@ -68,6 +68,8 @@ mod published_attention_tests;
 mod alert_action_tests;
 #[cfg(test)]
 mod stream_start_tests;
+#[cfg(test)]
+mod conversation_delivery_tests;
 
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
@@ -4441,6 +4443,14 @@ fn conversation_read_now_unbounded(
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
+        if session.conversation_delivery_links && native_replay
+            && let Some(owner) = owner.as_deref()
+            && state.store.conversation_delivery_changed(owner, store_index, snapshot.store_index)
+                .map_err(ApiError::internal)?
+        {
+            return Err(conversation_replay_gap(session_id, "delivery-link-changed",
+                "a native consumption receipt changed; refresh the conversation page"));
+        }
         // Native pages contain native records and Fractal messages, not the driver's
         // mirrored harness.timeline entries. Requiring those IDs in a native page creates
         // a false gap on every observation, even when the native transcript is unchanged.
@@ -22203,6 +22213,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            conversation_delivery_links: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),

@@ -65,6 +65,10 @@ pub struct AgentRestartRequest {
     /// Restart without first asking the seat for its handoff.
     #[serde(default)]
     now: bool,
+    /// Start a new native session instead of continuing the last one. The seat must have a
+    /// handoff that is ready since its last turn, which its new session is given first.
+    #[serde(default)]
+    fresh_session: bool,
 }
 
 pub async fn restart_agent(
@@ -165,6 +169,14 @@ pub async fn restart_agent(
         .and_then(|fields| fields.get("incarnation_id"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    if request.fresh_session
+        && !crate::handoff::ready_since_last_turn(&state.store, &subject).map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "restart-fresh-session-no-handoff",
+            "a fresh session starts from the seat's handoff: write it with `st agents handoff write`, or mark the current one current with `st agents handoff ready`, then restart again",
+        )));
+    }
     let defer = actor == subject
         && !request.now
         && current.actual.as_ref().is_some_and(|actual| {
@@ -195,12 +207,14 @@ pub async fn restart_agent(
                 ("incarnation_id".into(), Value::String(incarnation.into())),
             ])
             .into_iter()
-            .chain(request.now.then(|| {
+            // A fresh session already required a ready handoff, so asking for one again is only a wait.
+            .chain((request.now || request.fresh_session).then(|| {
                 (
                     "operation".to_owned(),
                     Value::String(crate::handoff::RESTART_NOW_OPERATION.into()),
                 )
             }))
+            .chain(request.fresh_session.then(|| ("fresh_session".to_owned(), Value::Bool(true))))
             .collect(),
             evidence: vec![token],
             expected_subject: None,

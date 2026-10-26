@@ -7,12 +7,15 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/e237afa8587fb953cc589c35e0c9a252f7192444";
+    pty.url = "github:compoundingtech/pty/6336c376fe3d1657d825f4278465b6192b770b40";
     pty.inputs.nixpkgs.follows = "nixpkgs";
+    # Merged pairing stack, including the daemon-identity restricted client.
+    fabric.url = "github:compoundingtech/fabric/1e6e93e9a662a40749f91d63eeecc4e98de114bd";
+    fabric.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/1e294f81aeec43c2e1f25ba25bb731c1c8336beb";
+      "github:overengineeringstudio/effect-utils/fd39f4ff0c7db982aabd138e12489c05fd990541";
   };
 
   outputs =
@@ -22,6 +25,7 @@
       flake-utils,
       fenix,
       pty,
+      fabric,
       effect-utils,
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -463,7 +467,9 @@
           source = self;
         };
 
-        st3Check = pkgs.rustPlatform.buildRustPackage {
+        st3Check = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
+          assert deployPolicyFile == null || pkgs.lib.hasPrefix "${builtins.storeDir}/" "${deployPolicyFile}";
+          pkgs.rustPlatform.buildRustPackage {
           pname = "st3";
           inherit version;
           src = self;
@@ -486,6 +492,9 @@
           '';
           # Stamp st3 from this declared flake source; it hands the stamp to its libraries at startup.
           CLI_BUILD_STAMP = buildStamp;
+          # A declared immutable input, captured by option_env! in fractal-schema.
+          # Empty means no packaged policy: verification refuses all requests.
+          ST3_DEPLOY_POLICY_FILE = if deployPolicyFile == null then "" else "${deployPolicyFile}";
           inherit cargoDeps;
           cargoBuildFlags = [
             "-p"
@@ -627,6 +636,8 @@
           # generator formats the Rust client it checks with rustfmt.
           nativeCheckInputs = [
             pkgs.bashInteractive
+            # Fleet pairing integration drives the external helper over local HTTP.
+            pkgs.curl
             # The completion tests drive the stub in each supported shell.
             pkgs.fish
             pkgs.zsh
@@ -669,13 +680,38 @@
             license = pkgs.lib.licenses.mit;
             mainProgram = "st3";
           };
-        };
+        }) { };
 
         # Installing the current tools must not depend on running the full runtime suite.
         # Keep that suite as checks.st3; st/ci also runs it in the native test environment.
-        st3 = st3Check.overrideAttrs (_: {
-          doCheck = false;
+        st3 = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
+          (st3Check.override { inherit deployPolicyFile; }).overrideAttrs (_: {
+            doCheck = false;
+          })
+        ) { };
+
+        # Policy-only checks exercise absent, readable and unreadable compiled inputs.
+        # No test introduces a runtime selector, including in development builds.
+        deployPolicyFixture = pkgs.writeText "example-deploy-policy.json" (builtins.toJSON {
+          version = 1;
+          refusedVerifierHosts = [ "host-b" ];
+          consumptionSigners = [ "agent/example-executor" ];
+          goSigners = [ "agent/example-manager" ];
+          stopSigners = [ "agent/example-manager" ];
+          compatSignoffSigners = [ "agent/example-reviewer" ];
         });
+        unreadableDeployPolicy = pkgs.runCommand "unreadable-deploy-policy" { } ''mkdir "$out"'';
+        mkDeployPolicyCheck = name: deployPolicyFile: pkgs.rustPlatform.buildRustPackage {
+          pname = "st3-deploy-policy-${name}";
+          inherit version cargoDeps;
+          src = self;
+          ST3_DEPLOY_POLICY_TEST_MODE = name;
+          ST3_DEPLOY_POLICY_FILE = if deployPolicyFile == null then "" else "${deployPolicyFile}";
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          cargoBuildFlags = [ "-p" "fractal-schema" ];
+          cargoTestFlags = [ "-p" "fractal-schema" "--lib" "deploy_policy::tests" ];
+          installPhase = ''touch "$out"'';
+        };
 
         # Explicit opt-in: the default st3 package never gains bin/fractal.
         fractal = pkgs.runCommand "fractal-${version}" {
@@ -1065,6 +1101,8 @@
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
         packages.st-fabric-adapter = stFabricAdapter;
+        # Isolated bootstrap/live proofs use the exact pairing API revision.
+        packages.fabric-pairing = fabric.packages.${system}.default;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         packages.st2-wasm-resolver = st2WasmResolver;
@@ -1087,6 +1125,9 @@
         # wants them.
         checks.st2 = st2;
         checks.st3 = st3Check;
+        checks.st3-deploy-policy-absent = mkDeployPolicyCheck "absent" null;
+        checks.st3-deploy-policy-packaged = mkDeployPolicyCheck "packaged" deployPolicyFixture;
+        checks.st3-deploy-policy-unreadable = mkDeployPolicyCheck "unreadable" unreadableDeployPolicy;
         # Keep derivation-path assertions lazy until the check's builder is evaluated:
         # flake discovery must not force package inputs (including the installation hash guard).
         checks.st3-runtime-inputs = pkgs.runCommand "st3-runtime-inputs" { } (
