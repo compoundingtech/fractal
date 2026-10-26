@@ -1,4 +1,4 @@
-import type { Attention, TimelineEntry } from '@fractal/client';
+import type { Attention, AttentionPrompt, TimelineEntry } from '@fractal/client';
 import { ago } from './time.ts';
 
 // Home, drawn the way stui draws it (crates/fractal-tui/src/ui/screens.rs home_list, adapt.rs
@@ -209,8 +209,11 @@ export function promptAlertKey(item: { readonly id: string; readonly revision: s
   return [item.id, promptAnswers(item)?.episode ?? item.episode ?? '', item.revision].join('\n');
 }
 
-/** The call a harness recorded before it asked, in full: its tool and each input, lines intact. */
-export type PendingCall = { id: string; tool: string; lines: string[]; input?: unknown };
+/**
+ * The call a harness recorded before it asked: its tool and each input, lines intact. `complete`
+ * is false when st cut its input to its bound, and then nobody allows it from a client.
+ */
+export type PendingCall = { id: string; tool: string; lines: string[]; input?: unknown; complete?: boolean };
 
 function inputLines(args: unknown): string[] {
   let value = args;
@@ -232,8 +235,43 @@ function parsedInput(args: unknown): unknown {
 }
 
 /**
- * Every tool call with no result yet, oldest first. A permission prompt asks about one of them,
- * but the prompt carries no call ID, so with more than one unanswered a client cannot say which.
+ * A prompt as st serves it beside its card (`presentation.prompt`): the calls without a result in
+ * the seat's conversation, each as a person reads it, and whether a client may allow or answer the
+ * call it asks about; or why st serves none (it cannot read the conversation, or it is older).
+ */
+export type ServedPrompt = { calls: PendingCall[]; allow: boolean } | { calls: null; allow: false; why: string };
+export function servedPrompt(item: { readonly presentation?: { readonly prompt?: AttentionPrompt } | null }): ServedPrompt {
+  const prompt = item.presentation?.prompt;
+  if (!prompt) return { calls: null, allow: false, why: "This host's st is older and does not say which call the prompt asks about." };
+  if (!prompt.calls) return { calls: null, allow: false, why: prompt.unknown_reason ?? "st cannot read the agent's conversation." };
+  return {
+    calls: prompt.calls.map(call => ({
+      id: call.call_id, tool: call.tool || 'tool', lines: inputLines(call.input),
+      input: call.input_complete ? parsedInput(call.input) : call.input, complete: call.input_complete,
+    })),
+    allow: prompt.allow,
+  };
+}
+
+/**
+ * The answers a client offers beside a prompt st serves. `allow` and `approve` only where st
+ * allows them, beside the one call shown; `answer` only where st allows it and that call's
+ * questions can be shown and chosen from; every other answer (deny, and a screen prompt's or
+ * denial's own answers) always.
+ */
+export function servedAnswers(prompt: PromptAnswers, served: ServedPrompt): string[] {
+  const shown = served.calls === null ? [] : promptCalls(prompt, served.calls);
+  const certain = served.allow && shown.length === 1;
+  return prompt.answers.filter(answer => {
+    if (answer === 'allow' || answer === 'approve') return certain;
+    if (answer === 'answer') return certain && pendingQuestions(shown) !== null;
+    return true;
+  });
+}
+
+/**
+ * Every tool call with no result yet, oldest first: Fractal's own alerts still read a prompt's
+ * calls this way. A client that reads `presentation.prompt` uses `servedPrompt` instead.
  */
 export function pendingCalls(entries: ReadonlyArray<Pick<TimelineEntry, 'type' | 'body' | 'id'>>): PendingCall[] {
   const answered = new Set<string>();
@@ -313,7 +351,8 @@ export function answerLabel(answer: string): string {
 }
 
 /**
- * The answers a client may offer. `allow` and `approve` only beside the exact call the prompt asks
+ * The answers a client may offer from calls it read itself, as Fractal's own alerts still do
+ * (`servedAnswers` reads st's). `allow` and `approve` only beside the exact call the prompt asks
  * about, shown in full (from an older daemon: the one call unanswered); `answer` only when that
  * call's questions can be shown and chosen from; every other answer (deny, and a screen prompt's
  * or denial's own answers) always.

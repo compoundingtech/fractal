@@ -557,8 +557,8 @@ agents.
 | | Derivation | Differs from this contract |
 |---|---|---|
 | Terminal UI | Reads `tier`, `kind`, `agent`, `raised_by` and `waiting` (`crates/fractal-tui/src/ui/adapt.rs` `attention()`); a row without a presentation (an older st, or one not presented yet), or with a group or card it does not know, shows st's text as an unplaced card where its `alert` flag puts it, with no answer of its own; a message or a fault stays off Now. Still its own: `preview()`, `alerts.rs` `unanswered_calls`, the variants fetch in `live.rs` | Fills launch agents' harness and host as unknown. Withholds allow when a call runs past four lines, instead of when its input is incomplete. |
-| Phone | `clients/typescript/fractal-views/homeView.ts` (225 lines) `homeKind`, `pendingCalls`, `offeredAnswers` | Drops `custom.*` kinds. Shows launch variants and diagnostics, with no step preview. |
-| Fractal | None live; `projections.ts` `attentionRefs` only | Nothing to delete. |
+| Phone | `clients/typescript/fractal-views/homeView.ts` (225 lines) `homeKind`; a prompt's calls and answers are `prompt`'s (`servedPrompt`, `servedAnswers`, `apps/ios/screens/Alerts.tsx`), and an older st that serves none gets a card answered in the terminal | Drops `custom.*` kinds. Shows launch variants and diagnostics, with no step preview. |
+| Fractal | `projections.ts` `attentionRefs`; its alerts read a prompt's calls from the conversation (`src/conversation/alerts/AgentAlerts.tsx`, with `homeView.ts` `pendingCalls`, `offeredAnswers`) | Moves to `prompt` with `servedPrompt` and `servedAnswers`; then `pendingCalls` and `offeredAnswers` are deleted. |
 
 Settled: `custom.*` kinds are Today requests, as in the terminal UI. Allow depends on
 `input_complete`; a client that cannot show the whole input offers deny only.

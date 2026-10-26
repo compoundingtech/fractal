@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { alertConversations, alertsHeading, alertsIn, answerLabel, homeRows, isAlert, offeredAnswers, openAlerts, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer } from '@fractal/views/homeView';
+import { alertConversations, alertsHeading, alertsIn, answerLabel, homeRows, isAlert, offeredAnswers, openAlerts, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer, servedAnswers, servedPrompt } from '@fractal/views/homeView';
 
 const item = (id, attention_kind, extra = {}) => ({ id: `attention/${id}`, kind: 'attention', attention_kind, title: id, detail: '', priority: 'normal', state: 'open', person_id: 'person/alex', requested_at: '2026-09-30T11:00:00Z', source_id: 'x', actions: [], ...extra });
 const actor = 'person/alex/session/phone';
@@ -117,3 +117,30 @@ assert.deepEqual(offeredAnswers({ ...bound, call_id: null }, both), ['deny'], 'n
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'], call_id: 'c2' } } }).call_id, 'c2');
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'], call_id: null } } }).call_id, null);
 assert.equal(promptAnswers({ ...prompt, action_parameters: { 'prompt.respond': { episode: 'e', answers: ['allow'] } } }).call_id, undefined);
+
+// A prompt st serves (`presentation.prompt`): its calls as a person reads them, and allow where st
+// allows it. A cut input stays the text st served; st serves none when it cannot read the seat.
+const served = servedPrompt({ presentation: { prompt: {
+  calls: [
+    { call_id: 'c1', tool: 'Task', input: '{"prompt":"run the build"}', input_complete: true },
+    { call_id: 'c2', tool: 'Bash', input: '{"command":"make"}', input_complete: true },
+    { call_id: 'c3', tool: 'Write', input: '{"text":"cut', input_complete: false },
+  ],
+  answers: ['allow', 'deny'], allow: true,
+} } });
+assert.deepEqual(served.calls.map(each => [each.id, each.complete]), [['c1', true], ['c2', true], ['c3', false]]);
+assert.deepEqual(served.calls[1].lines, ['command: make']);
+assert.deepEqual(served.calls[1].input, { command: 'make' });
+assert.equal(served.calls[2].input, '{"text":"cut');
+assert.deepEqual(servedAnswers(bound, served), ['allow', 'deny'], 'beside the call st allows');
+assert.deepEqual(servedAnswers(bound, { ...served, allow: false }), ['deny'], 'st does not allow it');
+assert.deepEqual(servedAnswers({ ...bound, call_id: null }, served), ['deny'], 'no named call: several are shown');
+const unread = servedPrompt({ presentation: { prompt: { calls: null, answers: ['allow', 'deny'], allow: false, unknown_reason: 'The agent runs on another host.' } } });
+assert.deepEqual(unread, { calls: null, allow: false, why: 'The agent runs on another host.' });
+assert.deepEqual(servedAnswers(bound, unread), ['deny']);
+assert.equal(servedPrompt({ presentation: null }).calls, null, 'an older st serves no prompt');
+assert.deepEqual(servedAnswers({ target_id: 'a', episode: 'e', answers: ['trust', 'exit'] }, unread), ['trust', 'exit'], "a screen prompt's own answers need no call");
+// A question is answered only where st allows it and its questions can be read.
+const askedServed = servedPrompt({ presentation: { prompt: { calls: [{ call_id: 'q', tool: 'AskUserQuestion', input: JSON.stringify(asked[0].body.arguments), input_complete: true }], answers: ['answer', 'deny'], allow: true } } });
+assert.deepEqual(servedAnswers({ ...question, call_id: 'q' }, askedServed), ['answer', 'deny']);
+assert.deepEqual(servedAnswers({ ...question, call_id: 'q' }, { ...askedServed, allow: false }), ['deny']);
