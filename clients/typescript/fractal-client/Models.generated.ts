@@ -890,6 +890,7 @@ export type Attention = ResourceHeader & {
   mission_id?: Id;
   mission_run_id?: Id;
   person_id: Id;
+  presentation?: AttentionPresentation;
   preview?: (LaunchPreview | null);
   preview_token?: string | null;
   priority: "critical" | "high" | "normal" | "low";
@@ -909,6 +910,11 @@ export type Attention = ResourceHeader & {
   what?: string;
 };
 
+export type AttentionActor = {
+  id: Id;
+  label: string;
+};
+
 export type AttentionBlocked = {
   attempt: number;
   goal: string;
@@ -916,10 +922,48 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionPresentation = {
+  agent: (AttentionActor | null);
+  kind: 
+  "review"
+  | "feedback"
+  | "request"
+  | "update"
+  | "launch"
+  | "revision"
+  | "prompt"
+  | "login"
+  | "fault"
+  | null
+;
+  raised_by: (AttentionActor | null);
+  revision?: AttentionRevision;
+  tier: "stopped" | "alert" | "today" | "later" | null;
+  waiting: (AttentionWaiting | null);
+};
+
+export type AttentionRevision = {
+  from_revision: string;
+  lines: Array<AttentionRevisionLine>;
+  reason: string;
+  to_revision: string;
+  truncated: boolean;
+};
+
+export type AttentionRevisionLine = {
+  op: "+" | "-" | "~";
+  text: string;
+};
+
 export type AttentionTargetState = {
   id: Id;
   since?: Timestamp;
   state: string;
+};
+
+export type AttentionWaiting = {
+  path: string;
+  step: StepRunId;
 };
 
 export type BlobChunk = {
@@ -1316,6 +1360,14 @@ export type DecisionResponse = ({
   type: "rank";
   value: Array<string>;
 });
+
+export type DelegationProof = {
+  episode: string;
+  message: string;
+  person: string;
+  policy: string;
+  quote: string;
+};
 
 export type Device = ResourceHeader & {
   expires_at: Timestamp;
@@ -2191,6 +2243,7 @@ export type PageInfo = {
   has_more: boolean;
   limit: number;
   next_cursor?: string | null;
+  omitted_items?: number | null;
 };
 
 export type PairedSession = (PersonPairedSession | AssistantPairedSession);
@@ -2363,6 +2416,7 @@ export type ProjectionEvent = Omit<{
 
 export type PromptRespondParameters = {
   answer: string;
+  delegation?: DelegationProof;
   episode: string;
   target_id: Id;
 };
@@ -2977,6 +3031,7 @@ export type TimelineEntry = Omit<{
   body: {
 
 };
+  delivers?: string;
   final: boolean;
   id: TimelineEntryId;
   revision: number;
@@ -3379,6 +3434,16 @@ export type Usage = ResourceHeader & {
   value: UsagePeriod;
 };
 
+export type UsageAccount = {
+  account?: string;
+  credits?: UsageCredits;
+  driver?: string;
+  kind: "subscription" | "api-key";
+  name: string;
+  plan?: string;
+  provider: string;
+};
+
 export type UsageContext = {
   compactions?: number;
   last_compaction_ms?: number;
@@ -3388,6 +3453,13 @@ export type UsageContext = {
   used_percent?: number;
   used_tokens?: number;
   window_tokens?: number;
+};
+
+export type UsageCredits = {
+  budget_microusd: number;
+  period_start_ms: number;
+  unpriced_tokens: number;
+  used_microusd: number;
 };
 
 export type UsageLimit = {
@@ -3407,6 +3479,7 @@ export type UsageLimit = {
 };
 
 export type UsagePeriod = {
+  accounts?: Array<UsageAccount>;
   agent_messages?: AgentMessageEstimate;
   limits?: Array<UsageLimit>;
   rows: Array<UsageRow>;
@@ -3440,6 +3513,7 @@ export type UsagePricingRates = {
 
 export type UsageRow = {
   account?: string;
+  account_ref?: string;
   agent: Id;
   cache_write_1h_tokens: number;
   cache_write_tokens: number;

@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
+    let value = "fabric://devbox/st3-client-v0";
+    let cli = Cli::try_parse_from(["st", "--endpoint", value, "now"]).unwrap();
+    let endpoint = Endpoint::parse(cli.endpoint.unwrap()).unwrap();
+    assert!(matches!(endpoint, Endpoint::Fabric(_)));
+    assert_eq!(endpoint_label(&endpoint), value);
+    let client = generated_client(&endpoint, Some("person/operator")).unwrap();
+    assert!(!client.is_local_socket());
+}
+
+#[test]
+fn malformed_native_fabric_endpoint_is_not_a_local_socket() {
+    for value in [
+        "fabric://devbox", "fabric://devbox/replication",
+        "fabric://devbox/st3-client-v0/../admin",
+    ] {
+        assert!(Endpoint::parse(value).is_err(), "{value}");
+    }
+}
+
+#[test]
+fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
+    let plan = OperationalRepairPlan {
+        api_version: "st3.operational-repair.v0".into(),
+        token: format!("orpv0:{}", "0".repeat(64)),
+        snapshot_index: 0,
+        status: "clean".into(),
+        items: Vec::new(),
+    };
+    assert!(validate_repair_plan_filters(&plan, &[], &[]).is_ok());
+    assert!(validate_repair_plan_filters(&plan, &["agent/example-first".into()], &[]).is_err());
+    assert!(validate_repair_plan_filters(&plan, &[], &["revoked-legacy-runtime-start".into()]).is_err());
+}
+
+#[test]
+fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
+    let cli = Cli::try_parse_from([
+        "st", "repair", "dry-run", "--subject", "agent/example-first",
+        "--subject", "agent/example-second", "--class", "revoked-legacy-runtime-start",
+    ]).unwrap();
+    let Command::Repair { command: RepairCommand::DryRun { subjects, classes } } = cli.command else {
+        panic!("expected filtered repair dry-run");
+    };
+    assert_eq!(subjects, ["agent/example-first", "agent/example-second"]);
+    assert_eq!(classes, ["revoked-legacy-runtime-start"]);
+    let path = repair_plan_path(&subjects, &classes).unwrap();
+    assert!(path.contains(&format!("subjects={}",
+        urlencoding::encode(r#"["agent/example-first","agent/example-second"]"#))));
+    assert!(path.contains(&format!("classes={}",
+        urlencoding::encode(r#"["revoked-legacy-runtime-start"]"#))));
+    assert_eq!(repair_plan_path(&[], &[]).unwrap(), "/v1/repair");
+}
+
+#[test]
 fn owner_index_preparation_is_explicit_and_only_in_maintenance_help() {
     assert!(Cli::try_parse_from(["st", "store", "prepare-indexes"]).is_err());
     let cli = Cli::try_parse_from([
@@ -255,7 +309,7 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     assert!(shown.contains("smalltalk-ios 1.0 (42)  person/avery (Pocket)  via gateway  connected now, since 2m ago"), "{shown}");
     assert!(shown.contains("  follows: agents, conversation:agent/example/harbor"), "{shown}");
     assert!(shown.contains("(unnamed client)  person/avery  via local  last seen 3m ago"), "{shown}");
-    let devices = "DEVICES\ndevice/001122  active  person/avery/session/0011  scopes 4\n  action: st devices --as person/avery revoke device/001122\n";
+    let devices = "DEVICES\ndevice/001122  active  person/avery/session/0011  scopes 4\n  action: fractal devices --as person/avery revoke device/001122\n";
     let marked = with_device_presence(devices, Some(&found), now);
     assert!(marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"), "{marked}");
     assert_eq!(with_device_presence(devices, None, now), devices);
@@ -442,6 +496,96 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
         "start the terminal: st changed while this was on its way, so it was not applied (stale-fence)"
     );
     assert_eq!(plain_error(&anyhow::anyhow!("plain")), "plain");
+    assert_eq!(
+        cli_error_message(&error, false),
+        "start the terminal: Fractal changed while this was on its way, so it was not applied (stale-fence)"
+    );
+    assert_eq!(cli_error_message(&error, true), plain_error(&error));
+}
+
+#[test]
+fn gate_subprocess_stderr_keeps_stable_client_errors() {
+    const CHILD: &str = "ST_TEST_GATE_ERROR_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let api: fractal_client::ErrorEnvelope = serde_json::from_value(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/gate-test",
+            "code": "internal",
+            "message": "the store failed",
+            "retryable": false
+        })).unwrap();
+        let error = anyhow::Error::from(fractal_client::ClientError::Api(
+            api.code.clone(), api.message.clone(), Box::new(api),
+        ));
+        eprintln!("{}", cli_error_message(&error, false));
+        let mut stalled = None;
+        // Exercise the actual Resync notice sink, including duplicate suppression.
+        for _ in 0..2 {
+            conversations_cli::report_resync(
+                Some(&fractal_client::ErrorCode::Internal),
+                "the stream failed",
+                &mut stalled,
+            );
+        }
+        return;
+    }
+    for gate in [false, true] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "tests::gate_subprocess_stderr_keeps_stable_client_errors", "--nocapture"])
+            .env(CHILD, "1")
+            .env_remove(fractal_daemon::gate_report::ENV);
+        if gate {
+            command.env(fractal_daemon::gate_report::ENV, "/unused/gate-report");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(stderr.trim(), if gate {
+            "st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
+        } else {
+            "Fractal hit a problem: the store failed (internal)\nst: Fractal hit a problem: the stream failed · trying again"
+        });
+    }
+}
+
+#[tokio::test]
+async fn blob_errors_keep_their_type_until_the_rendering_boundary() {
+    use axum::{Json, Router, http::StatusCode};
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("blob.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = Router::new().fallback(|| async {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/blob-test",
+            "code": "internal",
+            "message": "the blob store failed",
+            "retryable": false
+        })))
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let endpoint = Endpoint::Unix(socket);
+    let file = directory.path().join("image.png");
+    fs::write(&file, b"image").unwrap();
+    let upload = upload_attachment(&endpoint, "person/test", &file, Some("image/png"))
+        .await.unwrap_err();
+    let read = run_blobs(&endpoint, None, BlobCommand::Get {
+        reference: format!("blob/{}", "a".repeat(64)),
+        message: None,
+        output: None,
+        actor: Some("person/test".into()),
+    }, false).await.unwrap_err();
+    for error in [upload, read] {
+        assert!(error.downcast_ref::<fractal_client::ClientError>().is_some(), "{error:#}");
+        assert_eq!(render_client_error(&error, ClientMessage::Human),
+            "Fractal hit a problem: the blob store failed (internal)");
+        assert_eq!(plain_error(&error),
+            "st hit a problem: the blob store failed (internal)");
+    }
+    server.abort();
+    let _ = server.await;
 }
 
 #[test]
@@ -682,7 +826,7 @@ fn a_conversation_reads_as_stui_shows_it_and_raw_keeps_every_entry() {
     );
     assert!(pretty.starts_with("CONVERSATION  session/example"), "{pretty}");
     assert!(pretty.contains("Please check why the n"), "{pretty}");
-    // The harness's own wrappers are cleaned away, as in stui; no escapes without colour.
+    // The harness's own wrappers are cleaned away, as in Fractal TUI; no escapes without colour.
     for noise in ["<task-notification>", "<channel", "<command-name>", "\x1b["] {
         assert!(!pretty.contains(noise), "{noise}: {pretty}");
     }
@@ -912,6 +1056,30 @@ fn usage_marks_a_reading_older_than_the_limits_cadence_as_stale() {
     let output = render_usage_report(&report, 24, None);
     assert!(output.contains("  ada/claude-1 (claude/aaaa)  stale\n"), "{output}");
     assert!(output.contains("  claude/bbbb\n"), "{output}");
+}
+
+#[test]
+fn usage_lists_every_declared_account_with_its_limit_or_credits() {
+    let report = json!({
+        "rows": [],
+        "limits": [
+            {"account": "claude/aaaa", "account_ref": "ada/claude-1", "weekly_percent": 24.0,
+             "weekly_resets_at_unix_ms": 1_799_500_000_000_u64, "stale": false,
+             "measured_at_unix_ms": 1_799_000_000_000_u64},
+        ],
+        "accounts": [
+            {"name": "ada/claude-1", "account": "claude/aaaa", "provider": "anthropic", "kind": "subscription"},
+            {"name": "ada/claude-2", "account": "claude/bbbb", "provider": "anthropic", "kind": "subscription"},
+            {"name": "ada/key", "account": "omp/cccc", "provider": "anthropic", "kind": "api-key",
+             "credits": {"budget_microusd": 200_000_000_u64, "used_microusd": 154_300_000_u64,
+                         "unpriced_tokens": 7, "period_start_ms": 0}},
+        ],
+    });
+    let output = render_usage_report(&report, 24, None);
+    assert!(output.contains("ACCOUNTS  3 · every declared account\n"), "{output}");
+    assert!(output.contains("ada/claude-1  weekly 24% resets 2027-01-09 "), "{output}");
+    assert!(output.contains("ada/claude-2  no limits reported\n"), "{output}");
+    assert!(output.contains("ada/key  credits $154+ of $200 this month\n"), "{output}");
 }
 
 #[test]
@@ -1310,6 +1478,19 @@ fn a_harness_cannot_mutate_as_a_peer_or_person() {
 }
 
 #[test]
+fn harness_actor_rejection_keeps_st_work_ask_at_the_error_rendering_boundary() {
+    let cli = Cli::try_parse_from([
+        "fractal", "work", "wake", "step-run/example/work", "--as", "person/operator",
+    ]).unwrap();
+    let error = guard_mutating_cli_actor(&cli.command, Some("agent/worker"), None).unwrap_err();
+    for native_driver in [false, true] {
+        let output = cli_error_message(&error, native_driver);
+        assert!(output.contains("`st work ask --as \"$ST_AGENT\"`"), "{output}");
+        assert!(!output.contains("fractal work ask"), "{output}");
+    }
+}
+
+#[test]
 fn a_claim_prints_each_host_document_under_its_reference() {
     let documents = [(
         "doc/hosts/example@abc".to_owned(),
@@ -1694,6 +1875,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
                 tokens: 0,
                 refilled_at_ms: 1_234,
             },
+            claude_attachment_polled: Some((("incarnation".into(), 4, "token".into()), 1_234)),
             settle: ResumeSettle::resumed(),
         },
     };
@@ -1720,6 +1902,8 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert!(back.loop_state.predecessor_harness_record.is_none());
     // Nor does a settle: the replacement image draws its own.
     assert!(back.loop_state.settle.0.is_none());
+    // An unpushed attachment poll is not carried: the replacement image polls once at once.
+    assert!(back.loop_state.claude_attachment_polled.is_none());
 }
 
 #[test]
@@ -1866,7 +2050,7 @@ fn agent_tree_nests_running_subagents_under_their_agent() {
         "page": {"limit": 50, "has_more": false}
     }))
     .unwrap();
-    let tree = render_client_agents(&page, true, false, "st agents tree");
+    let tree = render_client_agents(&page, true, false, "fractal agents tree");
     assert_eq!(
         tree,
         "AGENT TREE  1\n\
@@ -2398,6 +2582,30 @@ fn every_cli_command_has_a_valid_help_surface() {
             "{} has empty help",
             path.join(" ")
         );
+        for line in help.render_long_help().to_string().lines() {
+            // These describe real executable filenames, not the product identity.
+            if line.contains("Install st3, the st link")
+                || line.contains("Keep the installed st3, st,")
+            {
+                continue;
+            }
+            assert!(
+                !line.split_whitespace().any(|word| {
+                    matches!(word.trim_matches(['`', '.', ',', ';']), "st" | "st3")
+                }),
+                "{} contains legacy product wording: {line}",
+                path.join(" ")
+            );
+            if !line.trim_start().starts_with("Usage:") {
+                assert!(
+                    !line.split_whitespace().any(|word| {
+                        matches!(word.trim_matches(['`', '.', ',', ';', ':']), "seat" | "seats" | "seat's" | "Seat" | "Seats")
+                    }),
+                    "{} contains legacy agent terminology: {line}",
+                    path.join(" ")
+                );
+            }
+        }
         let subcommands = command.get_subcommands().cloned().collect::<Vec<_>>();
         for subcommand in subcommands {
             let mut child_path = path.to_vec();
@@ -2420,7 +2628,148 @@ fn every_cli_command_has_a_valid_help_surface() {
 
     let command = Cli::command();
     command.clone().debug_assert();
-    visit(&command, &["st".into()]);
+    visit(&command, &["fractal".into()]);
+}
+
+#[test]
+fn web_help_hides_only_its_unsupported_inherited_global_options() {
+    let command = cli_command();
+    let globals = command.get_arguments()
+        .filter(|argument| argument.is_global_set())
+        .collect::<Vec<_>>();
+    assert_eq!(globals.len(), 7);
+    let web = command.find_subcommand("web").unwrap();
+    for argument in globals {
+        let id = argument.get_id().as_str();
+        assert!(web.get_arguments().find(|arg| arg.get_id().as_str() == id).unwrap().is_hide_set(), "{id}");
+    }
+    let mut setup = command.find_subcommand("setup").unwrap().clone();
+    assert!(setup.render_long_help().to_string().contains("--endpoint"));
+    let mut web = web.clone();
+    let help = web.render_long_help().to_string();
+    assert!(help.contains("--state-dir"));
+    assert!(help.contains("--help"));
+    assert!(!help.contains("--endpoint"));
+    assert!(!help.contains("--instance"));
+}
+
+#[test]
+fn cli_branding_is_fractal_even_through_legacy_aliases() {
+    for program in ["fractal", "st", "st3"] {
+        let help = Cli::try_parse_from([program, "setup", "--help"]).err().unwrap().to_string();
+        assert!(help.contains("Usage: fractal setup"), "{help}");
+        assert!(help.contains("start fractal"), "{help}");
+        assert!(!help.contains("start st"), "{help}");
+        let version = Cli::try_parse_from([program, "--version"]).err().unwrap().to_string();
+        assert!(version.starts_with("fractal "), "{version}");
+    }
+}
+
+#[test]
+fn web_is_visible_in_root_help_and_parses_as_a_public_command() {
+    let help = cli_help::root_help(false);
+    assert!(help.lines().any(|line| line.starts_with("  web ")), "{help}");
+    let command = Cli::command();
+    assert!(!command.find_subcommand("web").unwrap().is_hide_set());
+    assert!(matches!(
+        Cli::try_parse_from(["fractal", "web", "--state-dir", "/tmp/example"]).unwrap().command,
+        Command::Web { state_dir: Some(_) }
+    ));
+}
+
+#[test]
+fn web_without_arguments_uses_the_configured_state_directory() {
+    for program in ["fractal", "st", "st3"] {
+        assert!(matches!(
+            Cli::try_parse_from([program, "web"]).unwrap().command,
+            Command::Web { state_dir: None }
+        ));
+    }
+}
+
+#[test]
+fn web_long_help_exits_successfully() {
+    let error = Cli::try_parse_from(["fractal", "web", "--help"]).err().unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert_eq!(error.exit_code(), 0);
+}
+
+#[test]
+fn web_short_help_exits_successfully() {
+    let error = Cli::try_parse_from(["fractal", "web", "-h"]).err().unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    assert_eq!(error.exit_code(), 0);
+}
+
+#[test]
+fn web_state_directory_preserves_every_legacy_value_form() {
+    // The previous positional parser accepted any OS string after --state-dir,
+    // including strings that otherwise name flags or delimit options.
+    for directory in ["/example/state", "relative", "", "-state", "--help", "-h", "--", "--state-dir"] {
+        let cli = Cli::try_parse_from(["fractal", "web", "--state-dir", directory]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new(directory)
+        ), "{directory:?}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let directory = std::ffi::OsString::from_vec(vec![b'-', 0xff]);
+        let cli = Cli::try_parse_from([
+            std::ffi::OsString::from("fractal"), "web".into(), "--state-dir".into(), directory.clone(),
+        ]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new(&directory)
+        ));
+    }
+}
+
+#[test]
+fn web_rejects_missing_values_repeats_positionals_and_unknown_flags_with_usage_status() {
+    for arguments in [
+        vec!["fractal", "web", "--state-dir"],
+        vec!["fractal", "web", "--state-dir", "one", "--state-dir", "two"],
+        vec!["fractal", "web", "unexpected"],
+        vec!["fractal", "web", "--unknown"],
+        vec!["fractal", "web", "--unknown", "value"],
+        vec!["fractal", "web", "--state-dir", "one", "extra"],
+        vec!["fractal", "web", "--", "unexpected"],
+    ] {
+        let error = Cli::try_parse_from(arguments.clone()).err().expect("invalid web arguments");
+        assert_eq!(error.exit_code(), 2, "{arguments:?}: {error}");
+    }
+}
+
+#[test]
+fn web_uses_clap_option_delimiters_and_equals_values() {
+    for arguments in [
+        vec!["fractal", "web", "--state-dir=relative"],
+        vec!["fractal", "web", "--state-dir", "relative", "--"],
+    ] {
+        assert!(matches!(
+            Cli::try_parse_from(arguments).unwrap().command,
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new("relative")
+        ));
+    }
+    assert!(matches!(
+        Cli::try_parse_from(["fractal", "web", "--"]).unwrap().command,
+        Command::Web { state_dir: None }
+    ));
+}
+
+#[test]
+fn web_global_rejection_covers_the_complete_inherited_inventory() {
+    let command = Cli::command();
+    let globals = command.get_arguments()
+        .filter(|argument| argument.is_global_set())
+        .map(|argument| argument.get_id().as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(globals, std::collections::BTreeSet::from([
+        "read_contract_inventory_json", "checkpoint_space_gate_capabilities",
+        "endpoint", "instance", "catalog", "json", "daemon_wait",
+    ]), "review each new global and add its real-binary web rejection case");
 }
 
 #[test]
@@ -2445,7 +2794,7 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
 
     let mut help = command.clone();
     let help = help.render_long_help().to_string();
-    assert!(help.contains("Usage: st ["), "{help}");
+    assert!(help.contains("Usage: fractal ["), "{help}");
     assert!(
         command
             .find_subcommand("claude-channel")
@@ -2487,6 +2836,8 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
 fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     #[cfg(test)]
     const SCHEDULES_SOURCE: &str = include_str!("schedules_cli.rs");
+    #[cfg(test)]
+    const DEPLOY_SOURCE: &str = include_str!("deploy_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -2494,6 +2845,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
+        ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
         ("driver", /* sqlite-large-value: allow-for-now lv-he57a4ce28014 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
         ("fleet", /* sqlite-large-value: allow-for-now lv-hc13a087df895 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
@@ -2599,6 +2951,7 @@ fn fixture_product_page(kinds: &[&str], has_more: bool) -> ClientPage {
             has_more,
             next_cursor: has_more.then(|| "cursor/next".into()),
             cursor_expires_at: None,
+            omitted_items: None,
         },
         sync: None,
         replicated: None,
@@ -2901,7 +3254,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
             diverged_since: None,
         }],
     });
-    let output = render_now_page(&page, "st3 now --as person/alex");
+    let output = render_now_page(&page, "fractal now --as person/alex");
     assert!(
         output.starts_with(
             "SYNCING  ExampleMac has 1 envelope this host lacks · estimating time to catch up · \
@@ -2917,7 +3270,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
         render_sync_notice(page.sync.as_ref().unwrap(), 1_000_000),
         "SYNCING  ExampleMac has 1 envelope this host lacks · estimating time to catch up · \
              last exchange 2s ago\n  Until then, items below can be out of date. \
-             Progress: st3 replication status\n\n"
+             Progress: fractal replication status\n\n"
     );
     assert_eq!(catch_up_estimate(Some(0)), "caught up");
     assert_eq!(catch_up_estimate(Some(59)), "caught up in under a minute");
@@ -2933,11 +3286,11 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
         render_sync_notice(page.sync.as_ref().unwrap(), 1_000_000),
         "DIVERGED  ExampleMac projects a different graph from the same envelopes · since 3m ago\n\
              \x20 Exchanges cannot fix this, so items below can be wrong. \
-             Details: st3 replication status\n\n"
+             Details: fractal replication status\n\n"
     );
 
     page.sync = None;
-    assert!(!render_now_page(&page, "st3 now").contains("SYNCING"));
+    assert!(!render_now_page(&page, "fractal now").contains("SYNCING"));
 }
 
 #[test]
@@ -2973,9 +3326,9 @@ fn terminal_list_shows_a_working_peek_target() {
     } else {
         panic!("expected runtime fixture");
     }
-    let rendered = render_product_page("TERMINALS", &page, "st terminals");
+    let rendered = render_product_page("TERMINALS", &page, "fractal terminals");
     assert!(
-        rendered.contains("peek: st terminals peek agent/release"),
+        rendered.contains("peek: fractal terminals peek agent/release"),
         "{rendered}"
     );
 }
@@ -3022,7 +3375,7 @@ fn work_detail_says_when_its_holder_was_nudged() {
 #[test]
 fn attention_from_a_retired_requester_says_who_can_close_it() {
     let mut page = fixture_product_page(&["attention"], false);
-    let before = render_product_page("NOW", &page, "st now");
+    let before = render_product_page("NOW", &page, "fractal now");
     assert!(!before.contains("requester retired"), "{before}");
     let ClientResource::Attention(attention) = &mut page.items[0] else {
         panic!("expected attention fixture");
@@ -3034,7 +3387,7 @@ fn attention_from_a_retired_requester_says_who_can_close_it() {
         owner_generation: None,
         runtime_incarnation: None,
     });
-    let rendered = render_product_page("NOW", &page, "st now");
+    let rendered = render_product_page("NOW", &page, "fractal now");
     assert!(
         rendered.contains("  requester retired: only person/alex can close it\n"),
         "{rendered}"
@@ -3045,25 +3398,25 @@ fn attention_from_a_retired_requester_says_who_can_close_it() {
 fn document_continuation_preserves_prefix_and_history() {
     assert_eq!(
         document_continuation_command(Some("doc/type case"), true, 1, "document/abc"),
-        "st documents ls 'doc/type case' --limit 1 --all --cursor document/abc"
+        "fractal documents ls 'doc/type case' --limit 1 --all --cursor document/abc"
     );
 }
 
 #[test]
 fn product_renderers_have_exact_empty_and_mixed_now_output() {
     assert_eq!(
-        render_product_page("NOW", &fixture_product_page(&[], false), "st now"),
+        render_product_page("NOW", &fixture_product_page(&[], false), "fractal now"),
         "NOW  0\nNo current items.\n"
     );
     let mixed = render_product_page(
         "NOW",
         &fixture_product_page(&["attention", "work", "operation"], false),
-        "st now",
+        "fractal now",
     );
     // An attention item leads with its kind and title, then who it is from and how long ago
     // (which moves with the clock) and its priority when it is not normal.
     let (head, rest) = mixed
-        .split_once("  action: st alerts show")
+        .split_once("  action: fractal alerts show")
         .expect(&mixed);
     assert!(
         head.starts_with("NOW  3\n\nrequest   Review release\n          "),
@@ -3077,9 +3430,9 @@ fn product_renderers_have_exact_empty_and_mixed_now_output() {
             "  id: attention/release-review\n",
             "work/release/1/build  work  claimed  build  attempt 1\n",
             "  assigned: agent/release\n",
-            "  action: st work show work/release/1/build\n",
+            "  action: fractal work show work/release/1/build\n",
             "operation/transport-host-b  operation  warning  degraded  Peer is retrying\n",
-            "  recovery: st doctor\n",
+            "  recovery: fractal doctor\n",
         )
     );
 }
@@ -3120,9 +3473,9 @@ fn an_attention_item_names_its_kind_sender_and_age() {
     if let Some(ClientResource::Attention(shown)) = page.items.first_mut() {
         shown.update = item.update.clone();
     }
-    let rendered = render_product_page("NOW", &page, "st now");
+    let rendered = render_product_page("NOW", &page, "fractal now");
     assert!(
-        rendered.contains("  action (marks it read): st alerts show launch/release"),
+        rendered.contains("  action (marks it read): fractal alerts show launch/release"),
         "{rendered}"
     );
     item.state = "snoozed".into();
@@ -3136,23 +3489,23 @@ fn an_attention_item_names_its_kind_sender_and_age() {
 fn now_page_without_work_does_not_claim_zero_working() {
     let attention_only = render_now_page(
         &fixture_product_page(&["attention"], false),
-        "st now --as person/alex",
+        "fractal now --as person/alex",
     );
     assert!(attention_only.starts_with("1 alert\n"), "{attention_only}");
     assert!(!attention_only.contains("WORKING"), "{attention_only}");
     assert!(!attention_only.contains("UNHEALTHY"), "{attention_only}");
     assert!(
-        attention_only.ends_with("\nWork: st work ls · Health: st doctor\n"),
+        attention_only.ends_with("\nWork: fractal work ls · Health: fractal doctor\n"),
         "{attention_only}"
     );
 
     let with_work = render_now_page(
         &fixture_product_page(&["attention", "work"], false),
-        "st now --as person/alex --owner-run mission-run/release/1",
+        "fractal now --as person/alex --owner-run mission-run/release/1",
     );
     assert!(with_work.contains("\nWORKING  1\n"), "{with_work}");
     assert!(!with_work.contains("UNHEALTHY"), "{with_work}");
-    assert!(!with_work.contains("Work: st work ls"), "{with_work}");
+    assert!(!with_work.contains("Work: fractal work ls"), "{with_work}");
 }
 
 #[test]
@@ -3161,9 +3514,9 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     let mut alerts = page.clone();
     alerts.items = [page.items.clone(), page.items.clone()].concat();
     assert!(
-        render_now_page(&alerts, "st now").starts_with("2 alerts\n"),
+        render_now_page(&alerts, "fractal now").starts_with("2 alerts\n"),
         "{}",
-        render_now_page(&alerts, "st now")
+        render_now_page(&alerts, "fractal now")
     );
     // An update asks nothing: it is listed apart and never counted as an alert.
     let mut updates = page.clone();
@@ -3178,18 +3531,18 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
         summary: None,
     });
     update.alert = Some(false);
-    let now = render_now_page(&updates, "st now");
+    let now = render_now_page(&updates, "fractal now");
     assert!(now.starts_with("UPDATES  1\n"), "{now}");
     assert!(!now.contains("1 alert\n") && !now.contains("0 alerts"), "{now}");
     // Nothing waits: no line about alerts at all, not even a zero.
     assert_eq!(
-        render_now_page(&fixture_product_page(&[], false), "st now"),
-        "Work: st work ls · Health: st doctor\n"
+        render_now_page(&fixture_product_page(&[], false), "fractal now"),
+        "Work: fractal work ls · Health: fractal doctor\n"
     );
     // `st alerts ls` counts the alerts under its heading, then lists updates apart.
     let mut mixed = page.clone();
     mixed.items.extend(updates.items.clone());
-    let listed = render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "st alerts ls");
+    let listed = render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "fractal alerts ls");
     assert!(listed.starts_with("ALERTS FOR person/alex  1\n"), "{listed}");
     assert!(listed.contains("\nUPDATES  1\n"), "{listed}");
     // A daemon that predates alerts says nothing: an update is still not an alert.
@@ -3198,7 +3551,7 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     };
     update.alert = None;
     assert_eq!(
-        render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "st alerts ls"),
+        render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "fractal alerts ls"),
         listed
     );
 }
@@ -3238,7 +3591,7 @@ fn context_occupancy_alone_is_not_reported_as_zero_tokens() {
         }))
         .unwrap(),
     );
-    let rendered = render_product_page("SESSIONS", &page, "st conversations sessions");
+    let rendered = render_product_page("SESSIONS", &page, "fractal conversations sessions");
     assert!(!rendered.contains("0 tokens"), "{rendered}");
     assert!(
         rendered.contains("  usage not reported · context 319465 tokens\n"),
@@ -3251,7 +3604,7 @@ fn context_occupancy_alone_is_not_reported_as_zero_tokens() {
     let usage = session.usage.as_mut().unwrap();
     usage.incarnation_count = 1;
     usage.total_tokens = 1200;
-    let rendered = render_product_page("SESSIONS", &page, "st conversations sessions");
+    let rendered = render_product_page("SESSIONS", &page, "fractal conversations sessions");
     assert!(rendered.contains("  usage 1200 tokens\n"), "{rendered}");
 }
 
@@ -3500,7 +3853,7 @@ fn machine_and_device_renderers_have_exact_operational_output() {
         render_product_page(
             "MACHINES",
             &fixture_product_page(&["machine"], true),
-            "st machines"
+            "fractal machines"
         ),
         concat!(
             "MACHINES  1\n",
@@ -3509,20 +3862,20 @@ fn machine_and_device_renderers_have_exact_operational_output() {
             "  runtimes 1 running · 1 known\n",
             "  assigned work 1\n",
             "  transport unix local · last success 2026-09-20T11:09:10Z\n",
-            "  inspect: st subject show host/host-a\n",
-            "More items are available: st machines --cursor cursor/next --limit 100\n",
+            "  inspect: fractal subject show host/host-a\n",
+            "More items are available: fractal machines --cursor cursor/next --limit 100\n",
         )
     );
     assert_eq!(
         render_product_page(
             "DEVICES",
             &fixture_product_page(&["device"], false),
-            "st devices --as person/alex"
+            "fractal devices --as person/alex"
         ),
         concat!(
             "DEVICES  1\n",
             "device/ios-release  active  person/alex/session/ios-release  scopes 4\n",
-            "  action: st devices --as person/alex revoke device/ios-release\n",
+            "  action: fractal devices --as person/alex revoke device/ios-release\n",
         )
     );
     let mut assistant = fixture_product_page(&["device"], false);
@@ -3530,8 +3883,8 @@ fn machine_and_device_renderers_have_exact_operational_output() {
     device.person_id = None;
     device.grant_id = Some("assistant-grant/0123456789abcdef01234567".into());
     device.session_actor = "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567".into();
-    let shown = render_product_page("DEVICES", &assistant, "st devices");
-    assert!(shown.contains("action: st devices grant revoke assistant-grant/0123456789abcdef01234567"));
+    let shown = render_product_page("DEVICES", &assistant, "fractal devices");
+    assert!(shown.contains("action: fractal devices grant revoke assistant-grant/0123456789abcdef01234567"));
     assert!(!shown.contains("--as person/"));
 }
 
@@ -3836,6 +4189,7 @@ fn pty_attach_accepts_an_explicit_nested_override() {
 fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
     let actor = "agent/worker";
     assert_eq!(
+        // Agent-only continuations deliberately keep the executable available in agent seats.
         wait_interruption_reason(actor, true, &[], &["message/new".into()]),
         Some(
             "the wait stopped because agent/worker has a new message: message/new. Run `st conversations ls`"
@@ -4041,7 +4395,7 @@ fn mission_start_help_shows_the_run_subject_an_id_names() {
 
 #[test]
 fn mission_start_bare_ids_are_scoped_to_each_mission() {
-    for mission in ["fleet/smalltalk/daemon-github-sekrets", "release/demo"] {
+    for mission in ["fleet/fractal/daemon-github-sekrets", "release/demo"] {
         for requested in ["2026-10-07", "mission-run/2026-10-07"] {
             let run_id = mission_start_run_id(mission, Some(requested));
             assert_eq!(run_id, format!("{mission}/2026-10-07"));
@@ -5454,6 +5808,32 @@ fn agent_new_args(arguments: &[&str]) -> AgentNewArgs {
         panic!("agents new did not parse");
     };
     args
+}
+
+#[test]
+fn agent_new_cli_normalizes_qualified_ids_without_changing_host_scoping() {
+    for (identity, expected) in [
+        ("worker", "agent/test.worker"),
+        ("team/worker", "agent/team/worker"),
+        ("test.worker", "agent/test.worker"),
+    ] {
+        for name in [identity.to_owned(), format!("agent/{identity}")] {
+            let args = agent_new_args(&[&name, "--harness", "codex"]);
+            let source = agent_new_document(&args, "/work/worker", false);
+            let intent = fractal_daemon::graph::parse_intent(&source, "test").unwrap();
+            assert_eq!(intent.subjects.len(), 1, "{source}");
+            assert!(intent.subjects.contains_key(expected), "{source}");
+        }
+    }
+}
+
+#[test]
+fn agent_lifecycle_subject_normalization_accepts_bare_and_qualified_ids() {
+    for identity in ["worker", "test.worker", "team/worker"] {
+        let subject = format!("agent/{identity}");
+        assert_eq!(normalize_agent_subject(identity), subject);
+        assert_eq!(normalize_agent_subject(&subject), subject);
+    }
 }
 
 #[test]
@@ -7945,4 +8325,9 @@ fn native_identity_rename_allows_generated_idempotency_key() {
         panic!("expected identity rename");
     };
     assert_eq!(args.idempotency_key, None);
+}
+
+#[test]
+fn github_watch_continuation_keeps_the_agent_executable() {
+    assert_eq!(GH_UNWATCH_HINT, "To stop: st gh unwatch");
 }

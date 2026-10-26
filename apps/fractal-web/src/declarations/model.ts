@@ -35,7 +35,7 @@ const hideEnvironment = (environment: unknown): unknown =>
   Predicate.isObject(environment) ? Object.fromEntries(Object.keys(environment).map(name => [name, REDACTED])) : REDACTED
 const withhold = (kdl: unknown): unknown => typeof kdl === 'string' ? WITHHELD_DECLARATIONS : kdl
 
-// The positions below mirror st's MissionSpec serde shape (crates/st3/src/model.rs): environment
+// The positions below mirror st's MissionSpec serde shape (crates/fractal-kernel/src/model.rs): environment
 // values live only in mechanical/llm `GateSpec.environment` and exec `MetricSource.environment`;
 // embedded declaration text in `MissionSpec`/`StepSpec.declarations_kdl`.
 const gate = (value: unknown): unknown => patch(value, { environment: hideEnvironment })
@@ -82,10 +82,10 @@ const unread = (feed: Unread): DeclarationPanelState =>
 export const agentDeclarationState = (feed: Feed<AgentDeclaration>): DeclarationPanelState =>
   feed._tag === 'Waiting' ? { _tag: 'Loading' }
     : feed._tag === 'Unavailable' ? unread(feed)
-    : { _tag: 'Ready', text: feed.value.kdl, language: 'kdl', source: `Canonical KDL from st · revision ${feed.value.revision} · environment values redacted${feed.freshness === 'stale' ? ' · last verified copy, reconnecting' : ''}` }
+    : { _tag: 'Ready', text: feed.value.kdl, language: 'kdl', source: `Canonical KDL from Fractal · revision ${feed.value.revision} · environment values redacted${feed.freshness === 'stale' ? ' · last verified copy, reconnecting' : ''}` }
 
 /** The mission's structured definition, labelled as a fallback; never presented as KDL. */
 export const missionDeclarationState = (feed: Feed<PublicationDefinition>): DeclarationPanelState =>
   feed._tag === 'Waiting' ? { _tag: 'Loading' }
     : feed._tag === 'Unavailable' ? unread(feed)
-    : { _tag: 'Ready', text: `${JSON.stringify(redactMissionDefinition(feed.value.declaration), null, 2)}\n`, language: 'json', source: `Structured definition · revision ${feed.value.revision} · st serves no mission KDL; environment values redacted${feed.freshness === 'stale' ? ' · last verified copy, reconnecting' : ''}` }
+    : { _tag: 'Ready', text: `${JSON.stringify(redactMissionDefinition(feed.value.declaration), null, 2)}\n`, language: 'json', source: `Structured definition · revision ${feed.value.revision} · Fractal serves no mission KDL; environment values redacted${feed.freshness === 'stale' ? ' · last verified copy, reconnecting' : ''}` }

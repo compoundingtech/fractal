@@ -446,11 +446,15 @@ fn spawn_st3_provider(
             environment,
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
         ) => match driver.as_str() {
-            "claude" => fractal_drivers::claude_session::run_controlled_paths(
+            "claude" => fractal_drivers::claude_session::run_controlled_paths_with_primary_ownership(
                 &paths.resolved(),
                 paths.identity,
                 paths.runtime_id,
                 argv,
+                // The owning daemon read the same install Config (including --config/instance)
+                // and overrides this launch value even when off. Sample only for a fresh claim;
+                // ProviderStart::Adopt below never reads it or changes a generation's choice.
+                std::env::var(fractal_drivers::claude_process::ENFORCEMENT_ENV).as_deref() == Ok("1"),
             ),
             "pi" => fractal_drivers::pi_session::run_native(
                 &paths.resolved(),
@@ -800,6 +804,7 @@ async fn drive_st2_native(
             }
             settled = settle.control_tick(&mut control_retry, &mut interval), if !completion_announced => {
                 if driver == "claude" && mailbox.subscription.is_some() && settled
+                    && claude_attachment_check_due(&mailbox, &mut loop_state, current_unix_ms()? as u64)
                     && let Err(error) = check_claude_attachment(
                         client, subject, &incarnation, &mailbox, attach_started, &mut loop_state,
                     ).await

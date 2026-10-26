@@ -754,8 +754,8 @@ its first differing ranges in order, and this build no longer falls back to a fu
 when that listing stops on tombstone ranges. The large answers also stop once every member runs
 this build. A pair of members with only tombstone differences reports no
 progress, so the worker rests rather than loops. Importing older or losing checkpoint lineages
-remains separate ([#1433](https://github.com/compoundingtech/smalltalk/issues/1433),
-[#1052](https://github.com/compoundingtech/smalltalk/issues/1052)); live-envelope convergence
+remains separate ([#1433](https://github.com/compoundingtech/fractal/issues/1433),
+[#1052](https://github.com/compoundingtech/fractal/issues/1052)); live-envelope convergence
 does not assert equal tombstone inventories.
 
 `sync::worker::tests::checkpoint_tombstones_do_not_starve_later_live_ranges` proves later notes
@@ -1259,15 +1259,64 @@ The replication-status JSON failed record also carries optional `failure` metada
 The phases are `dial`, `local-export`, `request-headers`, `response-body`, `verify`,
 `local-receive`, and `follow-up-export`; they describe the failing operation, not the
 carrier. Authenticated peer backend failures preserve allowlisted machine codes such
-as `replication-exchange-metadata-too-large` and the backend phase. The elapsed time
-is the local outbound attempt's duration, including any dial and polling time, not
-a remote clock measurement. Local daemon failures retain their typed API codes.
+as `replication-exchange-metadata-too-large` and the backend phase. `elapsed_ms`
+preserves the originating failure's local measurement when outer layers attach
+context; it is not replaced by the duration of the whole outbound attempt.
+For HTTP failures the clock starts immediately before send, after serialization,
+hashing, signing, optional deflate, and request construction. Response-body and
+verification failures include the preceding send/response-header time; these are
+local observations, not measurements of the peer's backend duration.
+
+`attempt_elapsed_ms` separately measures the worker's whole outbound attempt,
+including dial, exports, earlier requests, receives and overload polls.
+`preparation_ms` measures the failing HTTP request's serialization/hash/sign/deflate
+and construction before send. `request_body_uncompressed_bytes` reports serialized
+JSON bytes; `request_body_bytes` reports the HTTP body bytes after optional
+compression (equal to the uncompressed count when compression is not used).
+Lengths exclude HTTP headers and framing. Preparation and body counts are absent
+if preparation did not complete; whole-attempt timing is absent outside the dial
+worker. Local daemon failures retain their typed API codes and original timings.
 
 Causes retain safe error categories and typed I/O kinds, not free-form error/source
 displays, URLs, credentials, claim content, request bodies, or unsigned peer prose.
 Success records omit `failure`. Older worker requests and older observations without
 details remain readable and do not invent a cause. Carrier-only client sync notices
 remain unchanged; use replication-status JSON for the diagnostic details.
+
+For HTTP failures, `failure.correlation_id` identifies one request (each overload
+poll has its own ID), and `failure.client_stage` names the last observed client
+boundary: `send-started`, `connected`, `headers-received`, or `pooled-or-unknown`.
+`connected` means request-scoped connector middleware observed a fresh connection;
+on a Fabric route this is the local tunnel connection, not proof that the remote
+daemon received the request. Pool acquisition is not exposed by reqwest, so a
+pooled or unattributable connection remains `pooled-or-unknown`, never inferred.
+A refused fresh connection stays at `send-started`; a fresh server connection
+accepting without answering times out at `connected`. Failures before HTTP
+dispatch can omit these fields.
+
+Structured `smallclaims::replication` events carry `correlation_id`, `stage`,
+`unix_ms` (UTC), and `elapsed_us` (monotonic time since this host's request start).
+Fast successful clients log boundaries at DEBUG. A locally failed client exchange
+or one crossing five seconds promotes retained boundaries to INFO with their
+original timestamps; subsequent client boundaries remain INFO. The client emits
+`client-send-start`, `connect-done`, `client-headers-received`, and `client-failed`.
+
+Every handled server request emits exactly one INFO `replication exchange server
+summary`, including fast successes whose response never reaches the client.
+Search both hosts' journals for the ID from the failed record; no DEBUG logging
+is required. The summary includes `status`, `server_ingress_unix_ms`,
+`server_ingress_elapsed_us`, `backend_done_unix_ms`, `backend_done_elapsed_us`,
+`response_headers_ready_unix_ms`, and `response_headers_ready_elapsed_us`.
+`backend_done: false` and absent backend timestamps mean no completed backend
+answer was observed at response handoff (for example an overload or early refusal).
+The server's individual boundaries remain DEBUG, including late backend completion.
+Ingress means the handler entered after Axum extracted the body. Headers-ready
+means the signed/compressed response was handed to Axum, not that the socket write
+completed. A retained backend job records completion with its originating request
+ID; a later poll reusing the answer timestamps when that poll observed it.
+Compare monotonic
+durations only within one host/request; cross-host UTC comparison requires clock
+synchronization. IDs are diagnostic metadata, not authenticated identities.
 
 The worker captures a Fabric route before converting it to its loopback tunnel
 URL. Fabric currently supplies no direct/relay evidence for that exact dial or

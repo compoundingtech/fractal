@@ -3,7 +3,7 @@ import { contentReferences } from './conversationContent.ts';
 
 // A conversation drawn the way stui draws it (crates/fractal-tui/src/ui/adapt.rs conversation and
 // from_harness, conversation.rs): the person's turns as tinted blocks, replies as markdown, tool
-// calls as small boxes tinted by outcome, Small Talk in the same stream with a bar, and graph
+// calls as small boxes tinted by outcome, Fractal in the same stream with a bar, and graph
 // events and diagnostics as one dim line. Anything unexpected is shown as what it is, not dropped
 // and not allowed to break the rest.
 
@@ -99,7 +99,7 @@ export const DEFAULT_FILTERS: readonly DisplayFilter[] = ['harness-markup', 'con
 export const SHOW_EVERYTHING: readonly DisplayFilter[] = [];
 
 // Said once at the start of a conversation st read only the newest part of.
-const NATIVE_PREFIX_NOTE = "Earlier history is not shown: st reads only the newest part of this agent's transcript";
+const NATIVE_PREFIX_NOTE = "Earlier history is not shown: Fractal reads only the newest part of this agent's transcript";
 
 // Harness records that carry no conversation: the transcript's own titles and modes. Unknown
 // records stay visible.
@@ -114,7 +114,7 @@ const BOOKKEEPING_RECORDS = [
 // A record Claude writes about its own session, in kinds that keep appearing (instructions, session
 // context, prompt snapshots, deferred tools, hook summaries): an attachment, system record or entry
 // no renderer knows by name. Claude's own screen shows none as conversation, so they are
-// bookkeeping as a class (as in st3-conversation-ui).
+// bookkeeping as a class (as in fractal-conversation-ui).
 const claudeContextRecord = (text: string) => /^\[unrecognized claude (attachment|system|entry) `/.test(text);
 
 // A reasoning step whose text the model did not share is bookkeeping too.
@@ -203,6 +203,27 @@ function attribute(head: string, name: string): string | undefined {
 function unescapeXml(text: string): string {
   return text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 }
+/**
+ * The images a delivery names, `<attachment path="…/<sha256>.png" media_type="image/png" bytes="…"
+ * name="…"/>`, as the message's own images: read from st by the message, never by the seat's path,
+ * which stays private. What is left is the delivery's text; an image past its retention
+ * (`unavailable="expired"`) says so in it. As Fractal TUI reads them (fractal-conversation-ui `delivered_images`).
+ */
+export function deliveredImages(block: string, message: string | undefined): { text: string; images: MailImage[] } {
+  const images: MailImage[] = [];
+  const text = block.replace(/<attachment\s[^>]*?\/>/g, element => {
+    const name = attribute(element, 'name'), mediaType = attribute(element, 'media_type') ?? '';
+    const leaf = (attribute(element, 'path') ?? '').split(/[\\/]/).pop()?.split('.')[0] ?? '';
+    if (/^[0-9a-f]{64}$/i.test(leaf) && mediaType.startsWith('image/') && message?.startsWith('message/')) {
+      const bytes = Number(attribute(element, 'bytes'));
+      images.push({ sha256: leaf, message, mediaType, ...(name ? { name } : {}), size: Number.isFinite(bytes) ? bytes : 0 });
+      return '';
+    }
+    const why = attribute(element, 'unavailable') === 'expired' ? 'expired' : mediaType || 'not available here';
+    return `[${name ?? 'attachment'} · ${why}]`;
+  });
+  return { text: text.trimEnd(), images };
+}
 function field(block: string, tag: string): string | undefined {
   return takeBlocks({ value: block }, tag)[0]?.trim();
 }
@@ -238,7 +259,7 @@ export function signatureMark(provenance: unknown): string | undefined {
   }
 }
 
-/** The lines st adds beside a delivery for the agent (st-drivers `ding`). */
+/** The lines st adds beside a delivery for the agent (fractal-drivers `ding`). */
 const ST_DELIVERY_NOTES = [
   'Answer the person in this conversation; people have no inbox, so do not reply with st.',
   "The person reads replies in st, not in the agent's session.",
@@ -266,7 +287,8 @@ export function fromHarness(isUser: boolean, raw: string, shown: ReadonlySet<str
     const graph = attribute(head, 'graph');
     if (graph) enveloped.add(graph);
     if (graph && shown.has(graph)) { delivered.add(graph); return; }
-    bodies.push({ kind: 'mail', from: attribute(head, 'from') ?? 'someone', to: attribute(head, 'to') ?? '', subject: attribute(head, 'subject') ?? '', text: cleanMessageText(unescapeXml(block), filters).trim() });
+    const { text: said, images } = deliveredImages(block, graph);
+    bodies.push({ kind: 'mail', from: attribute(head, 'from') ?? 'someone', to: attribute(head, 'to') ?? '', subject: attribute(head, 'subject') ?? '', text: cleanMessageText(unescapeXml(said), filters).trim(), ...(images.length ? { images } : {}) });
   });
   const channelHeads = [...text.value.matchAll(/<channel\b[^>]*>/g)].map(match => match[0]);
   const senders = channelHeads.map(head => attribute(head, 'from') ?? 'someone');
@@ -281,8 +303,8 @@ export function fromHarness(isUser: boolean, raw: string, shown: ReadonlySet<str
     // Mail the stream does not show reads as that mail, never as the delivery's other lines
     // (Nathan, 2026-10-03: "delivered to the agent: The person reads replies in st…").
     if (envelope) {
-      const inner = takeBlocks({ value: block }, 'smalltalk-message')[0] ?? '';
-      bodies.push({ kind: 'mail', from: attribute(envelope, 'from') ?? senders[index] ?? 'someone', to: attribute(envelope, 'to') ?? '', subject: attribute(envelope, 'subject') ?? '', text: cleanMessageText(unescapeXml(inner), filters).trim() });
+      const { text: inner, images } = deliveredImages(takeBlocks({ value: block }, 'smalltalk-message')[0] ?? '', id);
+      bodies.push({ kind: 'mail', from: attribute(envelope, 'from') ?? senders[index] ?? 'someone', to: attribute(envelope, 'to') ?? '', subject: attribute(envelope, 'subject') ?? '', text: cleanMessageText(unescapeXml(inner), filters).trim(), ...(images.length ? { images } : {}) });
       return;
     }
     const subject = block.split('\n').map(line => line.trim()).find(line => line.startsWith('Subject:'))?.slice('Subject:'.length).trim() ?? shorten(cleanMessageText(block, filters), 70);
@@ -339,7 +361,7 @@ export function toolTitle(name: string, args: unknown): string {
   return ['Bash', 'bash', 'shell', 'exec_command'].includes(name) ? `$ ${first}` : `${name} ${first}`;
 }
 
-// Keep this line budget and marker in sync with st3-conversation-ui's tool_output.
+// Keep this line budget and marker in sync with fractal-conversation-ui's tool_output.
 const PREVIEW_LINES = 400;
 
 export function toolOutput(content: unknown, full = false): string[] {
@@ -348,7 +370,7 @@ export function toolOutput(content: unknown, full = false): string[] {
   else if (Array.isArray(content)) text = content.map(item => str(record(item).text) ?? str(item)).filter((part): part is string => part !== undefined).join('\n');
   else if (content == null) text = '';
   else text = str(record(content).text) ?? JSON.stringify(content);
-  // As st3-conversation-ui: no blank lines around the output.
+  // As fractal-conversation-ui: no blank lines around the output.
   const lines = text ? text.split('\n') : [];
   while (lines.length && !lines[0]?.trim()) lines.shift();
   while (lines.length && !lines[lines.length - 1]?.trim()) lines.pop();
@@ -365,7 +387,7 @@ function contentText(body: unknown): string {
 }
 
 // ------------------------------------------------------------ typed rows (OMP parity)
-// The rows a typed view becomes, mirroring st3-conversation-ui exactly: same titles, same
+// The rows a typed view becomes, mirroring fractal-conversation-ui exactly: same titles, same
 // lines, so the phone and stui read one conversation the same way (fixtures/clients/transcripts).
 
 /** The title of a tool call its typed view names: `$ command`, `edit path`, `write path · N bytes`,
@@ -604,6 +626,13 @@ function headerAge(asOf: string, now: string): string | undefined {
   return hours < 24 ? `${hours}h` : `${Math.floor((seconds + 43200) / 86400)}d`;
 }
 
+/** Older daemons name this product `st` or `older st`. Grouping still uses the raw source. */
+function headerSourceLabel(source: string): string {
+  if (source === 'older st') return 'older Fractal';
+  if (source === 'st') return 'Fractal';
+  return source;
+}
+
 /** Every present field in fixed order, with shared provenance once and minority sources
  * marked individually. The shared age is the oldest field from that source, as in stui. */
 export function headerLine(header: ConversationHeader | undefined, now: string): string | null {
@@ -611,7 +640,7 @@ export function headerLine(header: ConversationHeader | undefined, now: string):
   const fields: HeaderField[] = [];
   const marker = (field: HeaderField): string => {
     const age = headerAge(field.as_of, now);
-    return `${field.source}${age ? ` · ${age} ago` : ''}`;
+    return `${headerSourceLabel(field.source)}${age ? ` · ${age} ago` : ''}`;
   };
   const marked = (label: string, field: HeaderField): string | undefined => {
     if (field === undefined) return undefined;
@@ -684,7 +713,7 @@ function diagnosticTone(body: Record<string, unknown>): 'quiet' | 'warning' | 'f
 
 /**
  * Why a conversation cannot be shown whole: st could not read the harness's transcript, and sent
- * only the Small Talk around it. Half a conversation reads as the agent ignoring the person, so
+ * only the Fractal around it. Half a conversation reads as the agent ignoring the person, so
  * neither half shows; this says why, with the transcript's path so it can be reported (Nathan,
  * 2026-10-01). As stui's `unreadable_transcript`.
  */
@@ -703,7 +732,7 @@ export function unreadableTranscript(timeline: Entry[]): string | null {
 }
 
 /**
- * One conversation as st joined it: the harness's turns and the agent's Small Talk, in time
+ * One conversation as st joined it: the harness's turns and the agent's Fractal, in time
  * order. `names` maps graph ids to what a person calls them; the viewer is `you`.
  */
 /** A long message shows only its start; the whole text (`bytes` long, in UTF-8) is read from st by `message`. */
@@ -754,7 +783,7 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
     }
     return {...entry, body} as Entry;
   });
-  const name = (id: string): string => names.get(id) ?? (id === 'daemon/runtime' ? 'st' : id.startsWith('person/') ? id.slice('person/'.length) : short(id));
+  const name = (id: string): string => names.get(id) ?? (id === 'daemon/runtime' ? 'Fractal' : id.startsWith('person/') ? id.slice('person/'.length) : short(id));
   const stamped: ConversationEntry[] = [];
   const tools = new Map<string, number>();
   const callSources = new Map<string, Entry>();
@@ -771,8 +800,8 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
     const body = record(entry.body);
     if (entry.type === 'message') {
       if (Array.isArray(body.blocks)) for (const block of body.blocks.filter(block => record(block).kind === 'raw_text')) push(entry, str(record(block).id) ?? entry.id, {kind:'event',tone:'quiet',text:`[unreadable message]\n${cleanMessageText(str(record(record(block).payload).text) ?? '', filters)}`});
-      // A Small Talk message is two entries: who wrote to whom, then what they wrote. Only a
-      // graph message, `message/…`, is Small Talk; a transcript heads its own turns this way too.
+      // A Fractal message is two entries: who wrote to whom, then what they wrote. Only a
+      // graph message, `message/…`, is Fractal; a transcript heads its own turns this way too.
       mail = (str(body.message_id) ?? '').startsWith('message/') ? body : undefined;
       continue;
     }
@@ -809,7 +838,12 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
     mail = undefined;
     switch (entry.type) {
       case 'content': {
-        const raw = contentText(entry.body) || (contentReferences(entry.body).length ? '[content available on demand]' : '');
+        // An image alone in a turn is its image view; the text st writes in its place
+        // (`[image · load from owner]`) is not the person's or the agent's words (as stui).
+        const imageOnly = Array.isArray(body.blocks) && body.blocks.some(block => record(block).kind === 'image')
+          && body.blocks.every(block => ['image', 'source_record'].includes(str(record(block).kind) ?? ''))
+          && ['', '[image]', '[image · load from owner]'].includes(contentText(entry.body).trim());
+        const raw = imageOnly ? '' : contentText(entry.body) || (contentReferences(entry.body).length ? '[content available on demand]' : '');
         const nativeBlocks = Array.isArray(body.blocks) && body.blocks.some(block => record(block).kind !== 'text');
         // Typed extension blocks (irc, job, status) replace the entry's text fallback, role
         // aside; `tool_start` belongs to its call and is never drawn alone.
@@ -819,7 +853,9 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
           extension.forEach((part, index) => push(entry, extension.length === 1 ? entry.id : `${entry.id}#${index}`, part));
           break;
         }
-        if ((entry.role === 'user' || entry.role === 'system') && (nativeBlocks || raw.startsWith('[unrecognized '))) {
+        if (imageOnly) {
+          push(entry, entry.id, entry.role === 'assistant' ? { kind: 'assistant', text: '' } : { kind: 'user', text: '' });
+        } else if ((entry.role === 'user' || entry.role === 'system') && (nativeBlocks || raw.startsWith('[unrecognized '))) {
           // A native entry's text is data #1574 exposed; it is shown as it arrived.
           const shown = nativeBlocks ? raw : cleanMessageText(raw, filters);
           push(entry, entry.id, entry.role === 'user' ? {kind:'user',text:shown} : {kind:'event',tone:'quiet',text:shown});
@@ -873,7 +909,7 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
           break;
         }
         const tone = diagnosticTone(body);
-        const message = str(body.message) ?? str(body.code) ?? 'st reported a problem';
+        const message = str(body.message) ?? str(body.code) ?? 'Fractal reported a problem';
         push(entry, entry.id, { kind: 'event', tone, text: tone === 'fault' ? `error: ${message}` : message });
         break;
       }
@@ -919,7 +955,7 @@ export function entryText(entry: ConversationEntry): string {
 }
 
 /**
- * A delivery that paused while st restarted and then recovered says nothing a person needs:
+ * A delivery that paused while Fractal restarted and then recovered says nothing a person needs:
  * each such pair becomes one quiet line, and a run of them one line with a count.
  */
 export function foldDeliveryFlaps(entries: ConversationEntry[]): ConversationEntry[] {
@@ -933,7 +969,7 @@ export function foldDeliveryFlaps(entries: ConversationEntry[]): ConversationEnt
     const last = run.at(-1)!;
     const recovered = last.body.kind === 'event' && last.body.text.includes('recovered');
     const pauses = run.filter(entry => entry.body.kind === 'event' && !entry.body.text.includes('recovered')).length;
-    out.push({ ...last, id: `${run[0]!.id}…${last.id}`, body: { kind: 'event', tone: recovered ? 'quiet' : 'warning', text: recovered ? `message delivery paused ${pauses === 1 ? 'once' : `${pauses} times`} while st restarted · recovered` : 'message delivery is paused; st will retry' } });
+    out.push({ ...last, id: `${run[0]!.id}…${last.id}`, body: { kind: 'event', tone: recovered ? 'quiet' : 'warning', text: recovered ? `message delivery paused ${pauses === 1 ? 'once' : `${pauses} times`} while Fractal restarted · recovered` : 'message delivery is paused; Fractal will retry' } });
   }
   return out;
 }
@@ -981,7 +1017,7 @@ export function freshnessLine(o: { issue: string; loaded: boolean; refreshing: b
   if (o.issue) return { text: `⚠ retrying${updated}`, tone: 'warn' };
   if (!o.loaded) return { text: '↻ loading…', tone: 'refreshing' };
   if (o.refreshing) return { text: `↻ refreshing…${updated}`, tone: 'refreshing' };
-  if (o.lastFrame === null) return { text: '● live · waiting for st', tone: 'live' };
+  if (o.lastFrame === null) return { text: '● live · waiting for Fractal', tone: 'live' };
   return { text: `● live${updated}`, tone: 'live' };
 }
 

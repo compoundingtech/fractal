@@ -1,9 +1,59 @@
 use fractal_legacy_runner::Runner as _;
 
-static RUNTIME_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The runtime tests start real pty sessions, and a session's id and state directory are the user's
+/// by default: a sibling test, another checkout's run of the group, or a session left by a killed run
+/// answers to the same `example-linux.worker` ids, and one in three runs lost a pty spawn to it. Each
+/// test therefore runs against its own `PTY_ROOT` and `XDG_STATE_HOME`, as the other supervision tests
+/// do. They also take turns (an advisory file lock, which spans nextest's process per test; the
+/// environment is the process's), so the variables they set are never read by a sibling thread.
+struct RuntimeTest {
+    _lock: std::fs::File,
+    _root: tempfile::TempDir,
+    saved: [(&'static str, Option<std::ffi::OsString>); 2],
+}
+
+impl RuntimeTest {
+    fn take() -> Self {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(std::env::temp_dir().join("st-stream-authoring-cli-runtime.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        // A short path: the pty socket path must fit the socket address limit.
+        let root = tempfile::Builder::new().prefix("sa").tempdir_in("/tmp").unwrap();
+        let saved = ["PTY_ROOT", "XDG_STATE_HOME"].map(|name| (name, std::env::var_os(name)));
+        // SAFETY: the lock above is held for the guard's life, and every test that reads these
+        // variables through the runner holds it too.
+        unsafe {
+            std::env::set_var("PTY_ROOT", root.path().join("pty"));
+            std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+        }
+        Self { _lock: lock, _root: root, saved }
+    }
+}
+
+impl Drop for RuntimeTest {
+    fn drop(&mut self) {
+        for (name, value) in &self.saved {
+            // SAFETY: as in `take`, under the lock the guard still holds.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+
+/// How long a stream's session may take to start or retire on a loaded host. Each wait ends as soon
+/// as the session is where the test expects it; a slow first start once missed three quick polls.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn write_agent(root: &Path) {
     let directory = root.join("agents/example-linux/worker");
@@ -16,12 +66,21 @@ fn write_agent(root: &Path) {
     fractal_legacy_runner::event::publish_owner_binding_for_test(root, "example-linux").unwrap();
 }
 
+/// The pty root the in-process `SystemRunner` uses for `root`, handed to each `st2` so the CLI retires
+/// the sessions the runner spawned: the catalog's own, or PTY_ROOT when the test process has one. The
+/// other CLI tests remove PTY_ROOT, but this file's runner reads it in-process, so removing it only
+/// from `st2` would split the two. scripts/st-test drops an agent seat's PTY_ROOT (its live root).
+fn pty_root(root: &Path) -> std::path::PathBuf {
+    fractal_legacy_runner::run::effective_pty_root(root)
+}
+
 fn st2(root: &Path, args: &[&str]) -> std::process::Output {
     Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("--catalog")
         .arg(root)
         .args(args)
         .env("ST2_TEST_EVENT_HOST", "example-linux")
+        .env("PTY_ROOT", pty_root(root))
         .env_remove("ST_AGENT")
         .output()
         .unwrap()
@@ -253,7 +312,7 @@ fn command_and_direct_argv_are_mutually_exclusive() {
 
 #[test]
 fn launched_stream_removal_retires_runtime_before_source_publication() {
-    let _runtime = RUNTIME_TEST.lock().unwrap();
+    let _runtime = RuntimeTest::take();
     let catalog = tempfile::tempdir().unwrap();
     write_agent(catalog.path());
     let add = st2(
@@ -276,7 +335,8 @@ fn launched_stream_removal_retires_runtime_before_source_publication() {
         String::from_utf8_lossy(&add.stderr)
     );
     let runner = fractal_legacy_runner::SystemRunner::new(catalog.path().to_path_buf(), fractal_legacy_runner::exec_state_dir("example-linux"));
-    for _ in 0..3 {
+    let deadline = std::time::Instant::now() + SETTLE;
+    while std::time::Instant::now() < deadline {
         let report = fractal_legacy_runner::up_once(catalog.path(), "example-linux", &runner).unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         if runner
@@ -316,7 +376,8 @@ fn launched_stream_removal_retires_runtime_before_source_publication() {
         String::from_utf8_lossy(&remove.stderr)
     );
     let mut retired = false;
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + SETTLE;
+    while std::time::Instant::now() < deadline {
         retired = runner
             .list_sessions()
             .unwrap()
@@ -340,7 +401,7 @@ fn launched_stream_removal_retires_runtime_before_source_publication() {
 
 #[test]
 fn launched_stream_removal_escalates_an_ignoring_adapter_before_forgetting_it() {
-    let _runtime = RUNTIME_TEST.lock().unwrap();
+    let _runtime = RuntimeTest::take();
     let catalog = tempfile::tempdir().unwrap();
     write_agent(catalog.path());
     let add = st2(
@@ -370,7 +431,8 @@ fn launched_stream_removal_escalates_an_ignoring_adapter_before_forgetting_it() 
             .is_empty()
     );
     let runtime_id = "example-linux.worker.stream-stubborn";
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + SETTLE;
+    while std::time::Instant::now() < deadline {
         if runner
             .list_sessions()
             .unwrap()
@@ -419,7 +481,7 @@ fn launched_stream_removal_escalates_an_ignoring_adapter_before_forgetting_it() 
 #[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn failed_source_publish_after_stop_keeps_declaration_relaunchable() {
-    let _runtime = RUNTIME_TEST.lock().unwrap();
+    let _runtime = RuntimeTest::take();
     let catalog = tempfile::tempdir().unwrap();
     write_agent(catalog.path());
     assert!(
@@ -460,6 +522,7 @@ fn failed_source_publish_after_stop_keeps_declaration_relaunchable() {
             "example-linux",
         ])
         .env("ST2_TEST_AGENT_AUTHOR_FAIL_BEFORE_PUBLISH", "1")
+        .env("PTY_ROOT", pty_root(catalog.path()))
         .output()
         .unwrap();
     assert!(!failed.status.success());
@@ -469,7 +532,8 @@ fn failed_source_publish_after_stop_keeps_declaration_relaunchable() {
             .contains("stream \"live\"")
     );
 
-    for _ in 0..3 {
+    let deadline = std::time::Instant::now() + SETTLE;
+    while std::time::Instant::now() < deadline {
         let report = fractal_legacy_runner::up_once(catalog.path(), "example-linux", &runner).unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         if runner

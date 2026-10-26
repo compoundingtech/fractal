@@ -1,4 +1,4 @@
-//! Translate the shared renderer's pane intents into stui's shell hit map.
+//! Translate the shared renderer's pane intents into Fractal TUI's shell hit map.
 
 use super::doc::{Doc, Hit, Target};
 use super::theme;

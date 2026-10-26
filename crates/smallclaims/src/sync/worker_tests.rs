@@ -114,6 +114,97 @@ fn plain_open(path: &Path, origin: &str) -> anyhow::Result<Store> {
     Store::open(path, origin, Arc::new(Plain))
 }
 
+#[tokio::test]
+async fn signed_default_answer_cannot_draw_envelopes_from_a_named_shard() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().unwrap();
+    let auth = FleetAuth::test("1f91ca65-7793-48cc-866e-ac15690130e1", &[7; 32]);
+    let shard = Arc::new(plain_open(&root.path().join("github.sqlite3"), "birch").unwrap());
+    shard
+        .bind_shard(&crate::shards::ShardId::parse("github").unwrap())
+        .unwrap();
+    shard.bind_fleet(auth.fleet_id()).unwrap();
+    shard
+        .append_claim(&ClaimInput {
+            subject: "note/github".into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let default = plain_open(&root.path().join("default.sqlite3"), "cedar").unwrap();
+    default.bind_fleet(auth.fleet_id()).unwrap();
+    let answer = default.export_replication_summary(auth.fleet_id()).unwrap();
+    assert_eq!(answer.shard_id, None);
+    let requests = Arc::new(AtomicUsize::new(0));
+    let count = requests.clone();
+    let signing = auth.clone();
+    let app = Router::new().route(
+        EXCHANGE_PATH,
+        post(move |body: Bytes| {
+            let count = count.clone();
+            let signing = signing.clone();
+            let answer = answer.clone();
+            async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                let query: ReplicationExchange = serde_json::from_slice(&body).unwrap();
+                assert_eq!(query.shard_id.as_deref(), Some("github"));
+                assert!(
+                    query.envelopes.is_empty(),
+                    "scope check precedes payload push"
+                );
+                let envelope = PeerResponse::new("cedar", 0, answer);
+                let bytes = serde_json::to_vec(&envelope).unwrap();
+                let mut response = (StatusCode::OK, bytes.clone()).into_response();
+                response.headers_mut().extend(
+                    signing
+                        .response_headers_for(
+                            EXCHANGE_PATH,
+                            "cedar",
+                            &bytes,
+                            &FleetAuth::body_digest(&body),
+                        )
+                        .unwrap(),
+                );
+                response
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
+    let error = exchange(
+        &replication_http_client(),
+        &Local(shard.clone()),
+        "birch",
+        &peer,
+        &auth,
+        &fleet,
+    )
+    .await
+    .unwrap_err();
+    let mismatch = error.downcast_ref::<PeerShardMismatch>().unwrap();
+    assert_eq!(mismatch.expected.as_deref(), Some("github"));
+    assert_eq!(mismatch.actual, None);
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    assert!(
+        default
+            .replication_inventory()
+            .unwrap()
+            .envelopes
+            .is_empty()
+    );
+    server.abort();
+}
+
 #[tokio::test(start_paused = true)]
 async fn overload_poll_exhaustion_retains_authenticated_response_details() {
     let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
@@ -175,13 +266,15 @@ async fn overload_poll_exhaustion_retains_authenticated_response_details() {
     let _ = server.await;
     let _ = awake.await;
     assert!(error.is::<PeerOverloaded>());
+    let inner_elapsed = error.downcast_ref::<ReplicationExchangeFailure>().unwrap().elapsed_ms;
     let failure = ReplicationExchangeFailure::from_error(
         &error, ReplicationFailurePhase::Verify, Duration::from_secs(300), None,
     );
     assert_eq!(failure.code, "replication-overloaded");
     assert_eq!(failure.phase, ReplicationFailurePhase::ResponseBody);
     assert_eq!(failure.http_status, Some(503));
-    assert_eq!(failure.elapsed_ms, 300_000);
+    assert_eq!(failure.elapsed_ms, inner_elapsed);
+    assert!(failure.preparation_ms.is_some());
     assert!(!failure.cause.contains("private"));
 }
 
@@ -975,9 +1068,11 @@ fn the_dial_set_comes_from_membership_and_skips_dial_out_members() {
         |name: &str, state: &str, mode: &str, endpoints: Vec<Value>| crate::fleet::MemberView {
             name: name.into(),
             member_key: format!("{name}-key"),
+            node_id: None,
             state: state.into(),
             mode: mode.into(),
             endpoints,
+            endpoints_published: true,
             start: 1,
             end: None,
             ended: None,
@@ -1042,6 +1137,8 @@ fn transport_order_view() -> FleetView {
         member_key: format!("{name}-key"),
         state: "current".into(),
         mode: "listening".into(),
+        node_id: None,
+        endpoints_published: true,
         endpoints,
         start: 1,
         end: None,
@@ -1306,6 +1403,76 @@ fn a_refusal_waits_for_the_settings_lock_without_blocking_the_runtime() {
             .removed
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn pairing_admission_binds_signed_membership_before_sealing_the_answer() {
+    use crate::fleet::code::{JoinCode, fingerprint};
+    use crate::fleet::handshake::{JoinResponse, Joiner};
+    let fleet = "3b241101-e2bb-4255-8caf-4136c566a962";
+    let anchor = Arc::new(MemberKey::generate().unwrap().0);
+    let member = MemberKey::generate().unwrap().0;
+    let store = Arc::new(plain_memory("a").unwrap());
+    store.bind_fleet(fleet).unwrap();
+    store.pin_fleet_anchor(anchor.public()).unwrap();
+    store.set_member_key(Some(anchor.clone())).unwrap();
+    fleet_claim(&store, "fleet.member-admitted", "host/a", serde_json::json!({
+        "fleet_id": fleet, "member_key": anchor.public(), "via": "anchor", "mode": "listening"
+    }));
+    let invitation = store.create_fleet_invite(
+        Some("b"), Duration::from_secs(600), &["fabric".into()], "person/test", false,
+    ).unwrap();
+    let code = JoinCode {
+        fleet_id: uuid::Uuid::parse_str(fleet).unwrap(),
+        invite: hex::decode(invitation.invite).unwrap().try_into().unwrap(),
+        token: invitation.token,
+        fingerprint: fingerprint(anchor.public()),
+        expires_at: invitation.expires_at_unix_ms / 1000,
+        name: Some("b".into()),
+        migrate: false,
+        endpoints: Vec::new(),
+        pairing: None,
+    };
+    let node_id = "a".repeat(64);
+    let session = Joiner::start_bound(&code, &member, "b", "dial-out", None, "test", Some(node_id.clone())).unwrap();
+    let state = PeerState {
+        backend: Local(store.clone()),
+        node: "a".into(),
+        auth: FleetAuth::test(fleet, &[9; 32]).with_member_key(Some(anchor.clone())),
+        fleet: member_context(&store, &anchor, &[], &[], false),
+        outbound_notify: watch::channel(0_u64).0,
+    };
+    let body = serde_json::json!({
+        "request": session.request(), "node_id": node_id,
+        "expected_fleet_id": fleet, "expected_sponsor_key": anchor.public()
+    });
+    let response = receive_pairing_admission(State(state.clone()), Bytes::from(serde_json::to_vec(&body).unwrap())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), MAX_JOIN_BYTES).await.unwrap();
+    let answer: JoinResponse = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(session.open(&answer).unwrap().fleet_id, fleet);
+    store.verify_fleet_pairing_admission("b", member.public(), &node_id).unwrap();
+    let view = store.fleet_view().unwrap();
+    let admitted = view.current("b");
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0].member_key, member.public());
+    assert_eq!(admitted[0].node_id.as_deref(), Some(node_id.as_str()));
+    assert!(admitted[0].endpoints.is_empty(), "admission must not wait for joiner endpoint publication");
+    assert!(!admitted[0].endpoints_published);
+    let encoded = serde_json::to_value(&view).unwrap();
+    assert_eq!(serde_json::from_value::<FleetView>(encoded).unwrap(), view);
+    assert!(store.verify_fleet_pairing_admission("b", member.public(), &"b".repeat(64)).is_err());
+    assert!(store.verify_fleet_pairing_admission("b", anchor.public(), &node_id).is_err());
+    let mut wrong_fleet = body.clone();
+    wrong_fleet["expected_fleet_id"] = serde_json::json!("3b241101-e2bb-4255-8caf-4136c566a963");
+    let refused = receive_pairing_admission(
+        State(state.clone()), Bytes::from(serde_json::to_vec(&wrong_fleet).unwrap()),
+    ).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    let mut wrong_node = body;
+    wrong_node["node_id"] = serde_json::json!("b".repeat(64));
+    let refused = receive_pairing_admission(State(state), Bytes::from(serde_json::to_vec(&wrong_node).unwrap())).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -4027,6 +4194,8 @@ mod retry_tests {
             state: "current".into(),
             mode: "listening".into(),
             member_key: "member-key".into(),
+            node_id: None,
+            endpoints_published: true,
             start: 0,
             end: None,
             ended: None,

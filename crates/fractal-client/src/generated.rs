@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; HTTP API/error versions stay unchanged; sunset 2026-11-01.
 pub const API_VERSION: &str = "st3.client.v0";
 pub const ERROR_VERSION: &str = "st3.client.error.v0";
-pub const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
+pub const TERMINAL_SUBPROTOCOL: &str = "fractal.client.terminal.v0";
 
 /// Current advisory text, never an approval, grant, assignment or answer to an ask.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -222,6 +222,9 @@ pub struct PageInfo {
     pub next_cursor: Option<String>,
     #[serde(default)]
     pub cursor_expires_at: Option<String>,
+    /// Unreadable history candidates skipped on this page. Nonzero means incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_items: Option<usize>,
 }
 
 /// Declaration reads preserve future fields and state strings without assigning new semantics.
@@ -510,6 +513,9 @@ pub struct Attention {
     /// The mission step waiting on this ask, on an ask a mission step made.
     #[serde(default)]
     pub blocked: Option<AttentionBlocked>,
+    /// st's presentation of this row; absent from older daemons.
+    #[serde(default)]
+    pub presentation: Option<AttentionPresentation>,
     pub title: String,
     pub detail: String,
     pub priority: String,
@@ -521,6 +527,57 @@ pub struct Attention {
     pub target_states: Vec<AttentionTargetState>,
     #[serde(default)]
     pub actions: Vec<String>,
+}
+/// st's presentation of an attention row (docs/clients/ui-contract.md, Attention row). Words
+/// are fixtures/clients/words.json ids.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionPresentation {
+    /// The Now group; `None` for a row that is not a Now card.
+    #[serde(default)]
+    pub tier: Option<String>,
+    /// The card; `None` for a row that is no card.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Who Chat about this reaches; `None` means the chief of staff.
+    #[serde(default)]
+    pub agent: Option<AttentionActor>,
+    #[serde(default)]
+    pub raised_by: Option<AttentionActor>,
+    #[serde(default)]
+    pub waiting: Option<AttentionWaiting>,
+    /// On a revision card: what the candidate revision changes.
+    #[serde(default)]
+    pub revision: Option<AttentionRevision>,
+}
+/// What a candidate mission revision changes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionRevision {
+    pub from_revision: String,
+    pub to_revision: String,
+    pub reason: String,
+    #[serde(default)]
+    pub lines: Vec<AttentionRevisionLine>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+/// One change: `+` adds a step, `-` removes one, `~` changes the mission or a step.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionRevisionLine {
+    pub op: String,
+    pub text: String,
+}
+/// An agent or other actor, with the name a person reads.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionActor {
+    pub id: String,
+    pub label: String,
+}
+/// The step an attention row holds.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionWaiting {
+    pub step: String,
+    /// The step's name within its mission.
+    pub path: String,
 }
 /// The mission step that asked and waits for the answer.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -714,6 +771,10 @@ pub struct UsagePeriod {
     /// Each account's freshest limits reading; empty from a daemon that reports none.
     #[serde(default)]
     pub limits: Vec<UsageLimit>,
+    /// Every declared account in name order, so each panel lists the same accounts; empty from a
+    /// daemon that reports none.
+    #[serde(default)]
+    pub accounts: Vec<UsageAccount>,
     /// Daily planning estimate, including useful work; absent on older daemons.
     #[serde(default)]
     pub agent_messages: Option<AgentMessageEstimate>,
@@ -745,6 +806,37 @@ pub struct AgentMessageDay {
     pub low_percent: Option<f64>,
     #[serde(default)]
     pub high_percent: Option<f64>,
+}
+/// A declared account, listed whether or not it spent or reported limits in the period.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct UsageAccount {
+    /// The declared name, like `nathan/claude-1`.
+    pub name: String,
+    /// The label its usage rows and limits carry, joining them to this account.
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub driver: Option<String>,
+    pub provider: String,
+    pub kind: UsageAccountKind,
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub credits: Option<UsageCredits>,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum UsageAccountKind {
+    Subscription,
+    ApiKey,
+}
+/// An api-key account's spend so far in the UTC calendar month of the period's end.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct UsageCredits {
+    pub budget_microusd: u64,
+    pub used_microusd: u64,
+    pub unpriced_tokens: u64,
+    pub period_start_ms: u64,
 }
 /// An account's 5-hour and weekly limits, as the seat that measured it most recently read them.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -785,6 +877,9 @@ pub struct UsageRow {
     pub model: Option<String>,
     #[serde(default)]
     pub account: Option<String>,
+    /// The declared account this row's spend is read against, when one claims its label.
+    #[serde(default)]
+    pub account_ref: Option<String>,
     #[serde(default)]
     pub host: Option<String>,
     #[serde(default)]
@@ -2252,6 +2347,8 @@ pub struct TimelinePage {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct TimelineEntry {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivers: Option<String>,
     pub sequence: u64,
     pub revision: u32,
     pub timestamp: String,
@@ -4913,10 +5010,23 @@ pub struct AgentRepository {
     pub agent_ids: Vec<String>,
 }
 
+/// Exact prior person instruction and current policy; authentication selects the actor.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationProof {
+    pub person: String,
+    pub policy: String,
+    pub message: String,
+    pub quote: String,
+    pub episode: String,
+}
+
 /// A person's answer to a native harness prompt alert.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptRespondParameters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DelegationProof>,
     pub target_id: String,
     pub episode: String,
     pub answer: String,

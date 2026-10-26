@@ -35,7 +35,7 @@ final class DiagnosticStore: @unchecked Sendable {
   private static let retentionMs: UInt64 = 7 * 24 * 60 * 60 * 1_000
 
   let context = DiagnosticLaunchContext.current()
-  private let queue = DispatchQueue(label: "smalltalk.diagnostics.disk")
+  private let queue = DispatchQueue(label: "fractal.diagnostics.disk")
   // Independent of the report queue: after the marker is durable, subsequent
   // pre-JS callbacks and launchContext() return without waiting for MetricKit I/O.
   private let startup = NSLock()

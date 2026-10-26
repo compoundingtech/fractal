@@ -18,6 +18,8 @@ pub struct State {
     confirmed: BTreeSet<String>,
     #[serde(default)]
     accepted: BTreeSet<String>,
+    #[serde(default)]
+    receipt_records: BTreeMap<String, Option<crate::conversation_delivery::NativeReceipt>>,
     lines: fractal_drivers::reexec::LineBuffer,
 }
 #[derive(Default, Deserialize, Serialize)]
@@ -27,6 +29,8 @@ pub struct Handoffs {
     confirmed: BTreeSet<String>,
     #[serde(default)]
     accepted: BTreeSet<String>,
+    #[serde(default)]
+    receipt_records: BTreeMap<String, Option<crate::conversation_delivery::NativeReceipt>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -39,6 +43,27 @@ pub async fn run(
     runtime_id: &str,
 ) -> Result<()> {
     let agent_dir = &paths.agent_dir;
+    let session = std::env::var(fractal_drivers::claude_session::SESSION_ENV).unwrap_or_default();
+    let sequence = std::env::var(fractal_drivers::claude_session::SESSION_SEQ_ENV)
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let ownership = fractal_drivers::claude_process::with_caller(agent_dir, &session, sequence,
+        std::process::id(), None, fractal_drivers::claude_process::Caller::Channel, Ok);
+    let legacy = match ownership {
+        Ok(fractal_drivers::claude_process::Admission::Primary) => false,
+        // The report and initialization claim below retain the ownership warning.
+        // Accepted legacy startup must not write into the person's terminal.
+        Ok(fractal_drivers::claude_process::Admission::Legacy) => true,
+        Err(error) => {
+            eprintln!("st: {}", fractal_drivers::claude_process::diagnostic(&error));
+            if fractal_drivers::claude_process::failure_kind(&error)
+                == Some(fractal_drivers::claude_process::FailureKind::Refused) {
+                return run_idle().await;
+            }
+            // Unavailable proof is not proof of secondary ownership. Report startup failure
+            // rather than silently parking a legitimate primary in the unscoped protocol.
+            return Err(error);
+        }
+    };
     let ledger_path = agent_dir.join("native-channel-handoffs.json");
     let mut state = if let Some(path) =
         fractal_drivers::reexec::resume_path(fractal_drivers::reexec::CHANNEL_RESUME_ENV)
@@ -60,6 +85,7 @@ pub async fn run(
             attempted: ledger.attempted,
             confirmed: ledger.confirmed,
             accepted: ledger.accepted,
+            receipt_records: ledger.receipt_records,
             ..State::default()
         }
     };
@@ -110,13 +136,18 @@ pub async fn run(
         "image":fractal_drivers::reexec::running_identity().map(|i| i.token()),
         "follows":fractal_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
         "channel":{"pid":std::process::id(),"image":fractal_drivers::reexec::running_identity().map(|i| i.token()),"age_ms":0},
-        "ready":state.initialized})
+        "ready":state.initialized,
+        "reason":legacy.then_some("legacy ownership: unprotected until next natural restart")})
     };
     let mut subscription = Subscription::start(client.clone(), state.fence.clone(), report());
     let mut watch = fractal_drivers::reexec::ReplacementWatch::for_current_process();
     // Retry the identical claim after a failed acknowledgement. The existing tick
     // schedules retries; polling the POST separately keeps MCP input and EOF live.
-    let initialization_input = channel_initialization_claim(&state.fence);
+    let mut initialization_input = channel_initialization_claim(&state.fence);
+    if legacy {
+        initialization_input.fields.insert("reason".into(), json!(
+            "legacy ownership: unprotected until next natural restart; MCP initialized under legacy admission"));
+    }
     let initialization = announce_initialization(client, &initialization_input);
     tokio::pin!(initialization);
     let mut initialization_recorded = false;
@@ -129,6 +160,7 @@ pub async fn run(
     let mut transcript = Transcript::default();
     let wrapper = std::env::var(fractal_drivers::claude_session::SESSION_ENV).unwrap_or_default();
     let mut retries = BTreeMap::<String, Retry>::new();
+    let mut retained = BTreeMap::<String, RetainedView>::new();
     let mut unconfirmed_since = BTreeMap::<String, Instant>::new();
     let mut diagnostics = BTreeMap::<String, DiagnosticReport>::new();
     let mut preparation_errors = BTreeMap::<String, String>::new();
@@ -176,7 +208,8 @@ pub async fn run(
                     "image":fractal_drivers::reexec::running_identity().map(|i| i.token()),
                     "follows":fractal_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
                     "channel":{"pid":std::process::id(),"image":fractal_drivers::reexec::running_identity().map(|i| i.token()),"age_ms":0},
-                    "ready":state.initialized}));
+                    "ready":state.initialized,
+                    "reason":legacy.then_some("legacy ownership: unprotected until next natural restart")}));
                 if state.initialized && replayed {
                     // The stream grants eligibility only to live mail. Retained handoffs can
                     // still acquire missing receipts from native proof, without another offer.
@@ -185,16 +218,17 @@ pub async fn run(
                     let mut tracked = messages.clone();
                     let mut dirty = false;
                     let pending: BTreeSet<_> = state.attempted.iter().chain(&state.accepted).chain(&state.confirmed).cloned().collect();
+                    retained.retain(|message, _| pending.contains(message) && !live.contains(message));
                     for message in pending {
                         if live.contains(&message) { continue; }
                         let key = format!("recovery:{message}");
                         if !retry_ready(&retries, &key) { continue; }
-                        match client.get::<MessageView>(&format!("/v1/messages/read/{message}")).await {
-                            Ok(view) if view.to == subject && matches!(view.status.as_str(), "sent" | "staged" | "delivered") => {
-                                tracked.push(view);
+                        match recover_retained(client, subject, &message, &mut retained, Instant::now()).await {
+                            Recovery::Retained(view) => {
+                                tracked.push(*view);
                                 retries.remove(&key);
                             },
-                            Ok(_) => {
+                            Recovery::Settled => {
                                 dirty |= state.attempted.remove(&message);
                                 dirty |= state.accepted.remove(&message);
                                 dirty |= state.confirmed.remove(&message);
@@ -202,7 +236,7 @@ pub async fn run(
                                 unconfirmed_since.remove(&message);
                                 retries.remove(&key);
                             },
-                            Err(error) => {
+                            Recovery::Unavailable(error) => {
                                 retry_failed(&mut retries, &key);
                                 diagnostic(client, &state.fence, &message, "claude-handoff-status-unavailable",
                                     &format!("{message}: retained handoff status could not be read; receipt recovery retries with backoff up to 30s: {error:#}"),
@@ -275,14 +309,24 @@ pub async fn run(
                         let records = (|| {
                             let path = fractal_drivers::claude_session::channel_transcript_recovering(paths, identity, runtime_id, &wrapper)?
                                 .context("Claude has not bound this wrapper to a native transcript")?;
-                            transcript.appended(&path)
+                            let native_session = fractal_drivers::claude_session::channel_receipt_session(
+                                &paths.session_dir, identity, runtime_id, &wrapper, &path)?;
+                            Ok::<_, anyhow::Error>((transcript.appended(&path)?, native_session))
                         })();
                         match records {
-                            Ok(records) => {
+                            Ok((records, native_session)) => {
                                 retries.remove("transcript");
                                 for record in records {
                                     for (message, envelope) in &content {
                                         if native_receipt(&record, envelope) {
+                                            // Freeze the exact receipt payload before its first POST;
+                                            // a lost ACK retries identical metadata after reexec too.
+                                            if let std::collections::btree_map::Entry::Vacant(entry) = state.receipt_records.entry(message.clone()) {
+                                                let proof = native_session.as_deref().and_then(|session|
+                                                    crate::conversation_delivery::claude_record(&record, session));
+                                                entry.insert(proof);
+                                                dirty = true;
+                                            }
                                             dirty |= state.confirmed.insert(message.clone());
                                             dirty |= state.accepted.insert(message.clone());
                                             dirty |= state.attempted.insert(message.clone());
@@ -339,14 +383,18 @@ pub async fn run(
                         let result = async {
                             receipt(client, &state.fence, &message, "delivered").await?;
                             if state.confirmed.contains(&message) {
-                                receipt(client, &state.fence, &message, "read").await?;
+                                receipt_with_record(client, &state.fence, &message, "read",
+                                    state.receipt_records.get(&message).and_then(Option::as_ref)).await?;
                             }
                             Ok::<_, anyhow::Error>(())
                         }.await;
                         match result {
                             Ok(()) => {
+                                // This receipt changed the message's status: read it again next tick.
+                                retained.remove(&message);
                                 state.accepted.remove(&message);
                                 if state.confirmed.remove(&message) { content.remove(&message); }
+                                state.receipt_records.remove(&message);
                                 retries.remove(&key);
                                 unconfirmed_since.remove(&message);
                                 dirty = true;
@@ -443,6 +491,53 @@ fn current_notification_observation(observed: &fractal_drivers::harness_state::O
                 | fractal_drivers::harness_state::Activity::Idle
                 | fractal_drivers::harness_state::Activity::Active
                 | fractal_drivers::harness_state::Activity::Child)
+}
+
+/// The last read of a retained handoff that is no longer in the live stream. Its status
+/// changes when this channel publishes a receipt (which drops the entry) or when someone
+/// else reads or closes it, so it is read again with backoff instead of on every tick.
+struct RetainedView {
+    view: MessageView,
+    due: Instant,
+    checks: u32,
+}
+
+enum Recovery {
+    Retained(Box<MessageView>),
+    Settled,
+    Unavailable(anyhow::Error),
+}
+
+const RETAINED_RECHECK_MAX: Duration = Duration::from_secs(60);
+
+fn retained_recheck_delay(checks: u32) -> Duration {
+    Duration::from_secs(1_u64 << checks.min(6)).min(RETAINED_RECHECK_MAX)
+}
+
+async fn recover_retained(
+    client: &Client,
+    subject: &str,
+    message: &str,
+    retained: &mut BTreeMap<String, RetainedView>,
+    now: Instant,
+) -> Recovery {
+    if let Some(cached) = retained.get(message).filter(|cached| now < cached.due) {
+        return Recovery::Retained(Box::new(cached.view.clone()));
+    }
+    match client.get::<MessageView>(&format!("/v1/messages/read/{message}")).await {
+        Ok(view) if view.to == subject && matches!(view.status.as_str(), "sent" | "staged" | "delivered") => {
+            let checks = retained.get(message).map_or(0, |cached| cached.checks).saturating_add(1);
+            retained.insert(message.into(), RetainedView {
+                view: view.clone(), due: now + retained_recheck_delay(checks), checks,
+            });
+            Recovery::Retained(Box::new(view))
+        },
+        Ok(_) => {
+            retained.remove(message);
+            Recovery::Settled
+        },
+        Err(error) => Recovery::Unavailable(error),
+    }
 }
 
 async fn announce_initialization(client: &Client, input: &ClaimInput) -> Result<ClaimRecord> {
@@ -613,6 +708,7 @@ fn save_handoffs(path: &Path, state: &State) -> Result<()> {
             attempted: state.attempted.clone(),
             confirmed: state.confirmed.clone(),
             accepted: state.accepted.clone(),
+            receipt_records: state.receipt_records.clone(),
         },
     )?;
     file.flush()?;
@@ -764,16 +860,23 @@ async fn receipt(
     message: &str,
     lifecycle: &str,
 ) -> Result<ClaimRecord> {
-    client
-        .post(
-            "/v1/mailbox/receipts",
-            &Receipt {
-                fence: fence.clone(),
-                message: message.into(),
-                lifecycle: lifecycle.into(),
-            },
-        )
-        .await
+    receipt_with_record(client, fence, message, lifecycle, None).await
+}
+
+async fn receipt_with_record(
+    client: &Client,
+    fence: &Fence,
+    message: &str,
+    lifecycle: &str,
+    record: Option<&crate::conversation_delivery::NativeReceipt>,
+) -> Result<ClaimRecord> {
+    let mut payload = serde_json::to_value(Receipt {
+        fence: fence.clone(), message: message.into(), lifecycle: lifecycle.into(),
+    })?;
+    if let Some(record) = record {
+        payload["native_receipt"] = serde_json::to_value(record)?;
+    }
+    client.post("/v1/mailbox/receipts", &payload).await
 }
 /// A user-scoped plugin may be loaded by ordinary Claude sessions outside a seat.
 /// Serve the protocol without paths, daemon access, mailbox fences or readiness observations.
@@ -1104,6 +1207,24 @@ mod tests {
     }
 
     #[test]
+    fn claude_channel_receipt_identity_survives_ledger_and_reexec_without_payload() {
+        let mut state = State::default();
+        state.confirmed.insert("message/fixture".into());
+        state.receipt_records.insert("message/fixture".into(), Some(crate::conversation_delivery::NativeReceipt {
+            session_id: "session/external-0123456789abcdef01234567".into(), message_id: "native-user".into(),
+        }));
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("handoffs.json");
+        save_handoffs(&path, &state).unwrap();
+        let ledger: Handoffs = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(ledger.receipt_records, state.receipt_records);
+        let resumed: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(resumed.receipt_records, state.receipt_records);
+        let legacy: Handoffs = serde_json::from_value(json!({"incarnation":"old", "attempted":[],"confirmed":[],"accepted":[]})).unwrap();
+        assert!(legacy.receipt_records.is_empty());
+    }
+
+    #[test]
     fn claude_channel_retry_backoff_caps_at_thirty_seconds() {
         for (failures, seconds) in [
             (1, 1),
@@ -1117,6 +1238,69 @@ mod tests {
         ] {
             assert_eq!(retry_delay(failures), Duration::from_secs(seconds));
         }
+    }
+
+    #[tokio::test]
+    async fn claude_retained_handoff_status_is_read_with_backoff_not_every_tick() {
+        use axum::{Json, Router, http::StatusCode, routing::get};
+        use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let status = Arc::new(Mutex::new("delivered"));
+        let app = Router::new().route("/v1/messages/read/{*subject}", get({
+            let reads = Arc::clone(&reads);
+            let status = Arc::clone(&status);
+            move |axum::extract::Path(subject): axum::extract::Path<String>| {
+                let reads = Arc::clone(&reads);
+                let status = *status.lock().unwrap();
+                async move {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    if status == "unavailable" { return Err(StatusCode::INTERNAL_SERVER_ERROR); }
+                    Ok(Json(json!({"api_version":"st3.v1", "value":{
+                        "subject":subject, "from":"person/sender", "to":"agent/worker",
+                        "content":"hello", "status":status, "created_index":1,
+                    }})))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(crate::client::Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let mut retained = BTreeMap::new();
+        let start = Instant::now();
+        let tick = |second: u64| start + Duration::from_secs(second);
+
+        // Ten minutes of one-second ticks over a handoff that stays delivered: the old loop
+        // read it 600 times. Every tick still sees the retained view.
+        for second in 0..600 {
+            let recovery = recover_retained(&client, "agent/worker", "message/kept", &mut retained, tick(second)).await;
+            assert!(matches!(recovery, Recovery::Retained(view) if view.status == "delivered"));
+        }
+        let kept = reads.load(Ordering::SeqCst);
+        assert!(kept <= 16, "a delivered handoff was read {kept} times in 600 ticks");
+
+        // Someone else reads it: the channel notices within one recheck interval.
+        *status.lock().unwrap() = "read";
+        let mut settled = false;
+        for second in 600..=600 + RETAINED_RECHECK_MAX.as_secs() {
+            let recovery = recover_retained(&client, "agent/worker", "message/kept", &mut retained, tick(second)).await;
+            if matches!(recovery, Recovery::Settled) { settled = true; break; }
+        }
+        assert!(settled, "a read handoff was not settled within {RETAINED_RECHECK_MAX:?}");
+        assert!(!retained.contains_key("message/kept"));
+
+        // A failed read is not cached: the caller's retry backoff decides the next attempt,
+        // and the next success is read at once.
+        *status.lock().unwrap() = "unavailable";
+        let failed = recover_retained(&client, "agent/worker", "message/lost", &mut retained, tick(700)).await;
+        assert!(matches!(failed, Recovery::Unavailable(_)));
+        assert!(!retained.contains_key("message/lost"));
+        *status.lock().unwrap() = "delivered";
+        let before = reads.load(Ordering::SeqCst);
+        let recovered = recover_retained(&client, "agent/worker", "message/lost", &mut retained, tick(701)).await;
+        assert!(matches!(recovered, Recovery::Retained(_)));
+        assert_eq!(reads.load(Ordering::SeqCst), before + 1);
+        server.abort();
     }
 
     #[test]

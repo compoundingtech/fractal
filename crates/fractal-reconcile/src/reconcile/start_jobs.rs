@@ -165,6 +165,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             let guard = || -> Result<()> {
                 anyhow::ensure!(!store.runtime_start_revoked(&id)?, "start operation was revoked");
                 store.owned_desired_guard(&prepared.subject)?;
+                anyhow::ensure!(store.helper_launcher_alive(&subject)?,
+                    "the helper's launcher run has ended");
                 anyhow::ensure!(store.selected_desired_token(&subject)? == prepared.selected_token,
                     "declaration changed before launch");
                 anyhow::ensure!(prepared.requests_retained(&store)?,
@@ -317,7 +319,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn reconcile_start_operation(
+    pub(super) fn reconcile_start_operation(
         &self,
         mut operation: RuntimeStartOperation,
         snapshot: &PassPtySnapshot,
@@ -342,12 +344,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             // The kernel lock, not a PID guess, establishes that no old launch worker holds
             // admission. Late producer ownership still needs exact operation provenance.
             if let Some(_lock) = self.store.try_runtime_start_lock(&operation.subject)? {
-                self.revoke_start(&operation.subject)?;
-                self.store.finish_runtime_start(
-                    &operation.id,
-                    &serde_json::json!({"error": "launch owner ended before its result"}),
-                )?;
-                self.start_changed(&operation.subject);
+                // A worker records its result before it releases the lock and leaves `live`, so
+                // this pass's earlier read can predate a launch that has since finished. Only a
+                // start that is still unfinished under the lock has lost its owner.
+                let unfinished = self
+                    .store
+                    .pending_runtime_starts()?
+                    .into_iter()
+                    .any(|fresh| fresh.id == operation.id && !fresh.finished);
+                if unfinished {
+                    self.revoke_start(&operation.subject)?;
+                    self.store.finish_runtime_start(
+                        &operation.id,
+                        &serde_json::json!({"error": "launch owner ended before its result"}),
+                    )?;
+                    self.start_changed(&operation.subject);
+                }
             }
             return Ok(());
         }
@@ -560,7 +572,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             exec_observation = self.runtime.observe_exec(&member.runtime_id)?;
             exec_observation.as_ref()
         };
-        let Some(observation) = observation else {
+        // A retained terminal registry row without an incarnation is not evidence
+        // about this operation: it may belong to an older launch. As with an
+        // absent row, only operation-fenced producer/work-scope closure can retire it.
+        let terminal_without_incarnation = observation.is_some_and(|observation| {
+            observation.incarnation_id.is_none()
+                && matches!(observation.status.as_str(), "exited" | "stopped" | "vanished")
+        });
+        if observation.is_none() || terminal_without_incarnation {
             // An error from an entered backend does not prove its detached producer closed.
             if operation.finished
                 && self
@@ -578,8 +597,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ]))?;
             }
             return Ok(());
-        };
+        }
+        let observation = observation.expect("observed runtime required after absence cleanup");
         let Some(incarnation) = observation.incarnation_id.as_deref() else {
+            self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
+                ("severity".into(), Value::String("error".into())),
+                ("code".into(), Value::String("start-revocation-unverified".into())),
+                ("reason".into(), Value::String("the revoked runtime has no incarnation and is not terminal; producer closure cannot retire a potentially live runtime".into())),
+            ]))?;
             return Ok(());
         };
         let exec_provenance;

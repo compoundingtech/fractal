@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useState, useSyncExternalStore } from 'react';
 import { Linking, View, useColorScheme } from 'react-native';
 import { DarkTheme, DefaultTheme, ThemeProvider, NavigationContainer, getFocusedRouteNameFromRoute, type RouteProp } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackNavigationOptions } from '@react-navigation/native-stack';
@@ -104,13 +104,16 @@ function tabBarHidden(route: RouteProp<TabParams>): boolean {
   return !!focused && FULL_SCREEN.includes(focused);
 }
 
+const currentRoute = () => navigationRef.isReady() ? navigationRef.getCurrentRoute() : undefined;
+function subscribeRoute(notify: () => void) {
+  const removeReady = navigationRef.addListener('ready', notify);
+  const removeState = navigationRef.addListener('state', notify);
+  return () => { removeReady(); removeState(); };
+}
+
 function Main({ proofSession = false }: { proofSession?: boolean }) {
   const { pairDraft, credential, url, order, data, caps, actions, requestScroll, status } = useStore();
-  const [shownRoute, setShownRoute] = useState(() => navigationRef.getCurrentRoute());
-  useEffect(() => {
-    setShownRoute(navigationRef.getCurrentRoute());
-    return navigationRef.addListener('state', () => setShownRoute(navigationRef.getCurrentRoute()));
-  }, []);
+  const shownRoute = useSyncExternalStore(subscribeRoute, currentRoute);
   const homeCount = openAlerts(data.attention, caps?.session_actor).length;
   const paired = !!url && !!credential;
   const shownName = shownRoute?.name ?? ROOTS[order[0]];

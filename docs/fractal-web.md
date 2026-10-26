@@ -80,6 +80,36 @@ remote site. With CSP enforced the route is never reached and `img-src` reports
 the violation. Browser sessions, listeners and temporary build files are closed
 and removed on exit. There is no production CSP-disable switch.
 
+## Fractal web resizable separators
+
+Resizable separators keep their one-pixel layout track and seven-pixel pointer target.
+The target stacks above retained conversation/composer layers. Fixed chrome and the
+crossing sidebar own their pixels: the actual separator role covers the unoccluded
+span while the visible track stays full length. Escape rolls a held-pointer drag
+back to its starting size and prevents later mouseup from committing it; native
+cancellation remains a rollback. A zero, reversed or nonfinite range keeps only the
+layout rule, without a focusable separator, resize cursor or expanded hit affordance.
+Keyboard sizing (Arrow ±8, Shift+Arrow ±32, Home/End, Enter collapses) and pointer
+dragging move the same edge in the same direction, including reversed splits.
+
+Below the drawer breakpoint the agent sidebar becomes a modal navigation drawer
+(`aria-modal`, focus contained, Escape or the scrim closes it and focus returns to the
+opener); at and above it the sidebar is a non-modal docked region with its split.
+The **Expand sidebar** button keeps its accessible name and exposes the Cmd/Ctrl+B
+shortcut through the kit tooltip. `wf/Sidebar/Responsive navigation` covers light
+and dark surfaces at 440px, 700px, 900px and 1440px in separate named stories.
+The sidebar's **Collapse agents** and **Close agents** buttons use the same shared
+chrome control and named kit tooltip; opening the drawer focuses **Close agents**.
+Below 900px the phone drawer owns its open state and retains the same roster while
+hidden, so opening it does not render the conversation. Its controls use the kit's
+44px narrow-layout targets and safe-area insets. The phone tab panel and portal
+host remain at the same reconciliation position across the breakpoint, preserving
+composer drafts and scroll state. The dock and phone drawer share main's
+`MilestoneAgentRow`, the same tree, popover context and stale/unavailable-state presentations.
+Desktop chrome tooltips follow hover or user-moved keyboard focus, not restored focus;
+window blur clears their open state and navigation intent. Phone and coarse-pointer
+hosts retain the kit's touch policy.
+
 ## Observation and unavailable states
 
 The roster and conversation retain trusted content across disconnects. Feed freshness
@@ -98,10 +128,51 @@ roster with no results offers Clear filters. A failed roster read exposes Retry 
 Those actions reacquire failed or ended follows without restarting healthy follows.
 Authorization and capability refusals retain their distinct explanations.
 
-## Hosting the web app on a tailnet
+## Local daemon web app
 
-`apps/fractal-web/server/main.mts` runs the built app for one person. It listens on loopback
-only, and `tailscale serve` publishes it over HTTPS on the tailnet. The server injects one paired
+The daemon serves the web app by default at `http://127.0.0.1:7410`.
+Disable it with `fractal up --web-listen off`. `--web-dist /path/to/dist/web`
+overrides the default installed assets at `../share/fractal-web` relative to the
+daemon executable: an installation with `bin/fractal` uses `share/fractal-web/`.
+The assets stay separate from the daemon binary so a UI change does not require
+recompiling or relinking Rust.
+
+Missing assets or a missing configured concrete `person` degrade web availability
+without taking down the daemon's API listeners. `fractal doctor` reports the web
+finding and the configuration or installation to repair. An occupied listener port
+is still a startup error; use another loopback port or `--web-listen off`.
+
+Run `fractal web [--state-dir DIR]` or `st web [--state-dir DIR]` to open the app.
+The launcher reads the daemon's owner-only `web-launch-url`. The daemon consumes
+the launch token once, issues a 12-hour HttpOnly SameSite=Strict cookie, redirects
+to `/`, and atomically rotates the launch token. Up to 32 sessions survive until
+expiry or daemon restart. The launch token is not printed by the daemon.
+`FRACTAL_WEB_URL` remains an explicit override. Do not publish this listener through
+Tailscale Serve: it is a same-machine browser boundary, not the tailnet publisher.
+
+Only `/v1/client/*` reaches the existing API in-process. Caller credentials/person
+headers are replaced by the configured person after cookie admission. Host must
+be exactly `127.0.0.1:PORT` or `localhost:PORT`; unsafe methods and WebSocket
+upgrades need the exact matching HTTP Origin. Static paths support SPA fallback,
+HEAD, MIME types, traversal/symlink escape refusal, and `build-identity.json`.
+Inline script/style CSP hashes mirror trusted Vite output plus React Aria's fixed
+hashes. This is not a general HTML parser or proven browser-policy parity.
+
+Current local-host limits: no runtime deployment-ID injection, br/gzip,
+conditional/range responses, per-asset caching, session revocation, token expiry,
+or live session expiry enforcement on an already open WebSocket. Static files
+are read into memory per request. Trusted Unix person-session semantics are
+reused behind the browser boundary, so audit transport still says Unix. CSP is
+not yet a shared build artifact. Cookie transport is plain loopback HTTP, and
+same-user processes can read the launch rendezvous. Asset changes require a
+daemon restart; missing assets/person do not disable the API listeners.
+
+## Opt-in tailnet publisher
+
+`apps/fractal-web/server/main.mts` remains a separate, opt-in publisher for one
+person; the daemon does not start it. The example uses loopback port `7411`, separate
+from the daemon's local browser port `7410`. `tailscale serve` publishes this
+publisher over HTTPS on the tailnet. The server injects one paired
 bearer into every admitted request, so admission is the whole authorization. With a full-control
 pairing, any script running in the app holds that person's full st authority. A request must
 carry an allowed `Tailscale-User-Login`, which `tailscale serve` attaches for tailnet users. Any
@@ -112,14 +183,17 @@ user is already trusted with that person's st.
 
 ```sh
 pnpm --dir apps/fractal-web build            # writes dist/web, including build-identity.json
-WF_PORT=7410 \
-WF_PUBLIC_ORIGIN=https://atlas.example.ts.net:8443 \
-WF_TAILNET_LOGINS=river@example.com \
+WF_PORT=7411 \
+WF_PUBLIC_ORIGIN="$TAILNET_HTTPS_ORIGIN" \
+WF_TAILNET_LOGINS=robin@example.com \
 WF_ST_GATEWAY=$XDG_RUNTIME_DIR/st3-client.sock \
 WF_ST_AUTHORIZATION_FILE=/path/to/paired-bearer \
   pnpm --dir apps/fractal-web start
-tailscale serve --bg --https=8443 http://127.0.0.1:7410
+tailscale serve --bg --https=8443 http://127.0.0.1:7411
 ```
+
+Set `TAILNET_HTTPS_ORIGIN` to the exact HTTPS origin published by Serve, including
+its port when non-default.
 
 The settings:
 
@@ -128,6 +202,7 @@ The settings:
   The host refuses to start unless the file belongs to its user and nobody else can read it.
 - `WF_DIST` defaults to `dist/web`.
 - `WF_HOST` must be a loopback address.
+- `WF_PORT` is required; use `7411` to keep it separate from the daemon's local browser port.
 - `WF_DEPLOYMENT_ID` defaults to the published host.
 
 Before relying on a published endpoint, prove that `tailscale serve` replaces a forged login. A request
@@ -152,7 +227,8 @@ facts. Elapsed freezes at the managed session's end and is wall time, not active
 work. Session age continues from `Session.started_at`, with that provenance in its
 label. Native incarnation launch age is unreported: it is not inferred from the
 managed session start. Context uses the same reported occupancy projection as the
-sidebar; cumulative tokens are not a context numerator. Main-session money carries
+sidebar popover; cumulative tokens are not a context numerator. Context information is
+not painted around the row status icon. Main-session money carries
 its returned native usage interval. Cumulative tokens come from `Agent.usage.total_tokens`,
 span the agent's observed incarnations and have an explicitly unreported accumulation
 window; they remain visible without a proven current native root. Descendant money

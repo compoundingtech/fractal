@@ -753,7 +753,7 @@ pub async fn run<B: Backend>(
         notify,
     );
     let endpoints = Endpoints::default();
-    let app = peer_router(state, routes);
+    let app = peer_router(state.clone(), routes);
     let listening = config
         .fleet
         .as_ref()
@@ -832,7 +832,10 @@ pub async fn run<B: Backend>(
             let fleet_id = leave_fleet_id.clone();
             async move { axum::Json(fleet.leave_snapshot(Some(fleet_id)).await) }
         }),
-    );
+    ).route(
+        "/v1/internal/fleet/pairing-admission",
+        post(receive_pairing_admission::<B>).layer(DefaultBodyLimit::max(MAX_JOIN_BYTES)),
+    ).with_state(state);
     let serving_leave = async move { axum::serve(leave_listener, leave_app).await };
     let serving = async move {
         // A dial-out member accepts no connections, but still supervises publication.
@@ -1629,6 +1632,8 @@ async fn dial_peer<B: Backend>(
     // Routes whose one early attempt after an outage is spent, until a probe sees them down again
     // or an exchange over them succeeds. See `wait_peer_retry`.
     let mut early_spent = BTreeSet::new();
+    // Routes that answered for another shard than the one asked for, until the route set changes.
+    let mut misconfigured = Vec::<Route>::new();
     loop {
         // A removed node stops dialing; `st3 doctor` says what to do next.
         if fleet.is_removed() {
@@ -1696,6 +1701,9 @@ async fn dial_peer<B: Backend>(
                 continue;
             }
         }
+        if routes.has_changed().unwrap_or(false) {
+            misconfigured.clear();
+        }
         // Retry waits must retain signs of life received during this attempt, including
         // an inbound request that arrives just before the outbound request fails.
         let attempt_started = tokio::time::Instant::now();
@@ -1707,8 +1715,20 @@ async fn dial_peer<B: Backend>(
                 route = 0;
                 preferred_retry = None;
             }
-            (!routes.is_empty()).then(|| routes[route % routes.len()].clone())
+            (0..routes.len())
+                .map(|offset| routes[route.wrapping_add(offset) % routes.len()].clone())
+                .find(|candidate| !misconfigured.contains(candidate))
         };
+        if selected.is_none() && !misconfigured.is_empty() {
+            // Every route answered for another shard. There is nothing to dial until the
+            // routes change.
+            record_worker(&backend, &name, "misconfigured", attempt_unix_ms, None, None).await;
+            if routes.changed().await.is_err() {
+                return;
+            }
+            misconfigured.clear();
+            continue;
+        }
         let preferred_route = selected
             .as_ref()
             .map(|selected| routes.borrow().first() == Some(selected));
@@ -1722,6 +1742,7 @@ async fn dial_peer<B: Backend>(
         )
         .await;
         let carrier = selected.as_ref().map(Route::carrier).unwrap_or_default();
+        let selected_route = selected.clone();
         let is_http = matches!(selected, Some(Route::Http(_)));
         let fabric_route = selected
             .clone()
@@ -1805,6 +1826,29 @@ async fn dial_peer<B: Backend>(
                     fleet.mark_removed(&peer.name, removed).await;
                     continue;
                 }
+                if error.is::<PeerShardMismatch>() {
+                    // A shard route pointing at another store is a configuration error.
+                    // Repeating the same exchange cannot repair it. Keep the reason visible
+                    // until the route changes, without sending any shard envelopes.
+                    let mut failure = ReplicationExchangeFailure::from_error(
+                        &error, ReplicationFailurePhase::Verify, attempt_started.elapsed(), None,
+                    );
+                    failure.attempt_elapsed_ms = Some(u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX));
+                    let _ = backend
+                        .record_failure(
+                            &peer.name,
+                            "shard-mismatch",
+                            &error.to_string(),
+                            Some(carrier),
+                            Some(&failure),
+                        )
+                        .await;
+                    if let Some(selected_route) = selected_route {
+                        misconfigured.push(selected_route);
+                    }
+                    route = route.wrapping_add(1);
+                    continue;
+                }
                 // `fabric dial` never connects, so the member's refusal reaches us only as a
                 // tunnel that closed. Ask Fabric whether that is what happened.
                 if let (Some(fabric_route), Some(fabric)) = (&fabric_route, &fleet.fabric)
@@ -1838,6 +1882,7 @@ async fn dial_peer<B: Backend>(
                 let mut failure = ReplicationExchangeFailure::from_error(
                     &error, ReplicationFailurePhase::Verify, attempt_started.elapsed(), None,
                 );
+                failure.attempt_elapsed_ms = Some(u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX));
                 if overloaded {
                     failure.code = "replication-overloaded".into();
                 }
@@ -2198,14 +2243,203 @@ pub fn replication_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))
         .timeout(REPLICATION_EXCHANGE_TIMEOUT)
+        .connector_layer(ExchangeConnectLayer)
         .build()
         .expect("the replication HTTP client configuration is valid")
+}
+
+const EXCHANGE_CORRELATION_HEADER: &str = "x-fractal-exchange-id";
+
+struct ExchangeTiming {
+    id: String,
+    started: std::time::Instant,
+    server: bool,
+    // Clients promote retained DEBUG boundaries on failure/slowness; servers
+    // retain them for one always-INFO summary at response handoff.
+    boundaries: std::sync::Mutex<([Option<ExchangeBoundary>; 8], bool)>,
+}
+
+#[derive(Clone, Copy)]
+struct ExchangeBoundary {
+    stage: &'static str,
+    unix_ms: u64,
+    elapsed_us: u64,
+}
+
+impl ExchangeTiming {
+    fn record(&self, stage: &'static str) {
+        let boundary = ExchangeBoundary {
+            stage,
+            unix_ms: u64::try_from(crate::store::now_ms()).unwrap_or(u64::MAX),
+            elapsed_us: u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        };
+        let mut boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        // A retained backend job and its waiter can both observe completion.
+        if self.server && boundaries.0.iter().flatten().any(|event| event.stage == stage) {
+            return;
+        }
+        if boundaries.1 {
+            self.emit_info(boundary);
+            return;
+        }
+        tracing::debug!(
+            target: "smallclaims::replication",
+            correlation_id = %self.id,
+            stage,
+            unix_ms = %boundary.unix_ms,
+            elapsed_us = %boundary.elapsed_us,
+            "replication exchange boundary"
+        );
+        if let Some(slot) = boundaries.0.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(boundary);
+        } else {
+            // Bounded storage even if a future caller adds more boundaries.
+            if !self.server {
+                self.emit_info(boundary);
+            }
+            drop(boundaries);
+            self.promote();
+            return;
+        }
+        drop(boundaries);
+        if stage == "client-failed" || self.started.elapsed() >= Duration::from_secs(5) {
+            self.promote();
+        }
+    }
+
+    fn promote(&self) {
+        if self.server {
+            return;
+        }
+        let mut boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        boundaries.1 = true;
+        for boundary in boundaries.0.iter_mut().filter_map(Option::take) {
+            self.emit_info(boundary);
+        }
+    }
+
+    fn emit_info(&self, boundary: ExchangeBoundary) {
+        tracing::info!(
+            target: "smallclaims::replication",
+            correlation_id = %self.id,
+            stage = boundary.stage,
+            unix_ms = %boundary.unix_ms,
+            elapsed_us = %boundary.elapsed_us,
+            "replication exchange boundary"
+        );
+    }
+
+    fn server_boundaries(&self) -> [Option<ExchangeBoundary>; 3] {
+        let boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        ["server-ingress", "backend-done", "response-headers-ready"]
+            .map(|stage| boundaries.0.iter().flatten().find(|event| event.stage == stage).copied())
+    }
+
+    fn summarize_server(&self, status: StatusCode) {
+        let [ingress, backend, headers] = self.server_boundaries();
+        tracing::info!(
+            target: "smallclaims::replication",
+            correlation_id = %self.id,
+            status = status.as_u16(),
+            server_ingress_unix_ms = ingress.map(|event| event.unix_ms),
+            server_ingress_elapsed_us = ingress.map(|event| event.elapsed_us),
+            backend_done = backend.is_some(),
+            backend_done_unix_ms = backend.map(|event| event.unix_ms),
+            backend_done_elapsed_us = backend.map(|event| event.elapsed_us),
+            response_headers_ready_unix_ms = headers.map(|event| event.unix_ms),
+            response_headers_ready_elapsed_us = headers.map(|event| event.elapsed_us),
+            "replication exchange server summary"
+        );
+    }
+}
+
+struct ClientConnectObservation {
+    timing: ExchangeTiming,
+    state: std::sync::atomic::AtomicU8,
+}
+
+tokio::task_local! {
+    static EXCHANGE_CONNECT: Arc<ClientConnectObservation>;
+}
+
+#[derive(Clone)]
+struct ExchangeConnectLayer;
+
+impl<S> tower::Layer<S> for ExchangeConnectLayer {
+    type Service = ExchangeConnectService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        ExchangeConnectService(inner)
+    }
+}
+
+#[derive(Clone)]
+struct ExchangeConnectService<S>(S);
+
+impl<S, R> tower::Service<R> for ExchangeConnectService<S>
+where
+    S: tower::Service<R>,
+    S::Future: Send + 'static,
+    S::Response: 'static,
+    S::Error: 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = std::pin::Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        self.0.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        // Only attribute a connect invoked in this request's task-local scope. No
+        // endpoint/global map can safely attribute concurrent requests or pool reuse.
+        let observation = EXCHANGE_CONNECT.try_with(Arc::clone).ok();
+        if let Some(observation) = &observation {
+            observation.state.store(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let future = self.0.call(request);
+        Box::pin(async move {
+            let result = future.await;
+            if result.is_ok()
+                && let Some(observation) = observation
+            {
+                observation.state.store(2, std::sync::atomic::Ordering::Relaxed);
+                observation.timing.record("connect-done");
+            }
+            result
+        })
+    }
 }
 
 async fn receive_exchange<B: Backend>(
     State(state): State<PeerState<B>>,
     headers: HeaderMap,
     body: Bytes,
+) -> Response {
+    let timing = Arc::new(ExchangeTiming {
+        // Unauthenticated diagnostic input, never an identity or authorization decision.
+        id: headers.get(EXCHANGE_CORRELATION_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .map_or_else(|| uuid::Uuid::now_v7().to_string(), |id| id.to_string()),
+        started: std::time::Instant::now(),
+        server: true,
+        boundaries: Default::default(),
+    });
+    timing.record("server-ingress");
+    let response = receive_exchange_inner(State(state), headers, body, &timing).await;
+    // Axum owns socket writes. This is the handoff boundary, not a wire-write timestamp.
+    timing.record("response-headers-ready");
+    timing.summarize_server(response.status());
+    response
+}
+
+async fn receive_exchange_inner<B: Backend>(
+    State(state): State<PeerState<B>>,
+    headers: HeaderMap,
+    body: Bytes,
+    timing: &Arc<ExchangeTiming>,
 ) -> Response {
     let body = if deflated(&headers) {
         match inflate(&body, "an exchange request") {
@@ -2303,6 +2537,7 @@ async fn receive_exchange<B: Backend>(
             );
             let state = state.clone();
             let relay = relay.clone();
+            let backend_timing = Arc::clone(timing);
             tokio::spawn(crate::task_cpu::account(
                 "replication.exchange",
                 async move {
@@ -2343,6 +2578,7 @@ async fn receive_exchange<B: Backend>(
                     .map_err(|error| ReplicationExchangeFailure::from_error(
                         &error, ReplicationFailurePhase::LocalReceive, started.elapsed(), None,
                     ));
+                    backend_timing.record("backend-done");
                     done.send_replace(Some(result));
                 },
             ));
@@ -2360,6 +2596,11 @@ async fn receive_exchange<B: Backend>(
         }
     })
     .await;
+    if matches!(&ready, Ok(Some(_))) {
+        // A poll may reuse a previously completed job; record when this request
+        // observed its answer if the originating job did not record it here.
+        timing.record("backend-done");
+    }
     match ready {
         Ok(Some(Ok(export))) => {
             finish_exchange_job(&state.fleet, &relay, &answer);
@@ -2601,6 +2842,39 @@ async fn fetch_checkpoint_manifest_page(
     Ok(response.value)
 }
 
+/// Local adapter boundary. This reuses the ordinary sealed handshake; Fabric policy
+/// remains entirely outside st. The proxy pins this worker's fleet incarnation.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairingAdmissionRequest {
+    request: crate::fleet::handshake::JoinRequest,
+    node_id: String,
+    expected_fleet_id: String,
+    expected_sponsor_key: String,
+}
+
+async fn receive_pairing_admission<B: Backend>(
+    State(state): State<PeerState<B>>,
+    body: Bytes,
+) -> Response {
+    let Ok(admission) = serde_json::from_slice::<PairingAdmissionRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if admission.expected_fleet_id != state.auth.fleet_id()
+        || state.auth.member.as_ref().map(|key| key.public())
+            != Some(admission.expected_sponsor_key.as_str())
+        || admission.request.node_id.as_deref() != Some(admission.node_id.as_str())
+        || admission.node_id.len() != 64
+        || !admission.node_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(request) = serde_json::to_vec(&admission.request) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    receive_join(State(state), Bytes::from(request)).await
+}
+
 /// The join route. It exists only while this node sponsors an open invite; otherwise it answers
 /// 404 like any unknown path. Every refusal looks the same to the caller.
 ///
@@ -2644,6 +2918,12 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
         writer_floor: answer["writer_floor"].as_u64(),
         fabric_protocol: text("fabric_protocol"),
         admitted_claim: text("admitted_claim"),
+        sponsor_node_id: request.node_id.as_ref().and_then(|_| text("sponsor_node_id")),
+        sponsor_endpoints: if request.node_id.is_some() {
+            answer["sponsor_endpoints"].as_array().cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        },
     };
     match crate::fleet::handshake::seal_response(&request, &token, &state.node, &member, &payload) {
         Ok(response) => {
@@ -2804,6 +3084,41 @@ pub async fn exchange<B: Backend>(
     exchange_via(http, backend, node, peer, auth, fleet, Default::default()).await
 }
 
+#[derive(Debug)]
+struct PeerShardMismatch {
+    peer: String,
+    expected: Option<String>,
+    actual: Option<String>,
+}
+
+impl std::fmt::Display for PeerShardMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "peer {} answered for shard {:?}, expected {:?}",
+            self.peer, self.actual, self.expected
+        )
+    }
+}
+
+impl std::error::Error for PeerShardMismatch {}
+
+fn ensure_peer_exchange_shard(
+    peer: &str,
+    sent: &ReplicationExchange,
+    answer: &ReplicationExchange,
+) -> Result<()> {
+    if answer.shard_id != sent.shard_id {
+        return Err(PeerShardMismatch {
+            peer: peer.into(),
+            expected: sent.shard_id.clone(),
+            actual: answer.shard_id.clone(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 async fn finish_leave_receipt(
     http: &reqwest::Client,
     peer: &PeerConfig,
@@ -2909,6 +3224,7 @@ async fn exchange_inner<B: Backend>(
     let started = std::time::Instant::now();
     let (remote, peer_inflates) =
         post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
+    ensure_peer_exchange_shard(&peer.name, &query, &remote)?;
     let round_trip = started.elapsed();
     let different = remote.inventory.digest != query.inventory.digest;
     let received = receive_from_peer(
@@ -2944,6 +3260,7 @@ async fn exchange_inner<B: Backend>(
         // A peer that says it takes compressed requests gets a large push compressed.
         let (response, _) =
             post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
+        ensure_peer_exchange_shard(&peer.name, &push, &response)?;
         let round_trip = started.elapsed();
         // The peer stores a push before it answers, so its inventory moved if the push landed.
         pushed = !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
@@ -3253,7 +3570,13 @@ fn overloaded_error(
             ReplicationFailurePhase::RequestHeaders
         },
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        attempt_elapsed_ms: None,
+        preparation_ms: None,
+        request_body_bytes: None,
+        request_body_uncompressed_bytes: None,
         http_status,
+        correlation_id: None,
+        client_stage: None,
         cause: if http_status.is_some() {
             "authenticated peer is overloaded"
         } else {
@@ -3365,6 +3688,12 @@ fn unsigned_refusal(peer: &str, status: StatusCode, body: &[u8]) -> String {
     }
 }
 
+struct RequestPreparation {
+    elapsed_ms: u64,
+    body_bytes: u64,
+    uncompressed_body_bytes: u64,
+}
+
 /// Send one signed request to a peer path and return the peer's verified answer, as
 /// `post_signed` does for an exchange.
 #[allow(clippy::too_many_arguments)]
@@ -3378,28 +3707,90 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     request: &B,
     compress: bool,
 ) -> Result<(R, bool)> {
+    let observation = Arc::new(ClientConnectObservation {
+        timing: ExchangeTiming {
+            id: uuid::Uuid::now_v7().to_string(),
+            started: std::time::Instant::now(),
+            server: false,
+            boundaries: Default::default(),
+        },
+        state: std::sync::atomic::AtomicU8::new(0),
+    });
+    let timing = &observation.timing;
+    let mut stage = crate::replication::ReplicationClientStage::PooledOrUnknown;
+    let mut preparation = None;
+    EXCHANGE_CONNECT.scope(Arc::clone(&observation),
+        post_signed_to_timed(http, peer, node, auth, fleet, path, request, compress, timing, &mut stage, &mut preparation))
+        .await
+        .map_err(|error| {
+            let mut failure = ReplicationExchangeFailure::from_error(
+                &error, ReplicationFailurePhase::RequestHeaders, timing.started.elapsed(), None,
+            );
+            failure.correlation_id = Some(timing.id.clone());
+            if stage != crate::replication::ReplicationClientStage::HeadersReceived {
+                stage = match observation.state.load(std::sync::atomic::Ordering::Relaxed) {
+                    1 => crate::replication::ReplicationClientStage::SendStarted,
+                    2 => crate::replication::ReplicationClientStage::Connected,
+                    _ => crate::replication::ReplicationClientStage::PooledOrUnknown,
+                };
+            }
+            failure.client_stage = Some(stage);
+            if let Some(preparation) = preparation {
+                failure.preparation_ms = Some(preparation.elapsed_ms);
+                failure.request_body_bytes = Some(preparation.body_bytes);
+                failure.request_body_uncompressed_bytes = Some(preparation.uncompressed_body_bytes);
+            }
+            timing.record("client-failed");
+            let display = error.to_string();
+            error.context(failure).context(display)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    peer: &PeerConfig,
+    node: &str,
+    auth: &FleetAuth,
+    fleet: &FleetContext,
+    path: &str,
+    request: &B,
+    compress: bool,
+    timing: &ExchangeTiming,
+    client_stage: &mut crate::replication::ReplicationClientStage,
+    preparation: &mut Option<RequestPreparation>,
+) -> Result<(R, bool)> {
     let body = serde_json::to_vec(request)?;
+    let uncompressed_body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
     let request_digest = FleetAuth::body_digest(&body);
     let headers = auth.request_headers_for(path, node, &body)?;
     let endpoint = format!("{}{}", peer.url.trim_end_matches('/'), path);
-    let started = std::time::Instant::now();
     let mut request = http
         .post(&endpoint)
         .headers(headers)
         .header("content-type", "application/json")
-        .header("accept-encoding", EXCHANGE_ENCODING);
-    request = if compress && body.len() >= DEFLATE_MIN_BYTES {
-        request
-            .header("content-encoding", EXCHANGE_ENCODING)
-            .body(deflate(&body)?)
+        .header("accept-encoding", EXCHANGE_ENCODING)
+        .header(EXCHANGE_CORRELATION_HEADER, &timing.id);
+    let body = if compress && body.len() >= DEFLATE_MIN_BYTES {
+        request = request.header("content-encoding", EXCHANGE_ENCODING);
+        deflate(&body)?
     } else {
-        request.body(body)
+        body
     };
-    let response = request
-        .send()
-        .await
+    let body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
+    let request = request.body(body);
+    let started = std::time::Instant::now();
+    *preparation = Some(RequestPreparation {
+        elapsed_ms: u64::try_from(started.duration_since(timing.started).as_millis()).unwrap_or(u64::MAX),
+        body_bytes,
+        uncompressed_body_bytes,
+    });
+    timing.record("client-send-start");
+    let response = request.send().await
         .map_err(request_route_failure)
         .map_err(|error| exchange_failure(error, ReplicationFailurePhase::RequestHeaders, started, None))?;
+    *client_stage = crate::replication::ReplicationClientStage::HeadersReceived;
+    timing.record("client-headers-received");
     let status = response.status();
     let headers = response.headers().clone();
     let bytes = response
@@ -3556,8 +3947,14 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
                     .unwrap_or(ReplicationFailurePhase::ResponseBody)
             },
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            attempt_elapsed_ms: None,
+            preparation_ms: None,
+            request_body_bytes: None,
+            request_body_uncompressed_bytes: None,
             http_status: Some(status.as_u16()),
             cause: "authenticated peer rejected the exchange; body withheld".into(),
+            correlation_id: None,
+            client_stage: None,
         }.into());
     }
     let response: PeerResponse<R> =

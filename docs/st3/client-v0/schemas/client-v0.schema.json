@@ -199,7 +199,8 @@
         }}
       }
     },
-    "PromptRespondParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "episode", "answer"], "description": "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit).", "properties": {"target_id": {"$ref": "#/$defs/Id"}, "episode": {"type": "string"}, "answer": {"type": "string", "minLength": 1, "maxLength": 16384}}},
+    "DelegationProof": {"type": "object", "additionalProperties": false, "required": ["person", "policy", "message", "quote", "episode"], "properties": {"person": {"type": "string"}, "policy": {"type": "string"}, "message": {"type": "string"}, "quote": {"type": "string"}, "episode": {"type": "string"}}},
+    "PromptRespondParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "episode", "answer"], "description": "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). An authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof; when delegation is present, answer must be dismiss. Parameters never select the actor.", "properties": {"target_id": {"$ref": "#/$defs/Id"}, "episode": {"type": "string"}, "answer": {"type": "string", "minLength": 1, "maxLength": 16384}, "delegation": {"$ref": "#/$defs/DelegationProof"}}},
     "CustomReplyParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "registration", "revision", "episode", "fields"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "registration": {"type": "string"}, "revision": {"type": "string"}, "episode": {"type": "string"}, "fields": {"type": "object"}}},
     "ConversationSearchHit": {"type": "object", "additionalProperties": false, "required": ["conversation_id", "entry_id", "agent_id", "timestamp", "entry_type", "excerpt"], "properties": {"conversation_id": {"$ref": "#/$defs/Id"}, "entry_id": {"$ref": "#/$defs/Id"}, "agent_id": {"type": ["string", "null"]}, "timestamp": {"$ref": "#/$defs/Timestamp"}, "entry_type": {"type": "string"}, "excerpt": {"type": "string", "maxLength": 512}}},
     "ConversationSearch": {"type": "object", "additionalProperties": false, "required": ["kind", "items", "page", "indexed_at", "host_id", "incomplete_sources", "refreshing"], "properties": {"kind": {"const": "conversation-search"}, "items": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/ConversationSearchHit"}}, "page": {"$ref": "#/$defs/PageInfo"}, "indexed_at": {"$ref": "#/$defs/Timestamp"}, "host_id": {"$ref": "#/$defs/Id"}, "incomplete_sources": {"type": "array", "items": {"type": "string"}}, "refreshing": {"type": "boolean"}}},
@@ -419,7 +420,8 @@
         "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
         "has_more": { "type": "boolean" },
         "next_cursor": { "type": ["string", "null"] },
-        "cursor_expires_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] }
+        "cursor_expires_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "omitted_items": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "Envelope": {
@@ -619,6 +621,7 @@
             "mission_run_id": { "$ref": "#/$defs/Id" },
             "step_run_id": { "$ref": "#/$defs/Id" },
             "blocked": { "$ref": "#/$defs/AttentionBlocked", "description": "The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask." },
+            "presentation": { "$ref": "#/$defs/AttentionPresentation", "description": "st's presentation of this row: its Now group and card, who Chat about this reaches, who raised it, and the step it holds. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Attention row). Absent on older daemons." },
             "title": { "type": "string" },
             "detail": { "type": "string" },
             "priority": { "enum": ["critical", "high", "normal", "low"] },
@@ -1099,7 +1102,32 @@
         "until_ms": { "type": "integer", "minimum": 0 },
         "rows": { "type": "array", "items": { "$ref": "#/$defs/UsageRow" } },
         "limits": { "type": "array", "items": { "$ref": "#/$defs/UsageLimit" } },
+        "accounts": { "type": "array", "items": { "$ref": "#/$defs/UsageAccount" }, "description": "Every declared account in name order, so each panel lists the same accounts. Absent on older servers." },
         "agent_messages": { "$ref": "#/$defs/AgentMessageEstimate" }
+      }
+    },
+    "UsageAccount": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "provider", "kind"],
+      "properties": {
+        "name": { "type": "string", "description": "The declared name, like nathan/claude-1." },
+        "account": { "type": "string", "description": "The label its usage rows and limits carry, joining them to this account." },
+        "driver": { "type": "string" },
+        "provider": { "type": "string" },
+        "kind": { "enum": ["subscription", "api-key"] },
+        "plan": { "type": "string" },
+        "credits": { "$ref": "#/$defs/UsageCredits" }
+      }
+    },
+    "UsageCredits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["budget_microusd", "used_microusd", "unpriced_tokens", "period_start_ms"],
+      "description": "An api-key account's spend so far in the UTC calendar month of the period's end, against its monthly budget. Costs are API-equivalent; tokens with no price are counted apart, never as free.",
+      "properties": {
+        "budget_microusd": { "type": "integer", "minimum": 0 },
+        "used_microusd": { "type": "integer", "minimum": 0 },
+        "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "period_start_ms": { "type": "integer", "minimum": 0 }
       }
     },
     "AgentMessageEstimate": {
@@ -1186,6 +1214,7 @@
         "step": { "$ref": "#/$defs/Id" },
         "model": { "type": "string" },
         "account": { "type": "string" },
+        "account_ref": { "type": "string", "description": "The declared account this row's spend is read against, when one claims its label. Absent on older servers." },
         "host": { "type": "string" },
         "pricing": { "type": "string" },
         "native_session_id": { "type": "string" },
@@ -1578,6 +1607,64 @@
           }
         }
       ]
+    },
+    "AttentionPresentation": {
+      "type": "object",
+      "required": ["tier", "kind", "agent", "raised_by", "waiting"],
+      "properties": {
+        "tier": { "enum": ["stopped", "alert", "today", "later", null], "description": "The Now group, by its fixtures/clients/words.json tier id; null for a row that is not a Now card." },
+        "kind": { "enum": [
+          "review",
+          "feedback",
+          "request",
+          "update",
+          "launch",
+          "revision",
+          "prompt",
+          "login",
+          "fault",
+          null
+        ], "description": "The card; null for a row that is no card (an unread message stays in its conversation)." },
+        "agent": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff." },
+        "raised_by": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission." },
+        "waiting": { "oneOf": [{ "$ref": "#/$defs/AttentionWaiting" }, { "type": "null" }], "description": "The step it holds." },
+        "revision": { "$ref": "#/$defs/AttentionRevision", "description": "On a revision card: what the candidate revision changes. Absent elsewhere, and when st no longer has the proposal or either revision." }
+      }
+    },
+    "AttentionRevision": {
+      "type": "object",
+      "required": ["from_revision", "to_revision", "reason", "lines", "truncated"],
+      "properties": {
+        "from_revision": { "type": "string", "description": "The revision the run runs now." },
+        "to_revision": { "type": "string", "description": "The candidate revision." },
+        "reason": { "type": "string" },
+        "lines": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/AttentionRevisionLine" }, "description": "The mission's own changed fields, then by step path the steps added, removed and changed." },
+        "truncated": { "type": "boolean", "description": "Whether there were more than 200 lines." }
+      }
+    },
+    "AttentionRevisionLine": {
+      "type": "object",
+      "required": ["op", "text"],
+      "properties": {
+        "op": { "enum": ["+", "-", "~"], "description": "+ adds a step, - removes one, ~ changes the mission or a step." },
+        "text": { "type": "string", "description": "In plain words: `step PATH`, or `PATH: fields` and `mission: fields` for a change." }
+      }
+    },
+    "AttentionActor": {
+      "type": "object",
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id" },
+        "label": { "type": "string", "description": "The name a person reads." }
+      }
+    },
+    "AttentionWaiting": {
+      "type": "object",
+      "required": ["step", "path"],
+      "properties": {
+        "step": { "$ref": "#/$defs/StepRunId" },
+        "path": { "type": "string", "description": "The step's name within its mission." }
+      }
     },
     "WorkLabel": {
       "type": "object",
@@ -2470,6 +2557,7 @@
       "required": ["id", "sequence", "revision", "timestamp", "role", "type", "final", "body"],
       "properties": {
         "id": { "$ref": "#/$defs/TimelineEntryId" },
+        "delivers": { "type": "string", "pattern": "^message/[^\\s]+$" },
         "sequence": { "type": "integer", "minimum": 0 },
         "revision": { "type": "integer", "minimum": 1 },
         "timestamp": { "$ref": "#/$defs/Timestamp" },

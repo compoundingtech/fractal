@@ -1,4 +1,4 @@
-//! Shared safe text layout with stui's caller-owned palette.
+//! Shared safe text layout with Fractal TUI's caller-owned palette.
 
 use ratatui::style::Style;
 use ratatui::text::Line;

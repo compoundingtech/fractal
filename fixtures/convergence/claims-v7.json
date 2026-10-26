@@ -7581,6 +7581,25 @@
     "wakes_reconciler": false,
     "retention": "local"
   },
+  "slo.breach-transition": {
+    "kind": "slo.breach-transition",
+    "subjects": [
+      "resource"
+    ],
+    "fields": {
+      "record": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "slo-breaches",
+    "wakes_reconciler": true
+  },
   "step-run.carried": {
     "kind": "step-run.carried",
     "subjects": [
@@ -8326,98 +8345,6 @@
     "source_kdl": [
       "subscription"
     ]
-  },
-  "task-grant.created": {
-    "kind": "task-grant.created",
-    "subjects": [
-      "task-grant"
-    ],
-    "fields": {
-      "digest": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "grant_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "incarnation": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "manifest": {
-        "value_type": "object",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "op_proxy_case_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "requester": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "run": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "step": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "window": {
-        "value_type": "object",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
-  },
-  "task-grant.revoked": {
-    "kind": "task-grant.revoked",
-    "subjects": [
-      "task-grant"
-    ],
-    "fields": {
-      "grant_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "reason": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
   },
   "terminal.input.requested": {
     "kind": "terminal.input.requested",

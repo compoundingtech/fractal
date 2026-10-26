@@ -374,7 +374,7 @@ def one_run(args, run, attempt):
 
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY') or 'compoundingtech/smalltalk')
+    parser.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY') or 'compoundingtech/fractal')
     parser.add_argument('--run', type=int, help='observe this one finished Workspace CI run')
     parser.add_argument('--attempt', type=int, help='default: the run\'s latest attempt')
     parser.add_argument('--poll', action='store_true',

@@ -2551,7 +2551,7 @@ mission "cli/child" state="ready" {
 
     for (arguments, heading) in [
         // Nothing waits on alex: now says nothing about alerts, not even a zero.
-        (vec!["now", "--as", "person/alex"], "Work: st work ls"),
+        (vec!["now", "--as", "person/alex"], "Work: fractal work ls"),
         (vec!["machines"], "MACHINES"),
         (vec!["activity", "--limit", "10"], "ACTIVITY"),
         (vec!["devices", "--as", "person/alex", "--all"], "DEVICES"),
@@ -3635,11 +3635,11 @@ fn help_starts_with_examples_and_keeps_plumbing_reachable() {
     };
     let default = help(&["--help"]);
     assert_eq!(default, help(&["help"]));
-    assert!(default.starts_with("See what needs you:\n  st now\n"));
-    assert!(default.contains("st agents new NAME --harness claude --attach"));
+    assert!(default.starts_with("See what needs you:\n  fractal now\n"));
+    assert!(default.contains("fractal agents new NAME --harness claude --attach"));
     assert!(default.contains("Everyday use:"));
-    assert!(default.contains("Inside an agent seat:"));
-    assert!(default.contains("Running st on a machine or fleet:"));
+    assert!(default.contains("Inside an agent:"));
+    assert!(default.contains("Running fractal on a machine or fleet:"));
     assert!(!default.contains("Plumbing:"));
     assert!(help(&["help", "--all"]).contains("Plumbing:"));
     assert_eq!(
@@ -4076,10 +4076,10 @@ async fn new_agent_explains_ready_starting_and_waiting_states_and_preserves_json
                 "{progress}"
             );
             for action in [
-                "st terminals attach agent/client-v0-cli.demo --as person/avery",
-                "st conversations send agent/client-v0-cli.demo --from person/avery --body 'Hello'",
-                "st agents show agent/client-v0-cli.demo",
-                "st agents stop agent/client-v0-cli.demo --as person/avery",
+                "fractal terminals attach agent/client-v0-cli.demo --as person/avery",
+                "fractal conversations send agent/client-v0-cli.demo --from person/avery --body 'Hello'",
+                "fractal agents show agent/client-v0-cli.demo",
+                "fractal agents stop agent/client-v0-cli.demo --as person/avery",
                 "--attach",
             ] {
                 assert!(rendered.contains(action), "{rendered}");
@@ -4112,7 +4112,7 @@ async fn creation_commands_end_with_actions_and_json_remains_parseable() {
             let rendered = String::from_utf8(output.stdout).unwrap();
             assert!(rendered.contains("Waiting for your device"), "{rendered}");
             assert!(
-                rendered.contains("st devices --as person/avery"),
+                rendered.contains("fractal devices --as person/avery"),
                 "{rendered}"
             );
         }
@@ -4163,12 +4163,12 @@ async fn creation_commands_end_with_actions_and_json_remains_parseable() {
             );
             let rendered = String::from_utf8(output.stdout).unwrap();
             assert!(
-                rendered.contains("st missions show mission-run/demo/human --follow"),
+                rendered.contains("fractal missions show mission-run/demo/human --follow"),
                 "{rendered}"
             );
             assert!(
                 rendered.contains(
-                    "st missions cancel mission-run/demo/human --as person/avery --reason"
+                    "fractal missions cancel mission-run/demo/human --as person/avery --reason"
                 ),
                 "{rendered}"
             );
@@ -4207,11 +4207,11 @@ async fn creation_commands_end_with_actions_and_json_remains_parseable() {
             let rendered = String::from_utf8(output.stdout).unwrap();
             assert!(rendered.contains("Started — the planner"), "{rendered}");
             assert!(
-                rendered.contains("st launch show planning-session/launch/demo/human/"),
+                rendered.contains("fractal launch show planning-session/launch/demo/human/"),
                 "{rendered}"
             );
             assert!(
-                rendered.contains("st launch cancel planning-session/launch/demo/human/"),
+                rendered.contains("fractal launch cancel planning-session/launch/demo/human/"),
                 "{rendered}"
             );
         }
@@ -4355,7 +4355,7 @@ async fn terminal_owner_lookup_finds_a_seat_beyond_the_default_page() {
     assert!(human.status.success());
     let rendered = String::from_utf8(human.stdout).unwrap();
     assert!(
-        rendered.contains("st terminals ls --state 'running' --cursor"),
+        rendered.contains("fractal terminals ls --state 'running' --cursor"),
         "{rendered}"
     );
     server.abort();
@@ -4965,4 +4965,185 @@ fn local_state_commands_reject_unknown_config_before_using_default_state() {
                 .exists()
         );
     }
+}
+
+/// Authored private Store/socket only: no live alert, person policy or native process.
+#[tokio::test]
+async fn alerts_cli_uses_granted_agent_identity_and_sender_owned_update_sources() {
+    use fractal_daemon::model::{DelegationPolicyRequest, PersonAskRequest};
+    use fractal_daemon::{AttentionSnapshotStore as _, DelegationStore as _, PersonWorkStore as _};
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let helper = "agent/client-v0-cli.helper";
+    let seat = "agent/client-v0-cli.worker";
+    let source = "version 2\nagent \"worker\" { workspace \"/tmp\"; harness \"claude\" {} }\nagent \"helper\" { workspace \"/tmp\"; command \"true\" }\n";
+    let intent = fractal_daemon::graph::parse_intent(source, "client-v0-cli").unwrap();
+    let preview = state
+        .store
+        .mission(
+            &intent,
+            IntentInput {
+                kdl: source.into(),
+                source_name: None,
+            },
+        )
+        .unwrap();
+    state
+        .store
+        .apply_as(
+            &intent,
+            &preview.subject_tokens,
+            "cli-alert-agents",
+            Some("person/avery"),
+        )
+        .unwrap();
+    let append = |subject: &str, kind: &str, actor: &str, fields: Value, key: &str| {
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: Some(actor.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            })
+            .unwrap()
+    };
+    append(
+        seat,
+        "runtime.observed",
+        seat,
+        serde_json::json!({"status":"running","incarnation_id":"one"}),
+        "cli-runtime",
+    );
+    let denial = append(
+        seat,
+        "harness.diagnostic",
+        seat,
+        serde_json::json!({"code":"permission-denied","driver":"claude","status":"Bash","reason":"Invented denial"}),
+        "cli-denial",
+    );
+    let instruction = append(
+        "message/cli-instruction",
+        "message.sent",
+        "person/avery",
+        serde_json::json!({"from":"person/avery","to":helper,"content":"Dismiss that denied call. Report the result.","status":"sent"}),
+        "cli-instruction",
+    );
+    let policy = state
+        .store
+        .set_delegation_policy(&DelegationPolicyRequest {
+            person: "person/avery".into(),
+            actor: "person/avery".into(),
+            actions: vec!["close-item".into()],
+            evidence: vec![instruction.id],
+            idempotency_key: "cli-policy".into(),
+        })
+        .unwrap();
+    let update = state
+        .store
+        .ask_person(&PersonAskRequest {
+            legacy_request: None,
+            person: "person/avery".into(),
+            title: "Invented old status".into(),
+            reason: "This update is obsolete".into(),
+            actor: helper.into(),
+            step: None,
+            new_run: None,
+            incarnation: None,
+            request: Some(
+                serde_json::json!({"version":1,"type":"update","about":"message/cli-instruction"}),
+            ),
+            idempotency_key: "cli-update".into(),
+        })
+        .unwrap();
+    let identity = serde_json::to_vec(&(seat, "person/avery", &denial.id)).unwrap();
+    let card = format!("attention/{}", &hex::encode(Sha256::digest(identity))[..32]);
+    let socket = root.path().join("alerts.sock");
+    let served = socket.clone();
+    let app = fractal_daemon::api::router(state.clone());
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
+    let config_home = root.path().join("config-home");
+    std::fs::create_dir_all(&config_home).unwrap();
+    for _ in 0..200 {
+        if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let base = [
+        "alerts",
+        "resolve",
+        &card,
+        "--outcome",
+        "dismissed",
+        "--for",
+        "person/avery",
+        "--policy",
+        &policy.id,
+        "--instruction",
+        "message/cli-instruction",
+        "--quote",
+        "Dismiss that denied call.",
+        "--episode",
+        &denial.id,
+    ];
+    let mut borrowed = base.to_vec();
+    borrowed.extend(["--as", "person/avery"]);
+    assert!(
+        !run_lane_cli(&socket, &config_home, Some(helper), true, &borrowed)
+            .await
+            .status
+            .success()
+    );
+    assert_eq!(state.store.prompt_answer(&denial.id).unwrap().answer, None);
+    let mut granted = base.to_vec();
+    granted.extend(["--as", helper]);
+    let result = run_lane_cli(&socket, &config_home, Some(helper), true, &granted).await;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let answer: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(answer["actor"], helper);
+    assert_eq!(answer["outcome"], "dismissed");
+    let withdrawn = run_lane_cli(
+        &socket,
+        &config_home,
+        Some(helper),
+        true,
+        &[
+            "alerts",
+            "withdraw",
+            &update.subject,
+            "--as",
+            helper,
+            "--reason",
+            "Obsolete update",
+            "--idempotency-key",
+            "cli-withdraw",
+        ],
+    )
+    .await;
+    assert!(
+        withdrawn.status.success(),
+        "{}",
+        String::from_utf8_lossy(&withdrawn.stderr)
+    );
+    let value: Value = serde_json::from_slice(&withdrawn.stdout).unwrap();
+    assert_eq!(value["status"], "cancelled");
+    assert_eq!(
+        state
+            .store
+            .step_run(&update.subject)
+            .unwrap()
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+    server.abort();
+    let _ = server.await;
 }
