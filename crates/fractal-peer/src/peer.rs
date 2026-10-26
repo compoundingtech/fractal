@@ -170,10 +170,23 @@ pub enum ClientReadOperation {
         parameters: serde_json::Value,
     },
     /// A portable suspended seat payload, read only for the exact fenced resume request.
-    SeatSnapshot { subject: String, suspend_operation: String, resume_operation: String, offset: u64 },
+    SeatSnapshot {
+        subject: String,
+        suspend_operation: String,
+        resume_operation: String,
+        offset: u64,
+    },
     /// The directory this host gives a new agent that names no workspace.
     AgentWorkspace {
         identity: String,
+    },
+    AgentLaunch {
+        subject: String,
+        token: String,
+        #[serde(default)]
+        after: Option<String>,
+        #[serde(default)]
+        wait_ms: u64,
     },
     HarnessInventory {
         agent_id: String,
@@ -227,7 +240,8 @@ impl ClientReadOperation {
     pub fn wait(&self) -> Duration {
         match self {
             Self::ConversationChanges { wait_ms, .. }
-            | Self::TerminalScreenChange { wait_ms, .. } => {
+            | Self::TerminalScreenChange { wait_ms, .. }
+            | Self::AgentLaunch { wait_ms, .. } => {
                 Duration::from_millis((*wait_ms).min(CLIENT_READ_MAX_WAIT_MS))
             }
             _ => Duration::ZERO,
@@ -1487,6 +1501,19 @@ async fn receive_client_read(
                     crate::client::api_error_code(&error).unwrap_or("remote-unavailable"),
                     StatusCode::CONFLICT, format!("{error:#}")
                 ).into())
+            }
+            ClientReadOperation::AgentLaunch { subject, token, after, wait_ms } => {
+                anyhow::ensure!(wait_ms <= CLIENT_READ_MAX_WAIT_MS, "the launch wait exceeds its bound");
+                let local = if request.authority_actor.starts_with("agent/") {
+                    crate::client::Client::unix_agent(state.backend().socket(), &request.authority_actor)?
+                } else {
+                    crate::client::Client::unix_as(state.backend().socket(), &request.authority_actor)?
+                };
+                let mut path = format!("/v1/hosts/{}/agent-launch?subject={}&token={}&wait_ms={wait_ms}", urlencoding::encode(state.node()), urlencoding::encode(&subject), urlencoding::encode(&token));
+                if let Some(after) = after {
+                    path.push_str(&format!("&after={}", urlencoding::encode(&after)));
+                }
+                local.get::<serde_json::Value>(&path).await
             }
             ClientReadOperation::HarnessInventory { agent_id, query } => {
                 let value = client.harness_inventory_get(&agent_id, &query).await?.value;

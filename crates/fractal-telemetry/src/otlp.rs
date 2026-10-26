@@ -168,11 +168,19 @@ pub fn otlp_logs(node: &str, batch: &[ClaimRecord]) -> Value {
     let records = batch
         .iter()
         .flat_map(|observation| {
-            let fields = observation
+            let mut fields = observation
                 .body
                 .get("fields")
                 .cloned()
                 .unwrap_or(Value::Null);
+            if observation.kind == "runtime.action.failed"
+                && observation.actor.is_none()
+                && matches!(fields.get("action").and_then(Value::as_str), Some("start" | "startup-output"))
+            {
+                // Keep startup output on its runtime host, including when OTLP is configured.
+                // Preserve structured action and incarnation provenance for collector queries.
+                fields["reason"] = json!("startup detail is available from the runtime host");
+            }
             let time = (observation.accepted_at_unix_ms * 1_000_000).to_string();
             let mut attributes = vec![
                 attribute("st3.subject", json!({ "stringValue": observation.subject })),

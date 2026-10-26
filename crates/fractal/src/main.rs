@@ -2612,11 +2612,12 @@ enum AgentsCommand {
         #[command(subcommand)]
         command: HandoffCommand,
     },
-    /// Declare one new agent seat, start its harness, and wait until it is ready.
+    /// Declare one new agent seat, start its harness, and wait until it has reached readiness.
     ///
     /// The declaration is the one a person writes by hand, with the harness defaults of the
     /// fleet's Claude and Codex seats; `--print-kdl` shows it without applying it. With
-    /// `--attach`, this terminal attaches once the harness is ready, from any fleet host.
+    /// `--attach`, this terminal attaches after that milestone and a fresh runtime check,
+    /// from any fleet host.
     New(AgentNewArgs),
     /// List repositories already used by a host's agents, from replicated graph evidence.
     Repos {
@@ -4497,6 +4498,19 @@ enum CompletionShell {
 }
 
 #[derive(Debug)]
+struct AgentLaunchExit {
+    code: u8,
+    child_code: Option<i64>,
+    reason: String,
+}
+impl std::fmt::Display for AgentLaunchExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+impl std::error::Error for AgentLaunchExit {}
+
+#[derive(Debug)]
 struct CommandExit(u8);
 
 impl std::fmt::Display for CommandExit {
@@ -5003,6 +5017,10 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            if let Some(exit) = error.downcast_ref::<AgentLaunchExit>() {
+                eprintln!("st: {}", exit.reason);
+                return ExitCode::from(exit.code);
+            }
             if let Some(exit) = error.downcast_ref::<CommandExit>() {
                 return ExitCode::from(exit.0);
             }

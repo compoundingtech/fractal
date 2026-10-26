@@ -43,3 +43,5 @@ pub use pty::{
     Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, ProcfsHidesProcesses, PtyObservation, PtyRuntime,
     PtySpawnTimeout, PtySpawnTimeoutPhase, TerminalSize,
 };
+
+pub mod launch_diagnostic;
