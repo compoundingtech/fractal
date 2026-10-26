@@ -230,7 +230,7 @@ class SelectionTest(unittest.TestCase):
         source = self.module.SOURCE_CLONE
         subprocess.run(['git', 'init', '-q', str(source)], check=True)
         subprocess.run(['git', '-C', str(source), '-c', 'user.name=Fixture',
-                        '-c', 'user.email=fixture@example.invalid',
+                        '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null',
                         'commit', '--allow-empty', '-qm', 'initial'], check=True)
         subprocess.run(['git', '-C', str(source), 'branch', '-M', 'main'], check=True)
         real_run = self.module.run
