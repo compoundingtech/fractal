@@ -2020,7 +2020,7 @@ enum DevicesCommand {
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
         /// Let this pairing grant the device this member's client gateway over Fabric (after
-        /// `st devices fabric enable`); without it pairing grants nothing over Fabric.
+        /// `devices fabric enable`); without it pairing grants nothing over Fabric.
         #[arg(long, conflicts_with = "assistant")]
         fabric_gateway: bool,
         /// Begin a revocable external-assistant grant instead of a person device.
