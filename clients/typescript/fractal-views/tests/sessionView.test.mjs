@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { isSnapshotChurn, isUnmanaged, isUnresolved, listSessionPages, recentTimeline, sessionLabel, timelineText } from '@fractal/views/sessionView';
+import { isSnapshotChurn, isUnmanaged, isUnresolved, listSessionPages, olderNote, readOlder, recentTimeline, sessionLabel, timelineText } from '@fractal/views/sessionView';
 
 const managed = { id: 'session/managed', kind: 'session', owner_id: 'agent/one', state: 'running' };
 const exact = { id: 'session/exact', kind: 'session', owner_id: 'external-session/codex/one', state: 'running', managed: false, driver: 'codex', native_session_id: 'one' };
@@ -44,3 +44,8 @@ assert.deepEqual(restarted.map(session => session.id), ['session/managed', 'sess
 assert.deepEqual(recentTimeline([{ sequence: 9 }, { sequence: 10 }, { sequence: 1 }], 2).map(entry => entry.sequence), [9, 10]);
 assert.equal(timelineText({ media_type: 'text/plain', text: 'Hello' }), 'Hello');
 assert.equal(timelineText({ message_id: 'metadata-only' }), null);
+assert.equal(olderNote({ older: { loading: false }, hasOlder: false, entries: [{ sequence: 1 }] }), 'Start of this session · earlier ones: fractal conversations sessions');
+await assert.rejects(
+  readOlder(async () => ({ items: [{ sequence: 2 }], hasMore: true, cursor: 'c' }), {}, { sequence: 1 }),
+  (error) => error instanceof Error && error.message === 'this session is too long to read further back here; fractal conversations timeline reads it all',
+);
