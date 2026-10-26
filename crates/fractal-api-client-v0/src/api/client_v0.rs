@@ -7470,6 +7470,18 @@ async fn dispatch_action(
             let result = state
                 .store
                 .ask_person(&PersonAskRequest {
+                    deadline_ms: p
+                        .get("deadline_ms")
+                        .map(|deadline| {
+                            deadline
+                                .as_u64()
+                                .ok_or_else(|| validation("deadline_ms must be a whole number of milliseconds"))
+                        })
+                        .transpose()?,
+                    default_answer: p
+                        .get("default_answer")
+                        .map(|_| parameter_string(p, "default_answer"))
+                        .transpose()?,
                     legacy_request: None,
                     person: parameter_string(p, "person_id")?,
                     title: parameter_string(p, "title")?,

@@ -441,6 +441,10 @@ export type StructuredRequest = typeof StructuredRequest.Type
 export type StructuredRequestEncoded = typeof StructuredRequest.Encoded
 
 export const PersonAskParameters = /*#__PURE__*/ (() => Schema.Struct({
+  /** How long the person has to answer. Absent, the fleet's default deadline applies (24 hours unless configured). */
+  "deadline_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(60000)).check(Schema.isLessThanOrEqualTo(2592000000))).annotate({ description: "How long the person has to answer. Absent, the fleet's default deadline applies (24 hours unless configured)." }),
+  /** The request's answer id that applies at the deadline. Absent, the ask resolves as timed out. */
+  "default_answer": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]{0,47}$", "u")))).annotate({ description: "The request's answer id that applies at the deadline. Absent, the ask resolves as timed out." }),
   "new_run": optionalKey(Schema.String),
   "person_id": Id,
   "reason": Schema.String,
@@ -3004,7 +3008,8 @@ export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "custom",
   "feedback",
   "read",
-  "dismissed"
+  "dismissed",
+  "timed_out"
 ]),
   "text": optionalKey(Schema.String),
   "type": Schema.Literals(["decision","choice","feedback","update"])
@@ -3030,6 +3035,8 @@ export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   /** Server-owned grant-bound assistant session audit actor, separate from the answering principal. */
   "assistant_session_actor": optionalKey(Schema.String).annotate({ description: "Server-owned grant-bound assistant session audit actor, separate from the answering principal." }),
   "evidence": optionalKey(Schema.Array(Id)),
+  /** The ask resolved by itself at its deadline, not by the person. */
+  "resolved_by": optionalKey(Schema.Literals(["deadline"])).annotate({ description: "The ask resolved by itself at its deadline, not by the person." }),
   /** The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. */
   "respondent": SenderRef,
   /** External assistant attribution when the response was submitted through an assistant grant. */

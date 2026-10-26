@@ -1481,6 +1481,8 @@ pub(crate) fn generate(store: &Store, prefix: &str, scale: f64) {
     let asker = format!("agent/bench/{prefix}/standing-0");
     for request in 0..scaled(SAMPLED.attention, scale) {
         let posted = store.ask_person(&PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/bench-operator".into(),
             title: format!("Invented question {request}"),

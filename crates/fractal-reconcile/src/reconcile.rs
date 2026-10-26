@@ -3634,9 +3634,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.isolate("stage/provider-capacity-retries", &daemon, || {
             self.reconcile_provider_capacity_retries(&desired)
         });
-        self.isolate("stage/person-asks", &daemon, || {
-            self.store.reconcile_person_asks()
-        });
+        self.isolate("stage/person-asks", &daemon, || self.reconcile_person_asks());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
         });
@@ -14312,6 +14310,20 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.arm_step_deadline(&handle, &view.subject, remaining);
         }
         Ok(false)
+    }
+
+    /// End the asks whose owner ended and resolve the ones whose deadline passed. Nothing else
+    /// writes when an unanswered ask's deadline passes, so arm a wake for the next one.
+    fn reconcile_person_asks(&self) -> Result<bool> {
+        let pass = self.store.reconcile_person_asks_at(now_ms())?;
+        if let Some(deadline) = pass.next_deadline {
+            self.arm_deadline_at(
+                "person-ask-deadline",
+                deadline,
+                crate::reconcile_telemetry::WakeCause::Deadline,
+            );
+        }
+        Ok(pass.changed)
     }
 
     /// Wake the reconciler in `remaining` ms for `step`, unless the step already armed a wake at
@@ -43658,6 +43670,8 @@ mission "ios-proof-blocked" state="ready" {
             .unwrap();
         let ask = store
             .ask_person(&crate::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/alex".into(),
                 title: "Repair simulator components".into(),

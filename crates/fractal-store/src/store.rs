@@ -2016,6 +2016,8 @@ pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
+    /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
+    pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2378,7 +2380,8 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { graph, fractal, standby_observations: Default::default() })
+        Ok(Self { graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2393,7 +2396,8 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { graph, fractal, standby_observations: Default::default() })
+        Ok(Self { graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2405,7 +2409,8 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { graph, fractal, standby_observations: Default::default() })
+        Ok(Self { graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into() })
     }
 
     /// Simulate a different build's registry on this node.

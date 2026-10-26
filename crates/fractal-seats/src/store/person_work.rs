@@ -56,6 +56,8 @@ mission "person-work" state="ready" {
             Ok(())
         }).unwrap().unwrap();
         let input = PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/avery".into(),
             title: "Choose a release date".into(),
@@ -687,6 +689,163 @@ mission "person-work" state="ready" {{
                 .is_empty(),
             "a step-owned ask resumes its step instead of sending a message"
         );
+    }
+
+    /// Every ask has a deadline. At it, an unanswered structured ask completes with its default
+    /// answer, recorded as resolved by the deadline and not by the person: it leaves the
+    /// person's home, and the asking step resumes reading that it timed out and which default
+    /// applied. A person cannot answer it afterwards.
+    #[test]
+    fn a_structured_ask_resolves_with_its_default_answer_at_its_deadline() {
+        let (store, origin, mut input) = fixture();
+        input.title = "Land the browser gateway?".into();
+        input.request = Some(gateway_decision());
+        input.deadline_ms = Some(3_600_000);
+        for (default, code) in [("revise-auth", "invalid-default-answer"), ("ship-it", "invalid-default-answer")] {
+            let mut refused = input.clone();
+            refused.default_answer = Some(default.into());
+            assert_eq!(store.ask_person(&refused).unwrap_err().code, code, "{default}");
+        }
+        let mut too_soon = input.clone();
+        too_soon.deadline_ms = Some(10_000);
+        assert_eq!(store.ask_person(&too_soon).unwrap_err().code, "invalid-ask-deadline");
+        input.default_answer = Some("keep-open".into());
+        let before = now_ms();
+        let ask = store.ask_person(&input).unwrap();
+        let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        let deadline = u128::from(claim.body["fields"]["deadline_unix_ms"].as_u64().unwrap());
+        assert!((before + 3_600_000..=now_ms() + 3_600_000).contains(&deadline));
+        assert_eq!(claim.body["fields"]["default_answer"], "keep-open");
+        let mut conflict = input.clone();
+        conflict.default_answer = Some("land".into());
+        assert_eq!(store.ask_person(&conflict).unwrap_err().code, "idempotency-conflict");
+
+        let early = store.reconcile_person_asks_at(deadline - 1).unwrap();
+        assert_eq!(early, PersonAskPass { changed: false, next_deadline: Some(deadline) });
+        let item = store
+            .attention_items(Some("person/avery"))
+            .unwrap()
+            .into_iter()
+            .find(|item| item.subject == ask.subject)
+            .unwrap();
+        assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
+        assert!(
+            store.attention_items(Some("person/avery")).unwrap().iter().all(|item| item.subject != ask.subject),
+            "the resolved ask leaves the person's home"
+        );
+        let expected = json!({"type": "decision", "outcome": "timed_out", "id": "keep-open", "label": "Keep it open"});
+        let check = |store: &Store| {
+            let resumed = store.step_run(&origin.subject).unwrap().unwrap();
+            assert_eq!(resumed.status, "ready");
+            assert_eq!(resumed.person_answers.len(), 1);
+            let answer = &resumed.person_answers[0];
+            assert_eq!(answer.ask, ask.subject);
+            assert_eq!(answer.status, "completed");
+            assert_eq!(answer.respondent, "daemon/runtime");
+            assert_eq!(answer.resolved_by.as_deref(), Some("deadline"));
+            assert_eq!(answer.answer.as_ref(), Some(&expected));
+            assert_eq!(answer.summary, "Timed out without an answer; the default applied: Keep it open (keep-open)");
+            assert!(resumed.constraints.iter().any(|constraint| constraint
+                == "Person response: Timed out without an answer; the default applied: Keep it open (keep-open)"));
+            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "completed");
+        };
+        check(&store);
+        store.replay_replication_graph().unwrap();
+        check(&store);
+        assert_eq!(store.reconcile_person_asks_at(deadline + 1).unwrap(), PersonAskPass::default());
+        let late = PersonStepResponse {
+            delegation: None,
+            subject: ask.subject.clone(),
+            actor: "person/avery".into(),
+            summary: String::new(),
+            evidence: vec![],
+            episode: Some(item.episode),
+            idempotency_key: "gateway-late".into(),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+        };
+        assert_eq!(store.finish_person_step(&late, false).unwrap_err().code, "stale-fence");
+    }
+
+    /// A plain ask names no answers, so at the fleet's default deadline it resolves as timed out
+    /// with no answer.
+    #[test]
+    fn a_plain_ask_times_out_without_an_answer_at_the_fleet_default_deadline() {
+        let (store, origin, mut input) = fixture();
+        input.default_answer = Some("friday".into());
+        assert_eq!(store.ask_person(&input).unwrap_err().code, "invalid-default-answer");
+        input.default_answer = None;
+        store.set_default_ask_deadline_ms(2 * 3_600_000);
+        let ask = store.ask_person(&input).unwrap();
+        let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        let deadline = u128::from(claim.body["fields"]["deadline_unix_ms"].as_u64().unwrap());
+        assert!(deadline.abs_diff(claim.accepted_at_unix_ms + 2 * 3_600_000) < 5_000);
+        assert!(claim.body["fields"].get("default_answer").is_none());
+        assert!(!store.reconcile_person_asks_at(deadline - 1).unwrap().changed);
+        assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
+        let resumed = store.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(resumed.status, "ready");
+        let answer = &resumed.person_answers[0];
+        assert_eq!(answer.resolved_by.as_deref(), Some("deadline"));
+        assert_eq!(answer.answer, None);
+        assert_eq!(answer.summary, "Timed out without an answer");
+        assert!(resumed.constraints.iter().any(|constraint| constraint == "Person response: Timed out without an answer"));
+    }
+
+    /// No step waits on a new-run ask, so its timeout reaches the requester as a message.
+    #[test]
+    fn a_new_run_ask_that_times_out_tells_the_requester_which_default_applied() {
+        let (store, origin, mut input) = fixture();
+        store.set_step_state(&origin.subject, "completed", None).unwrap();
+        input.step = None;
+        input.new_run = Some("gateway".into());
+        input.title = "Land the browser gateway?".into();
+        input.request = Some(gateway_decision());
+        input.default_answer = Some("land".into());
+        let ask = store.ask_person(&input).unwrap();
+        let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        let deadline = u128::from(claim.body["fields"]["deadline_unix_ms"].as_u64().unwrap());
+        assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
+        let own = store.step_run(&ask.subject).unwrap().unwrap();
+        assert_eq!(own.status, "completed");
+        assert_eq!(own.person_answers[0].resolved_by.as_deref(), Some("deadline"));
+        let messages = store.messages(Some("agent/alder.asker"), true).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].content.starts_with(&format!(
+            "person/avery did not answer, by its deadline, `{}`: Land the browser gateway?", ask.subject)));
+        assert!(messages[0].content.contains("Answer: Land the gateway (land)"));
+    }
+
+    /// An ask an older build made carries no deadline. Counting from when it was asked would
+    /// resolve every old ask at once at deploy, so its deadline counts from when this node
+    /// began counting deadlines.
+    #[test]
+    fn an_ask_open_at_deploy_counts_its_deadline_from_the_deploy() {
+        let (store, origin, input) = fixture();
+        // The claim and pause exactly as a build without deadlines wrote them.
+        let subject = format!("step-run/{}/ask-legacy", generation_id_from_subject(&origin.generation));
+        let asked = store.connection.batched(|tx| -> Result<ClaimRecord> {
+            let claim = append_claim_tx(tx, "alder", &subject, "work.person-asked", Some(&input.actor),
+                &json!({"fields": {"run": origin.run, "generation": origin.generation, "origin_step": origin.subject,
+                    "origin_attempt": origin.attempt, "person": input.person, "title": input.title, "reason": input.reason,
+                    "key": input.idempotency_key, "attempt": 1, "status": "ready", "waiting_since": null, "legacy_request": null}}), &[], None)?;
+            project(tx, &claim).unwrap();
+            let pause = append_claim_tx(tx, "alder", &origin.subject, "step-run.state", Some("daemon/runtime"),
+                &json!({"fields": {"status": "waiting-person", "reason": subject, "attempt": origin.attempt}}), std::slice::from_ref(&claim.id), None)?;
+            project_mission_run_update(tx, &pause).unwrap();
+            Ok(claim)
+        }).unwrap().unwrap();
+        let day = DEFAULT_ASK_DEADLINE_MS as u128;
+        let deploy = asked.accepted_at_unix_ms + 10 * 3_600_000;
+        start_counting_ask_deadlines(&store.connection.write(), deploy).unwrap();
+        // A later start does not move the count.
+        start_counting_ask_deadlines(&store.connection.write(), deploy + day).unwrap();
+        let pass = store.reconcile_person_asks_at(asked.accepted_at_unix_ms + day).unwrap();
+        assert_eq!(pass, PersonAskPass { changed: false, next_deadline: Some(deploy + day) });
+        assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "waiting-person");
+        assert!(store.reconcile_person_asks_at(deploy + day).unwrap().changed);
+        let resumed = store.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(resumed.status, "ready");
+        assert_eq!(resumed.person_answers[0].resolved_by.as_deref(), Some("deadline"));
     }
 
     #[test]

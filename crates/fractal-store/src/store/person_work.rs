@@ -27,6 +27,65 @@ pub fn structured_request(ask: &ClaimRecord) -> Result<Option<StructuredRequest>
         })
 }
 
+/// How long a person has to answer an ask that names no deadline, unless `[asks]
+/// default_deadline` says otherwise.
+pub const DEFAULT_ASK_DEADLINE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// The `meta` key holding when this node first counted ask deadlines. An ask made before then
+/// carries none, so its deadline counts from then rather than from when it was asked.
+pub const ASK_DEADLINES_SINCE: &str = "person_ask_deadlines_since_unix_ms";
+
+/// When this node started counting ask deadlines; zero before it has.
+pub fn ask_deadlines_since(connection: &Connection) -> Result<u128> {
+    Ok(connection
+        .query_row("SELECT value FROM meta WHERE key=?1", [ASK_DEADLINES_SINCE], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()?
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0))
+}
+
+/// Records, once, that this node counts ask deadlines from `now`.
+pub fn start_counting_ask_deadlines(connection: &Connection, now: u128) -> Result<()> {
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h3beacc1959d7 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value) VALUES(?1,?2)",
+        params![ASK_DEADLINES_SINCE, now.to_string()],
+    )?;
+    Ok(())
+}
+
+/// When an ask resolves by itself if the person has not answered: the deadline it was asked
+/// with, or, for an ask made before deadlines, `default_ms` after it was asked or after this
+/// node began counting (`since`), whichever is later. An update waits for nobody and has none.
+pub fn ask_deadline(ask: &ClaimRecord, since: u128, default_ms: u64) -> Option<u128> {
+    if is_update(ask) {
+        return None;
+    }
+    if let Some(deadline) = ask.body["fields"]["deadline_unix_ms"].as_u64() {
+        return Some(u128::from(deadline));
+    }
+    Some(ask.accepted_at_unix_ms.max(since) + u128::from(default_ms))
+}
+
+/// The answer id that applies at an ask's deadline, if it names one.
+pub fn ask_default_answer(ask: &ClaimRecord) -> Option<&str> {
+    ask.body["fields"]["default_answer"].as_str()
+}
+
+impl Store {
+    /// Sets how long a person has to answer an ask that names no deadline.
+    pub fn set_default_ask_deadline_ms(&self, deadline_ms: u64) {
+        self.default_ask_deadline_ms
+            .store(deadline_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn default_ask_deadline_ms(&self) -> u64 {
+        self.default_ask_deadline_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 pub fn validate_delegated_answer(
     ask: &ClaimRecord,
     fields: &BTreeMap<String, Value>,
@@ -399,6 +458,10 @@ pub fn enrich_responses(
                 .filter(|answer| answer.is_object())
                 .cloned(),
             evidence: serde_json::from_value(body["evidence"].clone()).unwrap_or_default(),
+            resolved_by: fields
+                .get("resolved_by")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         });
     }
     Ok(())

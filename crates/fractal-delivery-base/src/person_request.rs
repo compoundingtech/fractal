@@ -503,6 +503,47 @@ impl StructuredRequest {
         Ok(answer)
     }
 
+    /// Checks that `id` can stand in for the person at the deadline: one of this request's
+    /// named answers that needs no words of theirs.
+    pub fn check_default(&self, id: &str) -> Result<(), St3Error> {
+        let invalid_default = |message: String| St3Error::new("invalid-default-answer", message);
+        if matches!(self.request_type, RequestType::Feedback | RequestType::Update) {
+            return Err(invalid_default(format!(
+                "a {} has no named answers to default to",
+                self.request_type.as_str()
+            )));
+        }
+        let option = self
+            .answers
+            .iter()
+            .find(|option| option.id == id)
+            .ok_or_else(|| {
+                invalid_default(format!(
+                    "`{id}` is not one of this request's answers: {}",
+                    self.answer_ids()
+                ))
+            })?;
+        if option.outcome == Some(DecisionOutcome::RequestChanges) {
+            return Err(invalid_default(format!(
+                "`{id}` requests changes, which needs the person's words, so it cannot apply by itself"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The answer an ask records when its deadline passes unanswered: timed out, with the id and
+    /// label of the default answer that applied, if the ask named one.
+    pub fn timed_out(&self, default: Option<&str>) -> Value {
+        let mut answer = json!({"type": self.request_type.as_str(), "outcome": TIMED_OUT});
+        if let Some(option) =
+            default.and_then(|id| self.answers.iter().find(|option| option.id == id))
+        {
+            answer["id"] = json!(option.id);
+            answer["label"] = json!(option.label);
+        }
+        answer
+    }
+
     fn answer_ids(&self) -> String {
         let mut ids = self
             .answers
@@ -519,8 +560,19 @@ impl StructuredRequest {
 /// The answer id by which a person sets a request aside; the asker reads it as a dismissal.
 pub const DISMISS: &str = "dismiss";
 
+/// The outcome an ask records when its deadline passes before the person answers it.
+pub const TIMED_OUT: &str = "timed_out";
+
 /// The human-readable history line for a typed answer.
 pub fn answer_summary(answer: &Value) -> String {
+    if answer["outcome"] == TIMED_OUT {
+        return match (answer["label"].as_str(), answer["id"].as_str()) {
+            (Some(label), Some(id)) => {
+                format!("Timed out without an answer; the default applied: {label} ({id})")
+            }
+            _ => "Timed out without an answer".to_owned(),
+        };
+    }
     if answer["outcome"] == "dismissed" {
         return match answer["text"].as_str() {
             Some(text) => format!("Dismissed without an answer: {text}"),
@@ -606,6 +658,34 @@ mod tests {
             request.answer(Some(&unknown), "").unwrap_err().code,
             "invalid-person-answer"
         );
+    }
+
+    #[test]
+    fn a_default_is_a_named_answer_that_needs_no_words_and_times_out_as_itself() {
+        let (request, _) = StructuredRequest::parse(&decision()).unwrap();
+        request.check_default("land").unwrap();
+        request.check_default("keep-open").unwrap();
+        assert_eq!(request.check_default("revise-auth").unwrap_err().code, "invalid-default-answer");
+        assert_eq!(request.check_default("yes").unwrap_err().code, "invalid-default-answer");
+        assert_eq!(request.check_default(DISMISS).unwrap_err().code, "invalid-default-answer");
+        let answer = request.timed_out(Some("keep-open"));
+        assert_eq!(
+            answer,
+            json!({"type": "decision", "outcome": "timed_out", "id": "keep-open", "label": "Keep it open"})
+        );
+        assert_eq!(
+            answer_summary(&answer),
+            "Timed out without an answer; the default applied: Keep it open (keep-open)"
+        );
+        let answer = request.timed_out(None);
+        assert_eq!(answer, json!({"type": "decision", "outcome": "timed_out"}));
+        assert_eq!(answer_summary(&answer), "Timed out without an answer");
+        let mut feedback = decision();
+        feedback["type"] = json!("feedback");
+        feedback.as_object_mut().unwrap().remove("answers");
+        feedback.as_object_mut().unwrap().remove("recommendation");
+        let (request, _) = StructuredRequest::parse(&feedback).unwrap();
+        assert_eq!(request.check_default("land").unwrap_err().code, "invalid-default-answer");
     }
 
     #[test]
