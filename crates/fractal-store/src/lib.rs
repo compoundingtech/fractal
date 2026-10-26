@@ -23,6 +23,7 @@ pub mod test_support;
 
 
 pub mod backup;
+pub mod conversation_delivery;
 pub mod external_sessions;
 pub mod recorder_receipts;
 pub mod render;

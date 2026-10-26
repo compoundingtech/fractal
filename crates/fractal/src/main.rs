@@ -133,6 +133,10 @@ struct Cli {
     read_contract_inventory_json: bool,
     #[arg(long, global = true, hide = true)]
     checkpoint_space_gate_capabilities: bool,
+    /// Daemon Unix socket, HTTP URL, or fabric://NODE-OR-NAME/st3-client-v0.
+    /// Native Fabric product requests use FRACTAL_CLIENT_CREDENTIAL for the paired bearer.
+    /// Fabric supports client-v0 and health only, not terminal/mailbox WebSockets,
+    /// backups, drivers, or other local-only daemon commands.
     #[arg(long, global = true)]
     endpoint: Option<String>,
     /// Run a second, fully separate fractal on this machine: its own state, config, sockets, node
@@ -179,7 +183,15 @@ fn cli_command() -> clap::Command {
             (old, fractal_drivers::contracts::env(old).map(|_| new))
         })
     });
-    cli_command_with_bindings(Cli::command(), &bindings)
+    let mut command = cli_command_with_bindings(Cli::command(), &bindings);
+    // Materialize inherited globals before hiding only web's copies. They remain
+    // parseable so the explicit refusal below still reports unsupported options.
+    command.build();
+    command.mut_subcommand("web", |web| {
+        web.mut_args(|argument| {
+            if argument.is_global_set() { argument.hide(true) } else { argument }
+        })
+    })
 }
 
 /// The local browser launcher uses its own state directory, not CLI transport,
@@ -281,7 +293,7 @@ enum Command {
     Changes(change_cli::ChangesArgs),
     /// Verify a deployment GO against the local replica without changing state.
     Deploy(deploy_cli::DeployArgs),
-    /// Validate and publish KDL files containing seats, missions and schedules.
+    /// Validate and publish KDL files containing agents, missions and schedules.
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     /// Gate checks run mission and step scripts; loop until scripts run after each round.
     Apply(ApplyArgs),
@@ -427,7 +439,7 @@ enum Command {
         command: SubjectCommand,
     },
     /// Watch GitHub issues and pull requests: each comment, review, required-check result and
-    /// close wakes this seat once.
+    /// close wakes this agent once.
     Gh {
         #[command(subcommand)]
         command: GhCommand,
@@ -463,7 +475,7 @@ enum Command {
         #[command(subcommand)]
         command: RuleCommand,
     },
-    /// Run any CLI with credentials no seat can read, through the sekrets gateway.
+    /// Run any CLI with credentials no agent can read, through the sekrets gateway.
     Sekrets(fractal_daemon::sekrets::cli::SekretsArgs),
     /// Run an agent's tools in its tile: its own Unix user, namespaces and cgroup. Root only.
     Tiles(fractal_daemon::tiles::cli::TilesArgs),
@@ -740,7 +752,7 @@ struct FleetLeaveArgs {
     /// Leave without reaching any member; another member must then remove this one.
     #[arg(long)]
     offline: bool,
-    /// Leave even while seats run on this machine.
+    /// Leave even while agents run on this machine.
     #[arg(long)]
     force: bool,
     /// Stop a leave that has not written its leave claim yet.
@@ -808,7 +820,7 @@ fn leave_receipt_confirmation(
         Some(removal) if removal.code == "member-left" => Ok(Some(removal.reported_by.clone())),
         Some(removal) => anyhow::bail!(
             "{} reports this machine as {}, so what it wrote after that will not replicate; \
-             finish with st fleet leave --offline",
+             finish with fractal fleet leave --offline",
             removal.reported_by,
             removal.code
         ),
@@ -866,7 +878,7 @@ async fn wait_for_leave_confirmation(
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
             "{stage}, no member reported holding everything this machine wrote within {seconds} \
-             seconds ({}); run st fleet leave again, or st fleet leave --offline and remove this \
+             seconds ({}); run fractal fleet leave again, or fractal fleet leave --offline and remove this \
              machine from another member",
             leave_peer_summary(&status)
         );
@@ -1229,9 +1241,9 @@ enum MissionViewCommand {
     Outcome(MissionOutcomeArgs),
     /// Retire a mission so it leaves the lists and cannot start; publishing it again brings it back.
     Retire(MissionRetireArgs),
-    /// Show one seat's current claim and its queued mission runs in order; same as `fractal agents queue AGENT`.
+    /// Show one agent's current claim and its queued mission runs in order; same as `fractal agents queue AGENT`.
     Queued {
-        /// Exact seat subject or its identity without the `agent/` prefix.
+        /// Exact agent subject or its identity without the `agent/` prefix.
         #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
         agent: String,
     },
@@ -2311,9 +2323,9 @@ enum ServiceCommand {
 
 #[derive(Subcommand)]
 enum ClaudeChannelCommand {
-    /// Install channel assets and approval policy; activate only in fractal seats.
+    /// Install channel assets and approval policy; activate only in fractal agents.
     Install {
-        /// Install user assets only; seats use development admission without machine policy.
+        /// Install user assets only; agents use development admission without machine policy.
         #[arg(long)]
         no_policy: bool,
     },
@@ -2451,32 +2463,32 @@ enum BlobCommand {
 }
 
 #[derive(Subcommand)]
-#[command(after_help = "A seat keeps one handoff, doc/agents/IDENTITY/handoff, versioned like any document. \
-fractal restarts a seat for an account or model change, a declaration change, or an operator's or agent's \
+#[command(after_help = "An agent keeps one handoff, doc/agents/IDENTITY/handoff, versioned like any document. \
+fractal restarts an agent for an account or model change, a declaration change, or an operator's or agent's \
 request; every session that starts after a restart is given the handoff and the live state of the \
-seat's work as its first message. Write what the graph does not hold: what you were in the middle of, \
+agent's work as its first message. Write what the graph does not hold: what you were in the middle of, \
 the branches and pull requests you own, what you wait on, what to do next, and anything running \
 that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.\n\n\
-Before a planned restart fractal sends the seat a \"Prepare for restart\" message with a deadline. Writing the \
+Before a planned restart fractal sends the agent a \"Prepare for restart\" message with a deadline. Writing the \
 handoff acknowledges it; `ready` acknowledges a handoff that is already current. The restart goes ahead \
 at the acknowledgement or the deadline, whichever comes first.")]
 enum HandoffCommand {
-    /// Replace this seat's handoff with FILE, or with standard input when FILE is `-` or absent.
+    /// Replace this agent's handoff with FILE, or with standard input when FILE is `-` or absent.
     Write {
         file: Option<PathBuf>,
-        /// The seat whose handoff to write; only that seat may write it.
+        /// The agent whose handoff to write; only that agent may write it.
         #[arg(long = "as", value_parser = parse_actor_subject)]
         actor: Option<String>,
     },
-    /// Say this seat's handoff is current, so a restart that is waiting for it can go ahead.
+    /// Say this agent's handoff is current, so a restart that is waiting for it can go ahead.
     Ready {
-        /// The seat that is ready; a readiness claim counts only when it names that seat as its actor.
+        /// The agent that is ready; a readiness claim counts only when it names that agent as its actor.
         #[arg(long = "as", value_parser = parse_actor_subject)]
         actor: Option<String>,
     },
-    /// Print a seat's latest handoff (this seat's by default).
+    /// Print an agent's latest handoff (this agent's by default).
     Show {
-        /// The seat to read, such as agent/garden/worker.
+        /// The agent to read, such as agent/garden/worker.
         #[arg(value_parser = parse_actor_subject)]
         agent: Option<String>,
     },
@@ -2605,17 +2617,17 @@ enum AgentsCommand {
         #[arg(long)]
         all: bool,
     },
-    /// Print one seat's declared workspace directory on its owning host, even when stopped.
+    /// Print one agent's declared workspace directory on its owning host, even when stopped.
     Workspace { subject: String },
-    /// Write or read the handoff a seat leaves for the session that follows it.
+    /// Write or read the handoff an agent leaves for the session that follows it.
     Handoff {
         #[command(subcommand)]
         command: HandoffCommand,
     },
-    /// Declare one new agent seat, start its harness, and wait until it is ready.
+    /// Declare one new agent, start its harness, and wait until it is ready.
     ///
     /// The declaration is the one a person writes by hand, with the harness defaults of the
-    /// fleet's Claude and Codex seats; `--print-kdl` shows it without applying it. With
+    /// fleet's Claude and Codex agents; `--print-kdl` shows it without applying it. With
     /// `--attach`, this terminal attaches once the harness is ready, from any fleet host.
     New(AgentNewArgs),
     /// List repositories already used by a host's agents, from replicated graph evidence.
@@ -2628,37 +2640,37 @@ enum AgentsCommand {
     /// Legacy: use `fractal apply FILE`; preview and apply authored KDL.
     Apply(AgentApplyArgs),
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
-    /// Start a durable seat, patching only explicitly supplied declaration fields. A stopped
-    /// mission seat starts again on its run's own declaration.
+    /// Start a durable agent, patching only explicitly supplied declaration fields. A stopped
+    /// mission agent starts again on its run's own declaration.
     Start(AgentStartArgs),
-    /// Stop one exact durable seat and every process it started.
+    /// Stop one exact durable agent and every process it started.
     ///
-    /// The seat's builds and tests end with it, even those that left its harness's process tree.
+    /// The agent's builds and tests end with it, even those that left its harness's process tree.
     /// A host without a systemd user manager ends only the harness's process tree and process
     /// groups; docs/st3/priority.md says what else keeps running there.
     Stop(AgentStopArgs),
     /// Permanently retire an agent identity; later starts and first sends are refused.
     Retire(AgentRetireArgs),
-    /// Restart a top-level or mission seat, preserving its declaration; wait for a new incarnation.
+    /// Restart a top-level or mission agent, preserving its declaration; wait for a new incarnation.
     /// A self-restart during a turn returns pending until the harness is idle and quiescent.
     Restart(AgentRestartArgs),
     /// Acknowledge an interrupted seed attempt and its warning; never gate launch or rearm seed.
     AcknowledgeSeed(AgentAcknowledgeSeedArgs),
-    /// Retry a published owned-seat cutover with fresh desired and incarnation fences.
+    /// Retry a published owned-agent cutover with fresh desired and incarnation fences.
     Rollout(AgentRolloutArgs),
-    /// Stop a quiet seat at a clean boundary, keeping its native session to resume.
+    /// Stop a quiet agent at a clean boundary, keeping its native session to resume.
     ///
-    /// The seat must be idle, with no pending ask or unsent input, no claimed step and no
-    /// running subagent. A suspended seat stays declared, takes no restarts, and keeps its mail
+    /// The agent must be idle, with no pending ask or unsent input, no claimed step and no
+    /// running subagent. A suspended agent stays declared, takes no restarts, and keeps its mail
     /// until it is resumed.
     Suspend(AgentSuspendArgs),
-    /// Resume a suspended seat on the same native session; wait until its harness proves it.
+    /// Resume a suspended agent on the same native session; wait until its harness proves it.
     Resume(AgentResumeArgs),
-    /// Change only a seat's human label, without restarting its harness.
+    /// Change only an agent's human label, without restarting its harness.
     Rename(AgentRenameArgs),
-    /// Change a seat's canonical ID, preserving its immutable identity and harness.
+    /// Change an agent's canonical ID, preserving its immutable identity and harness.
     RenameId(IdentityRenameArgs),
-    /// Show one seat's current claim and its queued mission runs in order, or move a run.
+    /// Show one agent's current claim and its queued mission runs in order, or move a run.
     /// The show form is also available as `fractal missions queued AGENT`.
     Queue(AgentQueueArgs),
     /// Inspect, set, or release a Codex/OpenCode delivery hold; the provider keeps running.
@@ -2762,7 +2774,7 @@ struct AgentRenameArgs {
 struct AgentQueueArgs {
     #[command(subcommand)]
     command: Option<AgentQueueCommand>,
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(required = true)]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     agent: Option<String>,
@@ -2770,7 +2782,7 @@ struct AgentQueueArgs {
 
 #[derive(Subcommand)]
 enum AgentQueueCommand {
-    /// Move one queued mission run. A step the seat already holds stays held.
+    /// Move one queued mission run. A step the agent already holds stays held.
     Move(AgentQueueMoveArgs),
 }
 
@@ -2781,16 +2793,16 @@ enum AgentQueueCommand {
         .args(["top", "bottom", "before", "after"])
 ))]
 struct AgentQueueMoveArgs {
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     agent: String,
     /// Queued mission run to move.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
     run: String,
-    /// Put the run first in the seat's queue.
+    /// Put the run first in the agent's queue.
     #[arg(long)]
     top: bool,
-    /// Put the run last in the seat's queue.
+    /// Put the run last in the agent's queue.
     #[arg(long)]
     bottom: bool,
     /// Put the run directly before another queued run.
@@ -2805,7 +2817,7 @@ struct AgentQueueMoveArgs {
     #[arg(long)]
     reason: Option<String>,
     /// Person or agent making the move; defaults to `person` in the fractal config. Any agent may move
-    /// any seat's queue, its own included.
+    /// any agent's queue, its own included.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_queue_move_actor)]
     actor: Option<String>,
@@ -2846,7 +2858,7 @@ struct LaneEntryArgs {
     /// Why; recorded with the change.
     #[arg(long)]
     reason: Option<String>,
-    /// Person or agent making the change. A harness acts as its own seat (`ST_AGENT`); otherwise
+    /// Person or agent making the change. A harness acts as its own agent (`ST_AGENT`); otherwise
     /// this defaults to `person` in the fractal config.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_queue_move_actor)]
@@ -2901,7 +2913,7 @@ struct LaneMarkArgs {
     /// The exact head or version the status applies to.
     #[arg(long)]
     head: Option<String>,
-    /// Person or agent recording the status. A harness acts as its own seat (`ST_AGENT`).
+    /// Person or agent recording the status. A harness acts as its own agent (`ST_AGENT`).
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_queue_move_actor)]
     actor: Option<String>,
@@ -2944,7 +2956,7 @@ struct ApplyArgs {
     /// Preview against this exact store index (plain files only).
     #[arg(long, visible_alias = "at", conflicts_with = "set")]
     at_index: Option<u64>,
-    /// Drain changed and retiring seats, then resume their native conversation.
+    /// Drain changed and retiring agents, then resume their native conversation.
     #[arg(long, value_parser = ["when-idle"], requires = "set")]
     rollout: Option<String>,
     #[arg(long, default_value = "30m", requires = "rollout")]
@@ -3142,12 +3154,12 @@ struct AgentApplyArgs {
 
 #[derive(Args)]
 struct AgentStartArgs {
-    /// Seat identity or complete subject, e.g. example/worker or agent/example/worker.
+    /// Agent identity or complete subject, e.g. example/worker or agent/example/worker.
     /// Slash-qualified and dotted identities are exact; a simple name becomes agent/HOST.NAME.
     /// A doubled agent/agent/ prefix is rejected.
     #[arg(value_parser = parse_agent_start_identity)]
     identity: String,
-    /// Override the typed harness; new seats default to claude.
+    /// Override the typed harness; new agents default to claude.
     #[arg(long, value_parser = ["claude", "codex", "pi", "omp", "opencode"])]
     harness: Option<String>,
     #[arg(long)]
@@ -3156,22 +3168,22 @@ struct AgentStartArgs {
     /// Record permission to start this placement before unreachable source hosts acknowledge exit.
     #[arg(long, conflicts_with = "print_kdl")]
     source_offline: bool,
-    /// Override the workspace; new seats default to the current directory.
+    /// Override the workspace; new agents default to the current directory.
     #[arg(long)]
     workspace: Option<PathBuf>,
-    /// Set the typed-harness model; refused for existing command/argv seats.
+    /// Set the typed-harness model; refused for existing command/argv agents.
     #[arg(long)]
     model: Option<String>,
-    /// Set the typed-harness reasoning effort; refused for existing command/argv seats.
+    /// Set the typed-harness reasoning effort; refused for existing command/argv agents.
     #[arg(long)]
     effort: Option<String>,
-    /// Replace typed-harness extra arguments; refused for existing command/argv seats.
+    /// Replace typed-harness extra arguments; refused for existing command/argv agents.
     #[arg(long = "arg")]
     arguments: Vec<String>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
-    /// Read the daemon's declaration and print the effective seat KDL without publishing it.
+    /// Read the daemon's declaration and print the effective agent KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
 }
@@ -3181,7 +3193,7 @@ struct AgentNewArgs {
     /// Start the harness with this first message using its native prompt argument.
     #[arg(long, allow_hyphen_values = true)]
     message: Option<String>,
-    /// Stable seat identity. A slash-qualified identity is kept exactly after `agent/`; a simple
+    /// Stable agent identity. A slash-qualified identity is kept exactly after `agent/`; a simple
     /// name is prefixed with its host, as in `agent/HOST.NAME`.
     name: String,
     /// Fleet host that runs the agent; defaults to this host.
@@ -3209,7 +3221,7 @@ struct AgentNewArgs {
     /// Git branch; defaults to the simple agent name made safe for Git. Reuses an existing branch.
     #[arg(long, requires = "repo")]
     branch: Option<String>,
-    /// Remove a clean worktree after the seat is stopped; keep its branch and unfinished work.
+    /// Remove a clean worktree after the agent is stopped; keep its branch and unfinished work.
     #[arg(long, requires = "repo")]
     remove_at_run_end: bool,
     /// What the agent is for.
@@ -3247,7 +3259,7 @@ struct AgentRetireArgs {
 
 #[derive(Args)]
 struct AgentStopArgs {
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: true })))]
     subject: String,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
@@ -3272,17 +3284,17 @@ struct AgentRolloutArgs {
 
 #[derive(Args)]
 struct AgentSuspendArgs {
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(value_parser = parse_agent_start_identity)]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: true })))]
     subject: String,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
-    /// Why the seat is suspended, recorded with the request.
+    /// Why the agent is suspended, recorded with the request.
     #[arg(long)]
     reason: Option<String>,
-    /// How long to wait for the seat to suspend.
+    /// How long to wait for the agent to suspend.
     #[arg(long, default_value = "5m")]
     timeout: String,
 }
@@ -3292,21 +3304,21 @@ struct AgentResumeArgs {
     /// Resume the suspended conversation on this fleet host.
     #[arg(long)]
     host: Option<String>,
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(value_parser = parse_agent_start_identity)]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     subject: String,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
-    /// How long to wait for the seat to resume its native session.
+    /// How long to wait for the agent to resume its native session.
     #[arg(long, default_value = "10m")]
     timeout: String,
 }
 
 #[derive(Args)]
 struct AgentRestartArgs {
-    /// Exact seat subject or its identity without the `agent/` prefix.
+    /// Exact agent subject or its identity without the `agent/` prefix.
     #[arg(value_parser = parse_agent_start_identity)]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     subject: String,
@@ -3316,13 +3328,13 @@ struct AgentRestartArgs {
     /// How long to wait for a new running incarnation.
     #[arg(long, default_value = "10m")]
     timeout: String,
-    /// Restart at once. By default a seat that is up and ready is first asked for its handoff and
-    /// restarted at its acknowledgement or after two minutes; use this for a seat that cannot answer.
+    /// Restart at once. By default an agent that is up and ready is first asked for its handoff and
+    /// restarted at its acknowledgement or after two minutes; use this for an agent that cannot answer.
     /// Also interrupts immediately when restarting yourself during a turn.
     #[arg(long)]
     now: bool,
-    /// Start a new native session instead of continuing the last one. The seat must have a
-    /// handoff written or marked ready (`st agents handoff ready`) since its last turn; the new
+    /// Start a new native session instead of continuing the last one. The agent must have a
+    /// handoff written or marked ready (`fractal agents handoff ready`) since its last turn; the new
     /// session is given it first. Without this the restart continues the last session.
     #[arg(long)]
     fresh_session: bool,
@@ -3330,28 +3342,28 @@ struct AgentRestartArgs {
 
 #[derive(Subcommand)]
 enum GhCommand {
-    /// Watch an issue or pull request. Each new comment or review that this seat did not post,
+    /// Watch an issue or pull request. Each new comment or review that this agent did not post,
     /// each time the required checks on its current head turn pass or fail, changes to its
-    /// head, draft state or queue membership, and its close or merge wake this seat once;
+    /// head, draft state or queue membership, and its close or merge wake this agent once;
     /// the close or merge, or the deadline, ends the watch. Watching
     /// it again keeps the watch and takes the new deadline.
     #[command(
         after_help = "Examples:\n  fractal gh watch acme/garden#12\n  fractal gh watch https://github.com/acme/garden/pull/12 --until 4h\n  fractal gh watch acme/garden#12 --until none"
     )]
     Watch(GhWatchArgs),
-    /// End this seat's watch on an issue or pull request.
+    /// End this agent's watch on an issue or pull request.
     Unwatch(GhUnwatchArgs),
-    /// List this seat's watches, running and ended in the last day, or every seat's with --all.
+    /// List this agent's watches, running and ended in the last day, or every agent's with --all.
     Ls(GhLsArgs),
-    /// Post a comment, or a pull request review, as this seat. fractal records the new comment's
-    /// GitHub ID as this seat's, so it wakes no watch of this seat and other seats' wakes name
-    /// this seat; it also watches the thread unless --no-watch.
+    /// Post a comment, or a pull request review, as this agent. fractal records the new comment's
+    /// GitHub ID as this agent's, so it wakes no watch of this agent and other agents' wakes name
+    /// this agent; it also watches the thread unless --no-watch.
     #[command(
         after_help = "Examples:\n  fractal gh comment acme/garden#12 --body 'The seed list is ready.'\n  fractal gh comment acme/garden#12 --body-file review.md --review request-changes"
     )]
     Comment(GhCommentArgs),
-    /// Record a comment or review this seat posted some other way, by its URL, as this seat's.
-    /// A watch that already reported it woke the seat once.
+    /// Record a comment or review this agent posted some other way, by its URL, as this agent's.
+    /// A watch that already reported it woke the agent once.
     Own(GhOwnArgs),
 }
 
@@ -3402,7 +3414,7 @@ struct GhWatchArgs {
 struct GhUnwatchArgs {
     /// OWNER/REPO#NUMBER, or the issue or pull request URL.
     thread: String,
-    /// The seat whose watch a person ends; a seat ends its own.
+    /// The agent whose watch a person ends; an agent ends its own.
     #[arg(long)]
     agent: Option<String>,
     #[arg(long = "as", env = "ST_AGENT")]
@@ -3411,7 +3423,7 @@ struct GhUnwatchArgs {
 
 #[derive(Args)]
 struct GhLsArgs {
-    /// Every seat's watches, not only this seat's.
+    /// Every agent's watches, not only this agent's.
     #[arg(long)]
     all: bool,
     #[arg(long = "as", env = "ST_AGENT")]
@@ -3625,13 +3637,13 @@ struct AttentionWithdrawArgs {
 enum WorkCommand {
     /// Replace your allowed delegation list; repeat --action, or omit all to revoke.
     Delegation(DelegationPolicyArgs),
-    /// Open a one-step run for this seat without authoring a mission; then use claim.
+    /// Open a one-step run for this agent without authoring a mission; then use claim.
     ///
     /// For a small independent authorized job: describe the result, use the returned claim
     /// command, perform the work and complete it with durable evidence. Finish or release
     /// other independent claimed work first. See fractal skill for the full workflow.
     Start(WorkStartArgs),
-    /// Release claimed work to another seat or person with a note they acknowledge.
+    /// Release claimed work to another agent or person with a note they acknowledge.
     Handoff(WorkHandoffArgs),
     /// Acknowledge the exact handoff note before claiming or completing its work.
     Acknowledge(WorkAcknowledgeArgs),
@@ -3692,11 +3704,11 @@ enum WorkCommand {
     Progress(WorkActionArgs),
     /// Add time to the execution budget of claimed work that ran out of it.
     Extend(WorkExtendArgs),
-    /// Stop the execution clock while claimed work waits for something outside this seat.
+    /// Stop the execution clock while claimed work waits for something outside this agent.
     ///
     /// A build slot or the merge queue is waiting, not execution: the step's timeout counts
     /// only the time it runs. The clock restarts at `work resume`, or after `--for` at the
-    /// latest, so a seat that stops answering cannot hide behind a wait. The lease still
+    /// latest, so an agent that stops answering cannot hide behind a wait. The lease still
     /// needs its renewals.
     Wait(WorkWaitArgs),
     /// Start the execution clock again after `work wait`.
@@ -4028,7 +4040,7 @@ enum MessageCommand {
     Reply(MessageReplyArgs),
     /// Wait up to a deadline for a reply from one sender, and print the reply or `no reply`.
     ///
-    /// The reply is marked read for the waiting seat, so native delivery does not hand it over
+    /// The reply is marked read for the waiting agent, so native delivery does not hand it over
     /// again as a separate turn. Without `--after` only messages sent after the wait began count.
     Wait(MessageWaitArgs),
     /// Close exact messages after their related action is complete.
@@ -4231,7 +4243,7 @@ struct MessageReplyArgs {
 
 #[derive(Args)]
 struct MessageWaitArgs {
-    /// The seat waiting for the reply; defaults to the non-empty ST_AGENT value.
+    /// The agent waiting for the reply; defaults to the non-empty ST_AGENT value.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as")]
     actor: Option<String>,
@@ -4399,7 +4411,7 @@ enum AdmissionCommand {
 struct AdmissionBuildArgs {
     #[arg(value_parser = ["omp", "opencode"])]
     harness: String,
-    /// Exact executable used by the affected seat; defaults to the harness on PATH.
+    /// Exact executable used by the affected agent; defaults to the harness on PATH.
     #[arg(long)]
     binary: Option<String>,
     /// This machine's fractal state directory; defaults to the configured state directory.
@@ -4452,7 +4464,7 @@ fn run_admission(command: AdmissionCommand, json_output: bool) -> Result<()> {
         );
     } else if reason.is_some() {
         println!(
-            "{} installed build explicitly allowed; admission checks bypassed. Record: {}\nRestart only the affected seat to apply. A changed executable or shipped extension needs its own exception. Revoke with `st admission revoke {} --binary {}`.",
+            "{} installed build explicitly allowed; admission checks bypassed. Record: {}\nRestart only the affected seat to apply. A changed executable or shipped extension needs its own exception. Revoke with `fractal admission revoke {} --binary {}`.",
             build.harness,
             path.display(),
             build.harness,
@@ -4781,10 +4793,10 @@ fn plain_ui_requested(arguments: usize, stdin: bool, stdout: bool, seat: bool) -
 fn run_terminal_ui(mut options: fractal_tui::Args, endpoint: Option<&str>) -> ExitCode {
     let result = (|| -> Result<()> {
         if let Some(endpoint) = endpoint {
-            match Endpoint::parse(endpoint) {
+            match Endpoint::parse(endpoint)? {
                 Endpoint::Unix(path) => options = options.with_endpoint(path),
                 _ => anyhow::bail!(
-                    "st ui uses a local Unix socket; pair remote devices with st devices complete"
+                    "fractal ui uses a local Unix socket; pair remote devices with fractal devices complete"
                 ),
             }
         }
@@ -4830,7 +4842,7 @@ fn run_demo(command: DemoCommand) -> ExitCode {
             DemoCommand::Seat { player } => demo::seat(player),
             DemoCommand::Play { file, reset } => {
                 let instance = fractal_daemon::instance::current().context(
-                    "a demo plays in its own instance, so your fleet is never touched: st --instance demo demo play FILE",
+                    "a demo plays in its own instance, so your fleet is never touched: fractal --instance demo demo play FILE",
                 )?;
                 let demo = demo::load(&file)?;
                 // The demo acts as its own people and agents; a seat's identity must not leak in.
@@ -4913,6 +4925,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
         .or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"))
         .as_deref()
         .map(Endpoint::parse)
+        .transpose()?
         .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -5006,12 +5019,7 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
             if let Some(exit) = error.downcast_ref::<CommandExit>() {
                 return ExitCode::from(exit.0);
             }
-            let message = if native_driver {
-                plain_error(&error)
-            } else {
-                doctor_cli::human_outage_message(&error)
-                    .unwrap_or_else(|| plain_error(&error))
-            };
+            let message = cli_error_message(&error, native_driver);
             eprintln!("st: {message}");
             if refused_command(&error) {
                 fractal_daemon::gate_report::note_refusal(&plain_error(&error));
@@ -5034,9 +5042,51 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     }
 }
 
-/// The error chain as printed, with an st client-API error said in plain words and its code in
-/// parentheses for scripts, rather than a Rust enum name (`StaleFence`).
+/// CLI presentation is stable inside exec gates: both output streams enter JSON.
+#[derive(Clone, Copy)]
+enum ClientMessage {
+    Stable,
+    Human,
+}
+
+impl ClientMessage {
+    fn for_output(native_driver: bool) -> Self {
+        static IN_GATE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            std::env::var_os(fractal_daemon::gate_report::ENV).is_some()
+        });
+        if native_driver || *IN_GATE { Self::Stable } else { Self::Human }
+    }
+
+    fn error(self, error: &fractal_client::ClientError) -> String {
+        match self {
+            Self::Stable => error.plain(),
+            Self::Human => error.human(),
+        }
+    }
+
+    fn message(self, code: Option<&fractal_client::ErrorCode>, message: &str) -> String {
+        match self {
+            Self::Stable => fractal_client::plain_message(code, message),
+            Self::Human => fractal_client::human_message(code, message),
+        }
+    }
+}
+
+fn cli_error_message(error: &anyhow::Error, native_driver: bool) -> String {
+    let mode = ClientMessage::for_output(native_driver);
+    if let ClientMessage::Human = mode {
+        doctor_cli::human_outage_message(error).unwrap_or_else(|| render_client_error(error, mode))
+    } else {
+        render_client_error(error, mode)
+    }
+}
+
+/// Stable words and codes for scripts, gate output and refusal reports.
 fn plain_error(error: &anyhow::Error) -> String {
+    render_client_error(error, ClientMessage::Stable)
+}
+
+fn render_client_error(error: &anyhow::Error, mode: ClientMessage) -> String {
     let full = format!("{error:#}");
     let Some(api) = error
         .chain()
@@ -5051,7 +5101,8 @@ fn plain_error(error: &anyhow::Error) -> String {
         .ok()
         .and_then(|code| code.as_str().map(str::to_owned))
         .unwrap_or_default();
-    full.replace(&api.to_string(), &format!("{} ({code})", api.plain()))
+    let message = mode.error(api);
+    full.replace(&api.to_string(), &format!("{message} ({code})"))
 }
 
 static DAEMON_WAIT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
@@ -5128,7 +5179,8 @@ async fn run(cli: Cli) -> Result<()> {
     );
     let mission_run = fractal_drivers::contracts::env("ST_MISSION_RUN");
     guard_mutating_cli_actor(&cli.command, own.as_deref(), mission_run.as_deref())?;
-    if let Command::Setup(args) = cli.command {
+    if let Command::Setup(mut args) = cli.command {
+        args.json_output = cli.json;
         return crate::setup::run(args).await.map(|_| ());
     }
     // Staging must bypass normal service-family conflict checks and all install
@@ -5262,6 +5314,7 @@ async fn run(cli: Cli) -> Result<()> {
         .or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"))
         .as_deref()
         .map(Endpoint::parse)
+        .transpose()?
         .unwrap_or_else(|| Endpoint::Unix(config.client_socket()));
     let _ = DAEMON_WAIT.set(Duration::from_secs(cli.daemon_wait));
     let client = cli_client(&endpoint);
@@ -5434,7 +5487,7 @@ async fn run(cli: Cli) -> Result<()> {
             run_replication(&client, &config, command, cli.json).await
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
-        Command::Uninstall(args) => run_uninstall(&endpoint, args).await,
+        Command::Uninstall(args) => run_uninstall(&endpoint, args, cli.json).await,
         Command::Migrate { command: MigrateCommand::Host(args) } => {
             migrate_cli::run(&endpoint, args, cli.json).await
         }
@@ -5687,6 +5740,8 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
     format!("{}{agent}  {state}{until}{title}", text("thread"))
 }
 
+const GH_UNWATCH_HINT: &str = "To stop: st gh unwatch";
+
 async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, json: bool) -> Result<()> {
     match command {
         GhCommand::Watch(args) => {
@@ -5708,7 +5763,7 @@ async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, jso
             println!(
                 "Each new comment or review that this seat did not post, each time the required checks on its head turn pass or fail, and its close or merge wake this seat once."
             );
-            println!("To stop: st gh unwatch {thread}");
+            println!("{GH_UNWATCH_HINT} {thread}");
         }
         GhCommand::Unwatch(args) => {
             let outcome: Value = client
@@ -6961,7 +7016,7 @@ async fn startable_mission(
         anyhow::ensure!(
             now < deadline,
             "{absent} after {}s. A mission published on another host arrives by replication; \
-             check `st replication status`.",
+             check `fractal replication status`.",
             wait.as_secs()
         );
         if !announced {
@@ -7100,7 +7155,7 @@ async fn follow_mission_run_to(
             let mut frame = render_mission_run_page(&run, &page.runs, style, current_unix_ms()?);
             if let Some(cursor) = &page.next_cursor {
                 frame.push_str(&format!(
-                    "\nTREE      More runs follow; st missions show {} --cursor {cursor} --limit {limit}\n",
+                    "\nTREE      More runs follow; fractal missions show {} --cursor {cursor} --limit {limit}\n",
                     run.subject,
                 ));
             }
@@ -7350,7 +7405,7 @@ async fn attach_terminal(
         && !outer.is_empty()
     {
         anyhow::bail!(
-            "st terminals attach: already inside PTY session `{outer}`. Detach first with Ctrl+\\, or pass --force."
+            "fractal terminals attach: already inside PTY session `{outer}`. Detach first with Ctrl+\\, or pass --force."
         );
     }
     // The subject's running PTY sessions on this host, read from the registry alone. When there
@@ -7374,11 +7429,11 @@ async fn attach_terminal(
                 return terminal_exit(code);
             }
             (None, _) if budget.is_some() => {
-                anyhow::bail!("st terminals attach: daemon did not answer within 1 s and no local PTY session matches `{subject}`");
+                anyhow::bail!("fractal terminals attach: daemon did not answer within 1 s and no local PTY session matches `{subject}`");
             }
             (None, Some(root)) => {
                 eprintln!(
-                    "st terminals attach: waiting for the {daemon}; no PTY session of `{subject}` runs under {} to attach without it.",
+                    "fractal terminals attach: waiting for the {daemon}; no PTY session of `{subject}` runs under {} to attach without it.",
                     root.display()
                 );
                 consult.await
@@ -7411,6 +7466,7 @@ fn endpoint_label(endpoint: &Endpoint) -> String {
     match endpoint {
         Endpoint::Unix(socket) => socket.display().to_string(),
         Endpoint::Http(url) => url.clone(),
+        Endpoint::Fabric(endpoint) => endpoint.to_string(),
     }
 }
 
@@ -7446,7 +7502,7 @@ async fn attach_remote_terminal(
         },
         Err(error) => format!("{error:#}"),
     };
-    eprintln!("st terminals attach: {unreached}. Attaching through the client gateway instead.");
+    eprintln!("fractal terminals attach: {unreached}. Attaching through the client gateway instead.");
     fractal_daemon::remote_terminal::attach(&gateway, subject, subject).await
 }
 
@@ -7586,7 +7642,7 @@ async fn attach_unconsulted(
         .split_first()
         .context("an attachment without st needs a PTY session")?;
     eprintln!(
-        "st terminals attach: {why}, so st was not consulted. Attaching as the local user to PTY session `{}` of `{subject}` (started {}) under {}, without st's incarnation check.",
+        "fractal terminals attach: {why}, so st was not consulted. Attaching as the local user to PTY session `{}` of `{subject}` (started {}) under {}, without st's incarnation check.",
         newest.runtime_id,
         newest.created_at,
         pty_root.display()
@@ -7826,10 +7882,22 @@ fn trace_scalar(value: &Value) -> String {
 }
 
 fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<GeneratedClient> {
-    let Endpoint::Unix(socket) = endpoint else {
-        anyhow::bail!(
-            "client-v0 product commands require the trusted local Unix endpoint; remote clients must use a paired Fabric credential"
-        );
+    let socket = match endpoint {
+        Endpoint::Unix(socket) => socket,
+        Endpoint::Fabric(endpoint) => {
+            let mut client = GeneratedClient::fabric(endpoint.clone());
+            if let Some(credential) = std::env::var_os("FRACTAL_CLIENT_CREDENTIAL") {
+                let credential = credential.into_string().map_err(|_| {
+                    anyhow::anyhow!("FRACTAL_CLIENT_CREDENTIAL must contain valid UTF-8")
+                })?;
+                client = client.with_credential(credential);
+            }
+            return Ok(client
+                .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true));
+        }
+        Endpoint::Http(_) => anyhow::bail!(
+            "client-v0 product commands require a trusted local Unix or native Fabric endpoint"
+        ),
     };
     if let Some(startup) = fractal_daemon::startup::read(socket)
         && startup.status == "starting"
@@ -7866,7 +7934,7 @@ async fn run_now(
         "the now limit must be 1 through 200"
     );
     let person = args.person.as_deref().or(configured_person).context(
-        "st now needs `--as person/NAME` or `person = \"person/NAME\"` in the st config",
+        "fractal now needs `--as person/NAME` or `person = \"person/NAME\"` in the st config",
     )?;
     let person = parse_person_subject(person).map_err(anyhow::Error::msg)?;
     let client = generated_client(endpoint, Some(&person))?;
@@ -7884,7 +7952,7 @@ async fn run_now(
             .now_list(args.cursor.as_deref(), Some(args.limit), args.all)
             .await?
     };
-    let mut command = format!("st now --as {person}");
+    let mut command = format!("fractal now --as {person}");
     if let Some(owner_run) = args.owner_run {
         command.push_str(&format!(" --owner-run {owner_run}"));
     }
@@ -7954,7 +8022,7 @@ fn render_now_page(page: &ClientPage, continuation_command: &str) -> String {
         if !output.is_empty() {
             output.push('\n');
         }
-        output.push_str("Work: st work ls · Health: st doctor\n");
+        output.push_str("Work: fractal work ls · Health: fractal doctor\n");
     }
     if let Some(cursor) = page.page.next_cursor.as_deref() {
         use std::fmt::Write as _;
@@ -7980,7 +8048,7 @@ async fn run_machines(endpoint: &Endpoint, args: MachinesArgs, json_output: bool
         "MACHINES",
         &response,
         json_output,
-        &format!("st machines{history}"),
+        &format!("fractal machines{history}"),
     )
 }
 
@@ -8042,7 +8110,7 @@ async fn run_devices(
             let rendered = render_product_page(
                 "DEVICES",
                 &response.value,
-                &format!("st devices --as {person}{history}"),
+                &format!("fractal devices --as {person}{history}"),
             );
             print!(
                 "{}",
@@ -8074,7 +8142,7 @@ async fn run_devices(
             print_client_value(&response, json_output)?;
             if !json_output {
                 println!(
-                    "Complete on the assistant host before the code expires: `st devices complete MEMBER_URL PAIRING_ID --assistant`, then enter the code. Grant scopes and expiry are sealed; change them with `st devices --as {person} grant policy <grant>`."
+                    "Complete on the assistant host before the code expires: `fractal devices complete MEMBER_URL PAIRING_ID --assistant`, then enter the code. Grant scopes and expiry are sealed; change them with `fractal devices --as {person} grant policy <grant>`."
                 );
             }
             Ok(())
@@ -8143,7 +8211,7 @@ async fn run_devices(
                     let current = client.assistant_grant(&grant).await?;
                     anyhow::ensure!(
                         !current.value.revoked,
-                        "{grant} is revoked; begin a new grant with `st devices --as {person} pair --assistant`"
+                        "{grant} is revoked; begin a new grant with `fractal devices --as {person} pair --assistant`"
                     );
                     let terms = SealedAssistantGrantTerms::from_cli(
                         &person,
@@ -8532,7 +8600,7 @@ fn configured_human(
 ) -> Result<String> {
     let person = explicit.or(configured).with_context(|| {
         format!(
-            "st {command} needs `--as person/NAME` or `person = \"person/NAME\"` in the st config"
+            "fractal {command} needs `--as person/NAME` or `person = \"person/NAME\"` in the st config"
         )
     })?;
     parse_person_subject(person).map_err(anyhow::Error::msg)
@@ -8679,15 +8747,15 @@ async fn run_collection_watch(
             if collection == "agents" {
                 print!(
                     "{}",
-                    render_client_agents(&page.value, false, false, "st agents ls --watch")
+                    render_client_agents(&page.value, false, false, "fractal agents ls --watch")
                 );
             } else if collection == "attention" {
                 print!(
                     "{}",
-                    render_alert_sections(&page.value, Some(title), "st alerts ls --watch")
+                    render_alert_sections(&page.value, Some(title), "fractal alerts ls --watch")
                 );
             } else {
-                print_product_page(title, &page, false, &format!("st {collection} ls --watch"))?;
+                print_product_page(title, &page, false, &format!("fractal {collection} ls --watch"))?;
             }
             cli_output::stdout().flush()?;
             if cli_output::closed() {
@@ -8731,9 +8799,9 @@ fn render_sync_notice(sync: &fractal_client::SyncNotice, now: u128) -> String {
         output,
         "{}",
         if sync.diverged() {
-            "  Exchanges cannot fix this, so items below can be wrong. Details: st3 replication status\n"
+            "  Exchanges cannot fix this, so items below can be wrong. Details: fractal replication status\n"
         } else {
-            "  Until then, items below can be out of date. Progress: st3 replication status\n"
+            "  Until then, items below can be out of date. Progress: fractal replication status\n"
         }
     );
     output
@@ -8918,7 +8986,7 @@ fn render_product_page_headed(
                 };
                 let _ = writeln!(
                     output,
-                    "  action{reads}: st alerts show {} --as {}",
+                    "  action{reads}: fractal alerts show {} --as {}",
                     item.source_id, item.person_id
                 );
                 // What `st alerts approve` and its siblings take: a person copies it from here.
@@ -8945,7 +9013,7 @@ fn render_product_page_headed(
                 if let Some(claimant) = &item.claimant {
                     let _ = writeln!(output, "  assigned: {claimant}");
                 }
-                let _ = writeln!(output, "  action: st work show {}", item.header.id);
+                let _ = writeln!(output, "  action: fractal work show {}", item.header.id);
             }
             ClientResource::Mission(item) => {
                 let _ = writeln!(
@@ -8959,9 +9027,9 @@ fn render_product_page_headed(
                     let _ = writeln!(output, "  usage {}", render_usage(usage));
                 }
                 if item.runs_truncated {
-                    let _ = writeln!(output, "  inspect: st missions show {}", item.header.id);
+                    let _ = writeln!(output, "  inspect: fractal missions show {}", item.header.id);
                 } else if let Some(run) = item.runs.last() {
-                    let _ = writeln!(output, "  inspect: st missions show {run}");
+                    let _ = writeln!(output, "  inspect: fractal missions show {run}");
                 }
             }
             ClientResource::Launch(item) => {
@@ -8976,7 +9044,7 @@ fn render_product_page_headed(
                     if item.decisions.len() == 1 { "" } else { "s" }
                 );
                 let _ = writeln!(output, "  {}", item.title);
-                let _ = writeln!(output, "  inspect: st launch show {}", item.header.id);
+                let _ = writeln!(output, "  inspect: fractal launch show {}", item.header.id);
             }
             ClientResource::Operation(item) => {
                 let _ = writeln!(
@@ -8984,7 +9052,7 @@ fn render_product_page_headed(
                     "{}  operation  {}  {}  {}",
                     item.header.id, item.severity, item.state, item.summary
                 );
-                let _ = writeln!(output, "  recovery: st doctor");
+                let _ = writeln!(output, "  recovery: fractal doctor");
             }
             ClientResource::Agent(item) => {
                 let _ = writeln!(
@@ -9004,8 +9072,8 @@ fn render_product_page_headed(
                 );
                 let _ = writeln!(output, "  runtime: {}", item.runtime_id);
                 if item.terminal_id.is_some() && item.state == "running" {
-                    let _ = writeln!(output, "  peek: st terminals peek {}", item.owner_id);
-                    let _ = writeln!(output, "  attach: st terminals attach {}", item.owner_id);
+                    let _ = writeln!(output, "  peek: fractal terminals peek {}", item.owner_id);
+                    let _ = writeln!(output, "  attach: fractal terminals attach {}", item.owner_id);
                 }
                 if let Some(owner) = &item.owner_run_id {
                     let _ = writeln!(output, "  owner: {owner}");
@@ -9043,9 +9111,9 @@ fn render_product_page_headed(
                     }
                     let _ = writeln!(output);
                 }
-                let _ = writeln!(output, "  inspect: st subject show {}", item.host_id);
+                let _ = writeln!(output, "  inspect: fractal subject show {}", item.host_id);
                 if !matches!(item.state.as_str(), "local" | "reachable") {
-                    let _ = writeln!(output, "  recovery: st replication status");
+                    let _ = writeln!(output, "  recovery: fractal replication status");
                 }
             }
             ClientResource::Device(item) => {
@@ -9059,11 +9127,11 @@ fn render_product_page_headed(
                 );
                 if let Some(person) = &item.person_id {
                     let _ = writeln!(
-                        output, "  action: st devices --as {} revoke {}",
+                        output, "  action: fractal devices --as {} revoke {}",
                         person, item.header.id
                     );
                 } else if let Some(grant) = &item.grant_id {
-                    let _ = writeln!(output, "  action: st devices grant revoke {grant}");
+                    let _ = writeln!(output, "  action: fractal devices grant revoke {grant}");
                 }
             }
             ClientResource::Session(item) => {
@@ -9077,7 +9145,7 @@ fn render_product_page_headed(
                 }
                 let _ = writeln!(
                     output,
-                    "  timeline: st conversations timeline {}",
+                    "  timeline: fractal conversations timeline {}",
                     item.header.id
                 );
             }
@@ -9496,6 +9564,50 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let declared_accounts = report["accounts"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if !declared_accounts.is_empty() && only.is_none() {
+        // Every declared account, whether or not it spent or reported a limit, so a missing
+        // account is visible as missing and never as absent from the list.
+        output.push('\n');
+        let _ = writeln!(
+            output,
+            "ACCOUNTS  {} · every declared account",
+            declared_accounts.len()
+        );
+        for account in declared_accounts {
+            let name = account["name"].as_str().unwrap_or("unknown");
+            let limit = limits
+                .iter()
+                .find(|limit| limit["account"] == account["account"] && !account["account"].is_null());
+            let dollars = |microusd: &Value| {
+                format!("${}", microusd.as_u64().unwrap_or(0) / 1_000_000)
+            };
+            let detail = if let Some(credits) = account.get("credits") {
+                format!(
+                    "credits {}{} of {} this month",
+                    dollars(&credits["used_microusd"]),
+                    if credits["unpriced_tokens"].as_u64().unwrap_or(0) > 0 { "+" } else { "" },
+                    dollars(&credits["budget_microusd"])
+                )
+            } else if let Some(limit) = limit {
+                let weekly = limit["weekly_percent"]
+                    .as_f64()
+                    .map_or_else(|| "?".to_owned(), |value| format!("{value:.0}%"));
+                let reset = limit["weekly_resets_at_unix_ms"]
+                    .as_u64()
+                    .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+                    .map_or_else(String::new, |at| format!(" resets {}", at.format("%Y-%m-%d %H:%M UTC")));
+                let stale = if limit["stale"].as_bool() == Some(true) { "  stale" } else { "" };
+                format!("weekly {weekly}{reset}{stale}")
+            } else {
+                "no limits reported".to_owned()
+            };
+            let _ = writeln!(output, "{name}  {detail}");
+        }
+    }
     if !limits.is_empty() && only.is_none() {
         let percent = |value: &Value| {
             value
@@ -9563,6 +9675,11 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
     let declared = limits
         .iter()
         .filter_map(|limit| Some((limit["account"].as_str()?, limit["account_ref"].as_str()?)))
+        .chain(
+            declared_accounts
+                .iter()
+                .filter_map(|account| Some((account["account"].as_str()?, account["name"].as_str()?))),
+        )
         .collect::<BTreeMap<_, _>>();
     let groups = only
         .map(|by| vec![by])
@@ -10008,7 +10125,7 @@ fn event_cursor_error(error: anyhow::Error, query: &str, trace: bool) -> anyhow:
         "event cursor {after} has a gap: retained floor {floor}, frontier {frontier}. Missed transitions were not replayed."
     );
     if trace {
-        message.push_str(&format!(" Inspect retained claims, then explicitly continue on the same endpoint with `st trace show{filters} --after-index {frontier} --follow`"));
+        message.push_str(&format!(" Inspect retained claims, then explicitly continue on the same endpoint with `fractal trace show{filters} --after-index {frontier} --follow`"));
     } else {
         message.push_str(" Inspect the current subject state and retry this command explicitly.");
     }
@@ -10034,7 +10151,7 @@ impl LocalEventFeed {
                         .pointer("/features/bounded_legacy_events")
                         .and_then(Value::as_u64)
                         == Some(1),
-                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
+                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `fractal service restart`, then rerun the original command"
                 );
                 Err(error)
             }
@@ -10301,7 +10418,7 @@ async fn list_outcomes(
             .as_deref()
             .map(|a| format!(" --as {a}"))
             .unwrap_or_default();
-        println!("Next: st {collection} ls{actor} --limit {limit} --cursor '{cursor}'");
+        println!("Next: fractal {collection} ls{actor} --limit {limit} --cursor '{cursor}'");
     }
     if partial {
         fractal_daemon::gate_report::note_partial_listing(shown);
@@ -10448,7 +10565,7 @@ async fn doctor_request<T: serde::de::DeserializeOwned>(
         }
         Err(error) if fractal_daemon::client::daemon_unreachable(&error).is_some() => {
             if json_output {
-                let message = doctor_cli::human_outage_message(&error)
+                let message = doctor_cli::outage_message(&error)
                     .unwrap_or_else(|| plain_error(&error));
                 print_value(&json!({"status": "fail", "checks": [{
                     "name": "daemon", "status": "fail", "message": message
@@ -10486,10 +10603,10 @@ async fn run_doctor(
                 );
             }
         }
-        anyhow::ensure!(status != "fail", "st doctor found a failed check");
+        anyhow::ensure!(status != "fail", "fractal doctor found a failed check");
         anyhow::ensure!(
             !args.strict || status != "warn",
-            "st doctor found a computed warning in strict mode"
+            "fractal doctor found a computed warning in strict mode"
         );
         return Ok(());
     }
@@ -10551,14 +10668,14 @@ async fn run_doctor(
             println!("{status}\tstartup\t{}", startup.summary());
         }
         for check in &report.checks {
-            println!("{}\t{}\t{}", check.status, check.name, check.message);
+            println!("{}\t{}\t{}", check.status, check.name, presentation::human_command_hints(&check.message));
         }
         print!("{}", render_performance(&report.performance));
     }
-    anyhow::ensure!(report.status != "fail", "st doctor found a failed check");
+    anyhow::ensure!(report.status != "fail", "fractal doctor found a failed check");
     anyhow::ensure!(
         !args.strict || report.status == "pass",
-        "st doctor found a warning in strict mode"
+        "fractal doctor found a warning in strict mode"
     );
     Ok(())
 }
@@ -10619,7 +10736,7 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                         println!("  evidence\t{}", serde_json::to_string(&item.details)?);
                     }
                 }
-                println!("Apply this exact plan with: st repair apply {}", plan.token);
+                println!("Apply this exact plan with: fractal repair apply {}", plan.token);
             }
         }
         RepairCommand::Apply { token } => {
@@ -10725,7 +10842,7 @@ fn render_fenced_admissions(residue: &[smallclaims::store::FleetAdmissionResidue
     (!fenced.is_empty()).then(|| {
         format!(
             "this node admitted {} beyond the writer's high water, which the fleet fenced, so its \
-             claims differ from the fleet's; st doctor reports them",
+             claims differ from the fleet's; fractal doctor reports them",
             fenced.join(", ")
         )
     })
@@ -11062,7 +11179,7 @@ fn render_checkpoint_status(status: &fractal_daemon::store::CheckpointStatusView
     if status.halted {
         output.push_str(
             "halted        a trim found the graph would change; see daemon diagnostics, then \
-             `st replication checkpoint resume`\n",
+             `fractal replication checkpoint resume`\n",
         );
     }
     output.push_str(&format!("participants  {}\n", names(&status.participants)));
@@ -11177,7 +11294,7 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
 fn confirm_service_reset(config: &Config) -> Result<()> {
     anyhow::ensure!(
         std::io::stdin().is_terminal(),
-        "st service reset requires an interactive terminal"
+        "fractal service reset requires an interactive terminal"
     );
     let mut answer = String::new();
     for (prompt, expected) in [
@@ -11328,8 +11445,7 @@ async fn upload_attachment(
     };
     let uploaded = generated_client(endpoint, Some(actor))?
         .upload_blob(bytes, &media_type)
-        .await
-        .map_err(|error| anyhow::anyhow!("{}", error.plain()))?
+        .await?
         .value;
     Ok(fractal_daemon::model::AttachmentInput {
         blob: uploaded.blob,
@@ -11370,8 +11486,7 @@ async fn run_blobs(
             let hash = fractal_daemon::blobs::parse_reference(&reference)?;
             let bytes = generated_client(endpoint, Some(&actor))?
                 .blob(&hash, message.as_deref())
-                .await
-                .map_err(|error| anyhow::anyhow!("{}", error.plain()))?;
+                .await?;
             match output {
                 Some(path) => {
                     fs::write(&path, &bytes)
@@ -11418,7 +11533,7 @@ async fn run_rules(
                 return print_value(&rules, true);
             }
             if rules.is_empty() {
-                println!("no rules: every principal may write what its person may (st rules lockdown sets the presets)");
+                println!("no rules: every principal may write what its person may (fractal rules lockdown sets the presets)");
             }
             for rule in rules {
                 println!(
@@ -11469,7 +11584,7 @@ async fn run_rules(
                 println!("{name}\taudit\t{}", rule.description);
             }
             println!(
-                "Each rule logs what it would refuse; read the log with st rules audit, then st rules mode NAME enforce."
+                "Each rule logs what it would refuse; read the log with fractal rules audit, then fractal rules mode NAME enforce."
             );
             Ok(())
         }
@@ -11479,7 +11594,7 @@ async fn run_rules(
             let mut rule = rules
                 .into_iter()
                 .find(|rule| rule.name == name)
-                .with_context(|| format!("no rule is named `{name}`; st rules ls lists them"))?
+                .with_context(|| format!("no rule is named `{name}`; fractal rules ls lists them"))?
                 .rule;
             rule.mode = match mode.as_str() {
                 "off" => Mode::Off,
@@ -11687,7 +11802,7 @@ fn document_continuation_command(
         .map(|name| format!(" {}", shell_argument(name)))
         .unwrap_or_default();
     format!(
-        "st documents ls{name} --limit {limit}{} --cursor {}",
+        "fractal documents ls{name} --limit {limit}{} --cursor {}",
         if all { " --all" } else { "" },
         shell_argument(cursor)
     )
@@ -11724,7 +11839,7 @@ async fn run_import(endpoint: &Endpoint, command: ImportCommand, json_output: bo
             if let Some(cursor) = next_cursor {
                 let history = if all { " --all" } else { "" };
                 println!(
-                    "More sessions are available: st import ls{history} --cursor {cursor} --limit {limit}"
+                    "More sessions are available: fractal import ls{history} --cursor {cursor} --limit {limit}"
                 );
             }
             if partial {
@@ -11841,12 +11956,12 @@ fn render_import_session(session: &fractal_client::Session) -> String {
     if importable {
         let _ = writeln!(
             output,
-            "  import: st import run {} --as person/NAME",
+            "  import: fractal import run {} --as person/NAME",
             session.header.id
         );
         let _ = writeln!(
             output,
-            "  conversation: st conversations timeline {}",
+            "  conversation: fractal conversations timeline {}",
             session.header.id
         );
     } else if let Some(reason) = session.extra.get("import_reason").and_then(Value::as_str) {
@@ -12060,7 +12175,7 @@ fn lane_actor(explicit: Option<&str>, configured_person: Option<&str>) -> Result
         return Ok(seat_subject(&own));
     }
     configured_person.map(str::to_owned).context(
-        "st lanes needs `--as person/NAME`, `--as agent/PATH`, or `person = \"person/NAME\"` in the st config",
+        "fractal lanes needs `--as person/NAME`, `--as agent/PATH`, or `person = \"person/NAME\"` in the st config",
     )
 }
 
@@ -12697,7 +12812,7 @@ fn render_client_agent(
             let _ = writeln!(output, "ROLLOUT      published, rollout pending (manual)");
             let _ = writeln!(
                 output,
-                "CUTOVER      st agents rollout {} --as ACTOR",
+                "CUTOVER      fractal agents rollout {} --as ACTOR",
                 agent.header.id
             );
         } else {
@@ -12723,7 +12838,7 @@ fn render_client_agent(
         if matches!(phase, "held" | "failed" | "blocked") {
             let _ = writeln!(
                 output,
-                "RETRY        st agents rollout {} --as ACTOR",
+                "RETRY        fractal agents rollout {} --as ACTOR",
                 agent.header.id
             );
         }
@@ -13735,7 +13850,7 @@ fn derived_message_key(
 /// running the same command again sends it at most once.
 fn message_send_error(error: anyhow::Error, key: &str) -> anyhow::Error {
     let check = format!(
-        "st conversations status --idempotency-key {}",
+        "fractal conversations status --idempotency-key {}",
         shell_word(key)
     );
     let unconfirmed = format!(
@@ -14357,6 +14472,10 @@ struct NativeLoopState {
     /// Admissions for attachment-dependent writes, carried across re-exec with the binding.
     #[serde(default)]
     claude_attachment_admissions: AdmissionBucket,
+    /// When this binding last polled attachment without push. Not carried: a replacement
+    /// image polls once at once.
+    #[serde(skip)]
+    claude_attachment_polled: Option<((String, u64, String), u64)>,
     /// This image's own settle. A replacement image draws a new one, so it is never carried.
     #[serde(skip)]
     settle: ResumeSettle,
@@ -14394,6 +14513,7 @@ struct AdmissionBucket {
 
 const ADMISSION_BURST: u32 = 2;
 const ADMISSION_REFILL_MS: u64 = 10_000;
+const UNPUSHED_ATTACHMENT_RECHECK_MS: u64 = 10_000;
 
 impl AdmissionBucket {
     fn take(&mut self, fence: &fractal_daemon::mailbox::Fence, now_ms: u64) -> bool {
@@ -16983,6 +17103,39 @@ async fn publish_claude_readiness_fallback(
     Ok(false)
 }
 
+/// Whether this control tick checks attachment. With push the check reads the pushed value and
+/// rations its own admissions. Without push (an older daemon, or a reconnect waiting for its
+/// first frame) each check is a GET: a starting phase still checks every tick so readiness is
+/// not delayed, but a settled one (attached or blocked) is rechecked every ten seconds, not
+/// every second.
+fn claude_attachment_check_due(
+    mailbox: &NativeMailbox,
+    state: &mut NativeLoopState,
+    now_ms: u64,
+) -> bool {
+    if mailbox.pushed_attachment().is_some() {
+        return true;
+    }
+    let fence = &mailbox.fence;
+    let binding = (fence.incarnation.clone(), fence.epoch, fence.token.clone());
+    let settled = state.claude_attachment_reconciled
+        && state.claude_attachment_phase != "starting"
+        && state.claude_attachment_pending.is_none()
+        && state.claude_attachment_terminal.is_none();
+    // A replacement binding, or a wall clock stepped backwards, checks at once.
+    if settled
+        && state.claude_attachment_polled.as_ref().is_some_and(|(polled_binding, polled)| {
+            *polled_binding == binding
+                && now_ms >= *polled
+                && now_ms - polled < UNPUSHED_ATTACHMENT_RECHECK_MS
+        })
+    {
+        return false;
+    }
+    state.claude_attachment_polled = Some((binding, now_ms));
+    true
+}
+
 async fn check_claude_attachment(
     client: &Client,
     subject: &str,
@@ -16995,8 +17148,8 @@ async fn check_claude_attachment(
     // On a connection that has pushed attachment, the pushed value alone feeds the phase. Until
     // it has (an older daemon, or a new connection), the GET does, as before; never both.
     let pushed = mailbox.pushed_attachment();
-    // Admissions are rationed only where the phase comes from push; without push every tick
-    // already makes its GET, exactly as before.
+    // Admissions are rationed only where the phase comes from push; without push every check
+    // makes its GET (claude_attachment_check_due spaces those checks).
     let mut from_push = pushed.is_some();
     let mut checked = match pushed {
         Some(attachment) => Ok(attachment),

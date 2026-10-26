@@ -155,13 +155,13 @@ pub fn check_unclaimed(name: &str, uid: u32) -> Result<()> {
     if let Some(account) = account(uid) {
         bail!(
             "tile {name}'s user ID {uid} now belongs to the account {account}; a tile is never \
-             an account. Remove the account, or remove the tile with `st tiles remove`"
+             an account. Remove the account, or remove the tile with `fractal tiles remove`"
         );
     }
     if let Some(group) = group(uid) {
         bail!(
             "tile {name}'s user ID {uid} is also the group {group}'s; a tile's group is its own. \
-             Remove the group, or remove the tile with `st tiles remove`"
+             Remove the group, or remove the tile with `fractal tiles remove`"
         );
     }
     Ok(())

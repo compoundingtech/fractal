@@ -50,8 +50,11 @@ or to the path in ST_TEST_RUNS (`off` records nothing); scripts/st-test-report r
 (docs/st3/gate-evidence.md). Recording never changes the result: a file that cannot be written is one line on stderr.
 
 Exit 0 when every selected check passed and was signed (with --out, exported but not verified); 1 when a check failed, timed out or
-could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered; 4 when nothing failed but a check
-was not signed because the tree edits that check's lane (evidence-wrap would refuse it; CI runs it).
+could not be signed; 2 when it could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered. A tree that edits
+a check's lane is signed like any other (the note carries the edited lane's digest). The run exits 4 when nothing failed but a check was not signed: only
+against a base whose evidence-wrap still refuses a lane edit (before 2026-10-26) is that check left "not signed" for CI, or rust-tests left a crate unsigned
+because one of its tests passed only on a retry (CI's own per-crate notes refuse such a crate too, so CI runs it; linux-gate still signs and records them
+as flaky_tests).
 """
 import argparse
 import base64
@@ -207,7 +210,7 @@ def selecting(name):
     return name in SELECTING or name.startswith('GIT_PUSH_OPTION')
 
 
-SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'CLAUDE', 'ANTHROPIC_')
+SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'FRACTAL_', 'CLAUDE', 'ANTHROPIC_', 'PTY_')
 KEPT_SEAT = ('ST_AGENT', 'ST_SKIP_EVIDENCE')  # exact names, plus every ST_EVIDENCE* switch; this list is the only exception mechanism
 
 
@@ -233,8 +236,12 @@ def check_path():
 
 def scrub_seat_environment():
     """A CI runner has none of the variables an agent seat carries (identity, mission, session, daemon endpoint, hook and messaging
-    settings), and the checks must see what CI sees: tests that read them fail or behave differently under a seat (the ci-local-gate
-    drill's claude hook tests did). ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
+    settings, and the pty session it runs in), and the checks must see what CI sees: tests that read them fail or behave differently
+    under a seat (the ci-local-gate drill's claude hook tests did). A seat's PTY_ROOT names its live pty root: the legacy-runner tests
+    that spawn sessions then all spawn there instead of under their own catalogs, and concurrent ones collide (stream_authoring_cli's
+    "spawning pty 'example-linux.worker' failed"). FRACTAL_* are the seat's own names for the same things (FRACTAL_ENDPOINT,
+    FRACTAL_AGENT): a check that kept them could reach the live daemon as the seat. Every check starts in `nix develop`, whose shell
+    sets the dev shell's FRACTAL_* settings (flake.nix) itself, and scripts/ci-local drops the rest for its stages. ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
     starts the check); the evidence switches stay. The kept list is the only exception mechanism for a future ST_* switch."""
     for name in [name for name in os.environ
                  if name.startswith(SEAT_PREFIXES) and name not in KEPT_SEAT and not name.startswith('ST_EVIDENCE')]:
@@ -452,6 +459,12 @@ def run_input_arguments(check, base):
     return ['--run-input', f"kit_inputs={'true' if kit else 'false'}"]
 
 
+def edited_lanes_unsigned(base):
+    """True when the base's evidence-wrap refuses a tree that edits its lane (it lacks SIGNS_LANE_EDITS): only then is a lane edit left to CI."""
+    done = git('show', f'{base}:scripts/evidence-wrap', check=False)
+    return done.returncode != 0 or b'\nSIGNS_LANE_EDITS = True\n' not in done.stdout
+
+
 def lane_names(base):
     """The lanes the accepted base defines in .st/required-lanes.json (none when the file is absent or unreadable: then nothing changes)."""
     done = git('show', f'{base}:.st/required-lanes.json', check=False)
@@ -520,11 +533,30 @@ def pool_size():
     return max(slots, 1) + 1
 
 
+def normalise_origin(url):
+    """A remote URL as the same repository whatever way it was cloned: https://host/o/r.git, ssh://git@host/o/r and git@host:o/r.git alike."""
+    url = url.strip()
+    match = re.fullmatch(r'(?:[\w.-]+@)?([\w.-]+):(?!//)(.+)', url)  # scp-like: git@host:owner/repo.git
+    if match and not url.startswith(('/', '.')):
+        host, path = match.groups()
+    else:
+        match = re.fullmatch(r'[a-z][a-z0-9+.-]*://(?:[^/@]+@)?([^/:]+)(?::\d+)?/(.+)', url, re.I)
+        host, path = match.groups() if match else ('', url)
+    path = re.sub(r'(\.git)?/*$', '', path.strip('/') if host else path.rstrip('/'))
+    return f'{host}/{path}'.lower() if host else path.lower()
+
+
 def pool_root():
-    """This repository's pool: one directory per git common dir, so clones and worktrees of one repository share it."""
-    common = text(git('rev-parse', '--path-format=absolute', '--git-common-dir'))
-    key = hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:16]
-    return pool_base() / key
+    """The pool of this repository's ORIGIN: every clone of one origin shares it (one warm target and tree path per slot), so a throwaway
+    clone reuses the warm slots of an existing one instead of building a 35-44 GB target of its own. A clone without an origin keeps a pool
+    of its own, keyed by its git common dir."""
+    origin = text(git('config', '--get', 'remote.origin.url', check=False))
+    if origin:
+        key = 'o-' + hashlib.sha256(normalise_origin(origin).encode()).hexdigest()[:16]
+    else:
+        common = text(git('rev-parse', '--path-format=absolute', '--git-common-dir'))
+        key = 'c-' + hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:16]
+    return pool_base() / 'pools' / key
 
 
 def pool_base():
@@ -593,7 +625,10 @@ def read_unit_size(repo, n):
 def pool_units(base):
     """[(last used, directory of the unit's lock, N, [paths])]: every pool tree with its target, across all the repositories' pools."""
     units = {}
-    for repo in sorted(path for path in base.iterdir() if path.is_dir()) if base.is_dir() else []:
+    pools = sorted(path for path in base.iterdir() if path.is_dir() and path.name != 'pools') if base.is_dir() else []  # the old layout: one per clone
+    if (base / 'pools').is_dir():
+        pools += sorted(path for path in (base / 'pools').iterdir() if path.is_dir())
+    for repo in pools:
         for entry in repo.iterdir():
             match = re.fullmatch(r'(tree|target)-(\d+)(\.lock)?', entry.name)
             if match:
@@ -689,13 +724,38 @@ def is_pool_tree(directory):
     return done.returncode == 0 and ours.returncode == 0 and os.path.realpath(text(done)) == os.path.realpath(text(ours))
 
 
+def carry_kept_inputs(old, new):
+    """Move the inputs a pool tree keeps (POOL_KEEP) from the tree another clone left to the one just registered here, by rename (same disk)."""
+    old, new = Path(old), Path(new)
+    found = [name for name in ('repos', 'target/compat-baselines') if (old / name).is_dir()]
+    for top, dirs, _ in os.walk(old):
+        if 'node_modules' in dirs:
+            found.append(os.path.relpath(os.path.join(top, 'node_modules'), old))
+        # never look inside what is kept, a git directory or a build/store output
+        dirs[:] = [name for name in dirs if name not in ('node_modules', '.git', 'target', 'buck-out', '.devenv', 'repos')]
+    for relative in found:
+        source, target = old / relative, new / relative
+        if target.exists():
+            continue  # tracked in this commit: the checkout's own is the truth
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.rename(source, target)
+        except OSError:
+            pass  # a kept input that cannot move is simply fetched again
+
+
 def prepare_tree(root, n, commit):
     """The pool tree `n`, at `commit` with nothing untracked or ignored left in it (build output lives outside, in target-N), or a
     Failure when it is still not clean: the signature is for the committed tree."""
     directory = root / f'tree-{n}'
+    kept = None
     if directory.exists() and not is_pool_tree(directory):
-        git('worktree', 'remove', '--force', str(directory), check=False)
-        shutil.rmtree(directory, ignore_errors=True)
+        # Another clone's tree (or a broken one) sits at this slot's path. The path stays: the workspace crates' cargo ids contain it, so
+        # keeping it keeps them warm. The tree is re-registered as a worktree of THIS clone (its notes land here), and the inputs the cleaning
+        # keeps (members, installed dependencies, compat baselines) move across, so they are not fetched or installed again.
+        kept = directory.with_name(directory.name + '.adopting')
+        shutil.rmtree(kept, ignore_errors=True)
+        os.rename(directory, kept)
     git('worktree', 'prune', check=False)
     if directory.exists():
         # Forced detached checkout replaces both index and tracked files, even after an interrupted run.
@@ -703,6 +763,10 @@ def prepare_tree(root, n, commit):
         git('checkout', '--detach', '-q', '-f', commit, cwd=directory)
     else:
         git('worktree', 'add', '--detach', '--force', '-q', str(directory), commit)
+    if kept:
+        carry_kept_inputs(kept, directory)
+        subprocess.run(['chmod', '-R', 'u+rwX', '--', str(kept)], check=False, capture_output=True)
+        shutil.rmtree(kept, ignore_errors=True)
     clean = ['clean', '-ffdxq', *[f'--exclude={pattern}' for pattern in POOL_KEEP]]
     if git(*clean, cwd=directory, check=False).returncode != 0:
         # A check can leave read-only directories (copies of nix store paths, under .devenv/ and repos/): make them writable, once.
@@ -1078,6 +1142,16 @@ def takes_input_files(wrapper):
     return '--input-file' in Path(wrapper).read_text()
 
 
+UNCOVERED = 'not signed'  # a crate left for CI (a test passed only on a retry): its row, and the check's unsigned flag
+
+
+def retried_tests(directory, junit, crate):
+    """The crate's tests that passed only on a retry in the report (scripts/ci-rust-test-result's `flaky` lines)."""
+    done = subprocess.run([sys.executable, str(directory / 'scripts/ci-rust-test-result')], capture_output=True, text=True,
+                          env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate))
+    return [line.split(' ', 1)[1] for line in done.stdout.splitlines() if line.startswith('flaky ')]
+
+
 def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes, target, report=None):
     """The `rust-tests` check: one nextest run of the crates that have no passing note for their key, on the workspace build CI makes,
     then one signature per crate over that crate's part of the run. Returns the summary rows.
@@ -1141,6 +1215,12 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
                                           text=True, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate)).stdout or 'null')
         if not facts:
             return (f'rust-tests:{crate}', 'NOT SIGNED', 0, 'cannot read its result from the report'), []
+        flaky = retried_tests(directory, junit, crate)
+        if flaky:
+            # As CI's per-crate notes (scripts/ci-rust-test-notes): a crate with a test that passed only on a retry is not signed, so it
+            # stays uncovered and CI runs it. Not a failure of this run.
+            return (f'rust-tests:{crate}', UNCOVERED, 0, f'{len(flaky)} test(s) passed only on a retry, CI runs it: '
+                    + ', '.join(name.split(' ', 1)[-1] for name in flaky[:2]) + (' ...' if len(flaky) > 2 else ''))[:200], UNCOVERED
         wrap = [sys.executable, tools['evidence-wrap'], '--check', 'rust-tests', '--attempt', args.attempt,
                 '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base,
                 '--input', f'crate={crate}', '--input', f'source_inputs={keys[crate]}', '--input', f'tests_run={facts["tests_run"]}',
@@ -1188,7 +1268,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     for crate, (row, signed) in zip(selected, outcomes):
         if row:
             rows.append(row)
-            failed = True
+            failed = failed or signed != UNCOVERED
         else:
             refs, facts = signed
             signed_count += 1
@@ -1206,6 +1286,9 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
               f'{signed_count} of {len(selected)} crates run and signed ({have} of {len(keys)} already had a passing note); one nextest run on the workspace build')
     if args.out:
         detail += '; packs exported, not imported or verified'
+    left = [crate for crate, (_, signed) in zip(selected, outcomes) if signed == UNCOVERED]
+    if left:
+        detail += f'; {len(left)} left for CI, a test passed only on a retry: {", ".join(left[:8])}' + (' ...' if len(left) > 8 else '')
     empty = [crate for crate in empty if crate not in listed_no_tests(args.base)]
     if empty:
         # A note that ran no test covers nothing once a policy judges it: the crate belongs under no_tests in .st/rust-test-inputs.json (reviewed).
@@ -1396,9 +1479,10 @@ def main(argv):
             verifier = Path(scratch) / 'evidence-verify'
             verifier.write_bytes(git('show', f'{args.base}:scripts/evidence-verify').stdout)
             repository = args.repository or repository_of(remote or 'origin')
-            lanes, rows = lane_names(args.base), []
+            lanes, rows = lane_names(args.base) if edited_lanes_unsigned(args.base) else set(), []
             for name in checks:
-                # A tree that edits a check's lane cannot be signed here (evidence-wrap refuses it): CI runs that check.
+                # Against an older base a tree that edits a check's lane cannot be signed (its evidence-wrap refuses it): CI runs that check.
+                # Otherwise a lane edit is signed, and asked about, like any other tree.
                 edits = lane_edits(str(verifier), Path('.'), lane_base, name, tree) if name in lanes else []
                 unchanged = web_unchanged(args.base) if name == WEB else None
                 if edits:
@@ -1464,6 +1548,7 @@ def main(argv):
             signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
             rows, failed, unsigned = [], False, False
             lanes = lane_names(args.base)
+            unsignable = lanes if edited_lanes_unsigned(args.base) else set()  # lanes whose edits the base's wrapper refuses to sign
             target, target_lock = shared_target(tree_target) if any(name in BUILDS for name in checks) else (None, None)
             warm = target_warm(target) if any(name in BUILDS for name in checks) else None  # before anything builds in it
             # The members are fetched once, and only when a check has to run: a tree whose checks are all signed needs none. The light
@@ -1481,7 +1566,7 @@ def main(argv):
             stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
             def run_one(name, output=None):
                 """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
-                edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in lanes else []
+                edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in unsignable else []
                 if edits:
                     return (name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'), False, True
                 if name == RUST_TESTS:
@@ -1491,7 +1576,7 @@ def main(argv):
                     # One run, one row for the run and one for each crate that did not sign (a list: the collector below takes either).
                     new_rows, bad = run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes,
                                                    target, report=gate_report)
-                    return new_rows, bad, False
+                    return new_rows, bad, any(row[1] == UNCOVERED for row in new_rows)  # a crate left for CI: exit 4, not 1
                 unchanged = web_unchanged(args.base) if name == WEB else None
                 if unchanged:
                     return (name, 'not relevant', 0, unchanged), False, False  # nothing to run, nothing to sign: not a failure
@@ -1532,6 +1617,13 @@ def main(argv):
                     environment['CI_TEST_ENV_SKIPS'] = str(skips)
                     if takes_input_files(tools['evidence-wrap']):
                         wrap += ['--input-file', f'env_skips={skips}']
+                if name == 'linux-gate' and 'tests' in LOCAL[name] and takes_input_files(tools['evidence-wrap']):
+                    # The tests that passed only on a retry (scripts/ci-nextest-flaky writes them after the tests stage): the whole-tree note
+                    # still signs, as CI's gate counts a retried pass, and records them as flaky_tests so the evidence says so. rust-tests
+                    # does not sign a crate with one (run_rust_tests), as CI's own per-crate notes do not.
+                    flaky = Path(scratch) / 'flaky-linux-gate.txt'
+                    environment['CI_TEST_FLAKY'] = str(flaky)
+                    wrap += ['--input-file', f'flaky_tests={flaky}']
                 if name in BASE_BOUND:
                     # clippy's ratchet compares with the base, as CI compares with the event's base: the base as just fetched,
                     # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.

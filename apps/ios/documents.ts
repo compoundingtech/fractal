@@ -17,7 +17,7 @@ export function documentsServed(caps: Pick<Capabilities, 'capabilities'> | null 
   return caps.capabilities.some(capability => capability.id === 'documents' && capability.version >= 1 && capability.state === 'granted');
 }
 
-export const DOCUMENTS_NOT_SERVED = 'The st this phone is paired with does not serve documents yet; it needs a newer st.';
+export const DOCUMENTS_NOT_SERVED = 'The Fractal version this phone is paired with does not serve documents yet; it needs an update.';
 
 /** Why a read failed: a 404 is not found or not synced yet; anything else, or no answer, is the remote. */
 export function whyUnreadable(error: unknown): DocumentUnavailable {

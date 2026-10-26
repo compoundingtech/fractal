@@ -65,14 +65,14 @@ describe('gatewayAgentControls', () => {
     client.agentStart.mockRejectedValueOnce(new TypeError('network down'))
     expect(await port.control('agent/example/atlas', 'restart')).toEqual({
       _tag: 'Refused',
-      detail: 'Stopped, but starting it again failed: st did not confirm it; check the agent before trying again. It was not sent again. Start it from this menu.',
+      detail: 'Stopped, but starting it again failed: Fractal did not confirm it; check the agent before trying again. It was not sent again. Start it from this menu.',
     })
     expect(calls.map(([name]) => name)).toEqual(['agent.stop'])
     // A refused stop leaves it running, and says only why.
     const second = fake()
     second.client.agentStop.mockRejectedValueOnce(new TypeError('network down'))
     expect(await second.port.control('agent/example/atlas', 'restart')).toEqual({
-      _tag: 'Refused', detail: 'st did not confirm it; check the agent before trying again. It was not sent again.',
+      _tag: 'Refused', detail: 'Fractal did not confirm it; check the agent before trying again. It was not sent again.',
     })
   })
 
@@ -125,7 +125,7 @@ describe('AgentActions', () => {
     await view.press('Restart')
     await act(async () => [...document.querySelectorAll<HTMLElement>('[role="alertdialog"] button')].find((each) => each.textContent === 'Restart')!.click())
     expect(data.control).toHaveBeenCalledWith('agent/example/atlas', 'restart')
-    expect(document.querySelector('[role="status"]')?.textContent).toBe('Restart atlas: asked st')
+    expect(document.querySelector('[role="status"]')?.textContent).toBe('Restart atlas: asked Fractal')
     view.unmount()
   })
 
