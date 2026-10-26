@@ -33,6 +33,7 @@ pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
 pub mod directive_notes;
+pub mod task_grants;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
@@ -20738,6 +20739,7 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("resource_observations", &[]),
     ("glass_heads", &[]),
     ("person_directive_notes", &[]),
+    ("task_grants", &[]),
     ("custom_registrations", &[]),
     ("custom_sources", &[]),
     ("custom_dependencies", &[]),

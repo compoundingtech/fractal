@@ -123,6 +123,18 @@ converge. Characterization used
 on a gated Linux build host. The first v9 run failed only the five stale v8
 trim expectations; exact per-seed equality and majority trim coverage remain.
 
+`claims-v10.json` adds the durable task-grant manifest kinds `task-grant.created`
+and `task-grant.revoked` to v9. Versions 1 through 9 stay frozen. Regenerate it with
+`cargo run -p fractal-schema --locked --example claims_json -- fixtures/convergence/claims-v10.json`;
+do not hand-edit the snapshot. The simulation selects v10 and records its filename
+in audit summaries.
+
+The measured v10 never-trim set is `[17, 34, 610]`: the other 14 of 17 fixed seeds
+trim (14/17 coverage), and all 17 converge. Characterization used
+`cargo test -p fractal --locked --test integration convergence:: -- --nocapture --test-threads=4`
+on a gated Linux build host. The first v10 run failed only the four stale v9 trim
+expectations; exact per-seed equality and majority trim coverage remain enforced.
+
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&fractal_schema::registry().claims)`
 and deliberately update the simulation's include. Apply identical simulation

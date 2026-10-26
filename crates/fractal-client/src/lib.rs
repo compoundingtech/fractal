@@ -13,6 +13,7 @@ mod generated;
 pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
+mod task_grants;
 pub use contract::*;
 pub use generated::*;
 mod identities;

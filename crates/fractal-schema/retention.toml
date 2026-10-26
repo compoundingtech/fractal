@@ -24,6 +24,8 @@
 #           until one exists
 
 [kinds]
+"task-grant.created" = { class = "durable" }
+"task-grant.revoked" = { class = "durable" }
 "deploy.go" = { class = "durable" }
 "deploy.go-revoked" = { class = "durable" }
 "deploy.go-consumed" = { class = "durable" }
