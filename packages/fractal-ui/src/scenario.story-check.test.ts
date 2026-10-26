@@ -231,16 +231,6 @@ const deferredStoryModes: Readonly<Record<string, number>> = {
   './Workbench.stories.tsx#HostToolReveal': 2936,
   './Workbench.stories.tsx#AllStates': 2936,
   './Workbench.stories.tsx#AllStatesLight': 2936,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#HoverCardKnown': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#HoverCardUnknown': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#TimeCohort': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#FrozenWorkingVersusIdle': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#QuickOpenAction': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#AllStates': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#DensitiesAndChildren': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#PhoneTouchTargets': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#PhoneFocusNoHover': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#ThemedOverlaysAndFocus': 2906,
 }
 
 // Reviewed shrink-only pin owned by the app, separate from the blocked-PR ratchet.
@@ -563,7 +553,7 @@ test('app mode debt matches its reviewed shrink-only pin', () => {
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(426)
+  expect(exemptions).toHaveLength(436)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 
