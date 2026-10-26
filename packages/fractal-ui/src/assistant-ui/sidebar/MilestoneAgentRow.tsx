@@ -163,8 +163,8 @@ const styles = stylex.create({
   // Inset ring: the clipping name column would cut an outset one.
   countButton: { cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   // fgSoft, not fgMuted: 11px text must clear 4.5:1 on the hover and active-row washes too. Inline-block, not flex, so the
-  // space before the word survives in the text and the accessible name.
-  countTag: { display: 'inline-block', paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+  // space before the word survives in the text and the accessible name. Relative: the compacted word stays inside the tag.
+  countTag: { position: 'relative', display: 'inline-block', paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   // Compact: visually hidden, still in the accessible name.
   countWord: {
     position: { default: 'static', [compactName]: 'absolute' }, width: { default: 'auto', [compactName]: '1px' }, height: { default: 'auto', [compactName]: '1px' },

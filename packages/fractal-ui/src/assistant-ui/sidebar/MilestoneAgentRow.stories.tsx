@@ -680,28 +680,35 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
         await expect(chip!.textContent).toContain('Unreported subagents')
       }
       const titleElement = row.querySelector<HTMLElement>('[data-row-column="title"]')!
+      const where = `${host.dataset.countHost} · "${title}"`
       // Every flat row has room for the full count: the word is painted, not compacted.
-      await expect(getComputedStyle(chip!.querySelector('[data-count-word]')!).position).toBe('static')
+      await expect(getComputedStyle(chip!.querySelector('[data-count-word]')!).position, `${where}: count word compacted`).toBe('static')
       const titleBox = titleElement.getBoundingClientRect(), chipBox = chip!.getBoundingClientRect(), tagBox = tag.getBoundingClientRect()
+      const name = row.querySelector('[data-row-column="name"]')!.getBoundingClientRect()
       const time = row.querySelector('[data-row-column="time"]')!.getBoundingClientRect()
       const line2 = row.querySelector('[data-row-column="line2"]')!.getBoundingClientRect()
       // Immediately after the title (the s.sm gap), on line 1, centred with the title and clear of the time column.
-      await expect(Math.abs(chipBox.left - titleBox.right - 6)).toBeLessThanOrEqual(1)
-      await expect(Math.abs((chipBox.top + chipBox.bottom) / 2 - (titleBox.top + titleBox.bottom) / 2)).toBeLessThanOrEqual(1)
-      await expect(chipBox.bottom).toBeLessThanOrEqual(line2.top + 0.5)
-      await expect(chipBox.right).toBeLessThanOrEqual(time.left + 0.5)
+      await expect(Math.abs(chipBox.left - titleBox.right - 6), `${where}: count not 6px after the title`).toBeLessThanOrEqual(1)
+      await expect(Math.abs((chipBox.top + chipBox.bottom) / 2 - (titleBox.top + titleBox.bottom) / 2), `${where}: count off the title's centre line`).toBeLessThanOrEqual(1)
+      await expect(chipBox.bottom, `${where}: count below line 1`).toBeLessThanOrEqual(line2.top + 0.5)
+      await expect(chipBox.right, `${where}: count over the time column`).toBeLessThanOrEqual(time.left + 0.5)
       // One line each: the title and the count never wrap, and the count is never clipped.
-      await expect(titleBox.height).toBeLessThanOrEqual(24)
-      await expect(tagBox.height).toBeLessThan(24)
-      await expect(tag.scrollWidth).toBeLessThanOrEqual(tag.clientWidth + 1)
+      await expect(titleBox.height, `${where}: title wraps`).toBeLessThanOrEqual(24)
+      await expect(tagBox.height, `${where}: count wraps`).toBeLessThan(24)
+      await expect(tag.scrollWidth, `${where}: count clipped`).toBeLessThanOrEqual(tag.clientWidth + 1)
       await expect(getComputedStyle(tag).whiteSpace).toBe('nowrap')
       await expect(getComputedStyle(tag).color).toBe(soft)
-      // Long titles truncate with an ellipsis yet keep a readable stretch; short titles stay whole.
-      if (longCountTitles.includes(title)) {
-        await expect(titleElement.scrollWidth).toBeGreaterThan(titleElement.clientWidth)
+      // The title truncates first: whole while title, gap and full count fit the name column, otherwise an ellipsis that
+      // keeps a readable stretch (the ~24px the compact threshold reserves). At 320px every short title is whole.
+      const fits = titleElement.scrollWidth + 6 + tagBox.width <= name.width + 1
+      if (longCountTitles.includes(title)) await expect(fits, `${where}: fixture title should be long enough to truncate`).toBe(false)
+      else if (host.dataset.width === '320') await expect(fits, `${where}: short title should fit beside the count at 320px`).toBe(true)
+      if (fits) await expect(titleElement.scrollWidth, `${where}: title truncated although title + count fit (name ${name.width}px)`).toBeLessThanOrEqual(titleElement.clientWidth + 1)
+      else {
+        await expect(titleElement.scrollWidth, `${where}: title should truncate (name ${name.width}px, count ${tagBox.width}px)`).toBeGreaterThan(titleElement.clientWidth)
         await expect(getComputedStyle(titleElement).textOverflow).toBe('ellipsis')
-        await expect(titleBox.width).toBeGreaterThanOrEqual(32)
-      } else await expect(titleElement.scrollWidth).toBeLessThanOrEqual(titleElement.clientWidth + 1)
+        await expect(titleBox.width, `${where}: truncated title under the readable minimum (name ${name.width}px, count ${tagBox.width}px)`).toBeGreaterThanOrEqual(24)
+      }
     }
   }
   // Deep nesting at 240px: the count fits its name column (full, then bare, then gone) and never covers time or signal;
@@ -712,8 +719,9 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
   const modes = new Set<'full' | 'compact' | 'hidden'>()
   for (const [depth, row] of deepRows.entries()) {
     const titleElement = row.querySelector<HTMLElement>('[data-row-column="title"]')!
-    await expect(titleElement.textContent).toBe(`Depth ${depth} · coordinate the long release train`)
-    await expect(titleElement.scrollWidth).toBeGreaterThan(titleElement.clientWidth)
+    const where = `count-deep · depth ${depth}`
+    await expect(titleElement.textContent, `${where}: title text changed`).toBe(`Depth ${depth} · coordinate the long release train`)
+    await expect(titleElement.scrollWidth, `${where}: long title should truncate`).toBeGreaterThan(titleElement.clientWidth)
     const chip = row.querySelector<HTMLElement>('[data-subagent-count]')!
     const tag = chip.querySelector<HTMLElement>('[data-count-text]')!
     const count = deepCounts[depth]
@@ -722,15 +730,16 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
     const time = row.querySelector('[data-row-column="time"]')!.getBoundingClientRect()
     const signal = row.querySelector('[data-row-column="signal"]')!.getBoundingClientRect()
     const titleBox = titleElement.getBoundingClientRect()
-    await expect(name.right).toBeLessThanOrEqual(time.left + 0.5)
-    await expect(name.right).toBeLessThanOrEqual(signal.left + 0.5)
-    await expect(titleBox.left).toBeGreaterThanOrEqual(name.left - 0.5)
-    await expect(titleBox.right).toBeLessThanOrEqual(name.right + 0.5)
+    const at = `${where} (name ${name.left}–${name.right}px, title ${titleBox.left}–${titleBox.right}px, time from ${time.left}px, signal from ${signal.left}px)`
+    await expect(name.right, `${at}: name column over the time column`).toBeLessThanOrEqual(time.left + 0.5)
+    await expect(name.right, `${at}: name column over the signal column`).toBeLessThanOrEqual(signal.left + 0.5)
+    await expect(titleBox.left, `${at}: title starts before the name column`).toBeGreaterThanOrEqual(name.left - 0.5)
+    await expect(titleBox.right, `${at}: title ends past the name column`).toBeLessThanOrEqual(name.right + 0.5)
     if (getComputedStyle(chip).display === 'none') {
       // Gone: the title takes the whole name column.
       modes.add('hidden')
-      await expect(name.width).toBeLessThan(48 + 0.5)
-      await expect(Math.abs(titleBox.width - name.width)).toBeLessThanOrEqual(0.5)
+      await expect(name.width, `${at}: count hidden on a name column of 48px or more`).toBeLessThan(48 + 0.5)
+      await expect(Math.abs(titleBox.width - name.width), `${at}: title does not fill the name column`).toBeLessThanOrEqual(0.5)
       continue
     }
     const word = chip.querySelector<HTMLElement>('[data-count-word]')!
@@ -738,20 +747,21 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
     modes.add(compact ? 'compact' : 'full')
     if (compact) {
       // Bare count: the word is visually hidden but still in the text.
-      await expect(name.width).toBeLessThan(104 + 0.5)
-      await expect(name.width).toBeGreaterThanOrEqual(48 - 0.5)
-      await expect(word.getBoundingClientRect().width).toBeLessThanOrEqual(1)
-    } else await expect(name.width).toBeGreaterThanOrEqual(104 - 0.5)
+      await expect(name.width, `${at}: bare count on a name column of 104px or more`).toBeLessThan(104 + 0.5)
+      await expect(name.width, `${at}: bare count on a name column under 48px`).toBeGreaterThanOrEqual(48 - 0.5)
+      await expect(word.getBoundingClientRect().width, `${at}: compact word still painted`).toBeLessThanOrEqual(1)
+    } else await expect(name.width, `${at}: full count on a name column under 104px`).toBeGreaterThanOrEqual(104 - 0.5)
     const tagBox = tag.getBoundingClientRect()
-    await expect(tagBox.left).toBeGreaterThanOrEqual(name.left - 0.5)
-    await expect(tagBox.right).toBeLessThanOrEqual(name.right + 0.5)
-    await expect(tagBox.right).toBeLessThanOrEqual(time.left + 0.5)
-    await expect(tagBox.right).toBeLessThanOrEqual(signal.left + 0.5)
-    await expect(tag.scrollWidth).toBeLessThanOrEqual(tag.clientWidth + 1)
-    await expect(Math.abs(tagBox.left - titleBox.right - 6)).toBeLessThanOrEqual(1)
+    const tagAt = `${at} tag ${tagBox.left}–${tagBox.right}px, ${compact ? 'compact' : 'full'}`
+    await expect(tagBox.left, `${tagAt}: count starts before the name column`).toBeGreaterThanOrEqual(name.left - 0.5)
+    await expect(tagBox.right, `${tagAt}: count ends past the name column`).toBeLessThanOrEqual(name.right + 0.5)
+    await expect(tagBox.right, `${tagAt}: count over the time column`).toBeLessThanOrEqual(time.left + 0.5)
+    await expect(tagBox.right, `${tagAt}: count over the signal column`).toBeLessThanOrEqual(signal.left + 0.5)
+    await expect(tag.scrollWidth, `${tagAt}: count clipped (client ${tag.clientWidth}px)`).toBeLessThanOrEqual(tag.clientWidth + 1)
+    await expect(Math.abs(tagBox.left - titleBox.right - 6), `${tagAt}: count not 6px after the title`).toBeLessThanOrEqual(1)
   }
-  await expect(modes.has('compact')).toBe(true)
-  await expect(modes.has('hidden')).toBe(true)
+  await expect(modes.has('compact'), `deep modes seen: ${[...modes].join(', ')}`).toBe(true)
+  await expect(modes.has('hidden'), `deep modes seen: ${[...modes].join(', ')}`).toBe(true)
   const [red, green, blue] = getComputedStyle(surfaceRoot).backgroundColor.match(/\d+(\.\d+)?/g)!.map(Number)
   await expect((0.2126 * red! + 0.7152 * green! + 0.0722 * blue!) / 255 > 0.5).toBe(surfaceRoot.getAttribute('data-scheme') === 'light')
 }
