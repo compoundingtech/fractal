@@ -582,10 +582,17 @@ impl Ui {
         }
     }
 
-    /// Where alert `id`'s picks are kept: by the alert and its one question call.
+    /// Where alert `id`'s picks are kept: by the alert and its one question call. Read every
+    /// frame, so it finds the call as the prompt's model does without building the form.
     fn question_call_key(&self, id: &str) -> Option<String> {
         let item = self.world.attention.items().iter().find(|item| item.id == id)?;
-        match prompt_model(&self.world, item)?.calls.as_slice() {
+        let AttentionKind::Prompt { seat_id, answers, call, .. } = &item.kind else {
+            return None;
+        };
+        if answers.is_empty() {
+            return None;
+        }
+        match prompt_calls(&self.world, seat_id, call).as_slice() {
             [only] => Some(question_key(id, &only.id)),
             _ => None,
         }
@@ -720,12 +727,15 @@ impl Ui {
     /// the alert, its seat's pending calls and harness, the form's state, the width and the
     /// limit. Typing redraws every key, and the card should cost it nothing.
     fn band_card(&self, item: &Attention, width: usize, limit: usize, place: Place) -> (Doc, usize) {
-        use std::fmt::Write as _;
         use std::hash::{Hash, Hasher};
+        // Serialized, not formatted with Debug: this runs every frame, and serde is the cheaper.
         struct Feed<'a>(&'a mut std::collections::hash_map::DefaultHasher);
-        impl std::fmt::Write for Feed<'_> {
-            fn write_str(&mut self, text: &str) -> std::fmt::Result {
-                self.0.write(text.as_bytes());
+        impl std::io::Write for Feed<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.write(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
         }
@@ -745,13 +755,12 @@ impl Ui {
                 .find(|agent| agent.id == seat)
                 .map(|agent| agent.harness)
         });
-        let _ = write!(
-            Feed(&mut hasher),
-            "{item:?}{calls:?}{harness:?}{:?}{}{:?}",
-            state.mark,
-            state.keys,
-            state.chosen
-        );
+        let _ = serde_json::to_writer(Feed(&mut hasher), item);
+        for call in calls.into_iter().flatten() {
+            (&call.id, &call.tool).hash(&mut hasher);
+            let _ = serde_json::to_writer(Feed(&mut hasher), &call.input);
+        }
+        (harness, state.mark, state.keys, state.chosen).hash(&mut hasher);
         let signature = hasher.finish();
         let key = (item.id.clone(), limit, place);
         if let Some((kept, doc, shown)) = self.band_cards.borrow().get(&key)
