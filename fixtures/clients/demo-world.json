@@ -479,7 +479,7 @@
           "fix": "Its API key expired at 08:40. Renew the key, then restart the seat.",
           "kind": "fault",
           "source": "seat release-captain on harbor",
-          "what": "Release Captain exited 4 times in 10 minutes and st stopped restarting it."
+          "what": "Release Captain exited 4 times in 10 minutes and Fractal stopped restarting it."
         },
         "mission": "mission/fleet/release/weekly",
         "raised_by": null,
@@ -813,7 +813,7 @@
                 "mission/fleet/harbor/nightly     done     4/4"
               ],
               "state": "ok",
-              "title": "$ st missions ls --since 22:00"
+              "title": "$ fractal missions ls --since 22:00"
             }
           },
           "id": "c3"
@@ -873,7 +873,7 @@
               "body": "release-captain on harbor exited 4 times in 10 minutes. Restarts are paused until a person acts.",
               "delivered": false,
               "dictated": false,
-              "from": "st",
+              "from": "Fractal",
               "subject": "Seat release-captain stopped restarting",
               "to": "Chief of Staff"
             }
@@ -1062,7 +1062,7 @@
     },
     "session/unmanaged-1": {
       "state": "failed",
-      "value": "This codex process was found running on lark, but st cannot tell which session file it writes, so there is no conversation to show. Start it through st to see it here."
+      "value": "This codex process was found running on lark, but Fractal cannot tell which session file it writes, so there is no conversation to show. Start it through fractal to see it here."
     }
   },
   "devices": {

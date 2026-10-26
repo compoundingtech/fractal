@@ -308,7 +308,7 @@ async fn legacy_inventory(client: &Client, inventory: Inventory) -> InventoryRea
         Inventory::Sessions => InventoryRead::Rows(inventory, model::read_native_sessions(client).await.map_err(|error| error.to_string())),
         Inventory::Terminals => InventoryRead::Terminals(client.terminals_list(None, Some(200), false).await.map(|reply| (reply.value.items, reply.value.page.has_more)).map_err(|error| error.human())),
         Inventory::Clients => InventoryRead::Clients(client.clients_list().await.map(|reply| reply.value).map_err(|error| match error {
-            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this st does not list its clients yet: its daemon needs an update".into(),
+            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this Fractal does not list its clients yet: its daemon needs an update".into(),
             error => error.human(),
         })),
         Inventory::Usage(hours) => {
@@ -360,10 +360,10 @@ fn usage_error(error: &fractal_client::ClientError) -> String {
     match error {
         // A daemon from before the read answers its path with a bare 404.
         fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound, _, _) => {
-            "This st does not serve usage yet: its daemon needs an update.".into()
+            "This Fractal does not serve usage yet: its daemon needs an update.".into()
         }
         fractal_client::ClientError::Protocol(message) if message.starts_with("HTTP 404") => {
-            "This st does not serve usage yet: its daemon needs an update.".into()
+            "This Fractal does not serve usage yet: its daemon needs an update.".into()
         }
         error => format!("Could not read usage: {}", error.human()),
     }
@@ -670,7 +670,7 @@ pub fn run(context: Context) -> Result<()> {
         let turn_started = Instant::now();
         // A program written over on disk while it runs is told to the person at once, and noted.
         if started.elapsed().as_secs().is_multiple_of(10) && super::lastrun::binary_replaced() {
-            ui.flash("st was updated on disk while this was running: restart it, the system may stop it");
+            ui.flash("Fractal was updated on disk while this was running: restart it, the system may stop it");
         }
         ui.tick = (started.elapsed().as_millis() / 100) as u64;
         if ui
@@ -967,7 +967,7 @@ pub fn run(context: Context) -> Result<()> {
                     extras.offline = None;
                     extras.offline_since = None;
                     ui.flash(format!(
-                        "Live stream lost ({reason}); st answers, reconnecting"
+                        "Live stream lost ({reason}); Fractal answers, reconnecting"
                     ));
                     extras.degraded = Some(reason);
                     attached = None;
@@ -1542,7 +1542,7 @@ pub fn run(context: Context) -> Result<()> {
                     ui.content.finish(key, Err("Offline · reconnect, then load again".into()));
                 }
                 ui.flash(if extras.degraded.is_some() {
-                    "Reconnecting to st · try again in a moment; nothing was queued"
+                    "Reconnecting to Fractal · try again in a moment; nothing was queued"
                 } else {
                     "Offline · reconnect before acting; nothing was queued"
                 });
@@ -2484,7 +2484,7 @@ async fn older_page(
         }
         cursor = page.cursor;
     }
-    Err("this session is too long to read further back here; st conversations timeline reads it all".into())
+    Err("this session is too long to read further back here; fractal conversations timeline reads it all".into())
 }
 
 /// How long a message st did not confirm waits before it is sent again by itself, for each time.
@@ -2580,7 +2580,7 @@ fn history_note(timeline: &fractal_conversation_ui::Timeline) -> Option<super::v
     } else if timeline.items.is_empty() {
         return None;
     } else {
-        "Start of this session · earlier ones: st conversations sessions".to_owned()
+        "Start of this session · earlier ones: fractal conversations sessions".to_owned()
     };
     Some(super::view::Entry {
         id: HISTORY_NOTE.into(),
@@ -2782,7 +2782,7 @@ async fn perform(
             agent_control(client, &agent, control).await?;
             Ok((
                 format!(
-                    "{} {}: asked st",
+                    "{} {}: asked Fractal",
                     control.verb(),
                     agent.trim_start_matches("agent/")
                 ),
@@ -3719,7 +3719,7 @@ mod tests {
         assert_eq!(connecting_text(Duration::from_secs(3)), "connecting 3s");
         assert_eq!(
             connecting_text(Duration::from_secs(12)),
-            "connecting 12s, st is slow to answer"
+            "connecting 12s, Fractal is slow to answer"
         );
     }
 
@@ -5074,7 +5074,7 @@ fn connecting_text(waited: Duration) -> String {
     match waited.as_secs() {
         0..2 => "connecting".into(),
         2..8 => format!("connecting {}s", waited.as_secs()),
-        seconds => format!("connecting {seconds}s, st is slow to answer"),
+        seconds => format!("connecting {seconds}s, Fractal is slow to answer"),
     }
 }
 

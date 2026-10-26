@@ -192,7 +192,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             extras
                 .degraded
                 .iter()
-                .map(|why| format!("live stream: {why} · st answers, reconnecting")),
+                .map(|why| format!("live stream: {why} · Fractal answers, reconnecting")),
         )
         .collect();
     World {
@@ -311,10 +311,12 @@ fn tier(id: &str) -> Option<Tier> {
     }
 }
 
-/// Who st names, as a person reads it: an agent by its label and id, st's own machinery as
-/// "st", a mission or a person as st labels it.
+/// Who Fractal names, as a person reads it: an agent by its label and id, Fractal's own
+/// machinery as "Fractal", a mission or a person as Fractal labels it.
 fn who(actor: &fractal_client::AttentionActor) -> String {
-    if actor.id.starts_with("agent/") && actor.label != "st" {
+    if actor.label == "st" {
+        "Fractal".into()
+    } else if actor.id.starts_with("agent/") {
         format!("{} · {}", actor.label, actor.id)
     } else {
         actor.label.clone()
@@ -489,7 +491,7 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                         "fault" => return None,
                         // A newer st's card: show what st says, never drop it.
                         _ => unplaced(
-                            "st names a card this client does not know: answer it with st alerts.",
+                            "Fractal names a card this client does not know: answer it with fractal alerts.",
                         ),
                     };
                     // A group this client does not know shows where st's alert flag puts it.
@@ -505,7 +507,7 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                 None => (
                     fallback,
                     unplaced(
-                        "st does not say what this is: this host's st is older, or has not presented it yet. Answer it with st alerts.",
+                        "Fractal does not say what this is: this host's Fractal is older, or has not presented it yet. Answer it with fractal alerts.",
                     ),
                 ),
             };
@@ -610,7 +612,7 @@ pub fn preview(name: &str, normalized: &Value) -> MissionPreview {
             let assignee = match selector["kind"].as_str() {
                 Some("assigned") => selector["agent"].as_str().map(short).unwrap_or_default(),
                 Some("available") => "any of several".into(),
-                Some("agentless") => "st".into(),
+                Some("agentless") => "Fractal".into(),
                 _ => "—".into(),
             };
             if let Some(agent) = selector["agent"].as_str()
@@ -1964,7 +1966,7 @@ mod tests {
         assert!(matches!(live.link, Link::Live));
         assert_eq!(
             live.stale,
-            ["live stream: st closed the connection · st answers, reconnecting"]
+            ["live stream: st closed the connection · Fractal answers, reconnecting"]
         );
     }
 
@@ -2207,7 +2209,7 @@ mod tests {
             matches!(&item.kind, AttentionKind::Review { feedback: true, step, .. } if step == "review")
         );
         assert_eq!(item.agent.as_deref(), Some("agent/example/auditor"));
-        assert_eq!(item.raised_by.as_deref(), Some("st"));
+        assert_eq!(item.raised_by.as_deref(), Some("Fractal"));
         assert_eq!(item.waiting.as_deref(), Some("step review"));
     }
 
@@ -2293,7 +2295,7 @@ mod tests {
             panic!("{:#?}", items[0].kind);
         };
         assert_eq!(text, "What st says.");
-        assert!(why.contains("st is older"), "{why}");
+        assert!(why.contains("Fractal is older"), "{why}");
         // The gate keeps the actions st offers; the client offers none of its own.
         assert_eq!(items[0].actions, ["review.approve", "review.reject"]);
         assert!(
@@ -2620,7 +2622,7 @@ mod tests {
         })]);
         let seat = &agents(&model, &[])[0];
         assert_eq!((seat.state, seat.reported.as_deref()), (AgentState::Unknown, Some("running")));
-        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older st");
+        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older Fractal");
         let world = world(&model, "person/avery", &Extras::default());
         let legend = super::super::screens::agents_list(&world, "⠋", 80)
             .legend
@@ -2628,7 +2630,7 @@ mod tests {
             .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(legend.contains("This host's st is older"), "{legend}");
+        assert!(legend.contains("This host's Fractal is older"), "{legend}");
     }
 
     #[test]

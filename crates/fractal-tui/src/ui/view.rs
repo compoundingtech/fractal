@@ -520,7 +520,7 @@ impl Reach {
             Reach::Direct => "connected",
             Reach::Indirect => "online via others",
             Reach::Offline => "offline",
-            Reach::Unknown => "st cannot tell",
+            Reach::Unknown => "Fractal cannot tell",
         }
     }
 }
