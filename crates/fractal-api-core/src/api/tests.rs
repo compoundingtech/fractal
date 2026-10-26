@@ -4455,6 +4455,26 @@ async fn replication_worker_status_changes_only_local_memory() {
 }
 
 #[tokio::test]
+async fn a_worker_process_report_feeds_the_member_cpu_minutes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let report = |cpu_ns: u64| json!({"process": {"pid": 4242, "started_at_unix_ms": 7, "cpu_ns": cpu_ns}});
+    let boundary = |minute| {
+        request_latency().lock().unwrap().cpu_minutes().boundary(minute, Instant::now(), 0, 1)
+    };
+    let (status, response) = json_request(app.clone(), "/v1/internal/replication/worker-status", report(6_000_000_000)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    // Minutes long past, apart from the live hour the other tests read.
+    assert_eq!(boundary(10), None);
+    json_request(app, "/v1/internal/replication/worker-status", report(12_000_000_000)).await;
+    assert_eq!(boundary(11), Some(10));
+    let minutes = request_latency().lock().unwrap().cpu_minutes().report(11 * 60_000);
+    // The daemon's own CPU did not move: what the minute holds is the worker's.
+    assert!(minutes["windows"]["1m"]["cores"].as_f64().is_some_and(|cores| cores > 0.0), "{minutes}");
+}
+
+#[tokio::test]
 async fn idle_replication_receipts_do_not_wake_client_streams() {
     const FLEET: &str = "94cd11ba-c582-4558-9c84-c3bda922eb6d";
     let root = tempfile::tempdir().unwrap();

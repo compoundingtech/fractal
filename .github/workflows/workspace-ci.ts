@@ -863,7 +863,8 @@ const embeddedPython = (script: string) =>
 // SHA-256(story ID) modulo this count; increasing it does not depend on index order. Only the
 // full set (KIT_PLAY_SET=all: merge groups and manual runs) is sharded; pull requests run the
 // per-commit set unsharded on shard 0.
-const kitShardCount = 2
+// Four shards leave room for shard 0's non-play lanes within the unchanged 25-minute job budget.
+const kitShardCount = 4
 const kitSharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
 // What one run of the lane covers, written once: the matrix, the run step, each shard's note and the whole-check note
 // all read these, so a note can never claim more shards or a fuller test set than the run had.
