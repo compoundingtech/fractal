@@ -392,9 +392,36 @@ fn request_resource(path: &str) -> &'static str {
     }
 }
 
-/// Send exactly once, including mutations. A 401 invalidates only the credential used here;
-/// another poll can acquire again after backoff. Never retry the original HTTP request.
+/// Send reads with separately admitted same-origin redirect hops. Mutations, 401s and
+/// ordinary failures are sent once; a later poll reacquires credentials after backoff.
 pub async fn send(
+    request: reqwest::RequestBuilder,
+    auth: &GithubAuth,
+) -> Result<reqwest::Response> {
+    let (client, request) = request.build_split();
+    let request = request?;
+    if request.method() != reqwest::Method::GET && request.method() != reqwest::Method::HEAD {
+        return send_once(reqwest::RequestBuilder::from_parts(client, request), auth).await;
+    }
+    let mut template = request;
+    let mut redirects = 0;
+    loop {
+        let request = template.try_clone().context("GitHub read body cannot be replayed for a redirect")?;
+        let response = send_once(reqwest::RequestBuilder::from_parts(client.clone(), request), auth).await?;
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let location = response.headers().get(reqwest::header::LOCATION)
+            .context("GitHub redirect has no Location")?.to_str()?;
+        let target = template.url().join(location)?;
+        anyhow::ensure!(target.origin() == template.url().origin(), "GitHub redirect changed API origin");
+        anyhow::ensure!(redirects < 10, "GitHub redirect limit exceeded");
+        redirects += 1;
+        *template.url_mut() = target;
+    }
+}
+
+async fn send_once(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
 ) -> Result<reqwest::Response> {

@@ -760,32 +760,16 @@ async fn github_json(
     {
         return Ok(payload.clone());
     }
-    let mut current_url = reqwest::Url::parse(&url)?;
-    let mut redirects = 0;
-    let response = loop {
-        let mut request = client
-            .get(current_url.clone())
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28");
-        if let Some(etag) = cached.as_ref().and_then(|payload| payload.etag.as_deref()) {
-            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-        }
-        let response = crate::github_http::send(request, token).await?;
-        record_github_response(response.status(), response.headers());
-        let response = github_response(response).await?;
-        if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
-            let location = response.headers().get(reqwest::header::LOCATION)
-                .context("GitHub redirect has no Location")?.to_str()?;
-            let target = current_url.join(location)?;
-            // Never forward a credential to another origin or downgrade HTTPS.
-            anyhow::ensure!(target.origin() == current_url.origin(), "GitHub redirect changed API origin");
-            anyhow::ensure!(redirects < 10, "GitHub redirect limit exceeded");
-            redirects += 1;
-            current_url = target;
-            continue;
-        }
-        break response;
-    };
+    let mut request = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(etag) = cached.as_ref().and_then(|payload| payload.etag.as_deref()) {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    let response = crate::github_http::send(request, token).await?;
+    record_github_response(response.status(), response.headers());
+    let response = github_response(response).await?;
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
         let payload = cached
             .as_mut()

@@ -43,11 +43,12 @@ the first refusal's expired reset.
 
 Each REST page, check/status sub-request and GraphQL query (including a smaller
 query retried after a GraphQL execution error) passes admission separately.
-REST redirects are followed explicitly, up to ten hops within the same API
+REST read redirects are followed explicitly, up to ten hops within the same API
 origin, with a new reservation and response attribution for each hop. Cross-origin
-redirects are refused rather than forwarding credentials. Automatic transport
-retries are disabled in the observer and authorized gateway clients; an ordinary
-HTTP 5xx is not retried inside a send. A reservation can still correspond to no
+redirects are refused rather than forwarding credentials. Mutations are sent once,
+without following redirects. Automatic transport retries are disabled in the
+observer and authorized gateway clients; an ordinary HTTP 5xx is not retried
+inside a send. A reservation can still correspond to no
 completed HTTP request when a connection fails, so the ledger remains a
 conservative attempt ceiling rather than proof of exact provider debits.
 
