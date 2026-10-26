@@ -280,3 +280,10 @@ success-output = "immediate"
 [[profile.ci.overrides]]
 filter = 'package(=fractal-runtime) and test(=process::tests::current_process_token_matches_proc_self)'
 success-output = "immediate"
+
+# Helper credential authority must exercise a real PTY child on the PR hash shards.
+# Missing pty is a hard failure in hosted CI, including non-systemd runners.
+[[profile.ci.overrides]]
+filter = 'package(=fractal-runtime) and test(=pty::tests::process_identity_captures_the_harness_not_the_pty_server_and_fences_incarnation)'
+retries = 0
+success-output = "immediate"

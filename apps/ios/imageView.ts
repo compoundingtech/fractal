@@ -17,7 +17,7 @@ export function imageFailure(code: string | undefined, message: string): { words
   switch (code) {
     // The owner of the message keeps the bytes; it is off or out of reach (docs/st3/attachments.md).
     case 'remote-unavailable': return { words: `${message.replace(/\.$/, '')}. The computer that has this image cannot be reached right now (remote unavailable).`, retry: true };
-    case 'blob-expired': return { words: 'This image has expired: st no longer keeps it.', retry: false };
+    case 'blob-expired': return { words: 'This image has expired: Fractal no longer keeps it.', retry: false };
     case 'forbidden': return { words: 'You cannot read this image.', retry: false };
     default: return { words: message || 'The image could not be read.', retry: true };
   }

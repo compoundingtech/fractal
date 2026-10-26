@@ -3,8 +3,9 @@
 
 An agent (ST_AGENT set) on a machine whose signer is listed on main runs the tests deliberately, with `scripts/st-test
 --push REMOTE`, before it pushes: that runner signs what it ran. This hook only asks `scripts/st-test --status` whether
-HEAD's tree is covered for every check. Covered (a note, a lane edit CI runs, a check with no local command) and the push goes,
-silently; otherwise the push is REFUSED (git sees exit 1) with the uncovered checks and the command to run. The hook never runs signing
+HEAD's tree is covered for every check. Covered (a note, or a check with no local command) and the push goes, silently; a tree
+that edits a check's lane is signed like any other, so a row that leaves a lane edit to CI ('lane edit: CI runs it') is not
+covered (Nathan, 2026-10-26: every pull request of ours is signed); otherwise the push is REFUSED (git sees exit 1) with the uncovered checks and the command to run. The hook never runs signing
 for an agent. ST_EVIDENCE_OVERRIDE='reason' lets such a push go anyway: one line is printed and the receipt records outcome
 `override` with the reason; `git push --no-verify` stays git's own escape. A machine without a signer, or without one listed
 on main, keeps the behaviour below, as does a push by a person (no ST_AGENT).
@@ -197,16 +198,19 @@ def refuse_unless_covered(script, top, remote, base, tree, pushed):
                                 cwd=top, env=clean_environment(), timeout=positive('ST_EVIDENCE_STATUS_TIMEOUT', STATUS_LIMIT))
     except subprocess.TimeoutExpired:
         status = None
-    if status is not None and status.returncode == 0:
+    # An older st-test reports a lane edit as covered by CI (exit 0): that is not signed, so it is refused like a check with no note.
+    lane_edits = [line.split()[0] for line in status.stdout.splitlines() if ' lane edit: CI runs it ' in f' {line} '] \
+        if status is not None and status.returncode == 0 else []
+    if status is not None and status.returncode == 0 and not lane_edits:
         receipt(tree, pushed, 'covered')
         return 0
-    if status is None or status.returncode != 3:
+    if status is None or status.returncode not in (0, 3):
         problem = 'it did not answer in time' if status is None else (status.stderr or status.stdout).strip()[-300:]
         say(f'refused: could not tell whether this tree ({tree[:12]}) is covered ({problem}). Try the push again; '
             f'if it still cannot tell, run `{command}` first')
         receipt(tree, pushed, 'refused', uncovered=None)
         return REFUSED
-    uncovered = [line.split()[0] for line in status.stdout.splitlines() if ' not covered ' in f'{line} ']
+    uncovered = [line.split()[0] for line in status.stdout.splitlines() if ' not covered ' in f'{line} '] + lane_edits
     say(f'refused: this tree ({tree[:12]}) is not covered for: {", ".join(uncovered) or "(see below)"}')
     print(status.stdout.rstrip(), file=sys.stderr)
     say(f'run the tests here, which signs what they ran, then push again:\n\n    {command}\n\n'

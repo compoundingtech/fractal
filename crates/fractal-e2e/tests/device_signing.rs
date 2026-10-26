@@ -939,7 +939,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
         let error = format!("{error:#}");
         let session = observed.lock().unwrap().take().unwrap();
         assert!(error.contains(session["device_id"].as_str().unwrap()));
-        assert!(error.contains("st devices revoke"));
+        assert!(error.contains("fractal devices revoke"));
         assert!(error.contains("server consumed the pairing code"));
         assert!(!error.contains(session["credential"].as_str().unwrap()));
         assert!(!error.contains(&private));
@@ -1041,7 +1041,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
     let failure = format!("{:#}", result.unwrap_err());
     assert!(failure.contains("not writable"));
     assert!(failure.contains("Possible orphaned device device/"));
-    assert!(failure.contains("st devices revoke"));
+    assert!(failure.contains("fractal devices revoke"));
     assert!(
         std::fs::read(&path).unwrap() == saved,
         "Previous profile bytes changed"

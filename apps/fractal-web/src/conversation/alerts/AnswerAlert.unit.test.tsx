@@ -198,7 +198,7 @@ describe('AnswerAlert', () => {
     expect(none).toContain('There is no valid preview of this launch yet, so it cannot be approved. The mission file does not parse.')
     expect(none).not.toContain('>Approve launch<')
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'revision-approval', detail: 'Add a deploy step', actions: ['mission.approve-revision'] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
-      .toContain('st work revision approve or cancel')
+      .toContain('fractal work revision approve or cancel')
   })
 
   it('shows a JSON report as its telling fields', () => {
@@ -212,7 +212,7 @@ describe('AnswerAlert', () => {
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'harness-login', actions: [] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
       .toContain('Sign in from the seat&#x27;s terminal.')
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'fault', actions: [] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
-      .toContain('Answer this one in st for now.')
+      .toContain('Answer this one in Fractal for now.')
   })
 
   it('opens the first of several alerts and folds the rest under their titles', () => {
@@ -258,7 +258,7 @@ describe('gatewayAlertActions', () => {
     const action = { type: 'work.done', summary: 'Yes' } as const
     expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'This was already answered or closed.' })
     expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'This changed since you read it. Read it again before answering.' })
-    expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'st no longer offers this answer here.' })
+    expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'Fractal no longer offers this answer here.' })
     expect(workDone).not.toHaveBeenCalled()
   })
 
@@ -314,7 +314,7 @@ describe('gatewayAlertActions', () => {
     expect(await approve({ variant_id: 'variant/one', preview_token: token('a') }, [two])).toEqual(changed)
     // No variant or preview named.
     expect(await approve({ episode: token('b') }, [two])).toEqual({
-      _tag: 'Refused', detail: 'This alert does not say which preview it shows, so it cannot be approved here. Review it in st.',
+      _tag: 'Refused', detail: 'This alert does not say which preview it shows, so it cannot be approved here. Review it in Fractal.',
     })
   })
 
