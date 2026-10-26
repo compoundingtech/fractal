@@ -610,6 +610,7 @@ impl RuntimeStartsStore for Store {
             self.graph.ensure_principal_key(actor).map_err(|error| anyhow::anyhow!(
                 "runtime-start admission refused: cannot prepare signing key for actor {actor}: {error}"
             ))?;
+            self.graph.ensure_principal_key("agent/st3/reconciler")?;
         }
         self.connection.batched(|tx| -> Result<RuntimeStartAdmission> {
             let selected = current_desired_row_tx(tx, &operation.subject)?;
@@ -662,7 +663,8 @@ impl RuntimeStartsStore for Store {
                     fields.insert("incarnation_id".into(), Value::from(incarnation));
                 }
                 let control = ClaimInput { subject: operation.subject.clone(), kind: "runtime.action.requested".into(),
-                    actor: request.actor.clone(), fields, evidence: vec![request.id.clone()],
+                    actor: request.actor.as_ref().map(|_| "agent/st3/reconciler".into()),
+                    fields, evidence: vec![request.id.clone()],
                     expected_subject: None, idempotency_key: Some(key.clone()) };
                 let control = if request.actor.is_none() {
                     let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM local_observations WHERE dedupe_key=?1)",
@@ -1382,7 +1384,7 @@ mod tests {
                 assert_eq!(held(&store.readers.get()), 1);
                 let control: ClaimRecord =
                     serde_json::from_value(start.body["control_request_receipt"].clone()).unwrap();
-                assert_eq!(control.actor.as_deref(), Some(actor));
+                assert_eq!(control.actor.as_deref(), Some("agent/st3/reconciler"));
                 assert!(store.runtime_start_for(actor).unwrap().is_some());
             }
         }

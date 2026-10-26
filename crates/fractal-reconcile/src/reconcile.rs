@@ -3234,6 +3234,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             }
                             return Ok(());
                         }
+                        self.retire_obsolete_failed_restart(subject, now_ms())?;
                         // A pending publication must not orphan a suspend or block its resume.
                         if let Some(suspension) = &suspension {
                             return self.reconcile_suspension(
@@ -6091,6 +6092,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return Ok(None);
                 }
                 Ok(Some(caught(|| -> Result<()> {
+                    self.retire_obsolete_failed_restart(subject, now_ms())?;
                     self.reconcile_stop_with_origin(subject, ptys, actual_origin)?;
                     self.remove_checkout_after_run(subject, live_workspaces)
                 })))
@@ -8123,6 +8125,76 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
+    /// A failed launch is not a durable grant to restart after later lifecycle intent.
+    /// Keep its unresolved producer fenced, but consume the obsolete restart request.
+    fn retire_obsolete_failed_restart(&self, subject: &DesiredSubject, now: u128) -> Result<bool> {
+        const MAX_FAILED_RESTART_AGE_MS: u128 = 60 * 60 * 1000;
+        let Some(pending) = self.store.runtime_start_for(&subject.subject)? else {
+            return Ok(false);
+        };
+        if !pending.finished || pending.cleanup_verified
+            || !pending.result.as_ref().is_some_and(|result| result["error"].is_string())
+        {
+            return Ok(false);
+        }
+        let Some(request) = crate::restart::latest_request(&self.store, &subject.subject)? else {
+            return Ok(false);
+        };
+        let completion = format!("agent-restart-completed:{}", request.id);
+        if self.store.operation_claim(&completion)?.is_some() {
+            return Ok(false);
+        }
+        let later_control = self.store.claims_for(&subject.subject, Some("runtime.action.requested"))?
+            .into_iter().rev().take_while(|claim| claim.id != request.id)
+            .any(|claim| claim.actor.is_some() && matches!(
+                claim.body["fields"]["action"].as_str(),
+                Some("suspend" | "resume" | "stop" | "terminate")
+            ));
+        let retired = self.store.claims_for(&subject.subject, Some("agent.retired"))?
+            .into_iter().any(|claim| claim.store_index > request.store_index);
+        let reason = if self.store.selected_desired_token(&subject.subject)?.as_deref()
+            != request.body.pointer("/evidence/0").and_then(Value::as_str)
+        {
+            "the desired declaration changed after the restart request"
+        } else if retired || later_control || crate::suspension::current(&self.store, &subject.subject)?
+            .is_some_and(|suspension| suspension.holds_seat())
+        {
+            "later lifecycle control or suspension superseded the restart request"
+        } else if now.saturating_sub(request.accepted_at_unix_ms) > MAX_FAILED_RESTART_AGE_MS {
+            "the failed-start restart request exceeded its one-hour retry authority"
+        } else {
+            return Ok(false);
+        };
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: Some(RECONCILER_ACTOR.into()),
+            fields: BTreeMap::from([
+                ("decision".into(), Value::from("restart-retired-obsolete-request")),
+                ("reason".into(), Value::from(reason)),
+                ("operation".into(), Value::from(pending.id)),
+            ]),
+            evidence: vec![request.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(format!("restart-retired-obsolete-request:{}", request.id)),
+        })?;
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.action.succeeded".into(),
+            actor: Some(RECONCILER_ACTOR.into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("operation_status".into(), Value::from("retired")),
+                ("reason".into(), Value::from(reason)),
+            ]),
+            evidence: vec![request.id],
+            expected_subject: None,
+            idempotency_key: Some(completion),
+        })?;
+        self.signal_changed();
+        Ok(true)
+    }
+
     /// A requester-authored action replicates to the runtime owner. The declaration and old
     /// incarnation fence it, so a delayed request cannot stop a replacement or revive a stop.
     /// A start that FAILED and whose producer closure was never proven stays pending, and while it
@@ -8170,6 +8242,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(_lock) = self.store.try_runtime_start_lock(&subject.subject)? else {
             return Ok(false);
         };
+        if self.retire_obsolete_failed_restart(subject, now_ms())? {
+            return Ok(false);
+        }
         if pending.revoked_by.is_none() {
             self.revoke_start(&subject.subject)?;
         }
@@ -8214,6 +8289,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             != request.body.pointer("/evidence/0").and_then(Value::as_str)
         {
             return Ok(false);
+        }
+        if self.retire_obsolete_failed_restart(subject, now_ms())? {
+            return Ok(true);
         }
         let completion = format!("agent-restart-completed:{}", request.id);
         if let Some(result) = self.store.operation_claim(&completion)? {

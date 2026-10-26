@@ -26,6 +26,8 @@ st agents show agent/garden/worker
 
 When repeated failed starts have parked an agent, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the agent parks again and its cause stays visible in `fractal agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
 
+A failed start with unverified producer closure can be superseded only by a still-current restart request accepted within the last hour. The selected desired declaration must still match the request, with no later suspension, resume, stop, termination or retirement; a current suspension also blocks recovery. Otherwise reconciliation records `restart-retired-obsolete-request` and completes the request as `retired` without launching or asserting producer closure. A new explicit restart is required after intent changes or expiry. The existing minimum failed-start age, absent-runtime check and kernel launch lock still apply. Synthesized start control requests are attributed to `agent/st3/reconciler`, with the original requester-authored restart retained as evidence; they do not impersonate a new request from that actor.
+
 The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
 
 ```sh
