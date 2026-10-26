@@ -670,6 +670,15 @@ impl UsageFold {
 }
 
 
+/// A seat st stopped restarting after it failed to start: why, and when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParkedSeat {
+    /// The crash-loop decision that parked it.
+    pub decision: String,
+    pub reason: String,
+    pub parked_at_unix_ms: u128,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentWorkQueue {
     pub current_work_ids: Vec<String>,
@@ -5427,6 +5436,74 @@ impl Store {
         kept.extend(read.iter().map(|(id, time)| (id.clone(), *time)));
         times.extend(read);
         Ok(times)
+    }
+
+    /// Each of `subjects` that st parked at `at_index` and that has not run since: its newest
+    /// crash-loop raise (after repeated failed starts, or a failed explicit restart) for its
+    /// current launch, with no running observation after it. A new declaration launches afresh,
+    /// so a raise for an earlier launch parks nothing.
+    pub fn parked_seats_for(
+        &self,
+        subjects: &[String],
+        at_index: u64,
+    ) -> Result<BTreeMap<String, ParkedSeat>> {
+        let connection = self.readers.get();
+        // One seek per subject, and only past its newest running observation: a seat that ran
+        // since it was parked has nothing to find.
+        let mut statement = connection.prepare_cached(
+            "SELECT subjects.value, claims.id, claims.body, claims.accepted_at_unix_ms
+             FROM json_each(?1) subjects
+             JOIN claims ON claims.id=(
+                 SELECT id FROM claims WHERE subject=subjects.value
+                    AND kind='runtime.reconcile-decision' AND store_index<=?2
+                    AND store_index>COALESCE((SELECT MAX(store_index) FROM claims
+                        WHERE subject=subjects.value AND kind='runtime.observed'
+                          AND store_index<=?2
+                          AND json_extract(body, '$.fields.status')='running'), 0)
+                    AND json_extract(body, '$.fields.decision')='raise'
+                    AND (json_extract(body, '$.fields.key') GLOB 'runtime-crash-loop:*'
+                      OR json_extract(body, '$.fields.key') GLOB 'codex-crash-loop:*')
+                  ORDER BY store_index DESC LIMIT 1)",
+        )?;
+        let mut parked = BTreeMap::new();
+        for chunk in subjects.chunks(256) {
+            let rows = statement
+                .query_map(params![serde_json::to_string(chunk)?, at_index], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (subject, id, body, accepted_at) in rows {
+                let body: Value = serde_json::from_str(&body)?;
+                let fields = body.get("fields").unwrap_or(&body);
+                let token = fields
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .and_then(|key| key.split_once(':'))
+                    .map(|(_, token)| token.to_owned())
+                    .unwrap_or_default();
+                if !launch_lineage_tx(&connection, &subject)?.contains(&token) {
+                    continue;
+                }
+                parked.insert(
+                    subject,
+                    ParkedSeat {
+                        decision: id,
+                        reason: fields
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("st stopped restarting it after repeated failures")
+                            .to_owned(),
+                        parked_at_unix_ms: accepted_at.parse().unwrap_or_default(),
+                    },
+                );
+            }
+        }
+        Ok(parked)
     }
 
     /// A seat's harness diagnostics in canonical order, without the Claude channel's
