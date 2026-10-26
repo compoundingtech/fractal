@@ -1,4 +1,4 @@
-# st agent migration
+# Fractal agent migration
 
 Status: current isolated migration guide.
 
@@ -21,7 +21,7 @@ Write stable facts that an agent on the host needs. Do not put current work in t
 Store the bytes first:
 
 ```sh
-st documents put hosts/local.md --as doc/hosts/local
+fractal documents put hosts/local.md --as doc/hosts/local
 ```
 
 The command returns the exact SHA-256 reference. Put that reference in a host declaration:
@@ -35,7 +35,7 @@ host "local" {
 ```
 
 Include the host declaration in the mission candidate. Approval fails when the exact document is
-absent. st writes no file for it: `st work claim` on that host prints each host document after the
+absent. Fractal writes no file for it: `fractal work claim` on that host prints each host document after the
 claimed step.
 
 ## Prepare a durable seat
@@ -55,23 +55,23 @@ agent "agents/example" {
 The stable subject is `agent/agents/example`. The host places the seat but does not become part of
 that slash-qualified identity.
 
-A harness block takes no `prompt` child; st refuses one with `harness-prompt-removed`. The seat
+A harness block takes no `prompt` child; Fractal refuses one with `harness-prompt-removed`. The seat
 starts idle and takes no turn until a person types or a message is posted.
 
 Put current work in separate finite mission steps assigned to this subject. Do not put it in the
-host document. When a step assigned to the seat becomes ready, st posts the seat a message that
+host document. When a step assigned to the seat becomes ready, Fractal posts the seat a message that
 names it.
 
 Publish exact authored seat KDL without creating a planner session:
 
 ```sh
-st apply agents/example.kdl --as person/operator
+fractal apply agents/example.kdl --as person/operator
 ```
 
-The convenience form is `st agents start agents/example --harness codex --workspace
+The convenience form is `Fractal agents start agents/example --harness codex --workspace
 /work/example --as person/operator`. Add `--print-kdl` to review its exact KDL first.
 
-`st agents start agent/agents/example --harness codex --workspace /work/example --as
+`Fractal agents start agent/agents/example --harness codex --workspace /work/example --as
 person/operator` names the same seat: pass either the identity or its complete `agent/` subject.
 Slash-qualified and dotted identities are exact; a simple name is prefixed with its placement
 host, as in `agent/HOST.NAME`. A doubled `agent/agent/` prefix is rejected.
@@ -81,11 +81,11 @@ host, as in `agent/HOST.NAME`. A doubled `agent/agent/` prefix is rejected.
 Create and review a launch before any cutover:
 
 ```sh
-st launch start --id agents/example migration-request.md \
+fractal launch start --id agents/example migration-request.md \
   --workspace /work/example \
   --as person/operator
-st launch show launch/agents/example/SESSION
-st launch preview launch/agents/example/SESSION
+fractal launch show launch/agents/example/SESSION
+fractal launch preview launch/agents/example/SESSION
 ```
 
 Inspect the candidate KDL, subject diff, and document hashes. Approve the exact preview separately;
@@ -102,7 +102,7 @@ The rehearsal proves these facts:
 - an agent claims and completes normal graph work;
 - mission cleanup stops the test agent.
 
-## Start the st seat and one work mission
+## Start the Fractal seat and one work mission
 
 Do not start the live st seat while st2 still owns the same agent workspace.
 
@@ -111,8 +111,8 @@ Stop the authorized st2 agent first. Remove only the st2-generated files that co
 Apply the seat, then use a readable run ID for the first finite work trial:
 
 ```sh
-st apply agents/example.kdl --as person/operator
-st missions start work/example \
+fractal apply agents/example.kdl --as person/operator
+fractal missions start work/example \
   --id agents/example/pilot \
   --workspace /work/st3-runs/example \
   --as person/operator \
@@ -129,7 +129,7 @@ Stop the old st2 agent only after the authorized operator accepts the isolated s
 
 Use the st2 supervision mechanism for the old agent. Do not remove its history or catalog files during the trial.
 
-Verify the old process is stopped. Keep the verified st run active, and verify its process arguments and graph state again.
+Verify the old process is stopped. Keep the verified Fractal run active, and verify its process arguments and graph state again.
 
 Run both systems during the fleet migration. Do not bridge their messages or copy old inbox state.
 
@@ -138,7 +138,7 @@ Run both systems during the fleet migration. Do not bridge their messages or cop
 Publish or start a finite mission when the seat needs new work. A mission revision creates a
 successor run generation without changing the seat identity.
 
-Publish an exact root stop to stop the st seat:
+Publish an exact root stop to stop the Fractal seat:
 
 ```kdl
 version 2
@@ -151,11 +151,11 @@ Deleting a local KDL file never changes graph state.
 
 ## Fleet sequence
 
-Move one low-risk agent first. Keep each successful agent on st while the next agent moves.
+Move one low-risk agent first. Keep each successful agent on Fractal while the next agent moves.
 
 For each agent, repeat the same preview, isolated proof, start, verification, and old-runtime stop sequence.
 
-Do not create a root, supervisor, or chief-of-staff runtime for host control. The st daemon owns runtime supervision.
+Do not create a root, supervisor, or chief-of-staff runtime for host control. The Fractal daemon owns runtime supervision.
 
 An accountable fleet root can declare the human responsible for its trace:
 

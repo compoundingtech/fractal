@@ -10,11 +10,11 @@ or is the work waiting on a dependency? These checks use the worker and README m
 [missions in practice](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/missions-in-practice.md):
 
 ```sh
-st doctor
-st service status
-st missions show mission-run/garden/readme/one
-st agents show agent/garden/worker
-st agents queue agent/garden/worker
+fractal doctor
+fractal service status
+fractal missions show mission-run/garden/readme/one
+fractal agents show agent/garden/worker
+fractal agents queue agent/garden/worker
 ```
 
 | What you see | Next check |
@@ -31,10 +31,10 @@ st agents queue agent/garden/worker
 To inspect a stopped agent and why it stopped:
 
 ```sh
-st agents ls --all
-st agents show agent/garden/worker --json
-st subject history agent/garden/worker --limit 20
-st terminals peek agent/garden/worker
+fractal agents ls --all
+fractal agents show agent/garden/worker --json
+fractal subject history agent/garden/worker --limit 20
+fractal terminals peek agent/garden/worker
 ```
 
 The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped agent can retain a historical terminal, and an agent with no recorded terminal may have nothing to peek.
@@ -81,8 +81,8 @@ Other platforms and non-glibc Linux builds do not start this worker.
 ## Check usage without starting another turn
 
 ```sh
-st usage --hours 24 --by agent
-st usage --hours 24 --by mission
+fractal usage --hours 24 --by agent
+fractal usage --hours 24 --by mission
 ```
 
 These are observed token totals. Cost is an API-equivalent estimate, and unpriced models are shown as unpriced. Account limits and stop policies can explain why an agent stopped; the agent's reason is more useful than repeatedly restarting it. See [model accounts](st3/accounts.md).
@@ -92,7 +92,7 @@ These are observed token totals. Cost is an API-equivalent estimate, and unprice
 Finish a first-run prompt by attaching, then detach with **Ctrl+\\**:
 
 ```sh
-st terminals attach agent/garden/worker
+fractal terminals attach agent/garden/worker
 ```
 
 After fixing its dependency, restart a stale running agent; explicitly start an intentionally stopped one. Resume a suspended one instead. [Agent lifecycle](seat-lifecycle.md) gives the commands and their different effects. Retry failed work through the graph after correcting its cause; preserve the failure evidence rather than completing a step just to make the display green.
@@ -102,7 +102,7 @@ For a Claude agent with stale delivery, check `fractal claude-channel status`, t
 If doctor reports an operational contradiction, inspect the bounded repair plan:
 
 ```sh
-st repair dry-run
+fractal repair dry-run
 ```
 
 Apply only the exact reviewed token with the procedure in [operational repair](st3/operational-state/README.md#doctor-and-operational-repair). A changed plan needs a new review; repair appends transitions instead of deleting history.
@@ -162,8 +162,8 @@ reset state, delete the database or downgrade across a migration to get a reacha
 
 ```sh
 command -v st st3 pty
-st --version --json
-st doctor
+fractal --version --json
+fractal doctor
 ```
 
 Use the bin directory from your chosen archive or Nix route in the daemon user's login-shell
@@ -195,9 +195,9 @@ ordinary agent and mission use.
 ## Imported agents and saved sessions
 
 ```sh
-st import ls --all
-st import show SESSION
-st agents show agent/import/codex/ID
+fractal import ls --all
+fractal import show SESSION
+fractal agents show agent/import/codex/ID
 ```
 
 Use actual IDs from discovery; these are placeholders. Check the native session's owning home,
@@ -210,8 +210,8 @@ whether to resume, start or restart them.
 ## Replication and upgrade checks
 
 ```sh
-st replication status
-st doctor
+fractal replication status
+fractal doctor
 ```
 
 Compare sources on every member and follow [two-machine checks](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/two-machines.md)

@@ -52,7 +52,7 @@ If-None-Match on revalidation and a304 preserves full bodies/page links. First
 reads and endpoints without ETags cannot supply a valid conditional header.
 GraphQL has no ETag revalidation. Its shared repository minimum is now5minutes
 (was60seconds), settled remains15minutes, explicit refresh remains explicit.
-This visibly affects st gh watch wakes and observer-backed PR/check/queue UI
+This visibly affects Fractal gh watch wakes and observer-backed PR/check/queue UI
 freshness, up to5minutes while settling. Curator's source page says live merge
 and ci-passed gates fetch current data and enqueue/merge are direct writes; this
 patch does not replace those live gates with cached PR facts. Consumer coverage

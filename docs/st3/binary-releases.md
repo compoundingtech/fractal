@@ -116,11 +116,11 @@ unless the release explicitly documents a downgrade. Before upgrading a healthy 
 store, make a [claim backup](backups.md) and preserve excluded local data separately.
 
 First-run `st` offers to install the background service. For an upgrade or changed
-executable path, `st service install` refreshes
-service definitions and restarts daemon and replication services. `st service restart` suffices
+executable path, `fractal service install` refreshes
+service definitions and restarts daemon and replication services. `fractal service restart` suffices
 when those definitions already point at the intended binaries. Schedule that restart, compare
-`st --version --json` with the daemon's `machine_version` in `st doctor --json`, and verify peer
-health. `st doctor --strict` also treats warnings as failures: inspect each warning rather than
+`fractal --version --json` with the daemon's `machine_version` in `fractal doctor --json`, and verify peer
+health. `fractal doctor --strict` also treats warnings as failures: inspect each warning rather than
 assuming an optional-tool warning means that the API is unavailable. Restarting
 invalidates an ongoing continuous soak window, so coordinate that separately from downloading or
 installing files.
@@ -154,9 +154,9 @@ GitHub's Actions cache nor FlakeHub. The `nix-release-proof` artifact records th
 targets, and output paths. The scheduled check starts four hours before the daily release schedule
 to catch package breakage early.
 
-The st3 Nix check uses nextest to give each test its own process, including CPU-budget and
+The Fractal Nix check uses nextest to give each test its own process, including CPU-budget and
 delivery-presence fixtures. Python, Node, and the Linux process utilities are declared test inputs;
-the st3 messaging compatibility binary is the published release archive pinned by
+the Fractal messaging compatibility binary is the published release archive pinned by
 `.github/messaging-compat-baseline.json` and supplied through `ST3_MESSAGING_COMPAT_BIN` by the check’s `preCheck` inside the sandbox.
 The native runtime suite and documentation tests remain covered.
 
@@ -201,7 +201,7 @@ main builds continue. PRs above the documented [adoption boundary](release-impac
 also need a fresh valid fragment before merging. See [release impact authoring](release-impact.md) for
 committed fragments, measurements, historical backfills, and a notes-only preview.
 
-Archive builds carry a clean release stamp: `st --version` reports the package
+Archive builds carry a clean release stamp: `fractal --version` reports the package
 version and source revision with `(release)`, and JSON exposes the same machine
 version. A tag build uses its semantic tag version; untagged main builds use the
 Cargo package version and exact revision. Daily publication reuses those tested

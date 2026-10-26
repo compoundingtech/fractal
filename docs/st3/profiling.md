@@ -39,7 +39,7 @@ add no route or path rows.
 the published work list, `duration_scope: "work-stage"`. Stage `fresh-wait` is a fresh read's wait
 for a publication at its cut (2 s at most, `population: "fresh-reads"`); `page` a first page served
 from a publication, and `actor-build` one whose read built its actor's order in that publication
-(`population: "first-pages"`). They add no route or path rows. A fresh work read, which `st work ls`
+(`population: "first-pages"`). They add no route or path rows. A fresh work read, which `fractal work ls`
 sends, still counts in full, wait included, under the `GET /v1/client/work` route and its
 `person-read` target: it has no `(fresh)` path or target of its own.
 
@@ -151,7 +151,7 @@ page or terminal screen. A read the daemon relayed from another machine's owner 
 the target's `remote_windows` and its remote target. A request that asks to wait (`wait_ms` above
 zero, or `wait=true`) is a long poll: it is kept under `METHOD /route (long poll)` and counts
 toward no target. An agents list with legacy `fresh=true` or an explicit `min_cut` asks to wait for a
-publication. Ordinary `st agents ls` and `st agents tree` send neither. The explicit wait is
+publication. Ordinary `fractal agents ls` and `fractal agents tree` send neither. The explicit wait is
 still a wait a person sits through, so it is the path `GET /v1/client/agents (fresh)` with its own `person-read-fresh`
 target and counts toward no other: a first page is held to the 100 ms of `person-read`, a fresh
 list to 300 ms. The `sql-statement`, `transaction` (`read`, `write`, `writer_hold`) and `cpu`
@@ -161,7 +161,7 @@ writer, and the member's CPU in cores.
 The `cpu` row is the member's CPU: the daemon process and every replication worker process beside
 it, with nothing left out (maintenance, heartbeat, anti-entropy and replication all count), over
 closed UTC minutes. The daemon reads its own process clock at each minute's boundary. The worker
-(`st3 replication-worker`) sends its own cumulative process CPU, with its pid and start time, to
+(`fractal replication-worker`) sends its own cumulative process CPU, with its pid and start time, to
 `/v1/internal/replication/worker-status` every ten seconds, and the newest reading the daemon holds
 at a boundary stands for it there, so a worker's CPU lands in the minute the daemon heard it in, at
 most one report late. A minute's CPU is known only when every worker the member runs (one, on a
@@ -171,8 +171,8 @@ process; a worker that restarted, went quiet or whose counter went backwards lea
 in it is known; `minutes` is how many of the hour's 60 the daemon holds, fewer while it has been up
 less than an hour.
 
-Two targets read it. `max_cores` (1 core) is the member over the hour, `slo/cpu` in `st doctor` and
-`cpu` in `st slo`. `idle_max_cores` (0.5 core) is the mean over the hour's idle minutes,
+Two targets read it. `max_cores` (1 core) is the member over the hour, `slo/cpu` in `fractal doctor` and
+`cpu` in `fractal slo`. `idle_max_cores` (0.5 core) is the mean over the hour's idle minutes,
 `slo/cpu/idle` and `cpu/idle`. A minute is idle only when that is known: its CPU is known, no seat
 on this member was in a working state in it, and none of a daemon start, a
 deploy check (`POST` to the deploy verification route) or a replication catch-up with a peer
@@ -192,7 +192,7 @@ harness state. `idle`
 gives the idle `minutes`, their `cores`, and `not_idle`, the minutes each reason kept from being
 idle (`seat`, `start`, `deploy`, `catch-up`, `unknown`; a minute may have several). The idle target
 is judged only over a whole hour holding at least `idle_min_minutes` (10) idle minutes; otherwise
-it, like an hour that is not whole, is unknown: `no-data` in `st slo`, `info` with UNKNOWN in `st
+it, like an hour that is not whole, is unknown: `no-data` in `fractal slo`, `info` with UNKNOWN in `Fractal
 doctor`, never met. A seat last observed working whose driver stopped reporting keeps every minute
 from being idle until it is observed again or this member records its runtime ended. daemon_load holds the daemon to `load_max_cores`
 (2 cores) under its synthetic load in CI instead of the production target.
@@ -222,7 +222,7 @@ and the borrower. Its hold in progress names the `stage` it is in. Other holds c
 `begin` and `chunk-read` are marked but no control slows them, so a small `unattributed_ms` does
 not by itself show that their marks are placed right. `open_reads` lists up to eight read
 snapshots open past the target now. `waiting` counts callers waiting for the writer and reads
-waiting for admission, and `threads` counts this process's threads, in all and by name. `st
+waiting for admission, and `threads` counts this process's threads, in all and by name. `Fractal
 doctor` prints it as `slo/writer-hold`.
 
 Three more fields show what keeps the WAL from recycling:
@@ -281,14 +281,14 @@ phone's live share is a minimum over foreground milliseconds, so it is not in th
 `st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
 the targets, not every path's snapshot.
 
-`st slo` lists the same targets with the account limits as one list, and `GET /v1/slo`, the daemon's own route
+`fractal slo` lists the same targets with the account limits as one list, and `GET /v1/slo`, the daemon's own route
 beside `/v1/usage`, serves it to the CLI. The phone and the web app read it through a client route
 that comes later, with its capability, schema and generated clients. An objective is a target with windows and an error budget: a p99
 target may have 1% of its samples over, so `LEFT` is how much of that 1% the last hour has not
 spent; a max target has no allowance, so it is whole or empty; CPU (`cpu` over the hour and
 `cpu/idle` over its idle minutes) and the database's size read against their own ceilings; a phone's live share against the disconnected time its minimum
 allows. A budget is an allowance that resets: each account's weekly and 5-hour limit, with `LEFT`
-the part not yet used and a reset time. `st slo explain ID` says one row in plain words and `ID`
+the part not yet used and a reset time. `fractal slo explain ID` says one row in plain words and `ID`
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
 
@@ -301,7 +301,7 @@ series feeds one name. They are `merge-latency/p50` and `merge-latency/p95` (a p
 time in the merge queue until it merges, each at most 10 minutes), `ci-critical-path/p95` (the
 workspace CI's critical path from a change to green, at most 13 minutes) and `flakes` (tests
 nextest passed only on a retry and merge groups ejected from the queue, none an hour). They are
-not in the request-latency read, its gauges or `st doctor`.
+not in the request-latency read, its gauges or `fractal doctor`.
 
 Workspace CI's runs (`fleet.yml`) feed them. The `github.repository` observer that reads
 `main_performance_failures` also reads, with the same token, conditional cache and five-minute
@@ -352,7 +352,7 @@ that shows the row `met` ends it with `operational.recovered`. A `no-data` row, 
 before the observer has read any runs, neither opens nor ends one. The other objectives open no
 fault.
 
-`st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
+`fractal slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
 remaining percent of every row to `<state>/slo-history/YYYY-MM-DD.jsonl` (UTC day) and deletes a
 day after seven. A chart column is the lowest reading in its slice of the period, so a brief spend
@@ -360,10 +360,10 @@ shows; a column with no reading is a dot, which means the daemon was down or not
 measured, not that a budget was spent. `GET /v1/slo/history?id=&since_ms=&until_ms=&steps=`
 serves the same columns. A node with a collector keeps the longer history there.
 
-`st doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
+`fractal doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
 over their target in the last five minutes. A p99 target is missed in a window when more than 1%
 of its samples are over. A max target is missed when any one sample is over. A miss is `info`,
-not `warn`, so `st doctor --strict` does not fail on a target.
+not `warn`, so `fractal doctor --strict` does not fail on a target.
 
 For a deployed latency receipt, retain the process/source identity and before/after count delta.
 A low-volume tail can include requests from before the measurement window, and a restart resets
@@ -974,7 +974,7 @@ caught panics reopen the connection after a one-minute cooldown. Worker error lo
 limited to one per minute. The detached thread is not a Tokio blocking task, so runtime
 shutdown does not wait for a long backfill.
 
-`st doctor` reports open, idle and active reader counts, peak open readers, total connections
+`fractal doctor` reports open, idle and active reader counts, peak open readers, total connections
 opened since startup, the configured cache target, and summed current reader targets without
 requiring SQLite MEMSTATUS. These are targets, not measured allocations: SQLite schema,
 prepared statements, query results and allocator overhead are additional. The report names
@@ -1044,7 +1044,7 @@ a full replay can also include claims admitted since that observation.
 
 The daemon reserves both Unix socket addresses right after acquiring its startup lock, before
 opening SQLite, but does not listen on them. A socket that is bound and not listening makes the
-kernel refuse every connection at once, so clients and `st doctor` keep seeing "daemon starting"
+kernel refuse every connection at once, so clients and `fractal doctor` keep seeing "daemon starting"
 with the current phase, and nothing queues behind an uninitialized router. The daemon starts
 listening only when migrations, admission, canonical projection catch-up and application
 initialization have finished. A per-address advisory lock (`<socket>.reservation.lock`) is held

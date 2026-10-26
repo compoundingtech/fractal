@@ -1,4 +1,4 @@
-# Claude Skill Inheritance eval for st3
+# Claude Skill Inheritance eval for Fractal
 
 This eval tests project and plugin skill loading in one native Claude Sonnet seat.
 

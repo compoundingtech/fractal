@@ -192,7 +192,7 @@ cat > "$TMPDIR/notice.json" <<'JSON'
   {"id": "dismiss", "label": "Dismiss", "outcome": "decline",
    "consequence": "The notice goes away; nothing else happens."}]}
 JSON
-st work ask --for PERSON --title "Your demo folder is ready" --request "$TMPDIR/notice.json" \
+fractal work ask --for PERSON --title "Your demo folder is ready" --request "$TMPDIR/notice.json" \
   --new-run demo-folder-ready --idempotency-key demo-folder-ready-1 --as "$ST_AGENT"
 ```
 

@@ -1,6 +1,6 @@
 # Checkpoints and trimming
 
-`st replication checkpoint status` shows each participant's `machine_version` advertised at
+`fractal replication checkpoint status` shows each participant's `machine_version` advertised at
 its last daemon start, including its source revision and dirty marker. This is startup metadata,
 which may differ from the build that produced a checkpoint seal. A daemon republishes its version
 on every start; status selects its latest own-origin `daemon.started` claim in canonical order.
@@ -19,7 +19,7 @@ each other holds.
 
 This document explains how a checkpoint works and what trimming drops, with examples. It describes
 the code in `crates/smallclaims/src/store/checkpoint*.rs` (agreement, proof, trim),
-`crates/fractal-schema/retention.toml` (the retention policy, which names the rules for st's own claim
+`crates/fractal-schema/retention.toml` (the retention policy, which names the rules for Fractal's own claim
 kinds; see [Retention](retention.md)) and `crates/fractal-store/src/store/checkpoint_rules.rs` (the planner
 functions those rules name). Operating commands
 are in [Fleet replication](replication.md#checkpoints). Read this before changing a rule, the
@@ -48,7 +48,7 @@ older checkpoint that never became stable is abandoned, because the newer sealed
 **Who must agree.** Every participant. A participant is every writer this node has ever heard of:
 the writer of any envelope or tombstone it holds, its configured peers, every member of the
 membership fold, and every writer named in a checkpoint claim. Two kinds of writer are not
-participants: one that left the fleet (`st fleet leave` drains everything the writer wrote to a
+participants: one that left the fleet (`fractal fleet leave` drains everything the writer wrote to a
 member first), and one a person excused (below). Removing a machine does not take it out. A
 checkpoint is not stable until every one of those writers has verified, however many of them are
 away.
@@ -109,7 +109,7 @@ reader's bounded history items during the proof and discarded afterward.
 the same participants and carries identical digests. Stability is a pure function of claims, like
 the membership fold: no clock, no order, so every node that holds the same claims reaches the same
 answer. If two nodes planned different drops, their digests differ and the checkpoint never becomes
-stable; the next day's checkpoint tries again. `st replication checkpoint status` names the digest
+stable; the next day's checkpoint tries again. `fractal replication checkpoint status` names the digest
 that differs.
 
 **Trim.** Only a stable checkpoint is trimmed, and each node trims the same checkpoints in the same
@@ -366,7 +366,7 @@ transaction of a trim moves the committed index forward by one.
 **If a deletion would change the graph.** Every chunk checks, in its own transaction, that the
 graph generation did not move. If it did, the chunk is rolled back and the checkpoint is marked
 `graph-changed`. The node writes a `checkpoint-trim-graph-changed` diagnostic and seals nothing more
-until a person runs `st replication checkpoint resume --reason ...`. The proof makes this
+until a person runs `fractal replication checkpoint resume --reason ...`. The proof makes this
 impossible for a correct rule, so it signals a bug, not a condition to retry.
 
 **A node that did not verify.** A node that joined after the checkpoint, or came back after an
@@ -380,7 +380,7 @@ and replicates as usual.
 ## Excusing an unreachable member
 
 A checkpoint waits for every participant, so a machine that is away, or whose build predates
-checkpoints, holds up trimming for the whole fleet. `st replication checkpoint status` names who has
+checkpoints, holds up trimming for the whole fleet. `fractal replication checkpoint status` names who has
 sealed and who has not, with the build each last sealed with.
 
 Three days after a checkpoint's due date without it becoming stable, the participant that sorts
@@ -388,7 +388,7 @@ first among those that have sealed asks the fleet's person, through attention, t
 
 - **Bring the machine back.** Nothing else is needed.
 - **Upgrade it,** if it runs a build without checkpoints.
-- **Excuse it:** `st replication checkpoint excuse NAME --reason "..." --as person/NAME`. The claim
+- **Excuse it:** `fractal replication checkpoint excuse NAME --reason "..." --as person/NAME`. The claim
   is a person's, and a node cannot excuse itself.
 
 Excusing takes the writer out of the participant set, so the others can reseal without it. It
@@ -397,7 +397,7 @@ person's or a mission's claims dated before a cut; those are late envelopes, kep
 claim cannot make any drop visible (see witnesses above). The returning machine adopts the
 checkpoints that became stable without it, and its first seal ends the excusal by itself.
 
-`st fleet remove` is not an excusal. Removing a machine fences writes nobody else holds, which is
+`fractal fleet remove` is not an excusal. Removing a machine fences writes nobody else holds, which is
 right only when its storage is gone, and it never makes a checkpoint stable on its own: the removed
 machine must also be excused.
 

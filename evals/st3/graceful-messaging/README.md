@@ -1,13 +1,13 @@
 # Graceful messaging
 
 This paid black-box eval proves that a running seat keeps its messages across a deploy. A deploy
-installs a new st binary at the same path and then restarts the daemon. Before this eval, a seat's
+installs a new Fractal binary at the same path and then restarts the daemon. Before this eval, a seat's
 driver kept executing the deleted binary, and on 2026-09-29 a message to a Claude seat showed
 `sent` and never reached the session until the harness was restarted.
 
 `scripts/st3-graceful-messaging-eval/run ST3_BIN OUT HARNESS...` runs it once. It starts one fresh
 isolated daemon from a copy of `ST3_BIN` and one seat for each named harness: `claude`, `codex`,
-`omp`, `pi`, or `opencode`. The seats get no authored prompt; st3 supplies the boot contract. Once
+`omp`, `pi`, or `opencode`. The seats get no authored prompt; Fractal supplies the boot contract. Once
 every seat is idle, the runner does what a deploy does. It installs a replacement at the daemon's
 binary path with `mv`, then stops the daemon and starts it again from that path. The replacement is
 `ST3_BIN` with a marker appended, so it is a different file with different contents; `GM_SWAP_BIN`
@@ -23,7 +23,7 @@ A seat passes when all of these hold:
   the same PID;
 - no channel process (Claude's `claude-mcp`, or the pi-family channel) still executes the deleted
   binary;
-- `st agents show` reports the seat's delivery path as `current`.
+- `fractal agents show` reports the seat's delivery path as `current`.
 
 The runner must run outside any st seat. The isolated daemon binds a caller to the nearest `ST_AGENT`
 among its ancestors, and the runner sends as `person/eval`. From a seat, start it detached, for

@@ -10,7 +10,7 @@ The agents are scripted, not harnesses. A demo uses no model tokens and plays th
 every time.
 
 ```sh
-st --instance demo demo play examples/demos/release-day.kdl
+fractal --instance demo demo play examples/demos/release-day.kdl
 ```
 
 A demo always plays in an [instance](instances.md), so your own fleet is never touched. Each
@@ -26,7 +26,7 @@ cache or a config without that mark, the play lists them and stops without touch
 Play in a new instance instead, or pass `--reset` to erase them and make the instance the demo's:
 
 ```sh
-st --instance demo demo play --reset examples/demos/release-day.kdl
+fractal --instance demo demo play --reset examples/demos/release-day.kdl
 ```
 
 Two examples are in [`examples/demos`](../../examples/demos):

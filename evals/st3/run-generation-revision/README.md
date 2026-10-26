@@ -1,10 +1,10 @@
 # Run generation revision
 
-This paid st3 eval proves one protected planning revision of a live mission run.
+This paid Fractal eval proves one protected planning revision of a live mission run.
 
 The controller completes one stable step before it starts a targeted Codex launch.
 The planner submits a replacement, and the requester approves the exact preview hash.
-st3 creates one successor generation and keeps the prior generation unchanged.
+Fractal creates one successor generation and keeps the prior generation unchanged.
 
 The gates prove these results:
 

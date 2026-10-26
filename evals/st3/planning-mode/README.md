@@ -1,6 +1,6 @@
 # Planning Mode
 
-This paid st3 eval proves the first planning-mode workflow with one native Codex planner.
+This paid Fractal eval proves the first planning-mode workflow with one native Codex planner.
 
 The controller starts a durable launch. It waits on the internal authoring event stream until the planner submits Markdown and KDL documents. It then renders the static graph and graph diff and directly approves the exact preview token.
 

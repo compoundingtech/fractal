@@ -1,3 +1,3 @@
 # Network isolation
 
-This model-free eval proves that two st3 endpoints isolate claims, messages, and PTY sessions.
+This model-free eval proves that two Fractal endpoints isolate claims, messages, and PTY sessions.

@@ -13,7 +13,7 @@ remain byte-for-byte unchanged: the wrapper owns its guard, config and state pat
 The installer does not restart services or agent seats. If a direct definition needs
 a different executable path, stop its loaded service before installing; the installer
 refuses to rewrite a loaded definition.
-For a first daemon install, run `st service install` from the installed app executable;
+For a first daemon install, run `fractal service install` from the installed app executable;
 for an update, restart the daemon and replication services when ready.
 
 When the `--from` directory also holds `StListen.app` (the terminal UI's speech helper, built by
@@ -83,7 +83,7 @@ configured keychain identity. The helper restores installation files, not
 application databases; schema compatibility must be checked by the deployment caller.
 
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
-For the default-host Fractal cutover, `st service install --stage-fractal` installs
+For the default-host Fractal cutover, `fractal service install --stage-fractal` installs
 `com.compoundingtech.fractal` and `com.compoundingtech.fractal.replication` definitions
 disabled without loading or starting them. On Linux the same command stages
 `fractal.service` and `fractal-replication.service` disabled. Existing legacy service

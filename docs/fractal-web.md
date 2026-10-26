@@ -142,7 +142,7 @@ without taking down the daemon's API listeners. `fractal doctor` reports the web
 finding and the configuration or installation to repair. An occupied listener port
 is still a startup error; use another loopback port or `--web-listen off`.
 
-Run `fractal web [--state-dir DIR]` or `st web [--state-dir DIR]` to open the app.
+Run `fractal web [--state-dir DIR]` or `fractal web [--state-dir DIR]` to open the app.
 The launcher reads the daemon's owner-only `web-launch-url`. The daemon consumes
 the launch token once, issues a 12-hour HttpOnly SameSite=Strict cookie, redirects
 to `/`, and atomically rotates the launch token. Up to 32 sessions survive until
@@ -174,7 +174,7 @@ person; the daemon does not start it. The example uses loopback port `7411`, sep
 from the daemon's local browser port `7410`. `tailscale serve` publishes this
 publisher over HTTPS on the tailnet. The server injects one paired
 bearer into every admitted request, so admission is the whole authorization. With a full-control
-pairing, any script running in the app holds that person's full st authority. A request must
+pairing, any script running in the app holds that person's full Fractal authority. A request must
 carry an allowed `Tailscale-User-Login`, which `tailscale serve` attaches for tailnet users. Any
 browser `Origin` must be exactly the published origin, and upgrades and unsafe methods must
 carry one. An Origin-less read is refused when the browser's `Sec-Fetch-Site` says another site sent it. Never publish it with Funnel, which carries no tailnet identity. Anything else that
@@ -267,7 +267,7 @@ their scope or provenance; monetary amounts keep their intrinsic width.
 The kit's E3 policy hides empty and unavailable resource bodies; unavailable categories
 are named once in its compact “Not reported for this session: …” summary. A collapsed
 “Why? Sections not reported” disclosure groups the reasons beneath it on desktop and phone.
-User-hidden categories are omitted. Known zero traced or observed st subagent counts
+User-hidden categories are omitted. Known zero traced or observed Fractal subagent counts
 remain visible evidence, distinct from an unknown count.
 The Subagents heading uses the reported traced-session total for both zero and
 positive counts, never the capped retained list length; unknown totals have no badge.
@@ -512,10 +512,10 @@ Both commands skip all live activity when the one-minute `/proc/loadavg` value i
 
 `node apps/fractal-web/scripts/alerts-live-proof.mjs [run|up|down]` proves the conversation
 alert strip against a real daemon without touching your own st. `up` makes a throwaway instance
-(`webproof`, under its own HOME in `/var/tmp/st-webproof`) with person/avery, a program seat
+(`webproof`, under its own HOME in `/var/tmp/fractal-webproof`) with person/avery, a program seat
 agent/example/atlas and a paired full-control device whose bearer it keeps in a mode-0600 file.
 `run` has atlas ask avery a yes-or-no question and a decision, answers both from the strip in
-headless Chromium, checks with st that each step finished with that answer, and prints the
+headless Chromium, checks with Fractal that each step finished with that answer, and prints the
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `st3`, `pty`, a Playwright module and Chromium).
 

@@ -1,6 +1,6 @@
-# The st3 module graph and its layering rule
+# The Fractal module graph and its layering rule
 
-st3 is one crate of about a hundred top-level modules, so every change that touches it recompiles
+Fractal is one crate of about a hundred top-level modules, so every change that touches it recompiles
 and retests all of it, and the merge queue cannot tell which part of a combined tree two changes
 could both affect. This page defines the module graph that the tooling uses, the rule it enforces,
 and how to read the number it reports. The plan to split the crate is in the mission document

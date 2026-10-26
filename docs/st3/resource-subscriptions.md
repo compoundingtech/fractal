@@ -123,7 +123,7 @@ The local file provider supports `status`, `path`, `content_hash`, `size`, `mode
 
 A planner or authorized producing agent authors the watch as a mission that owns one observer
 and one subscription. Its delivery target is explicit, never inferred from the caller's terminal
-environment. The standalone watch is a seat's GitHub issue or pull request watch (`st gh watch`, below).
+environment. The standalone watch is a seat's GitHub issue or pull request watch (`fractal gh watch`, below).
 
 ```kdl
 version 2
@@ -179,7 +179,7 @@ The run’s subjects are `observer/RUN/watch` and `subscription/RUN/watch`.
 
 The subscription stores the selected changes and delivery intent.
 
-A provider locator is an opaque provider value. st does not assign meaning to it outside the registered provider.
+A provider locator is an opaque provider value. Fractal does not assign meaning to it outside the registered provider.
 
 The `github.ref` locator is `OWNER/REPOSITORY@BRANCH`. Branch names can contain `/`. For example:
 
@@ -268,7 +268,7 @@ The GitHub repository provider reads what changed since its cursor. Its first po
 item, up to 10 pages; a larger open listing fails the observation instead of recording part of it.
 After that, it reads the issues listing for items updated since its watermark, which also names
 each closed pull request's merge, and the repository's comments updated since a second watermark.
-A comment watermark starts at the first poll, so st does not read old comments. Each read is
+A comment watermark starts at the first poll, so Fractal does not read old comments. Each read is
 conditional and its URL changes only when something changed, so an idle repository answers 304
 and costs nothing. A read longer than 10 pages records what it read and continues at once.
 
@@ -316,7 +316,7 @@ person at once. Each item closes when the observer observes again.
 
 Every observer on every host shares the token's hourly GitHub budget, as do `gh` and CI. The daemon
 counts each GitHub request against the observer that sent it, and keeps the counts and the budget
-from GitHub's latest rate-limit headers in memory. `st doctor` shows the remaining budget, how much
+from GitHub's latest rate-limit headers in memory. `fractal doctor` shows the remaining budget, how much
 of the current window this host's observers spent, and each observer's requests in the last hour
 and since the daemon started. A 304 answer to a conditional request is free, so it is counted
 apart. Request counts are not resource facts: an unchanged listing records no claim.
@@ -328,7 +328,7 @@ An unchanged failure creates no new claim. A later success replaces the complete
 
 An observer checks its declared fields. Its effective field set also includes the union of its subscription fields.
 
-st does not fetch once for each target. A subscription update can expand or reduce the observer field set.
+Fractal does not fetch once for each target. A subscription update can expand or reduce the observer field set.
 
 ## The intake pipeline
 
@@ -380,7 +380,7 @@ delivers nothing more. A review or triage request keeps the key as before.
 
 ## A seat's GitHub watch
 
-`st gh watch OWNER/REPO#N` gives the seat that runs it one watch on that issue or pull request. The
+`fractal gh watch OWNER/REPO#N` gives the seat that runs it one watch on that issue or pull request. The
 seat wakes once for each new comment or review on it, each time the required checks on its current
 head move into pass or fail, when an open pull request changes head, enters or leaves draft, or joins
 or leaves the merge queue, and a last time when it closes or merges, which ends the watch.
@@ -397,8 +397,8 @@ subscription "watch/acme/garden/12/example/planner" {
 ```
 
 The daemon declares the watch for the seat, which owns it; no mission run does. Watching a thread
-twice keeps the one watch and takes the new deadline. `st gh unwatch` ends a seat's own watch, and a
-person ends any seat's with `--agent`. `st gh ls` lists a seat's watches, running and ended in the
+twice keeps the one watch and takes the new deadline. `fractal gh unwatch` ends a seat's own watch, and a
+person ends any seat's with `--agent`. `fractal gh ls` lists a seat's watches, running and ended in the
 last day, and `--all` every seat's.
 
 Every watch of a repository, from any host, uses one standing observer,
@@ -460,10 +460,10 @@ or stopping its seat does not itself remove the watch. A deadline gives one fina
 the watch even while the seat is stopped. Each ending also stops that watch's declaration.
 
 Every fleet agent posts as one GitHub login, so a login cannot say which seat wrote a comment.
-`st gh comment OWNER/REPO#N --body-file FILE` posts through the seat's daemon, records the new
+`fractal gh comment OWNER/REPO#N --body-file FILE` posts through the seat's daemon, records the new
 comment's GitHub ID as the seat's (`github.posted` on `github-post/OWNER/REPO/KIND/ID`), and
 watches the thread unless `--no-watch`; `--review approve|request-changes|comment` posts a pull
-request review instead. `st gh own URL` records a comment or review posted some other way, and
+request review instead. `fractal gh own URL` records a comment or review posted some other way, and
 refuses one whose author is not the login this host posts as. The first seat to record an ID keeps
 it.
 
@@ -525,11 +525,11 @@ retries automatically with bounded backoff. No burst size asks a person to relea
 The queue is visible with:
 
 ```sh
-st missions requests subscription/NAME
+fractal missions requests subscription/NAME
 ```
 
 It shows open requests as `pending`, oldest first. A person can cancel a request with
-`st missions cancel-request REQUEST --as person/operator --reason "the work is no longer needed"`.
+`fractal missions cancel-request REQUEST --as person/operator --reason "the work is no longer needed"`.
 A cancelled request never starts.
 
 `st missions release` releases a legacy held request; automatic intake does not need it.

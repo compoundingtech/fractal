@@ -1,6 +1,6 @@
 # Binding an agent to a person's terminal
 
-A native driver can run as a child of a shell in an existing st terminal. Declare its seat with `bind-terminal` before starting the driver:
+A native driver can run as a child of a shell in an existing Fractal terminal. Declare its seat with `bind-terminal` before starting the driver:
 
 ```kdl
 version 2
@@ -15,7 +15,7 @@ agent "example/terminal-claude" {
 
 The terminal must already be declared on the same host. Publish with the terminal owner's person credential; agent and daemon credentials cannot create a binding. `incarnation` is the running terminal's PTY incarnation, including its PID and creation timestamp. `id` is a fresh UUID for each harness invocation. For a terminal with an explicit runtime ID, supply that exact ID with the optional `runtime-id` property.
 
-This declaration records a harness configuration but never launches it. The caller runs `st driver claude --subject agent/example/terminal-claude -- <provider argv>` as a child of its shell with its chosen permission settings, driver environment, channel and hook registrations. The launcher owns argument merging and unmanaged fallback. Declaring a binding alone does not arrange those registrations.
+This declaration records a harness configuration but never launches it. The caller runs `fractal driver claude --subject agent/example/terminal-claude -- <provider argv>` as a child of its shell with its chosen permission settings, driver environment, channel and hook registrations. The launcher owns argument merging and unmanaged fallback. Declaring a binding alone does not arrange those registrations.
 
 The driver keeps the terminal's `st3.subject` tag. It reads the binding and matches that terminal's tag and exact PTY incarnation in the local registry. Its agent incarnation appends `:bound:<invocation UUID>` to the PTY incarnation. Mail and driver exit reports use that invocation fence, so a prior harness in the same shell cannot end the next one.
 

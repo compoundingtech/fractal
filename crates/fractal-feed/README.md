@@ -69,8 +69,8 @@ retries a stale fence with a fresh read.
 ## Snapshot model and cache
 
 `model::Model` and `tree::MissionsTree` hold renderer-independent snapshots compatible with
-stui's cache. The crate also preserves the bounded snapshot and event-cursor read APIs for
-callers that use the event feed. stui's live screens use collection subscriptions; they run no
+the Fractal terminal UI's cache. The crate also preserves the bounded snapshot and event-cursor read APIs for
+callers that use the event feed. the Fractal terminal UI's live screens use collection subscriptions; they run no
 event-polling loop. `Model::bootstrap` reads the capability cursor and first collections;
 `reload` fills the remaining bounded projections. `sync` consumes events, deduplicates them and
 coalesces projection refreshes. Its result is `(changed, invalidated_sessions, cursor_gap)`.

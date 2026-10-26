@@ -1,37 +1,37 @@
-# st shell completion requirements
+# Fractal shell completion requirements
 
 ## Context
 
-- The st command surface is described in [../README.md](../README.md) and
+- The Fractal command surface is described in [../README.md](../README.md) and
   [CLI reference](../../site/reference/cli.md).
 - The implementation contract is [spec.md](./spec.md). Decisions:
   [.decisions/0001-runtime-completion.md](./.decisions/0001-runtime-completion.md).
 
 ## Assumptions
 
-- **A01 Local daemon:** Entity candidates come from the st daemon on this host through its trusted
+- **A01 Local daemon:** Entity candidates come from the Fractal daemon on this host through its trusted
   local Unix socket. The daemon answers a list request in tens of milliseconds.
 - **A02 Supported shells:** People use zsh, fish, or bash.
 
 ## Acceptable Tradeoffs
 
 - **T01 Unstable completion engine:** The completion engine is a feature that its upstream marks
-  unstable. st pins its exact version and accepts the upgrade work.
+  unstable. Fractal pins its exact version and accepts the upgrade work.
 - **T02 Bash has no descriptions:** Bash shows candidate values only. zsh and fish show values with
   descriptions.
-- **T03 One process per TAB:** Every TAB starts the st executable once.
+- **T03 One process per TAB:** Every TAB starts the Fractal executable once.
 
 ## Requirements
 
 ### Must offer the real choices
 
-- **R01 Live entity candidates:** An argument that names an st entity of a kind the client API
+- **R01 Live entity candidates:** An argument that names a Fractal entity of a kind the client API
   lists (for example terminal, agent, mission, mission run, work step, attention item, message,
   lane, fleet host, launch, device, subscription, session, person) completes to every current
   entity of that kind.
 - **R02 Command-relevant candidates:** Each argument offers only entities its command accepts. For
-  example, `st terminals attach` offers running terminals, `st agents stop` offers running agents,
-  and `st work retry` offers failed steps.
+  example, `fractal terminals attach` offers running terminals, `fractal agents stop` offers running agents,
+  and `fractal work retry` offers failed steps.
 - **R03 Rich descriptions:** Each candidate carries one line with the facts a person uses to choose
   it, such as state, host, harness, current work, and age.
 - **R04 Static surface:** Subcommands, flags, and closed value sets complete as before.
@@ -50,15 +50,15 @@
 - **R08 Prefix matching:** Completion matches typed text against the start of the full subject in
   every shell.
 - **R09 Short-name resolution:** A command that takes a terminal, agent, mission run, or attention
-  item accepts a unique short name (for example `st terminals attach steward`). Resolution sees
+  item accepts a unique short name (for example `fractal terminals attach steward`). Resolution sees
   all subjects of the kind. Destructive verbs accept only exact namespace or last-segment names.
   A short name that matches several subjects fails with status 2 and lists them.
 - **R10 Literal compatibility:** A word that resolves to nothing, or any word while the daemon does
   not answer, keeps its previous meaning. Bare-word attach must resolve and consult within the
   existing 1 s budget or fail fast; a full subject preserves offline attachment.
 
-### Must install with st
+### Must install with Fractal
 
-- **R11 Installed stubs:** An installed st package ships zsh, fish, and bash completion that call
+- **R11 Installed stubs:** An installed Fractal package ships zsh, fish, and bash completion that call
   back into the PATH-resolved `st` executable.
-- **R12 Printable stub:** `st completions <shell>` prints the same PATH-based stub for manual installation.
+- **R12 Printable stub:** `fractal completions <shell>` prints the same PATH-based stub for manual installation.

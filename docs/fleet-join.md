@@ -68,10 +68,10 @@ invites. A dial-out member cannot sponsor because a joiner must reach the sponso
 ## Invite
 
 ```text
-st fleet invite [NAME] [--expires DURATION] [--via auto|tailscale|fabric|loopback] [--migrate]
+fractal fleet invite [NAME] [--expires DURATION] [--via auto|tailscale|fabric|loopback] [--migrate]
                 [--send-fabric | --code-only | --code-file PATH] [--as PERSON]
-st fleet invites [--all]
-st fleet invites revoke fleet-invite/ID --reason TEXT
+fractal fleet invites [--all]
+fractal fleet invites revoke fleet-invite/ID --reason TEXT
 ```
 
 The optional name pins the joiner's name. Expiry defaults to 10 minutes and accepts
@@ -100,7 +100,7 @@ an unexpired invite exists and admits a body of at most 4 KiB.
 ## Join
 
 ```text
-st fleet join [CODE | - | --code-file PATH | --fabric-inbox] [--name NAME] [--dial-out]
+fractal fleet join [CODE | - | --code-file PATH | --fabric-inbox] [--name NAME] [--dial-out]
               [--via ROUTE] [--port PORT] [--transports LIST] [--advertise-loopback]
               [--no-service] [--no-wait] [--as PERSON]
 ```
@@ -177,9 +177,9 @@ broken local work. A connection pushes and pulls history while its backlog drain
 ### Changing an existing member's transports
 
 ```text
-st fleet transports add fabric [--prefer] [--fabric-protocol PROTOCOL] [--no-service]
-st fleet transports remove fabric [--no-service]
-st fleet transports prefer <tailscale|fabric> [--no-service]
+fractal fleet transports add fabric [--prefer] [--fabric-protocol PROTOCOL] [--no-service]
+fractal fleet transports remove fabric [--no-service]
+fractal fleet transports prefer <tailscale|fabric> [--no-service]
 ```
 
 Run these commands on the member whose transports should change. They update the existing
@@ -242,23 +242,23 @@ needed:
 
 ```sh
 # On a member:
-st fleet invite beacon
+fractal fleet invite beacon
 # On beacon:
-st fleet join CODE
+fractal fleet join CODE
 ```
 
 The code includes a pinned sponsor Fabric NodeID and a one-use pairing permit.
 The joining adapter uses its existing Fabric daemon identity, not a temporary
 peer or a second identity. The restricted `fabric/pair/1` exchange carries the
-existing signed, sealed st admission. It grants no ordinary service access.
+existing signed, sealed Fractal admission. It grants no ordinary service access.
 The sponsor verifies the request's signed Fabric NodeID against the authenticated
-pending identity and its admitted member key against signed st membership before
+pending identity and its admitted member key against signed Fractal membership before
 atomic confirmation. The immutable permit and reciprocal policy grant exactly
 `st3/fleet/FLEET_ID` and `st3-client-v0`, under owner `st/fleet/FLEET_ID`.
 Terminal access (`st3/pty/FLEET_ID`) requires an explicit operator grant in
 static Fabric policy, which the adapter never edits.
 The joiner verifies the sponsor's signed response and pinned endpoint before its
-adapter installs reciprocal access. The st daemon carries admission data only;
+adapter installs reciprocal access. The Fractal daemon carries admission data only;
 all Fabric permit, confirmation, and policy calls belong to the adapter.
 
 Pending attempts expire or fail closed after a Fabric restart; issue a fresh
@@ -271,8 +271,8 @@ The default replication protocol is `st3/fleet/FLEET_ID`.
 The worker exposes its loopback listener with
 `fabric expose PROTOCOL --tcp 127.0.0.1:PORT` and obtains an outbound tunnel with
 `fabric dial NODE_ID PROTOCOL --tcp 127.0.0.1:0`.
-`st fleet transports remove fabric`, leave, dial-out mode, and uninstall remove
-the exposure. The adapter maintains trust and grants; st does not edit
+`fractal fleet transports remove fabric`, leave, dial-out mode, and uninstall remove
+the exposure. The adapter maintains trust and grants; Fractal does not edit
 `peers.toml`.
 
 #### Adapter helper boundary
@@ -284,7 +284,7 @@ returns a JSON line containing the augmented `code`. `pairing-join` is a
 private interactive JSON-line protocol: the code produces `node_id`, the signed
 join `request` produces a sealed `response`, and the authenticated sealed
 admission plus `sponsor_key` produces `confirmed: true` only after confirmation.
-Credentials travel through pipes, not helper arguments. The st side verifies
+Credentials travel through pipes, not helper arguments. The Fractal side verifies
 the sealed response before sending the authenticated admission back to the
 helper; it does not write fleet settings before confirmation.
 
@@ -299,7 +299,7 @@ authenticated answer before irreversible confirmation; the helper queries the
 retained receipt without presenting the spent bearer token. Confirmed recovery
 does not reinstall Fabric policy. A restart-lost or expired unconfirmed exchange
 still requires a fresh invite.
-When given a fresh code, st replaces a saved recovery only after `pairing-status`
+When given a fresh code, Fractal replaces a saved recovery only after `pairing-status`
 observes an authenticated expired or rejected receipt for the old attempt and
 the same Fabric NodeID. Pending, confirmed, unknown, and unreachable outcomes
 preserve the recovery journal; use the original code rather than discarding a

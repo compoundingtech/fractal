@@ -22,7 +22,7 @@ Send one JSON command per subscription:
 {"kind":"subscribe","id":"missions-tab","collection":"missions","limit":50}
 ```
 
-**Proposed trace context, pending [#1910](https://github.com/compoundingtech/smalltalk/pull/1910)
+**Proposed trace context, pending [#1910](https://github.com/compoundingtech/fractal/pull/1910)
 and Nathan's decision:** subscribe frames may add
 `"trace": {"traceparent": "W3C value", "tracestate": "optional W3C value"}`.
 The lowercase `trace` wire key belongs to the repository-local client_v0 namespace;
@@ -159,7 +159,7 @@ new `order`, `has_more`, and a new snapshot fence. Apply removals and upserts
 before displaying the new order. Rows leaving a bounded window appear in
 `removes`, even if they still exist beyond that window.
 
-Rows are joined in st so a client never joins collections itself. A mission's
+Rows are joined in Fractal so a client never joins collections itself. A mission's
 `run_details` carry `steps` for each open run and for its latest run, and every
 run's steps in a mission detail read. An agent names its queue in
 `current_work`, `next_work`, and `upcoming_work`: each step's mission, run,
@@ -268,8 +268,8 @@ session starts with its own availability and must not inherit the previous windo
 Older-page responses independently report whether there are entries before that page; once
 the session's start is reached, later live deltas do not reopen older-history paging.
 
-`st missions ls --watch`, `st attention ls --watch`, `st agents ls --watch`,
-and `st work ls --watch` consume this same transport.
+`fractal missions ls --watch`, `fractal attention ls --watch`, `fractal agents ls --watch`,
+and `fractal work ls --watch` consume this same transport.
 
 ## Summary
 
@@ -322,10 +322,10 @@ retain their prior row timestamp so an unchanged count emits no delta.
 
 ## Presentations
 
-Optional capability `presentation` version 1 says agent rows carry `presentation`: st's state
+Optional capability `presentation` version 1 says agent rows carry `presentation`: Fractal's state
 word, list group, why the agent needs someone, and what it holds and has queued (see
 [the UI contract](../../clients/ui-contract.md#agent)). Older daemons omit both. A row that
-lacks it shows the state st reports, marked as coming from an older st; clients derive nothing.
+lacks it shows the state Fractal reports, marked as coming from an older Fractal; clients derive nothing.
 
 The same capability says attention rows carry `presentation`: the Now group and card, who
 **Chat about this** reaches, who raised it, and the step it holds (see

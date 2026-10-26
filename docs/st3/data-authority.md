@@ -1,4 +1,4 @@
-# st data authority
+# Fractal data authority
 
 This document classifies the claim store's SQLite tables. `every_persistent_table_has_a_projection_scope`
 (`crates/fractal-seats/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
@@ -34,7 +34,7 @@ large-value threshold is accepted; the guard checks source-site exceptions, not 
 
 ## Retention and local observations
 
-A claim kind of `local` retention (`st schema show KIND`) is an observation that only the node
+A claim kind of `local` retention (`fractal schema show KIND`) is an observation that only the node
 that made it reads. The daemon records it in `local_observations` instead of the claim log. It gets
 no batch, no envelope and no digest, so it never replicates and trimming it never changes what a
 peer holds. Every node computes the same graph from the same admitted claims. The daemon trims
@@ -142,9 +142,9 @@ an actor, reason, and explicit expiry. They are separate from reachability, obse
 and the harness's own approval/compaction holds. Inspect, set, and release them with:
 
 ```sh
-st agents hold agent/example/worker
-st agents hold agent/example/worker --for 15m --reason "Quiet interval" --as person/alex
-st agents hold agent/example/worker --release --reason "Resume delivery" --as person/alex
+fractal agents hold agent/example/worker
+fractal agents hold agent/example/worker --for 15m --reason "Quiet interval" --as person/alex
+fractal agents hold agent/example/worker --release --reason "Resume delivery" --as person/alex
 ```
 
 `GET /v1/delivery/hold?subject=agent/example/worker` returns the current decision and whether
@@ -328,11 +328,11 @@ Admission validates each claim and blob independently. Invalid or unknown record
 
 Projection uses admitted claims and keeps the last good graph when one reduction fails.
 
-`st doctor` compares the operation projection with the claim log.
+`fractal doctor` compares the operation projection with the claim log.
 
 An idempotent claim stores a keyed hash of the caller key in its `_operation` metadata.
 
-`st claim --idempotency-key KEY` opts a public claim into this contract.
+`fractal claim --idempotency-key KEY` opts a public claim into this contract.
 
 The claim stores the canonical request digest and canonical claim ID.
 

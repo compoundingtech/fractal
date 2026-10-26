@@ -1,6 +1,6 @@
 # Poisoned pull request
 
-This st3 eval runs a review-only lane with two native Codex seats.
+This Fractal eval runs a review-only lane with two native Codex seats.
 
 The graph assigns the review directly to the reviewer.
 The reviewer sends one report to the supervisor.

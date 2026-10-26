@@ -1,6 +1,6 @@
 # Run-only system services
 
-A gateway can serve a root-enrolled Linux system process without an st daemon, a
+A gateway can serve a root-enrolled Linux system process without a Fractal daemon, a
 seat or fleet membership. It authenticates the socket's kernel UID and the process's
 exact systemd unit, and rechecks its process birth and placement before a request.
 It reports a `program/HOST/NAME` caller, never the person who owns its grant.
@@ -9,7 +9,7 @@ It reports a `program/HOST/NAME` caller, never the person who owns its grant.
 A person mapping requires a logind login scope; a system runner is not a person.
 Do not map a runner UID as a person or give it profile management.
 
-The operator installs a separate `sekrets` user/store/gateway and a pinned st binary
+The operator installs a separate `sekrets` user/store/gateway and a pinned Fractal binary
 on ci1/ci2. NixOS installation belongs in the reviewed host module, not an ad hoc
 execution of the Debian-style setup script. The following is the gateway config
 portion; actual UID, unit, interpreter and script paths must come from that host's
@@ -54,7 +54,7 @@ login or profile-management request is refused. An explicit profile grant is als
 required; mapping to Ada does not give ownership of Nathan's profiles. Profile
 and grant policies both apply, including expiry, revocation and locks. Program
 callers cannot change profiles/keys/grants, make authorized HTTP requests or read
-the person's audit log. The human reads `st sekrets log` from their login session;
+the person's audit log. The human reads `fractal sekrets log` from their login session;
 allowed calls/refusals/exits retain the program identity in the gateway's local log.
 Program-caller `sekret.called`, `sekret.exited` and `sekret.refused` events are not
 mirrored into the graph: the daemon importer rejects their caller reference,
@@ -67,9 +67,9 @@ not provide a history of Program calls, exits or refusals.
 From the owner's actual login session after the reviewed installation:
 
 ```sh
-st sekrets profile create ada/evidence-sign \
+fractal sekrets profile create ada/evidence-sign \
   --allow 'python3 /nix/store/SIGNER-PIN/evidence-sign'
-st sekrets grant ada/evidence-sign --to program/ci1/ci1-1 \
+fractal sekrets grant ada/evidence-sign --to program/ci1/ci1-1 \
   --allow 'python3 /nix/store/SIGNER-PIN/evidence-sign'
 ```
 
@@ -171,7 +171,7 @@ skipped. Keep PR and landing policy separate.
 
 Authored source tests and isolation VM controls cover unit/UID classification, exact argv,
 management refusal, grant/revocation, audit and store/key unreadability before
-any st daemon starts, including private-mount binding, read-only checkout and stdin.
+any Fractal daemon starts, including private-mount binding, read-only checkout and stdin.
 They must pass before installation; source parsing and formatting alone do not
 qualify these controls. They do not claim that ci1/ci2 are installed or a
 real merge-group note is accepted. Record the actual image, config, grant, run,
@@ -182,7 +182,7 @@ Fabric service are subsequent steps of the same evidence-signing-service mission
 Existing people/agent/host callers keep their behavior. Upgrade the gateway before
 adding `[programs]`: older gateways reject the unknown config and caller kind.
 Rollback removes program enrollment/grants first; never convert a program into a
-person mapping. No st graph/schema/replay or gateway DB migration is introduced.
+person mapping. No Fractal graph/schema/replay or gateway DB migration is introduced.
 
 The inode-retention Rust control exercises the descriptor-relative walk and exact
 directory match directly, then replaces the path and checks the retained original

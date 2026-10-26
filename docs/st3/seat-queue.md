@@ -36,10 +36,10 @@ normally serves one run, so its queue has one entry.
 `crates/fractal-kernel/src/seat_queue.rs` holds the only next-work selector, `seat_queue::select`. It is used by:
 
 - `Store::agent_work_queues`, which feeds `NEXT WORK`, `QUEUED WORK`, and `UPCOMING` in
-  `st agents show` and the `agents` client resource;
+  `fractal agents show` and the `agents` client resource;
 - the reconciler's work wake and its retry deadline;
 - `Store::seat_queue`, which feeds `st agents queue` and its alias `st missions queued`;
-- the client work list when it is filtered to one agent, so `st work ls --as AGENT` lists ready
+- the client work list when it is filtered to one agent, so `fractal work ls --as AGENT` lists ready
   work in the same order;
 - `work claim`, which refuses to let the seat take a later run's step first.
 
@@ -52,15 +52,15 @@ for the seat, like any other step of its run.
 ## Commands
 
 ```sh
-st agents queue agent/example/example/worker
-st agents queue move agent/example/example/worker mission-run/release/2026-09-26 --top \
+fractal agents queue agent/example/example/worker
+fractal agents queue move agent/example/example/worker mission-run/release/2026-09-26 --top \
   --reason "the release needs this first" --as person/operator
-st agents queue move agent/example/example/worker mission-run/docs/2026-09-26 \
+fractal agents queue move agent/example/example/worker mission-run/docs/2026-09-26 \
   --after mission-run/release/2026-09-26 --as person/operator
 ```
 
-`st agents queue AGENT` prints the held step, the next work, each queued run in order with its
-state (`claimed`, `ready`, or `waiting`), and the most recent moves, newest first. `st missions
+`fractal agents queue AGENT` prints the held step, the next work, each queued run in order with its
+state (`claimed`, `ready`, or `waiting`), and the most recent moves, newest first. `Fractal missions
 queued AGENT` runs the exact same show through the same code and prints the identical output,
 including `--json`; there is no `missions queued move`, only `agents queue move`.
 
@@ -79,7 +79,7 @@ MOVES        1 total
 `move` takes exactly one of `--top`, `--bottom`, `--before RUN`, or `--after RUN`. The run and any
 anchor must be queued for the seat. After a move, the command prints the new queue.
 
-A person moves runs with `--as person/NAME` or `person` in the st config, like other client-v0
+A person moves runs with `--as person/NAME` or `person` in the Fractal config, like other client-v0
 mutations. With `--json`, it prints the action result.
 
 An agent moves runs in any seat's queue, including its own, with `--as agent/PATH`; in
@@ -195,10 +195,10 @@ still read from the current store; no queue cache is introduced.
   its work list before the wake for the head run arrives. Inside one run, the mission's
   dependencies decide readiness. `available-to` work is not queued, so it is not refused.
   An agent that wants another run first moves it.
-- **`st work ls` without `--as` lists fleet work.** That list is in creation order, not seat
+- **`fractal work ls` without `--as` lists fleet work.** That list is in creation order, not seat
   order, and it includes steps the agent cannot claim. The claim check makes the seat order hold
   anyway, and the seat's next step also arrives as a message that names it.
-- **An agent can re-declare its own seat.** In free mode an agent may use `st agents start`
+- **An agent can re-declare its own seat.** In free mode an agent may use `fractal agents start`
   for its own identity. The declaration records the agent as its writer and replaces the
   previous declaration.
 - **A reorder does not withdraw a wake that was already sent.** If the old head was woken and not

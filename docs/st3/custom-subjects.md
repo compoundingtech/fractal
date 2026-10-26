@@ -10,13 +10,13 @@ The complete example manifest is [custom-review.json](../../examples/st3/custom-
 All identities below are invented. Run the commands against your own daemon:
 
 ```sh
-st schema register examples/st3/custom-review.json --as agent/garden/seed
-st claim custom/garden/review/v1/review-001 custom.garden.review.v1.requested \
+fractal schema register examples/st3/custom-review.json --as agent/garden/seed
+fractal claim custom/garden/review/v1/review-001 custom.garden.review.v1.requested \
   --actor agent/garden/seed \
   --field 'title=Retain the seed history?' \
   --field 'detail=Choose Keep or Discard.' --field recipient=person/lichen
-st subject show custom/garden/review/v1/review-001
-st alerts ls --as person/lichen
+fractal subject show custom/garden/review/v1/review-001
+fractal alerts ls --as person/lichen
 ```
 
 The claim pins its registration hash automatically. One card appears for Lichen. The terminal UI displays
@@ -29,7 +29,7 @@ For a CLI reply, copy the `registration`, `revision` and attention `episode` fro
 write the reply fields to a JSON file, and run:
 
 ```sh
-st subject reply custom/garden/review/v1/review-001 \
+fractal subject reply custom/garden/review/v1/review-001 \
   --registration HASH --revision REVISION --episode EPISODE \
   --fields-file reply.json --idempotency-key garden-review-answer-001 --as person/lichen
 ```
@@ -41,7 +41,7 @@ isolated members remain competing immutable facts, visible as `reply_conflicts` 
 
 ## Manifest contract
 
-`st schema registrations` lists selected registrations; `st schema registration KIND@HASH`
+`fractal schema registrations` lists selected registrations; `fractal schema registration KIND@HASH`
 reads an exact registration. Registration is a trusted local configuration operation and uses
 existing rules. Paired devices cannot register kinds. Bound agent sockets cannot name another
 actor. Human replies still require the fixed recipient; free mode does not let an agent answer
@@ -63,7 +63,7 @@ supported manifest dependencies arrive.
 Each claim schema declares an authority (`creator`, `owner`, or `recipient`) and fields using
 existing schema types. Creation fixes the owner actor and addressed person. Only creation
 claims have creator authority. Owner claims require that original actor; recipient claims
-require the original person. Raw `st claim` writes receive the same validation as generic
+require the original person. Raw `fractal claim` writes receive the same validation as generic
 replies. Fields support required/optional values, scalar types, enum strings, arrays with
 `min_items`/`max_items`, subject reference families, immutable documents (`document: true`)
 and immutable claim IDs (`claim: true`). `additional_fields` defaults to false. Document/claim
@@ -93,13 +93,13 @@ Register [image-file-reference.json](../../examples/st3/image-file-reference.jso
 to use the same `reference.image-file` and `reference.onepassword-field` v1 kinds across fleets:
 
 ```sh
-st schema register examples/st3/image-file-reference.json --as agent/garden/seed
-st schema register examples/st3/onepassword-field-reference.json --as agent/garden/seed
-st claim custom/reference/image-file/v1/seed-picture custom.reference.image-file.v1.created \
+fractal schema register examples/st3/image-file-reference.json --as agent/garden/seed
+fractal schema register examples/st3/onepassword-field-reference.json --as agent/garden/seed
+fractal claim custom/reference/image-file/v1/seed-picture custom.reference.image-file.v1.created \
   --actor agent/garden/seed --field 'file=file/alder:/srv/garden/seed.png' \
   --field content_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --field media_type=image/png
-st claim custom/reference/onepassword-field/v1/garden-token custom.reference.onepassword-field.v1.created \
+fractal claim custom/reference/onepassword-field/v1/garden-token custom.reference.onepassword-field.v1.created \
   --actor agent/garden/seed --field locator=op://garden-vault/seed-service/token
 ```
 
@@ -113,7 +113,7 @@ read, embed, replicate or verify the image bytes; a consumer must check the file
 The 1Password carrier accepts only an exact `op://vault/item/field` locator (≤1024 JSON
 bytes). Each of its three components starts with an ASCII letter or digit and contains only
 ASCII letters, digits, `_` or `-`. Use IDs or simple names; v1 deliberately excludes spaces,
-section-qualified fields, query strings, fragments and encoded components. st never resolves
+section-qualified fields, query strings, fragments and encoded components. Fractal never resolves
 the locator. The schema has no secret-value, document, content or free-text field, and rejects
 extra fields. A locator's identifiers are graph data visible to graph readers; use invented
 names in public examples and keep credentials in the [sekrets](sekrets.md) workflow.
@@ -143,7 +143,7 @@ custom history and its referenced blobs. Client reads page indexes and never fol
 
 An external domain tool can append a derived claim with `_basis`, an array of
 `{"subject":"custom/...","kinds":["custom.domain.input"],"revision":"HASH"}`. Obtain the exact
-input-set token with `st subject basis SUBJECT --kind custom.domain.input` (or the equivalent
+input-set token with `fractal subject basis SUBJECT --kind custom.domain.input` (or the equivalent
 `/v1/custom/basis` read). Another matching input claim immediately makes the derived view stale
 and removes its card. The tool recomputes and appends a fresh derived claim. Filters exclude
 the output kind, dependency cycles are invalid, and bounds are enforced.
@@ -154,7 +154,7 @@ the output kind, dependency cycles are invalid, and bounds are enforced.
 for the external decision-tree tool. Register it once per fleet:
 
 ```sh
-st schema register examples/st3/decision-tree.json --as agent/example/decisions
+fractal schema register examples/st3/decision-tree.json --as agent/example/decisions
 ```
 
 Each logical tree is one subject, `custom/decision/tree/v1/<seat>`, named after the durable seat
@@ -185,7 +185,7 @@ write by the real seat is refused. A retired or renamed seat likewise strands it
 keeps its history but takes no new owner writes.
 
 `status` is the tool's derived view. Write it with one `_basis` entry for the tree subject
-covering every other kind, from `st subject basis custom/decision/tree/v1/<seat> --kind
+covering every other kind, from `Fractal subject basis custom/decision/tree/v1/<seat> --kind
 custom.decision.tree.v1.opened --kind ...requested --kind ...answered --kind ...assumed
 --kind ...promoted --kind ...damaged`. A `pending` status that names a `request` shows one card:
 the attention predicate compares `status.request` with itself because `eq` is false when either

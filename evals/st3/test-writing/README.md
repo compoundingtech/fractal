@@ -1,4 +1,4 @@
-# Test Writing eval for st3
+# Test Writing eval for Fractal
 
 This eval tests a Codex supervisor and developer with a mutation-scored test task.
 

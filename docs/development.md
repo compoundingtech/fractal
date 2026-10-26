@@ -6,13 +6,13 @@ Read the [product README](../README.md) and the guide for the behavior you are c
 Use invented people, host names, and paths in this public repository. Run
 `python3 scripts/check-public-repo` before opening a pull request.
 
-For st3 claims, missions, replication, runtime ownership, or recovery, start with the
+For Fractal claims, missions, replication, runtime ownership, or recovery, start with the
 [documentation index](st3/README.md). For st2 lifecycle, messaging, teardown, or presence,
 read and preserve the proofs in [st2 invariants](st2/invariants.md).
 
 ## CLI actor contract
 
-`st actor-contract --json` prints the actor syntax of the binary that runs it. It
+`fractal actor-contract --json` prints the actor syntax of the binary that runs it. It
 does not read config or call a daemon. The versioned `contract` has one entry for
 each callable clap command path, including hidden commands and optional parent
 commands. `aliases` lists other names under each canonical command. `contract_sha256` is
@@ -55,7 +55,7 @@ After a deliberate CLI change, review the changed actor entries and regenerate
 the checked-in contract:
 
 ```sh
-st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
+fractal actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
 cargo nextest run -p fractal -E 'test(actor_contract)'
 ```
 
@@ -67,7 +67,7 @@ if an alias changes. Supplement coverage also compares the reviewed setup/UI,
 note and changes paths, including every descendant, against the real clap
 inventory. Additions or removals require reviewing the identity handlers named
 beside `implicit_person`; mutation tests exercise added setup/UI descendants and
-a removed UI descendant. `st ui open` resolves the configured person before
+a removed UI descendant. `fractal tui open` resolves the configured person before
 queueing a request in that person's terminal UI request directory.
 This is freshness coverage, not proof of live runtime fallback or authority.
 Host, account, repository and harness policy remains in the
@@ -136,22 +136,22 @@ the installed `st3`. `st` is never a separate build. On macOS, st3 lives in a fi
 `packages/fractal-sdk` owns the app-independent `@fractal/sdk` package. Its
 `@fractal/sdk/effect` entry point provides transport, follow state, decoding, and
 trace-context propagation without browser startup or UI dependencies.
-`St3Live(options)` works without an application platform layer; callers can supply
+`FractalLive(options)` works without an application platform layer; callers can supply
 an explicit socket in options for custom transports and tests.
 
 Browser behavior stays in `apps/fractal-web/src/data`: early collection socket
 adoption, traced browser fetch/WebSocket wrappers, and visibility/LRU admission
-policy. The app supplies those through `St3Platform`; the neutral SDK does not
+policy. The app supplies those through `FractalPlatform`; the neutral SDK does not
 adopt a browser bootstrap socket or install browser visibility policy by default.
 `@fractal/sdk/admission` exposes the admission primitives used by that adapter.
 
-`St3.watch` accepts a typed `FollowDescriptor<TResource>`: `spec` selects an
+`Fractal.watch` accepts a typed `FollowDescriptor<TResource>`: `spec` selects an
 existing window collection and the descriptor's `decodeRow` decodes its rows.
 Optional `spec.descriptor` is a stable local decoder ID for independent decoder
 and admission identity; it is never sent on the wire. The watch shares the scoped
 follow lifecycle and multiplexed socket; it does not introduce another wire format.
 
-`St3Options.credential` resolves a bearer credential for each HTTP request and
+`FractalOptions.credential` resolves a bearer credential for each HTTP request and
 socket open. It is not an actor selector. The `client` option is only a reported
 client/build label, never authenticated identity or authority. An explicit
 credential bypasses browser bootstrap socket adoption; non-browser socket
@@ -369,7 +369,7 @@ Header and agent-work composition remain outside this crate.
 ## Embedding native conversations
 
 `crates/fractal-conversation-ui` provides the same native conversation presentation used by
-`st`’s terminal interface, without terminal acquisition, application tabs or daemon connections. Feed
+Fractal’s terminal interface, without terminal acquisition, application tabs or daemon connections. Feed
 `fractal-client` conversation frames into `Timeline::apply(Frame { replace, has_more, items })`,
 adapt the timeline with caller-owned display names, and render it with `Cache::render`
 and caller-supplied `Theme` tokens. The returned document contains styled lines and typed
@@ -437,7 +437,7 @@ wording consistent when both describe the same change.
 | Path | Contents |
 | --- | --- |
 | `crates/fractal` | Current daemon and CLI. |
-| `crates/fractal-tui` | Terminal UI library used by `st`. |
+| `crates/fractal-tui` | Terminal UI library used by Fractal. |
 | `crates/fractal-drivers`, `crates/fractal-runtime` | Harness drivers and shared runtime. |
 | `crates/fractal-client`, `crates/fractal-feed`, `crates/fractal-schema`, `crates/fractal-client-codegen` | Client API, feeds, schema, and code generation. |
 | `crates/fractal-ui-model`, `crates/fractal-conversation-ui` | Shared mission and conversation presentation. |
@@ -448,7 +448,7 @@ wording consistent when both describe the same change.
 | `examples/st3`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |
 
-The `fractal-tui` package is a library embedded in `st`; it has no standalone executable. Its existing
+The `fractal-tui` package is a library embedded in `fractal`; it has no standalone executable. Its existing
 Clippy baseline allowances remain under the `fractal-tui` package key because the library still owns
 the renderer and its existing lint baseline.
 Removing the binary does not rename the library or the protocol client identity.

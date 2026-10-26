@@ -92,7 +92,7 @@ matches resumes.
 **One capture per directory.** A capture takes an exclusive, non-blocking `flock` on
 `capture.lock` in its directory for as long as it holds its staging file. A second capture of the
 same directory fails at once with "another checkpoint capture is running"; its pass ends with that
-error and the next pass tries again. It never waits. The dry run (`st replication checkpoint
+error and the next pass tries again. It never waits. The dry run (`Fractal replication checkpoint
 plan`) captures into a directory of its own under the scratch directory and deletes its file when
 it is done, so it never replaces the scheduler's resumable capture.
 

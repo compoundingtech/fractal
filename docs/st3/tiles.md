@@ -3,7 +3,7 @@
 A tile is one agent as its own Unix user, in its own namespaces and its own root-owned cgroup.
 Another tile cannot read its files, see or signal its processes, reach its sockets or loopback
 ports, or pass for it. A tile is a process group and private directories on the host's kernel,
-not a VM and not a full container image. Linux first; the approved design is the st document
+not a VM and not a full container image. Linux first; the approved design is the Fractal document
 `doc/fleet/smalltalk/agent-tiles/design`.
 
 This document describes what is built: the first step of that design, launching a tile with a
@@ -13,7 +13,7 @@ signed handoffs and network egress come next and are listed at the end.
 ## Registry
 
 Root's registry, `/etc/st-tiles/tiles.toml`, is the only source of a tile's identity. Root owns
-the file and every directory above it; st refuses one anyone else can change. Root names each
+the file and every directory above it; Fractal refuses one anyone else can change. Root names each
 tile's agent, person, supervisor and ceilings; the launcher gives it a user ID.
 
 ```toml
@@ -53,7 +53,7 @@ one launch, so a tile keeps its user ID for as long as its state lasts, not for 
   overlaps a subordinate range in `/etc/subuid` or `/etc/subgid`, systemd's own dynamic users
   (61184-65519), systemd's container range (524288 and up), or 65534 and 65535. Every later
   launch refuses an ID that an account or a group has taken in the meantime.
-- `sudo st tiles remove atlas` stops the tile, removes its state and runtime directories, and
+- `sudo fractal tiles remove atlas` stops the tile, removes its state and runtime directories, and
   gives the ID back. It refuses while any process anywhere on the host runs as that ID, and the
   ID stays allocated while the state remains. Root's registry entry stays, so a later launch
   allocates a fresh ID, and nothing of the old tile is left for it to inherit.
@@ -68,20 +68,20 @@ nothing.
 ## Launching
 
 ```sh
-sudo st tiles run atlas -- python3 -c 'print("hello")'   # wait for it; --pty for a terminal
-sudo st tiles stop atlas                                  # end every process in it
-sudo st tiles prepare atlas                               # allocate its ID, make its directories
-sudo st tiles remove atlas                                # end it, remove its state, free its ID
+sudo fractal tiles run atlas -- python3 -c 'print("hello")'   # wait for it; --pty for a terminal
+sudo fractal tiles stop atlas                                  # end every process in it
+sudo fractal tiles prepare atlas                               # allocate its ID, make its directories
+sudo fractal tiles remove atlas                                # end it, remove its state, free its ID
 ```
 
 `st tiles run` starts `st-tile-NAME-tools.service` in `st_tiles-NAME.slice` with the tile's
 ceilings (`TasksMax`, `MemoryMax`, optional `MemoryHigh`, `CPUWeight`) and
 `KillMode=control-group`. Only one runs per tile. systemd owns the cgroup: nothing is delegated,
 so a tile cannot write to it, and the unit ends when its main process ends, for any reason. The
-st executable runs as root in that unit, so root must control it and every directory above it;
-install st where only root can change it.
+Fractal executable runs as root in that unit, so root must control it and every directory above it;
+install Fractal where only root can change it.
 
-The unit's main process, `st tiles enter`, checks it runs in that unit, makes new mount, PID,
+The unit's main process, `fractal tiles enter`, checks it runs in that unit, makes new mount, PID,
 IPC, network, UTS and cgroup namespaces, and forks the tile's first process, PID 1 of the new
 PID namespace. PID 1 builds the tile's file system on an empty tmpfs:
 
@@ -119,11 +119,11 @@ status.
 
 Every way a tile's launch ends leaves nothing behind. When the command exits, PID 1 exits and the
 kernel ends every process left in the PID namespace, including ones that ignore SIGTERM or
-double-forked into their own sessions. When PID 1 is killed, the same. When `st tiles enter`
+double-forked into their own sessions. When PID 1 is killed, the same. When `fractal tiles enter`
 ends for any reason, systemd stops the unit and kills every process in its cgroup: the cgroup is
 the guarantee. PID 1 also gets SIGKILL from its parent-death signal, which only ends it sooner.
-`st tiles stop` stops the unit directly. In each case the unit and its cgroup are
-gone when `st tiles run` returns, no process of the tile's user remains on the host, and the
+`fractal tiles stop` stops the unit directly. In each case the unit and its cgroup are
+gone when `fractal tiles run` returns, no process of the tile's user remains on the host, and the
 tile's mounts, which only ever existed in its own mount namespace, are gone with it. The tile
 starts again cleanly.
 
@@ -134,10 +134,10 @@ the only host directory where a tile can reach a socket. A server there learns t
 the kernel: `SO_PEERCRED` gives the Unix user and process, and the process's cgroup and the
 registry give the tile and its agent.
 
-The supervisor's st daemon serves `st.sock` there, the tile's restricted st endpoint, at
+The supervisor's Fractal daemon serves `st.sock` there, the tile's restricted Fractal endpoint, at
 `/run/st/st.sock` inside the tile. The daemon follows root's registry and serves every tile
 whose `supervisor_uid` is its own Unix user, from the moment root makes the tile's endpoint
-directory (`st tiles run` or `st tiles prepare`); a registry change starts or stops endpoints
+directory (`fractal tiles run` or `fractal tiles prepare`); a registry change starts or stops endpoints
 without a restart. When the registry withdraws a tile, removes its `supervisor_uid` or changes
 its entry, the endpoint stops and every open connection to it closes, so no connection keeps
 acting for an identity root has withdrawn. A connection is the tile's only when the kernel names
@@ -169,7 +169,7 @@ tile is refused. See [Sekrets: Tiles](sekrets.md#tiles).
 ## What it proves
 
 `crates/fractal/tests/tiles_root.rs` runs on a real host with `sudo -n`, systemd and cgroups v2. Its
-tiles get user IDs from a test range, and afterwards `st tiles remove` removes every tile, unit
+tiles get user IDs from a test range, and afterwards `fractal tiles remove` removes every tile, unit
 and directory:
 
 ```sh
@@ -189,13 +189,13 @@ that will run tiles; that gate is part of step 2.
   port or System V shared memory, see its files or processes, or signal any host process; the
   host's own loopback port and abstract socket are unreachable too. Outside the namespaces, one
   tile's user cannot read another's state.
-- Keys: a node key written as st writes it, and every path of the supervisor's state, are
+- Keys: a node key written as Fractal writes it, and every path of the supervisor's state, are
   unreadable by the tile's user and absent inside the tile.
 - Escape: every namespace flag, `setns`, mounts and `chroot` are refused, and so are io_uring,
   `bpf`, `userfaultfd`, `perf_event_open`, the keyring calls, `kcmp` and
   `process_vm_readv`/`writev`; `fork` works until
   `TasksMax`; the tile's user cannot move a process into its own or a sibling's cgroup.
-- Descriptors: a descriptor root's shell left open across `st tiles run` is not in the tile.
+- Descriptors: a descriptor root's shell left open across `fractal tiles run` is not in the tile.
 - Cleanup: killing the launcher, killing PID 1, stopping the unit and the command exiting each
   leave no unit, cgroup, process or mount, and the tile starts again.
 - User IDs: each tile gets its own ID from the range, held by no account or group, and recorded
@@ -204,7 +204,7 @@ that will run tiles; that gate is part of step 2.
   the ID back. An ID that still owns a directory under the state root is skipped. A range that
   holds an account is refused.
 - Refusals: a non-root caller, `enter` outside its unit, an account that took a tile's user ID,
-  a registry or st executable someone other than root can change.
+  a registry or Fractal executable someone other than root can change.
 - Endpoint: a real tile, through `/run/st/st.sock`, is told its own agent, sends as itself, and is
   refused sending as its sibling, reading its sibling's mailbox and the administrative API; the
   graph holds its message from its own agent and never the forged one. The sibling's endpoint
@@ -212,7 +212,7 @@ that will run tiles; that gate is part of step 2.
   connection from this user outside the tile's slice or from another tile's slice, the daemon
   following the registry and the endpoint directory as they appear, and a kept-open connection
   closing when the registry withdraws the tile.
-- Sekrets: a real tile's `st sekrets whoami`, at the client's default socket, is its agent
+- Sekrets: a real tile's `fractal sekrets whoami`, at the client's default socket, is its agent
   working for its person, with no daemon; the same Unix user outside the tile is unidentified;
   a tile whose registry names a missing gateway socket is refused at launch. Unit tests in
   `sekrets/tests.rs` cover a grant to the tile's agent, attestations that change nothing, every

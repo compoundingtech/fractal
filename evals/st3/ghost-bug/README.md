@@ -1,6 +1,6 @@
 # ghost-bug-codex — the ghost-bug debug loop, run by codex seats
 
-This st3 eval asks two native Codex agents to find a shared-default mutation bug in `labelkit`.
+This Fractal eval asks two native Codex agents to find a shared-default mutation bug in `labelkit`.
 This teaches a bounded delegate-debug-verify loop where a shallow patch or a test that never failed
 cannot pass.
 

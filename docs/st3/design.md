@@ -1,6 +1,6 @@
-# st architecture
+# Fractal architecture
 
-st is the Fractal claims-graph runtime. KDL declarations are its human authoring surface. Claims
+Fractal is the Fractal claims-graph runtime. KDL declarations are its human authoring surface. Claims
 are its durable fact surface. Projections, process observations, and caches are derived state.
 
 This document defines the stable system shape. The linked technical documents define the complete
@@ -59,7 +59,7 @@ reject unsupported versions. The authoritative fields and nested validation live
 - `deploy.compat-signoff` binds `trainId`, `oldCommit`, and `newCommit`. A GO's
   `compatSignoffId` denotes this typed claim, not a message or an untyped approval.
 
-Schema admission is not authorization. `st deploy verify-go` checks the local replica
+Schema admission is not authorization. `fractal deploy verify-go` checks the local replica
 through the local Unix daemon API; remote endpoints are refused and verification never
 contacts fleet peers or requests synchronization. The verifier uses the existing
 `smallclaims::principal::judge` signature/delegation authorization model and its complete
@@ -151,8 +151,8 @@ list output while allowing unrelated known records to progress.
 Every document starts with `version 2`. Declarations follow that node directly. There is no wrapper
 that represents a database transaction.
 
-`st launch preview` validates and renders a planner-authored launch candidate.
-`st apply FILE... --as ACTOR` previews and then atomically applies authored KDL for seats,
+`fractal launch preview` validates and renders a planner-authored launch candidate.
+`fractal apply FILE... --as ACTOR` previews and then atomically applies authored KDL for seats,
 missions and schedules. In [free mode](../site/reference/configuration.md#free-mode) any agent may publish, as itself. A failed
 declaration rejects the complete publication.
 
@@ -218,7 +218,7 @@ process re-reads and replaces `.claude.json` under that lock, so no running Clau
 older copy of the config that lacks the new workspace.
 
 A native harness starts with no prompt and takes no turn until a person types or a message is
-posted. Its driver installs the skill that `st skill` prints, which describes how to use st. A
+posted. Its driver installs the skill that `fractal skill` prints, which describes how to use st. A
 harness declaration cannot carry a `prompt`.
 
 ## Fault isolation
@@ -246,14 +246,14 @@ recovery.
 A fault that lasts two minutes becomes a fault item for its owning agent (see
 [Messages and attention](#messages-and-attention)). A new cause replaces that item, and the next
 success closes it. While whole passes fail or the reconciler panics, one item on `daemon/HOST`,
-"The reconciler is failing", names `st doctor` and `st service restart`, and the next successful
+"The reconciler is failing", names `fractal doctor` and `fractal service restart`, and the next successful
 pass closes it.
 
 The daemon also reads the free space of its state directory's filesystem and of each workspace on
 its host, every 30 seconds. When one has under 2 GiB or 2% left, one item on `daemon/HOST` names
 each such filesystem and how to free space. It closes once each has 4 GiB and 4% free, so a
 filesystem near the line does not raise and close items over and over. An item closed early is not
-raised again until the space recovers. `st doctor` shows the free space of the
+raised again until the space recovers. `fractal doctor` shows the free space of the
 state directory.
 
 Sometimes a fault cannot be recorded on its item, for example when a store write fails. The item
@@ -330,22 +330,22 @@ split lets a ready step survive a daemon outage, a driver outage, and a failed d
 An agent notification only indicates that ready work or a message may exist. It does not authorize
 new work. The work queue and message record remain authoritative.
 
-`st alerts ls --as person/NAME` lists only what waits on that person and no agent can resolve:
-requests (person steps and agents' `st work ask`) and reviews (human gates, launch approvals and
+`fractal alerts ls --as person/NAME` lists only what waits on that person and no agent can resolve:
+requests (person steps and agents' `fractal work ask`) and reviews (human gates, launch approvals and
 revision approvals). Human identity is required rather than inferred. The stable client-v0
 attention resource is the machine source for user interfaces, and the terminal UI's home and the phone show
 exactly this set.
 
 Messages never enter attention; they stay in conversations. An agent that waits on a person's
-answer asks with `st work ask`.
+answer asks with `fractal work ask`.
 
 Faults never enter attention either. A failed loop, step, deploy, observer or runtime goes to an
 owning agent: the agent assigned to the failed step, else the run's requester (or the requester of
 a run above it) when that is an agent, else the fleet's fault agent, the first live agent whose
 declaration carries the bare `handles-faults` node. Only a live agent declaration owns a fault. The
 host that runs the owner sends it one message per fault episode, from `daemon/runtime` with the
-title `Fault: TITLE`. The agent retries, revises or cancels, and asks a person with `st work ask`
-only for what only a person can give. A fault that no agent owns stays visible in `st doctor`'s
+title `Fault: TITLE`. The agent retries, revises or cancels, and asks a person with `fractal work ask`
+only for what only a person can give. A fault that no agent owns stays visible in `fractal doctor`'s
 `attention-age` check once it is a day old.
 
 ## Resources and observers
@@ -362,7 +362,7 @@ See [resource subscriptions](resource-subscriptions.md) for provider and intake 
 
 ## Replication
 
-One st node is a complete local system. Fleet nodes exchange authenticated claim envelopes and
+One Fractal node is a complete local system. Fleet nodes exchange authenticated claim envelopes and
 document bytes over loopback or tailnet HTTP, or a `fabric://NODE_ID/PROTOCOL` route.
 
 Replication compares immutable envelope inventories. Receipt order cannot change the deterministic
@@ -388,7 +388,7 @@ set; peer URLs are loopback or tailnet `http://` URLs or `fabric://NODE_ID/PROTO
 Fleet messages use a shared secret and request-bound signatures.
 
 Each member’s render transaction refuses symbolic-link escapes and conflicting file ownership.
-It refuses to change a tracked file. st removes the `.st3` directory that older releases wrote
+It refuses to change a tracked file. Fractal removes the `.st3` directory that older releases wrote
 for a native harness only when Git tracks nothing in it. Additive Git excludes combine
 across operations and worktrees sharing an exclude file. A failed member pass records a fault
 without blocking other members; stopping a member does not require its render to succeed.

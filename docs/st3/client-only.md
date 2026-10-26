@@ -1,8 +1,8 @@
 # Terminal UI on a device without a daemon
 
-A laptop can run `st` as a paired client device. It holds a private read-only display cache and
+A laptop can run `fractal` as a paired client device. It holds a private read-only display cache and
 device credentials, connects to a member's client gateway, and sends confirmed actions through
-that member. It runs no st daemon or replication worker, holds no graph replica, and needs no
+that member. It runs no Fractal daemon or replication worker, holds no graph replica, and needs no
 fleet membership, member key, peer exposure, or fleet sync secret. Members continue to sync as
 described in [replication](replication.md) and [Fleet join](../fleet-join.md).
 
@@ -21,7 +21,7 @@ exposes the bearer credential to observers.
 On the member, create a short-lived, single-use challenge for the intended person:
 
 ```sh
-st devices --as person/avery pair --full-control "Demo laptop"
+fractal devices --as person/avery pair --full-control "Demo laptop"
 ```
 
 This returns a `pairing_id`, a code, and its expiration time. `--full-control` grants the actions
@@ -32,7 +32,7 @@ The terminal UI cannot expand the member's grant.
 On the laptop, install Fractal and run one setup command:
 
 ```sh
-st devices complete https://member.example pairing/CHALLENGE_ID --fingerprint sha256:FINGERPRINT
+fractal devices complete https://member.example pairing/CHALLENGE_ID --fingerprint sha256:FINGERPRINT
 ```
 
 Obtain the member fingerprint through a trusted channel. Enter the code at the prompt. Input is hidden, and the code and credential are never printed.
@@ -40,13 +40,13 @@ Automation can provide the code on stdin; keep it out of shell arguments and his
 does not require a local daemon or `ST3_PERSON`. The member's grant determines the person and
 session actor; local actor settings cannot change that authority.
 
-Then run `st`. A saved profile selects client-only mode automatically. `st ui --client` requires
-a saved pairing; `st ui --local` explicitly selects the usual local Unix socket and configured
-person. `st ui --help` lists these choices.
+Then run `fractal`. A saved profile selects client-only mode automatically. `fractal tui --client` requires
+a saved pairing; `fractal tui --local` explicitly selects the usual local Unix socket and configured
+person. `fractal tui --help` lists these choices.
 
 ## Several members and reconnecting
 
-Repeat `st devices complete URL PAIRING_ID --fingerprint sha256:FINGERPRINT` for another member to add its route and its own device grant.
+Repeat `fractal devices complete URL PAIRING_ID --fingerprint sha256:FINGERPRINT` for another member to add its route and its own device grant.
 All routes in one profile must delegate the same person; use separate `XDG_CONFIG_HOME`
 directories for different people. Each credential goes only to the member it was paired with.
 The profile is read at startup, so restart the terminal UI after adding a route. A reachable member stays
@@ -81,8 +81,8 @@ expires after seven days.
 
 Credentials expire according to the member's API policy (currently thirty days). Create a new
 challenge and run the pairing command again to replace a route's grant. List and revoke devices
-on the member with `st devices --as person/avery ls` and
-`st devices --as person/avery revoke device/DEVICE_ID --reason "Retired laptop grant"`.
+on the member with `fractal devices --as person/avery ls` and
+`fractal devices --as person/avery revoke device/DEVICE_ID --reason "Retired laptop grant"`.
 Re-pairing creates a new grant; revoke any old grant that is no longer needed. A revocation is
 final: every member treats the grant as revoked, whatever order it received the pairing and the
 revocation in, and nothing pairs the same grant again. Removing the
@@ -95,7 +95,7 @@ cargo test -p fractal --locked --test integration client_only
 cargo run -p fractal-client-codegen --locked -- --check
 ```
 
-The `client_only` end-to-end test launches the actual st binary in a PTY with an isolated
+The `client_only` end-to-end test launches the actual Fractal binary in a PTY with an isolated
 client home and deliberately absent local socket. Independent member routers and paired-only
 network carriers prove pairing, a confirmed remote action, loss of the gateway, retained data
 and a last-connected time, no queued action, offline cache after a client restart, automatic

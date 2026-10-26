@@ -1,15 +1,15 @@
 # Owned-seat rollout
 
 A publisher can opt an owned set into draining changed and omitted seats before restarting or
-retiring them. st performs and reports the cutover. The publisher still supplies the complete KDL
+retiring them. Fractal performs and reports the cutover. The publisher still supplies the complete KDL
 bundle, an immutable Git SHA, a strictly increasing source sequence and exact set/member fences.
 Publication alone does not watch a repository or automatically apply its contents.
 
 ```sh
-st apply --set garden seats.kdl --repository acme/garden --ref refs/heads/main \
+fractal apply --set garden seats.kdl --repository acme/garden --ref refs/heads/main \
   --sha "$SOURCE_SHA" --source-sequence "$SOURCE_SEQUENCE" --expect-set "$PREVIOUS_SET" \
   --rollout when-idle --rollout-deadline 30m --as agent/garden/publisher
-st sets status garden --sha "$SOURCE_SHA" --json
+fractal sets status garden --sha "$SOURCE_SHA" --json
 ```
 
 The policy is part of the immutable receipt and preview digest. Omitting `--rollout` retains
@@ -40,7 +40,7 @@ agent "garden/orchard" {
 ```
 
 The graph applier publishes this declaration with the rest of the fleet using its ordinary
-`st apply --set` invocation, including `--rollout when-idle` if the automatic seats should drain.
+`fractal apply --set` invocation, including `--rollout when-idle` if the automatic seats should drain.
 There is no per-seat apply flag to repeat. The property is in the canonical declaration and
 receipt digest, survives retries and subsequent complete publications, and changes through the
 same review and fencing as any other declaration field. Omission of the property restores the
@@ -61,7 +61,7 @@ all automatic members have completed their rollout. Failures, unknown progress a
 explicit cutovers still prevent satisfaction. Existing response fields retain their meanings.
 
 ```sh
-st agents rollout agent/garden/orchard --deadline 30m --as person/operator
+fractal agents rollout agent/garden/orchard --deadline 30m --as person/operator
 ```
 
 The explicit command captures fresh declaration and incarnation fences and validates cutover
@@ -115,7 +115,7 @@ normal reconciliation and restart requests cannot bypass that hold. Retry explic
 desired/incarnation fences:
 
 ```sh
-st agents rollout agent/garden/orchard --deadline 30m --as person/operator
+fractal agents rollout agent/garden/orchard --deadline 30m --as person/operator
 ```
 
 `--force-after-deadline` on publication or explicit retry permits interruption of busy work. It
@@ -125,8 +125,8 @@ uses the existing runtime-exit and lease-recovery behavior.
 
 Agent and set JSON reads expose the operation, phase, blockers, deadline and session verification.
 Source status distinguishes publication, local visibility, supersession and satisfied rollout.
-`st sets status <set> --sha <sha>` returns 404 until that SHA has a publication receipt; this
-is intended, including before a dry run or first apply. Read `st sets show <set>` for the current
+`fractal sets status <set> --sha <sha>` returns 404 until that SHA has a publication receipt; this
+is intended, including before a dry run or first apply. Read `fractal sets show <set>` for the current
 set revision used by `--expect-set` fencing.
 An omitted seat is retired only after observed exit; mission/schedule publication is not a running
 seat. Remote visibility and unreachable owner progress remain unknown without reporting evidence.

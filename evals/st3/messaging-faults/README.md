@@ -8,7 +8,7 @@ extension and consumes `sendUserMessage`. No model or LLM judge runs, and the re
 never polls a mailbox. This measures the transport and harness integration boundary;
 it does not prove a real model's response time or every harness's integration.
 
-Run outside an st seat, since the sender acts as `person/eval`. For example:
+Run outside a Fractal seat, since the sender acts as `person/eval`. For example:
 
 ```sh
 setsid -f env -i HOME="$HOME" USER="$USER" PATH="$PATH" \
@@ -92,7 +92,7 @@ Duplicates after that bounded observation window are not covered.
 Delivery and reporting are separate results: a working channel reported stale fails the
 reporting gate even if the message arrives. `result.json` records both receipt timing and
 the delivery assessment. Every path, including the upgraded previous-release channel, must
-be `current`, and every `st3 driver` process of the seat must run the daemon's executable.
+be `current`, and every `fractal driver` process of the seat must run the daemon's executable.
 The failed-handoff case also requires a visible blockage in the agent, doctor and sender views. Per-case evidence keeps graph
 traces, native receipts, process snapshots, agent cards, replication status and
 daemon/worker logs. Paths are normalized before publishing; stores, configuration

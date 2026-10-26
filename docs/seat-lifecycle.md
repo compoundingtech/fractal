@@ -5,8 +5,8 @@ An agent's declaration, work, messages, and decisions live in the graph. A runni
 Use the worker declared in [missions in practice](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/missions-in-practice.md). Check it before changing anything:
 
 ```sh
-st agents show agent/garden/worker
-st agents queue agent/garden/worker
+fractal agents show agent/garden/worker
+fractal agents queue agent/garden/worker
 ```
 
 ## Restart, stop, or suspend?
@@ -20,8 +20,8 @@ st agents queue agent/garden/worker
 Restart an agent:
 
 ```sh
-st agents restart agent/garden/worker --as person/ada
-st agents show agent/garden/worker
+fractal agents restart agent/garden/worker --as person/ada
+fractal agents show agent/garden/worker
 ```
 
 When repeated failed starts have parked an agent, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the agent parks again and its cause stays visible in `fractal agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
@@ -29,8 +29,8 @@ When repeated failed starts have parked an agent, an authorized person's or agen
 The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
 
 ```sh
-st agents stop agent/garden/worker --as person/ada
-st agents start garden/worker --as person/ada
+fractal agents stop agent/garden/worker --as person/ada
+fractal agents start garden/worker --as person/ada
 ```
 
 Native drivers check their work once a minute and renew held claims only while the claim's
@@ -49,9 +49,9 @@ gets a first message with the handoff it left and the live state of its work. Se
 To preserve the exact conversation, wait until the agent has finished its turn and holds no claim:
 
 ```sh
-st agents suspend agent/garden/worker --as person/ada --reason 'Idle until tomorrow.'
-st agents show agent/garden/worker
-st agents resume agent/garden/worker --as person/ada
+fractal agents suspend agent/garden/worker --as person/ada --reason 'Idle until tomorrow.'
+fractal agents show agent/garden/worker
+fractal agents resume agent/garden/worker --as person/ada
 ```
 
 Suspend refuses a busy agent with its blockers: a turn, claimed work, pending question, unsent input, or running subagent. A new harness may need one turn before it has a saved native session. Mail waits while suspended; it does not wake the agent. Resume verifies the same session on the same host. See [suspend/resume](st3/suspend.md) for failure reasons and limits.
@@ -111,8 +111,8 @@ to respect the set's ownership.
 Read the directory from the agent instead of constructing a path from its identity:
 
 ```sh
-st agents workspace agent/garden/interactive
-st agents workspace agent/garden/interactive --json
+fractal agents workspace agent/garden/interactive
+fractal agents workspace agent/garden/interactive --json
 ```
 
 The plain command prints only the declared workspace directory, so a local launcher can use
@@ -126,7 +126,7 @@ an error instead of a guessed directory.
 For a running interactive agent, attach to its existing terminal:
 
 ```sh
-st terminals attach agent/garden/interactive --as person/ada
+fractal terminals attach agent/garden/interactive --as person/ada
 ```
 
 Attach does not start or restart the agent. Detach with Ctrl-\\; the harness keeps running, and
@@ -134,10 +134,10 @@ the same attach command reconnects. After the process exits or you stop it, rest
 agent and attach again:
 
 ```sh
-st agents stop agent/garden/interactive --as person/ada
-st agents start agent/garden/interactive --as person/ada
-st agents workspace agent/garden/interactive --json
-st terminals attach agent/garden/interactive --as person/ada
+fractal agents stop agent/garden/interactive --as person/ada
+fractal agents start agent/garden/interactive --as person/ada
+fractal agents workspace agent/garden/interactive --json
+fractal terminals attach agent/garden/interactive --as person/ada
 ```
 
 Omit `stop` if the agent has already stopped or retired. Start without overrides restores its
@@ -158,10 +158,10 @@ fractal can find Codex, Claude Code, omp, pi, and OpenCode sessions you started 
 under its ownership:
 
 ```sh
-st import ls            # running sessions
-st import ls --all      # saved sessions too
-st import show SESSION
-st conversations timeline SESSION
+fractal import ls            # running sessions
+fractal import ls --all      # saved sessions too
+fractal import show SESSION
+fractal conversations timeline SESSION
 ```
 
 `import ls` reads exact transcript paths named by live harness commands without scanning saved
@@ -179,7 +179,7 @@ whose workspace matches the live process and then the newest copy; import refuse
 indistinguishable by those rules before stopping any process.
 
 ```sh
-st import run SESSION --as person/ada
+fractal import run SESSION --as person/ada
 ```
 
 Import stops that exact process if it is still running, declares a durable agent named
@@ -235,8 +235,8 @@ Upgrading fractal does not migrate stored declarations. Re-importing an already-
 agent does not replace its declaration. Stop the agent and export its current KDL:
 
 ```sh
-st agents stop agent/import/omp/ID --as person/ada
-st subject show agent/import/omp/ID --kdl --show-env-values > imported.kdl
+fractal agents stop agent/import/omp/ID --as person/ada
+fractal subject show agent/import/omp/ID --kdl --show-env-values > imported.kdl
 ```
 
 Keep the identity, workspace, and other settings. Remove the harness's
@@ -253,8 +253,8 @@ The native ID must match the transcript's session header. Apply the repaired
 declaration and inspect the resulting agent:
 
 ```sh
-st apply imported.kdl --as person/ada
-st agents show agent/import/omp/ID
+fractal apply imported.kdl --as person/ada
+fractal agents show agent/import/omp/ID
 ```
 
 ### Repair a Codex import created before strict resume
@@ -267,8 +267,8 @@ the durable agent already exists.
 Stop the affected agent and export its declaration for editing:
 
 ```sh
-st agents stop agent/import/codex/ID --as person/ada
-st subject show agent/import/codex/ID --kdl --show-env-values > imported.kdl
+fractal agents stop agent/import/codex/ID --as person/ada
+fractal subject show agent/import/codex/ID --kdl --show-env-values > imported.kdl
 ```
 
 Keep the same agent identity, workspace and other settings. Remove the harness's `resume`
@@ -291,8 +291,8 @@ agent "import/codex/ID" {
 Apply the repaired declaration and check the resulting agent:
 
 ```sh
-st apply imported.kdl --as person/ada
-st agents show agent/import/codex/ID
+fractal apply imported.kdl --as person/ada
+fractal agents show agent/import/codex/ID
 ```
 
 The resumed session keeps the settings it was saved with, such as its permission mode. To choose
@@ -300,12 +300,12 @@ them, declare the agent yourself with the same identity, workspace, and resume a
 that file with your other agents. For a Claude Code session:
 
 ```sh
-st agents start import/claude/ID --harness claude --workspace WORKSPACE \
+fractal agents start import/claude/ID --harness claude --workspace WORKSPACE \
   --model claude-sonnet-5 --effort medium \
   --arg=--resume --arg NATIVE_SESSION_ID --arg=--permission-mode --arg auto \
   --as person/ada --print-kdl > imported.kdl
-st agents stop agent/import/claude/ID --as person/ada
-st apply imported.kdl --as person/ada
+fractal agents stop agent/import/claude/ID --as person/ada
+fractal apply imported.kdl --as person/ada
 ```
 
 One limit remains: a resumed Claude Code session does not load fractal's channel yet, so fractal cannot
@@ -315,10 +315,10 @@ declare yourself.
 ## Spot and recover a stale or stopped agent
 
 ```sh
-st agents ls --all
-st agents show agent/garden/worker --json
-st subject history agent/garden/worker --limit 20
-st doctor
+fractal agents ls --all
+fractal agents show agent/garden/worker --json
+fractal subject history agent/garden/worker --limit 20
+fractal doctor
 ```
 
 Ordinary `fractal agents ls` and `fractal agents tree` read the latest published roster without
@@ -337,7 +337,7 @@ One command declares an agent on any fleet machine, waits until its harness is r
 this terminal to it:
 
 ```sh
-st agents new site --host builder --harness claude --model claude-opus-5-5 --attach
+fractal agents new site --host builder --harness claude --model claude-opus-5-5 --attach
 ```
 
 It writes the same declaration a person writes by hand, with the harness defaults of the fleet's
@@ -372,9 +372,9 @@ next steps. JSON output keeps its existing shape.
 ## Open a shell
 
 ```sh
-st terminals new work --cwd /tmp
-st terminals attach terminal/pty/person/ada/UUID
-st terminals end terminal/pty/person/ada/UUID
+fractal terminals new work --cwd /tmp
+fractal terminals attach terminal/pty/person/ada/UUID
+fractal terminals end terminal/pty/person/ada/UUID
 ```
 
 `terminals new` prints the new terminal ID. It runs the host's preferred shell (`$SHELL`, falling
@@ -390,7 +390,7 @@ declaration with `fractal agents start --print-kdl` and keep the file in Git:
 
 ```sh
 cd ~/src/garden
-st agents start example/worker --harness claude --model claude-sonnet-5 --effort medium \
+fractal agents start example/worker --harness claude --model claude-sonnet-5 --effort medium \
   --as person/ada --print-kdl > worker.kdl
 ```
 
@@ -421,9 +421,9 @@ agent "example/worker" {
 Apply it and look at it:
 
 ```sh
-st apply worker.kdl --as person/ada
-st agents show agent/example/worker
-st terminals peek agent/example/worker
+fractal apply worker.kdl --as person/ada
+fractal agents show agent/example/worker
+fractal terminals peek agent/example/worker
 ```
 
 See [model accounts](st3/accounts.md) for usage totals, weekly limits, and account pools.
@@ -468,8 +468,8 @@ its mail until it resumes. [Suspending an agent](st3/suspend.md) has the details
 Human labels are presentation, not launch configuration:
 
 ```sh
-st agents rename agent/example/worker "Garden maintenance" --as person/ada
-st agents rename agent/example/worker --clear --as person/ada
+fractal agents rename agent/example/worker "Garden maintenance" --as person/ada
+fractal agents rename agent/example/worker --clear --as person/ada
 ```
 
 Rename publishes only `desired.display_name`, the same durable field as KDL `name`. It does not

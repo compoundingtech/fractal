@@ -187,7 +187,7 @@ with a refusal code, or `rejected` with an Error frame’s fault code. It keeps
 only the code, never the diagnostic. The app names a refusal as one; a fault
 falls back like any failed connection.
 
-After fabric admits the stream, **st still checks pairing and client scopes**.
+After fabric admits the stream, **Fractal still checks pairing and client scopes**.
 Fabric does not synthesize a person, device grant, or bearer credential. Complete
 normal short-lived gateway pairing through this same carrier if needed. The
 native carrier must not insert a privileged credential or bypass gateway checks.
@@ -226,7 +226,7 @@ log entry, so preserve HTTP keep-alive instead of reconnecting per request.
 A phone granted inbound-only gets none of the daemon’s ordinary peer behavior:
 no health probes, no announcements on start-up or peer reload, and no
 network-change checks. Its status is whether it is connected now. The
-[bridge’s pinned-daemon test](../../apps/ios/modules/st-fabric/README.md#checks)
+[bridge’s pinned-daemon test](../../apps/ios/modules/fractal-fabric/README.md#checks)
 proves it: with probes every second, the member probes an ordinarily granted
 peer and never the inbound-only phone, while the phone’s attaches succeed. An
 ordinary grant, the only kind before fabric 0.2.41, has the member probe the
@@ -499,7 +499,7 @@ here. The terminal UI owner also required bridge-owned loopback selection and an
 isolated-daemon proof before member provisioning.
 
 The executable proof should establish: unknown NodeID refusal; trusted phone
-refusal for an ungranted exposure; exact gateway admission; st refusal without a
+refusal for an ungranted exposure; exact gateway admission; Fractal refusal without a
 paired credential; pairing/capabilities and collections over the carrier; uploads
 and WebSocket/terminal capability forwarding; half-close and concurrent requests;
 network loss/foreground recovery without replaying actions; abandoned session

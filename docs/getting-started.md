@@ -93,7 +93,7 @@ one, make the command available in this shell and run:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
-st setup
+fractal setup
 ```
 
 For Claude, setup offers the user-owned Fractal message channel without needing
@@ -156,7 +156,7 @@ After quitting, make the installed commands available in this shell and reopen f
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
-st
+fractal
 ```
 
 If setup reported that the login PATH lacks `~/.local/bin`, add that export to your
@@ -167,9 +167,9 @@ You can also send the Assistant a question from the shell. This example assumes 
 chose `ada`; replace `person/ada` with your configured person:
 
 ```sh
-st conversations send agent/st/assistant --from person/ada \
+fractal conversations send agent/st/assistant --from person/ada \
   --subject 'Getting started' --body 'Help me make my first mission.'
-st
+fractal
 ```
 
 Setup starts the Assistant on its own only on that first run. On a machine that already has a
@@ -183,9 +183,9 @@ Use `fractal setup --help` for scripted answers and other options.
 ## 4. Check the installation
 
 ```sh
-st --version
-st doctor
-st service status
+fractal --version
+fractal doctor
+fractal service status
 ```
 
 `doctor` should show a reachable daemon and `pty`. A machine with no fleet configured
@@ -218,7 +218,7 @@ after logout and before login after a reboot. Setup prints the needed command if
 cannot enable it. On macOS, run:
 
 ```sh
-st service permissions
+fractal service permissions
 ```
 
 Follow the instructions for the OS permissions you must grant, including Full Disk
