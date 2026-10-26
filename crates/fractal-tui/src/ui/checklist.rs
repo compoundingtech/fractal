@@ -733,9 +733,9 @@ impl Screen {
                     let none_found = self.form.rows.iter().all(|row| row.facts.found.is_none());
                     lines.extend(wrap(
                         if self.skipped {
-                            "st is set up. No agent was set up; run st setup to add one."
+                            "st is set up. No agent was set up; run fractal setup to add one."
                         } else if none_found {
-                            "st is set up. No agent is installed yet, so no Assistant was started. Install Claude Code or Codex, then run st setup again."
+                            "st is set up. No agent is installed yet, so no Assistant was started. Install Claude Code or Codex, then run fractal setup again."
                         } else if ready == 0 {
                             "st is set up."
                         } else {
@@ -746,7 +746,7 @@ impl Screen {
                     ));
                 } else {
                     lines.extend(wrap(
-                        &format!("{pending} agent{} did not finish. Everything else is set up; you can retry now or fix it later with st setup.", if pending == 1 { "" } else { "s" }),
+                        &format!("{pending} agent{} did not finish. Everything else is set up; you can retry now or fix it later with fractal setup.", if pending == 1 { "" } else { "s" }),
                         0,
                         theme::fg(theme::WAITING),
                     ));
@@ -1004,7 +1004,7 @@ mod tests {
             machine: "studio".into(),
             login_label: "Start st when I log in".into(),
             login: true,
-            login_note: "Installs a user service. Remove it with st service uninstall.".into(),
+            login_note: "Installs a user service. Remove it with fractal service uninstall.".into(),
             linger: Some(false),
             work_root: "/home/ada/st".into(),
             rows: vec![

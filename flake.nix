@@ -15,7 +15,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/1e294f81aeec43c2e1f25ba25bb731c1c8336beb";
+      "github:overengineeringstudio/effect-utils/fd39f4ff0c7db982aabd138e12489c05fd990541";
   };
 
   outputs =
@@ -1909,7 +1909,7 @@
         };
         # Configuration generation must not realize the Rust/PTY/collector shell.
         devShells.genie = pkgs.mkShell {
-          packages = [ effect-utils.packages.${system}.genie pkgs.nodejs ];
+          packages = [ effect-utils.packages.${system}.genie pkgs.nodejs pkgs.python3 ];
           shellHook = ''
             [ -e repos/effect-utils ] || echo 'repos/effect-utils is missing: run `mr apply` first' >&2
           '';
