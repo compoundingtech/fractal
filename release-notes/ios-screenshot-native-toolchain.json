@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Repair hosted iOS landing screenshots, observe navigation after mount, and key Markdown quote and list blocks consistently",
+  "summary": "Repair hosted iOS landing screenshots, preserve idle demo streams with protocol heartbeats, observe navigation after mount, and key Markdown quote and list blocks consistently",
   "replay": {"status": "none", "detail": "No replay changes."},
   "schema": {"status": "none", "detail": "No schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rule change."},

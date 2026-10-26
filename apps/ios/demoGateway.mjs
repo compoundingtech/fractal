@@ -204,6 +204,11 @@ const collections = new WebSocketServer({ noServer: true, handleProtocols: proto
 server.on('upgrade', (request, socket, head) => collections.handleUpgrade(request, socket, head, ws => collections.emit('connection', ws, request)));
 const windows = { attention, missions, agents };
 collections.on('connection', ws => {
+  // Match the real gateway's eight-second protocol heartbeat. The native client
+  // correctly closes a quiet stream after 24 seconds without a frame or ping.
+  const heartbeat = setInterval(() => ws.ping(), 8000);
+  heartbeat.unref();
+  ws.on('close', () => clearInterval(heartbeat));
   ws.on('message', data => {
     const command = JSON.parse(String(data));
     if (command.kind !== 'subscribe') return;
@@ -218,4 +223,4 @@ collections.on('connection', ws => {
   });
 });
 
-server.listen(port, '0.0.0.0', () => console.log(`demo gateway on :${port}`));
+server.listen(port, '0.0.0.0', () => console.log(`demo gateway on :${server.address().port}`));
