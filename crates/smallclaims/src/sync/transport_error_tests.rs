@@ -142,7 +142,7 @@ async fn pooled_socket_blackhole_times_out_without_recovery_and_retries_on_fresh
             assert_eq!(response.bytes().await.unwrap().as_ref(), b"ok");
             server.await.unwrap();
         } else {
-            let error = http.execute(request).await.unwrap_err();
+            let error = http.execute(/* sqlite-large-value: allow-for-now lv-hb9d8c8433655 owner=smallclaims::sync::transport_error_tests TODO=trace-statement-and-value-representation */ request).await.unwrap_err();
             assert!(error.is_timeout(), "{error:?}");
             server.abort();
             let _ = server.await;

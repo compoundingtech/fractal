@@ -2264,7 +2264,8 @@ async fn send_exchange_request(
     let retry = (path == EXCHANGE_PATH).then(|| {
         request.try_clone().expect("signed exchanges have buffered request bodies")
     });
-    match http.execute(request).await {
+    // These are typed HTTP sends, conservatively inventoried by the SQL lexical scanner.
+    match http.execute(/* sqlite-large-value: allow-for-now lv-hd3bc6cc6cb80 owner=smallclaims::sync::worker TODO=trace-statement-and-value-representation */ request).await {
         Ok(response) => Ok(response),
         Err(error) => {
             let error = request_route_failure(error);
@@ -2277,7 +2278,7 @@ async fn send_exchange_request(
             timing.record("client-fresh-retry");
             // A private, newly constructed client has an empty pool. Cloning the
             // original client or Connection: close would not guarantee fresh dial.
-            replication_http_client().execute(retry).await.map_err(request_route_failure)
+            replication_http_client().execute(/* sqlite-large-value: allow-for-now lv-h81e5bb57a7a9 owner=smallclaims::sync::worker TODO=trace-statement-and-value-representation */ retry).await.map_err(request_route_failure)
         }
     }
 }

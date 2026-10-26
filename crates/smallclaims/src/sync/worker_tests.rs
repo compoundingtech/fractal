@@ -4078,9 +4078,12 @@ mod retry_tests {
             }
             tokio::time::resume();
             let retries = attempts.load(Ordering::Relaxed) - before;
+            // Each unanswered logical attempt can use one fresh-connection retry;
+            // keep the same backoff budget while counting both wire connections.
+            let allowed_logical_attempts = if away == 120 { 20 } else { 40 };
             assert!(
-                retries <= if away == 120 { 20 } else { 40 },
-                "{retries} connection attempts in {away}s"
+                retries <= 2 * allowed_logical_attempts,
+                "{retries} wire connections in {away}s, budget {allowed_logical_attempts} logical attempts"
             );
             for server in &stores[..2] {
                 server.age_replication_peer_for_test("traveller");
@@ -5419,10 +5422,11 @@ mod early_recovery {
         link.set(HEAD_ONLY);
         let rearmed = worker.wait(third.as_deref(), 10).await;
         assert!(rearmed.is_some_and(|waited| waited <= PEER_PROBE_INTERVAL.as_secs() + 1));
-        // Three attempts, each an export and a signature, over a link that never carried an
-        // exchange; two were released early, one per observed outage and recovery.
+        // Three logical attempts, each an export and a signature; two were released
+        // early, one per observed outage/recovery. Each unanswered attempt has one
+        // additional wire send through a fresh connection, not another recovery credit.
         assert_eq!(worker.attempts, 3);
-        assert_eq!(link.exchanges.load(Ordering::SeqCst), 3);
+        assert_eq!(link.exchanges.load(Ordering::SeqCst), 2 * worker.attempts);
         awake.abort();
         link.server.abort();
     }
@@ -5640,17 +5644,18 @@ mod early_recovery {
             );
             step(&local).await;
         }
-        // Not a spin: while the link was down the worker tried no more often than the shortest
-        // jitter of its backoff schedule allows.
+        // Not a spin: the logical attempt budget remains the shortest-jitter
+        // backoff schedule, with at most two wire sends per logical attempt.
         let (mut schedule, mut allowed) = (Duration::ZERO, 0);
         while schedule < outage {
             schedule += PeerBackoff::delay(allowed, 0);
             allowed += 1;
         }
         let refused = link.refused.load(Ordering::SeqCst);
+        let allowed_sends = 2 * allowed as usize;
         assert!(
-            (1..=allowed as usize).contains(&refused),
-            "{refused} exchanges in a {outage:?} outage; the backoff allows {allowed}"
+            (1..=allowed_sends).contains(&refused),
+            "{refused} wire sends in a {outage:?} outage; backoff allows {allowed} logical attempts ({allowed_sends} sends)"
         );
         dialer.abort();
         peer.abort();
