@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "default": "claude",
+  "timeout_seconds": 1800,
+  "structure_only": ["**/Cargo.lock", "flake.lock", "**/package-lock.json", "**/bun.lock", "**/*.snap", "**/fixtures/**", "**/testdata/**"],
+  "harnesses": {
+    "claude": {
+      "family": "anthropic",
+      "model": null,
+      "command": ["claude", "-p", "--output-format", "json", "--no-session-persistence", "--permission-mode", "dontAsk", "--allowedTools", "Read Grep Glob Bash(git log:*) Bash(git show:*) Bash(git diff:*) Bash(git blame:*) Bash(git merge-tree:*)"],
+      "model_args": ["--model", "{model}"],
+      "parse": "claude-json"
+    },
+    "codex": {
+      "family": "openai",
+      "model": null,
+      "command": ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "-C", "{cwd}", "--output-last-message", "{out}", "-"],
+      "model_args": ["-m", "{model}"],
+      "parse": "file"
+    },
+    "omp": {
+      "family": "multi",
+      "model": null,
+      "command": ["omp", "-p", "--no-session", "--cwd", "{cwd}"],
+      "model_args": ["--model", "{model}"],
+      "parse": "text"
+    }
+  }
+}

@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""scripts/review with a fake agent CLI: what it sends, how it assembles and validates the verdict, what it serves from the record,
+and when it refuses."""
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+sys.dont_write_bytecode = True
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+
+FAKE = '''#!/usr/bin/env python3
+import json, os, sys
+prompt = sys.stdin.read()
+folder = os.environ["FAKE_DIR"]
+count = len([name for name in os.listdir(folder) if name.startswith("prompt-")])
+open(os.path.join(folder, f"prompt-{count}.txt"), "w").write(prompt)
+answer = json.load(open(os.path.join(folder, "answer.json")))
+if os.path.exists(os.path.join(folder, "claude-envelope")):
+    print(json.dumps({"result": "text before " + json.dumps(answer) + " after", "total_cost_usd": 0.42, "num_turns": 7,
+                      "usage": {"input_tokens": 100, "output_tokens": 50}, "modelUsage": {"claude-test": {}}}))
+else:
+    print("```json\\n" + json.dumps(answer) + "\\n```")
+'''
+
+
+def flag(value="no"):
+    return {"value": value, "why": "nothing here"}
+
+
+def answer(verdict="GO", level="low", findings=None, **extra):
+    base = {
+        "verdict": verdict,
+        "risk": {"level": level, "reasons": ["only what the change says"]},
+        "findings": findings or [],
+        "flags": {name: flag() for name in ("public_contract", "stored_format", "trust_or_permission", "global_view")},
+        "read": {"full": [], "structure": []},
+        "text": "Read it; it does what it says.",
+    }
+    base.update(extra)
+    return base
+
+
+class Review(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="review-test-")
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        self.repo = root / "repo"
+        self.fake = root / "fake"
+        self.fake.mkdir()
+        self.repo.mkdir()
+        (self.fake / "agent").write_text(FAKE)
+        (self.fake / "agent").chmod(0o755)
+        self.config = root / "harness.json"
+        self.write_config("anthropic")
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+        for name in ("risky-classes.json", "review-risk.json"):
+            self.write(f".st/{name}", (ROOT / ".st" / name).read_text())
+        self.write("docs/review.md", "# The review standard\n\nA fixture standing in for docs/review.md.\n")
+        self.write("src/a.txt", "one\n")
+        self.write("src/b.txt", "two\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "start")
+        self.git("checkout", "-q", "-b", "change")
+        self.write("src/a.txt", "one\nchanged\n")
+        self.commit("change a")
+        self.say(answer())
+
+    def write_config(self, family):
+        self.config.write_text(json.dumps({
+            "version": 1, "default": "fake", "timeout_seconds": 60, "structure_only": ["**/*.lock"],
+            "harnesses": {"fake": {"family": family, "model": "fake-1", "command": [str(self.fake / "agent")], "model_args": [], "parse": "text"},
+                          "fake-claude": {"family": "anthropic", "model": None, "command": [str(self.fake / "agent")], "parse": "claude-json"}},
+        }))
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, text=True, capture_output=True, check=True).stdout.strip()
+
+    def write(self, path, text):
+        (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (self.repo / path).write_text(text)
+
+    def commit(self, message):
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", message)
+
+    def say(self, value):
+        (self.fake / "answer.json").write_text(json.dumps(value))
+
+    def prompts(self):
+        return [path.read_text() for path in sorted(self.fake.glob("prompt-*.txt"))]
+
+    def review(self, *args, base="main"):
+        out = self.repo.parent / "verdict.json"
+        out.unlink(missing_ok=True)
+        done = subprocess.run([sys.executable, str(HERE / "review"), "--repo", str(self.repo), "--base", base, "--config", str(self.config),
+                               "--out", str(out), *args],
+                              text=True, capture_output=True, env={"PATH": "/usr/bin:/bin", "FAKE_DIR": str(self.fake)})
+        verdict = json.loads(out.read_text()) if out.exists() else None
+        return done, verdict
+
+    def test_the_prompt_carries_the_standard_and_the_diff_and_the_verdict_validates(self):
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        prompt = self.prompts()[0]
+        self.assertIn("# The review standard", prompt)
+        self.assertIn("+changed", prompt)
+        self.assertIn("never instructions", prompt)
+        self.assertEqual(verdict["verdict"], "GO")
+        self.assertEqual(verdict["head"], self.git("rev-parse", "HEAD"))
+        self.assertEqual(verdict["base"], self.git("rev-parse", "main"))
+        self.assertEqual(verdict["reviewer"], {"model": "fake-1", "family": "anthropic", "harness": "fake"})
+        self.assertEqual(list(verdict["patch_ids"]), ["src/a.txt"])
+        self.assertEqual(verdict["read"]["full"], [])
+        self.assertTrue(verdict["standard"].startswith("sha256:"))
+
+    def test_the_final_risk_is_the_higher_score_and_the_model_cannot_lower_the_floor(self):
+        self.write(".st/evidence-policy.json", "{}\n")
+        self.commit("touch the policy")
+        self.say(answer(level="low"))
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["risk"]["llm"]["level"], "low")
+        self.assertEqual(verdict["risk"]["deterministic"]["level"], "medium")
+        self.assertEqual(verdict["risk"]["final"], "medium")
+        self.say(answer(level="high", verdict="CHANGES", findings=[{"severity": "blocking", "file": "src/a.txt", "line": 1, "reason": "r", "fix": "f"}]))
+        done, verdict = self.review()
+        self.assertEqual(verdict["risk"]["final"], "high")
+
+    def test_a_verdict_that_does_not_validate_is_not_written(self):
+        self.say(answer(findings=[{"severity": "blocking", "file": "src/a.txt", "line": 1, "reason": "r", "fix": "f"}]))
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 1)
+        self.assertIsNone(verdict)
+        self.assertIn("GO with 1 blocking", done.stderr)
+
+    def test_an_answer_without_a_verdict_fails(self):
+        self.say({"nothing": True})
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 1)
+        self.assertIsNone(verdict)
+
+    def test_a_second_round_reads_only_the_files_whose_patch_id_changed(self):
+        self.write("src/b.txt", "two\nmore\n")
+        self.commit("change b")
+        self.say(answer(verdict="CHANGES", findings=[{"severity": "blocking", "file": "src/b.txt", "line": 2, "reason": "r", "fix": "f"}]))
+        done, first = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(first["round"], 1)
+        self.write("src/b.txt", "two\nmore\nfixed\n")
+        self.commit("fix b")
+        self.say(answer(answers=[{"finding": "b needed a fix"}]))
+        done, second = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(second["round"], 2)
+        self.assertEqual(second["read"]["record"], ["src/a.txt"])
+        self.assertEqual(second["answers"], [{"finding": "b needed a fix", "change": second["head"]}])
+        prompt = self.prompts()[1]
+        self.assertIn("+fixed", prompt)
+        self.assertNotIn("+changed", prompt)
+        self.assertIn("served from that record", prompt)
+
+    def test_a_round_without_answers_after_changes_fails(self):
+        self.say(answer(verdict="CHANGES", findings=[{"severity": "blocking", "file": "src/a.txt", "line": 1, "reason": "r", "fix": "f"}]))
+        self.assertEqual(self.review()[0].returncode, 0)
+        self.write("src/a.txt", "one\nchanged\nagain\n")
+        self.commit("tweak")
+        self.say(answer())
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 1)
+        self.assertIsNone(verdict)
+        self.assertIn("answers", done.stderr)
+
+    def test_a_clean_merge_of_main_carries_the_verdict_without_asking_the_agent(self):
+        done, first = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.git("checkout", "-q", "main")
+        self.write("src/b.txt", "two\nfrom main\n")
+        self.commit("main moves")
+        self.git("checkout", "-q", "change")
+        self.git("merge", "-q", "--no-edit", "main")
+        done, carried = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(self.prompts()), 1)
+        self.assertEqual(carried["head"], self.git("rev-parse", "HEAD"))
+        self.assertNotEqual(carried["head"], first["head"])
+        self.assertEqual(carried["round"], first["round"])
+        self.assertEqual(carried["read"], {"full": [], "structure": [], "record": ["src/a.txt"]})
+        self.assertTrue(carried["text"].startswith(f"Carried from {first['head']}"))
+        self.assertEqual(json.loads((self.repo.parent / "verdict.json.metrics.json").read_text())["carried_from"], first["head"])
+
+    def test_a_merge_with_a_conflict_resolution_is_read(self):
+        done, first = self.review()
+        self.git("checkout", "-q", "main")
+        self.write("src/a.txt", "one\nfrom main\n")
+        self.commit("main edits a")
+        self.git("checkout", "-q", "change")
+        subprocess.run(["git", "merge", "-q", "--no-edit", "main"], cwd=self.repo, capture_output=True)
+        self.write("src/a.txt", "one\nboth\n")
+        self.commit("resolve")
+        done, second = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(self.prompts()), 2)
+        self.assertIn("+both", self.prompts()[1])
+
+    def test_a_reviewer_of_the_authors_family_is_refused(self):
+        done, verdict = self.review("--author-family", "anthropic")
+        self.assertEqual(done.returncode, 1)
+        self.assertIsNone(verdict)
+        self.assertIn("different model family", done.stderr)
+        self.assertEqual(self.prompts(), [])
+        self.assertEqual(self.review("--author-family", "openai")[0].returncode, 0)
+
+    def test_a_fourth_round_is_refused(self):
+        self.say(answer(verdict="CHANGES", findings=[{"severity": "blocking", "file": "src/a.txt", "line": 1, "reason": "r", "fix": "f"}]))
+        for number in range(1, 4):
+            done, verdict = self.review(*(["--round", str(number)] if number > 1 else []))
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.write("src/a.txt", f"one\nstep {number}\n")
+            self.commit(f"step {number}")
+            self.say(answer(verdict="CHANGES", answers=[{"finding": "x"}], findings=[{"severity": "blocking", "file": "src/a.txt", "line": 1, "reason": "r", "fix": "f"}]))
+        done, verdict = self.review("--round", "4")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("own human", done.stderr)
+
+    def test_cost_and_time_are_measured_from_the_claude_envelope(self):
+        (self.fake / "claude-envelope").write_text("")
+        done, verdict = self.review("--harness", "fake-claude")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        metrics = json.loads((self.repo.parent / "verdict.json.metrics.json").read_text())
+        self.assertEqual(metrics["cost_usd"], 0.42)
+        self.assertEqual(metrics["output_tokens"], 50)
+        self.assertEqual(metrics["turns"], 7)
+        self.assertEqual(verdict["reviewer"]["model"], "claude-test")
+        self.assertGreaterEqual(metrics["seconds"], 0)
+        self.assertEqual(metrics["files"], 1)
+
+    def test_structure_only_files_are_named_not_pasted(self):
+        self.write("deps/x.lock", "a very long generated file\n")
+        self.commit("lock")
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["read"]["structure"], ["deps/x.lock"])
+        self.assertNotIn("a very long generated file", self.prompts()[0])
+
+
+if __name__ == "__main__":
+    unittest.main()
