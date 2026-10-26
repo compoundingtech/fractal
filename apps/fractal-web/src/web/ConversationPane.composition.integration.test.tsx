@@ -134,6 +134,8 @@ beforeEach(() => {
   source.sendable = false
   source.agentControls = undefined
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // React Aria uses CSS.escape when the notice returns focus to a collection tab; jsdom omits it.
+  if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, char => `\\${char}`) })
   // jsdom has no layout observers; the kit instantiates one while attaching scroll.
   // Test-environment sizing (react-aria renders every row) needs no measured entries.
   vi.stubGlobal('ResizeObserver', class {

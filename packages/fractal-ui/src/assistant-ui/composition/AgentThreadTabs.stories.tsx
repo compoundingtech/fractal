@@ -74,6 +74,11 @@ async function assertStripOrder(tablist: HTMLElement) {
   const ids = within(tablist).getAllByRole('tab').map(tab => tab.dataset.threadId!)
   await expect(ids).toEqual(threads.map(thread => thread.id).filter(id => ids.includes(id)))
   await expect(within(tablist).getByRole('tab', { selected: true })).toBeVisible()
+  const tabs = within(tablist).getAllByRole('tab')
+  const strip = tablist.closest<HTMLElement>('[data-agent-thread-strip]')!
+  const toggle = strip.querySelector<HTMLElement>('[data-thread-drawer-toggle]')
+  const right = toggle?.getBoundingClientRect().left ?? strip.getBoundingClientRect().right
+  for (const tab of tabs) await expect(tab.getBoundingClientRect().right).toBeLessThanOrEqual(right + 1)
 }
 
 /** The selected tab controls the one conversation panel, which is labelled by that tab. */
@@ -197,7 +202,7 @@ const keyboardPlay: NonNullable<Story['play']> = async ({ canvasElement, args })
   await expect(chosen).toHaveAttribute('aria-selected', 'true')
   const after = within(tablist).getAllByRole('tab')
   await expect(after.at(-1)).toBe(chosen)
-  await expect(after.length).toBeLessThanOrEqual(visible)
+  await expect(after.length).toBeLessThan(threads.length)
   await assertStripOrder(tablist)
   await expect(canvas.getByTestId('thread-selection')).toHaveTextContent('release')
   await assertPanelLinked(canvasElement)
@@ -309,9 +314,7 @@ export const ResizeFit: Story = { play: async ({ canvasElement }) => {
   // Settled: the measurement does not feed back into another resize.
   const settled = root.dataset.threadShown
   for (let frame = 0; frame < 4; frame++) {
-    const { promise, resolve } = Promise.withResolvers<number>()
-    requestAnimationFrame(resolve)
-    await promise
+    await new Promise<number>(resolve => requestAnimationFrame(resolve))
   }
   await expect(root.dataset.threadShown).toBe(settled)
 
