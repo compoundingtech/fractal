@@ -23,6 +23,7 @@ import type {
   BlobChunk,
   BlobUpload,
   ConversationSearch,
+  SubagentSummary,
 } from '@fractal/client/schema'
 import type { ErrorEnvelope } from '@fractal/client'
 import type { Timestamp } from '@fractal/client/schema'
@@ -183,6 +184,8 @@ export const decodedRoster: RosterDecode = { undecodable: [], decodeStale: false
 /** The loaded conversation window; older history is a boundary, not an available fetch operation. */
 export interface ConversationPage {
   readonly items: readonly ConversationItem[]
+  /** OMP task-block summaries with addressable child transcripts, never roster session IDs. */
+  readonly subagents?: readonly SubagentSummary[]
   readonly hasOlder: boolean
   /** Native page provenance; filtered items cannot establish emptiness. */
   readonly observation?: { readonly empty: boolean }
