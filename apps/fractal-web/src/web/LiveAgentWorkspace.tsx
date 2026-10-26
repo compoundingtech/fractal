@@ -261,13 +261,35 @@ const subscribeLocation = (callback: () => void) => {
   window.addEventListener('popstate', callback)
   return () => window.removeEventListener('popstate', callback)
 }
-const initialAgentFromUrl = () => {
-  const encoded = window.location.pathname.match(/^\/w\/(.+)$/)?.[1]
+const initialAgentFromUrl = (location: string) => {
+  const encoded = location.split('?')[0]?.match(/^\/w\/(.+)$/)?.[1]
   try {
     return encoded === undefined ? undefined : decodeURIComponent(encoded)
   } catch {
     return undefined
   }
+}
+
+/** The app uses browser history; static embeds supply a private in-memory location. */
+export interface WorkspaceNavigation {
+  readonly getLocation: () => string
+  readonly subscribe: (callback: () => void) => () => void
+  readonly navigate: (href: string) => void
+}
+const browserNavigation: WorkspaceNavigation = {
+  getLocation: locationState,
+  subscribe: subscribeLocation,
+  navigate: (href) => {
+    window.history.pushState(null, '', href)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  },
+}
+interface WorkspaceProps {
+  readonly ux?: UxTelemetry
+  readonly onSelectConversation?: (ref: string) => void
+  readonly dimensions?: { readonly width: number; readonly height: number }
+  readonly navigation?: WorkspaceNavigation
+  readonly persistGeometry?: boolean
 }
 
 /**
@@ -276,7 +298,7 @@ const initialAgentFromUrl = () => {
  * provider sits above the shell state, so its context value never changes on a switch and the
  * portalled panes inherit it without a context scan.
  */
-export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
+export function LiveAgentWorkspace(props: WorkspaceProps) {
   const overlayHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => overlayHost.current, [])
   usePortalContainerRegistration(getContainer)
@@ -284,7 +306,7 @@ export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly 
 }
 
 /** One authoritative agent thread per workspace; local geometry never grants backend authority. */
-function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void; readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
+function Workspace({ ux, onSelectConversation, dimensions, navigation = browserNavigation, persistGeometry = true, overlayHost }: WorkspaceProps & { readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), rosterDecode = useRosterDecode()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [phoneAgents, setPhoneAgents] = useAtom(phoneAgentTabs)
@@ -295,18 +317,21 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     query.addEventListener('change', callback)
     return () => query.removeEventListener('change', callback)
   }, [])
-  const narrow = React.useSyncExternalStore(subscribeNarrow, narrowLayoutMatches, serverNarrow)
+  const windowNarrow = React.useSyncExternalStore(subscribeNarrow, narrowLayoutMatches, serverNarrow)
+  const narrow = dimensions === undefined ? windowNarrow : dimensions.width < 900
   React.useLayoutEffect(() => setTheme(scheme), [scheme])
   const sidebarOpener = React.useRef<HTMLButtonElement>(null)
-  const viewport = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
-  const phoneHeight = React.useSyncExternalStore(subscribePhoneViewport, phoneViewportHeight, phoneViewportHeight)
+  const windowWidth = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
+  const windowHeight = React.useSyncExternalStore(subscribePhoneViewport, phoneViewportHeight, phoneViewportHeight)
+  const viewport = dimensions?.width ?? windowWidth
+  const phoneHeight = dimensions?.height ?? windowHeight
   const phoneViewportStyle = narrow ? { height: `calc(${phoneHeight}px - var(--wf-devbar-space, 0px))`, '--wf-phone-height': `${phoneHeight}px` } : undefined
   const toggleSidebar = React.useCallback(() => {
     if (narrow) agentsDrawer.current?.toggle()
     else setCollapsed(value => !value)
   }, [narrow, setCollapsed])
   useSidebarShortcut(toggleSidebar)
-  const location = React.useSyncExternalStore(subscribeLocation, locationState, locationState)
+  const location = React.useSyncExternalStore(navigation.subscribe, navigation.getLocation, navigation.getLocation)
   const hoverOwner = React.useRef<HTMLElement | null>(null)
   const rememberHoverOwner = (event: React.SyntheticEvent<HTMLElement>) => {
     hoverOwner.current = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-wf-agent-ref]') : null
@@ -336,7 +361,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     const cancelCapture = ux?.rosterCommitted()
     return () => { cancelTiming(); cancelCapture?.() }
   }, [ux, rosterObserved])
-  const current = initialAgentFromUrl() ?? (storedAgent || agents[0]?.ref || '')
+  const current = initialAgentFromUrl(location) ?? (storedAgent || agents[0]?.ref || '')
   const agent = agents.find((row) => row.ref === current)
   // A canonical subject address is not proof of a terminal. Keep the control disabled
   // from its first render until the roster can establish the selected agent's runtime.
@@ -386,8 +411,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
   const navigate = (ref: string, pane = 'thread') => {
     setStoredAgent(ref)
-    window.history.pushState(null, '', workspaceHref(ref, pane, window.location.search))
-    window.dispatchEvent(new PopStateEvent('popstate'))
+    navigation.navigate(workspaceHref(ref, pane, location.split('?')[1] ?? ''))
   }
   const select = (ref: string) => {
     if (narrow) setPhoneAgents(refs => [...new Set([...refs, current, ref])].filter(Boolean))
@@ -578,7 +602,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} style={phoneViewportStyle} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
               {narrow ? null : <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)} headerActions={<ClockedAlertsPopover onOpen={select} />}>{sidebarBody}</ResponsiveAgentSidebar>}
-              <DockedSplit persistKey={`live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}`} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
+              <DockedSplit persistKey={persistGeometry ? `live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}` : undefined} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
                 <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
                   <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} onSelectedViewChange={view => setInspectorView({ mount: dockedInspector, view })} />
                 </React.Suspense>

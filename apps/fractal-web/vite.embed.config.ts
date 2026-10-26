@@ -11,6 +11,9 @@ export default defineConfig({
     }),
     react(),
   ],
-  resolve: { dedupe: ['effect', 'react', 'react-dom', '@stylexjs/stylex'] },
+  resolve: {
+    alias: [{ find: /^\.\/storageAdapter\.ts$/, replacement: new URL('./src/embed/memoryStorageAdapter.ts', import.meta.url).pathname }],
+    dedupe: ['effect', 'react', 'react-dom', '@stylexjs/stylex'],
+  },
   build: { outDir: 'dist-embed', emptyOutDir: true, rolldownOptions: { input: 'embed.html' } },
 })

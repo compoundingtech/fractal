@@ -11,6 +11,7 @@ import { fixtureProjections } from '../fixtures/projections.ts'
 import { LiveAgentWorkspace } from '../web/LiveAgentWorkspace.tsx'
 import { DomTerminal } from '../terminal/DomTerminal.tsx'
 import { defaultTerminalPalette } from '../terminal/palette.ts'
+import { createEmbedNavigation } from './navigation.ts'
 
 export const fragments = ['web', 'web-narrow', 'claude-code', 'codex'] as const
 export type EmbedFragment = typeof fragments[number]
@@ -34,11 +35,29 @@ export const Embed = ({ fragment, scheme = 'dark' }: { readonly fragment: EmbedF
     return value
   })
   React.useEffect(() => () => registry.dispose(), [registry])
+  const [navigation] = React.useState(() => createEmbedNavigation(`/w/${embedAgent}?open=thread`))
+  const container = React.useRef<HTMLDivElement>(null)
+  const [dimensions, setDimensions] = React.useState(() => ({
+    width: fragment === 'web-narrow' ? Math.min(window.innerWidth, 440) : window.innerWidth,
+    height: window.innerHeight,
+  }))
+  React.useLayoutEffect(() => {
+    const node = container.current
+    if (node === null) return
+    const measure = () => {
+      const { width, height } = node.getBoundingClientRect()
+      if (width > 0 && height > 0) setDimensions(previous => previous.width === width && previous.height === height ? previous : { width, height })
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [fragment])
   if (fragment === 'claude-code' || fragment === 'codex') {
     const screen = terminalCapture(fragment)
     return screen === undefined
-      ? <main className="capture-pending" role="status"><h1>{fragment === 'codex' ? 'Codex' : 'Claude Code'}</h1><p>Capture pending — a real authenticated CLI frame has not been recorded.</p></main>
+      ? <main className="capture-pending"><h1>{fragment === 'codex' ? 'Codex' : 'Claude Code'}</h1><p role="status">Capture pending — a real authenticated CLI frame has not been recorded.</p></main>
       : <DomTerminal screen={screen} palette={defaultTerminalPalette} />
   }
-  return <div className={fragment === 'web-narrow' ? 'embed-narrow' : 'embed-wide'}><DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider></div>
+  return <div ref={container} className={fragment === 'web-narrow' ? 'embed-narrow' : 'embed-wide'}><DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace dimensions={dimensions} navigation={navigation} persistGeometry={false} /></DataSourceProvider></div>
 }

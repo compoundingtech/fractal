@@ -16,6 +16,24 @@ DataSourceProvider and AtomRegistry over the fixed-clock fixture source.
 Terminal views decode bundled TerminalScreen JSON and reuse DomTerminal.
 No gateway or telemetry runtime is imported. No frames are fetched at runtime.
 
+The embed build replaces browser persistence with an iframe-local memory adapter:
+it neither reads nor writes `wf.ui@1`, and storage events cannot synchronize sibling
+frames. Agent and pane navigation stays in memory, preserving the embed URL and the
+host page's Back history. Reload resets the fixture selection. The workspace uses
+its measured container dimensions; `#web-narrow` selects the phone layout even in a
+wide iframe. Document-only CSS belongs to the entry, not the Storybook surface.
+
+After building, run the focused production iframe proof in the web shell:
+
+```sh
+nix develop .#web --command pnpm --dir apps/fractal-web test:embed
+```
+
+The proof covers opposite-theme sibling frames, real-app storage isolation,
+container responsiveness, private navigation and reload reset, accessible pending
+states, and all five browser transport APIs. Set `EMBED_SCREENSHOT_DIR` to retain
+the eight fragment/theme screenshots.
+
 Claude Code and Codex currently show **Capture pending**, not imitations.
 `captures/provenance.json` records version pins and the lack of captures.
 To refresh, install `pyte==0.8.2` in a task-local virtual environment, initialize

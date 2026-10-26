@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
+    "test:embed": "node scripts/embed-proof.mjs",
     "changelog:registry": "node scripts/changelog-registry.mjs",
     "changelog:registry:check": "node scripts/changelog-registry.mjs --check",
     "typecheck": "node scripts/changelog-registry.mjs && tsc --noEmit",
