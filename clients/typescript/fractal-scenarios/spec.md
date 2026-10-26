@@ -45,7 +45,7 @@ These decisions are fixed for this package. Sections below cite them as D1–D10
 - **D8 Binding:** the kit is Effect-free. Components get props through `useScenarioSlice`.
   App-level stories and fractal-web dev/e2e replay client-v0 frames over a mock WebSocket through
   the real data layer. Fractal TUI and iOS read JSON or use the same replay.
-- **D9 Catalog:** seven narratives and the edge states listed under [Catalog](#catalog-d9);
+- **D9 Catalog:** seven recorded narratives, the authored `transcript-families` world and the edge states listed under [Catalog](#catalog-d9);
   failed sync has one world per cause.
 - **D10 Storybook:** a global Scenario toolbar selects the world. Every story declares exactly
   one mode in `parameters.scenario`: `{ _tag: 'slices', slices, ... }`,
@@ -265,6 +265,7 @@ The catalog's default inventory is:
 | `merge-conflict-standoff` | Empty. |
 | `offline-reconnect-storm` | Empty. |
 | `release-candidate-polish` | Empty. |
+| `transcript-families` | Empty. |
 | `empty` | Empty. |
 | `loading` | Empty; ordinary first-reply hold behavior remains independent of inventory. |
 | `unknown-fields` | Empty. |
@@ -629,6 +630,8 @@ identifies the recorded contribution without attributing synthetic frames to the
 All seven terminal slices are recorded. Roster, details, attention and sync slices remain
 synthetic: capture receipt times are not the authored product milestones, and the single-host
 daemon cannot witness remote cast activity.
+The authored `transcript-families` world is wholly synthetic: it supplies existing wire families
+not present in those captures and does not claim recorder provenance.
 
 | World | Recorded contribution | Synthetic slices and reason | Explicit splice |
 | --- | --- | --- | --- |
@@ -1175,6 +1178,7 @@ Narratives:
 | `merge-conflict-standoff` | Two agents edit the same files. A person adjudicates through review cards with a three-way diff. |
 | `offline-reconnect-storm` | The socket drops mid-stream repeatedly. Stale badges, backoff, resubscription and authoritative snapshots. |
 | `release-candidate-polish` | A calm tail: changelog, version bump, a green matrix, mostly idle agents, few cards. |
+| `transcript-families` | One builder inspects a report, exports it unsuccessfully, cancels a retry, then streams a handoff summary. Content `blocks` carry visible reasoning (`kind`, `source_type`, `visibility`, `payload`); generic `tool_call` names retain nested `arguments`; `tool_result.content` retains native JSON with `media_type: application/json`. Separate terminal `status: failed` and `status: cancelled` turns keep unresolved calls and `detail`; the failed turn also retains an `error` entry. The final content entry keeps its ID and sequence while revision 1 becomes final revision 2. |
 
 Edge states:
 
