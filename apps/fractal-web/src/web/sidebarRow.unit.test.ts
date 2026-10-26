@@ -55,14 +55,14 @@ it('distinguishes no mission, failed without a value and failed with retained mi
   const failed = { _tag: 'Failed' } as const
   const noMission = sidebarRow({ agent, stale: false, missionUnavailable: true, missionInfo: failed })
   expect(noMission.missionContext).toEqual({ _tag: 'None' })
-  expect(sidebarRowAccessibleName(noMission)).toBe('Reported name, Idle')
+  expect(sidebarRowAccessibleName(noMission)).toBe('Reported name, ? subagents, Idle')
   const working = { ...agent, mission: 'mission/example/review' }
   const missing = sidebarRow({ agent: working, stale: false, missionUnavailable: true, missionInfo: failed })
   expect(missing.missionContext).toEqual({ _tag: 'Unavailable' })
-  expect(sidebarRowAccessibleName(missing)).toBe('Reported name, Idle, mission info unavailable')
+  expect(sidebarRowAccessibleName(missing)).toBe('Reported name, ? subagents, Idle, mission info unavailable')
   const retained = sidebarRow({ agent: working, stale: false, missionInfo: failed })
   expect(retained.missionContext).toMatchObject({ _tag: 'Mission', slug: 'review' })
-  expect(sidebarRowAccessibleName(retained)).toBe('Reported name, Idle, Mission review, mission info may be out of date')
+  expect(sidebarRowAccessibleName(retained)).toBe('Reported name, ? subagents, Idle, Mission review, mission info may be out of date')
 })
 describe('controlled native sidebar observations', () => {
   it('never exposes an unknown raw status in hover copy', () => {
@@ -131,6 +131,8 @@ describe('controlled native sidebar observations', () => {
       started_at: '2026-10-18T12:00:00Z', lease_expires_at: '2026-10-18T12:01:00Z',
     }] })
     expect(result.childrenKnown).toBe(true)
+    expect(result.subagentCount).toBe(1)
+    expect(sidebarRowAccessibleName(result)).toBe('Reported name, 1 subagent, Working')
     expect(result.children[0]).toMatchObject({ title: 'Review', parentRef: agent.ref, status: 'unobserved', statusLabel: 'Not observed', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' } })
     expect(result.children[0]?.lastActivityAt).toBeUndefined()
     expect(result.children[0]?.statusSince).toBeUndefined()
@@ -138,6 +140,10 @@ describe('controlled native sidebar observations', () => {
     expect(result.children[0]?.unread).toBeUndefined()
     expect(result.children[0]?.terminal).toBeUndefined()
     expect(row({ subagents: [] }).childrenKnown).toBe(true)
+    expect(row({ subagents: [] }).subagentCount).toBe(0)
+    expect(sidebarRowAccessibleName(row({ subagents: [] }))).toBe('Reported name, Idle')
+    expect(row().subagentCount).toBeUndefined()
+    expect(sidebarRowAccessibleName(row())).toBe('Reported name, ? subagents, Idle')
   })
 })
 
@@ -196,7 +202,7 @@ describe('retained mission row context', () => {
 
   it('keeps concise accessible names aligned with real mission evidence', () => {
     const actual = sidebarRow({ agent: seat, stale: false, missions: [hydrated] })
-    const prefix = `${seat.name}, Idle, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps`
+    const prefix = `${seat.name}, ? subagents, Idle, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps`
     expect(sidebarRowAccessibleName(actual)).toBe(`${prefix}, Step Review changes`)
     const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
       actions: ['work.done'], conversation_id: 'agent/example-readonly', detail: 'Ship this change?', update: undefined }
@@ -205,7 +211,7 @@ describe('retained mission row context', () => {
     expect(sidebarRowAccessibleName(waiting)).toBe(`${prefix}, Waiting for you: Ship this change?, mission info may be out of date`)
     expect(sidebarRowAccessibleName({ ...actual, missionInfo: { _tag: 'Failed' } }))
       .toBe(`${prefix}, Step Review changes, mission info may be out of date`)
-    expect(sidebarRowAccessibleName(row())).toBe('Reported name, Idle')
+    expect(sidebarRowAccessibleName(row())).toBe('Reported name, ? subagents, Idle')
   })
   it('does not attach another agent question just because it shares the mission run', () => {
     const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',

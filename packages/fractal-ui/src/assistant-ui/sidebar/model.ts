@@ -66,6 +66,8 @@ export interface SidebarAgentRow extends SidebarReported {
   readonly usage: SidebarUsage
   readonly duration: SidebarDuration
   readonly lastTurn: SidebarLastTurn
+  /** Running children reported by the harness; absent means unreported, not zero. */
+  readonly subagentCount?: number
   readonly childrenKnown?: boolean
   readonly children: readonly SidebarAgentRow[]
 }

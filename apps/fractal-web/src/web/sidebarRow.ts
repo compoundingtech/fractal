@@ -126,6 +126,7 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
       ? { _tag: 'Unavailable' } : sidebarMissionContext({ agent, missions, attention }),
     missionInfo,
     needsMe,
+    subagentCount: agent.subagents?.length,
     childrenKnown: agent.subagents !== undefined,
     children: agent.subagents?.map(child => sidebarSubagentRow({ parent: agent, child, stale })) ?? [],
     // Cost is optional and may use another currency; never present unknown spend as $0.
