@@ -43,6 +43,10 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
     trackOrigin(base)
     const control = await context.newPage()
     const client = await context.newCDPSession(control)
+    // Inert origin documents audit localStorage without creating and navigating
+    // another Chromium page for every case. They never execute story code or
+    // share a case's sessionStorage; fresh case documents audit that separately.
+    const auditPages = new Map()
     const assertControl = () => {
       if (control.isClosed() || control.url() !== 'about:blank') {
         throw new Error('Kit isolation control page must remain open and blank')
@@ -55,19 +59,21 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
       for (const origin of origins) {
         const { usage } = await client.send('Storage.getUsageAndQuota', { origin })
         if (usage !== 0) throw new Error(`Kit isolation audit: residual storage at ${origin}: ${usage} bytes`)
-        // Use an inert document at the actual origin: quota usage excludes Web
-        // Storage, and the blank control page cannot read another origin's keys.
-        // Fulfilling locally avoids running application code during the audit.
-        const probe = await context.newPage()
-        try {
+        // Quota excludes Web Storage. Keep one script-free document per origin
+        // so reading localStorage remains an independent check of CDP clearing.
+        let probe = auditPages.get(origin)
+        if (!probe) {
+          probe = await context.newPage()
           await probe.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }))
           await probe.goto(origin)
-          residualStorage('reset', await probe.evaluate(() => ({
-            origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
-          })))
-        } finally {
-          await probe.close()
+          auditPages.set(origin, probe)
         }
+        if (probe.isClosed() || new URL(probe.url()).origin !== origin) {
+          throw new Error(`Kit isolation audit page changed at ${origin}`)
+        }
+        residualStorage('reset', await probe.evaluate(() => ({
+          origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
+        })))
       }
       // Public audits also cover sessionStorage in still-live case pages;
       // reset has already destroyed those browsing sessions.
@@ -86,12 +92,13 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
         assertControl()
         // Closing the entire previous page graph also removes sessionStorage,
         // globals, workers, in-flight scripts, and popups before clearing storage.
-        let pages = context.pages().filter(page => page !== control)
+        const casePages = () => context.pages().filter(page => page !== control && ![...auditPages.values()].includes(page))
+        let pages = casePages()
         while (pages.length) {
           const results = await Promise.allSettled(pages.map(page => page.close()))
           const failures = results.filter(result => result.status === 'rejected')
           if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Kit isolation page cleanup failed')
-          pages = context.pages().filter(page => page !== control)
+          pages = casePages()
         }
         await context.clearCookies()
         await context.clearPermissions()
