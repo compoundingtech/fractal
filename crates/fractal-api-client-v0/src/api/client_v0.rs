@@ -14928,10 +14928,17 @@ subscription "watch/source" {
                 state.store.append_claim(&forged).unwrap();
             }
             let before = state.store.status(None).unwrap().store_index;
-            let error = action(State(state.clone()), Extension(new_client_snapshot(&state)),
-                Extension(session), Json(request)).await.unwrap_err();
-            assert_eq!(error.code, "legacy-action-receipt-untrusted");
-            assert_eq!(state.store.status(None).unwrap().store_index, before);
+            let outcome = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session), Json(request)).await;
+            if peer {
+                // Unadmitted peer claims cannot become local replay authority.
+                let result = outcome.unwrap().0;
+                assert!(result.get("launcher_binding").is_none());
+                assert_ne!(result["affected_ids"], json!(["agent/forged"]));
+            } else {
+                assert_eq!(outcome.unwrap_err().code, "legacy-action-receipt-untrusted");
+                assert_eq!(state.store.status(None).unwrap().store_index, before);
+            }
         }
     }
 
