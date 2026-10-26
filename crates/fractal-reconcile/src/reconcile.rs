@@ -61,6 +61,8 @@ pub mod start_jobs;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
+#[cfg(test)]
+mod schedule_admission_tests;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -169,7 +171,10 @@ fn schedule_admission_ready(
     host: &str,
     configured: &[String],
     since: u128,
+    schedule: &DesiredSubject,
 ) -> Result<bool> {
+    // Include the due callback: an armed timer cannot bypass a staged or conflicting owner.
+    store.owned_desired_guard(schedule).map_err(anyhow::Error::new)?;
     if store.replication_projection_deferred()
         || store.replication_catching_up()
         || store
@@ -197,10 +202,42 @@ fn schedule_admission_ready(
         return Ok(true);
     }
     let sync = store.replication_peer_sync(&peers);
-    Ok(!sync.values().any(|peer| peer.peer_only_envelopes > 0)
-        && sync
-            .values()
-            .any(|peer| peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0))
+    let strict = sync.values().any(|peer| peer.stale && peer.peer_only_envelopes > 0)
+        && schedule_requires_complete_history(store, schedule)?;
+    Ok(schedule_progress_ready(sync.values(), since, strict))
+}
+
+/// Moving a schedule (or removing its standby) must not turn an old missing-history
+/// comparison into permission to run on a second host. Conservatively retain the strict
+/// policy for the entire retained history after any role/owner change, not just a timeout.
+fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) -> Result<bool> {
+    let Some(current) = owned_schedule_spec(store, schedule)? else { return Ok(true) };
+    if current.standby.is_some() { return Ok(true); }
+    for claim in store.claims_for(&schedule.subject, Some("intent.desired"))? {
+        let Some(previous) = crate::graph::schedule_spec(&claim.body["desired"], &claim.origin) else {
+            return Ok(true);
+        };
+        if previous.host != current.host || previous.standby.is_some()
+            || claim.body["owner_run"].as_str() != schedule.owner_run.as_deref()
+            || claim.body["owner_generation"].as_str() != schedule.owner_generation.as_deref()
+            || claim.body["owner_step"].as_str() != schedule.owner_step.as_deref() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn schedule_progress_ready<'a>(
+    sync: impl IntoIterator<Item = &'a smallclaims::replication::ReplicationPeerSync>,
+    since: u128,
+    strict: bool,
+) -> bool {
+    let mut complete = false;
+    for peer in sync {
+        if peer.peer_only_envelopes > 0 && (strict || !peer.stale) { return false; }
+        complete |= peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0;
+    }
+    complete
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -14565,12 +14602,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn schedules_caught_up(&self) -> Result<bool> {
+    fn schedules_caught_up(&self, schedule: &DesiredSubject) -> Result<bool> {
         schedule_admission_ready(
             &self.store,
             &self.host,
             &self.schedule_peers,
             self.started_at_unix_ms,
+            schedule,
         )
     }
 
@@ -14610,7 +14648,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if self.schedule_has_open_work(&schedule.subject)? {
             return Ok(());
         }
-        if !self.schedules_caught_up()? {
+        if !self.schedules_caught_up(schedule)? {
             self.arm_restart("stage/schedule-sync", now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
             return Ok(());
         }
@@ -14863,7 +14901,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     },
                     _ => false,
                 };
-                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at)
+                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at, &schedule_declaration)
                     .unwrap_or(false);
                 let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
                 let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
@@ -15047,7 +15085,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .remove(&schedule.subject);
             return Ok(());
         }
-        if !self.schedules_caught_up()? {
+        if !self.schedules_caught_up(schedule)? {
             self.arm_restart("stage/schedule-sync", now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
             return Ok(());
         }
