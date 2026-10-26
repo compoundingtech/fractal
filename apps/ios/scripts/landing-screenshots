@@ -8,6 +8,10 @@ Usage: apps/ios/scripts/landing-screenshots --gateway-host LAN_IPV4 [--output DI
 
 Run on macOS from a disposable checkout with Node 24, Corepack, CocoaPods,
 Maestro (https://maestro.mobile.dev/), full Xcode, and an iOS simulator runtime.
+Prepare the checkout using docs/development.md's source-input setup first:
+  mr apply --worktree-mode auto
+Then invoke this script inside the documented web shell:
+  nix develop .#web -c apps/ios/scripts/landing-screenshots --gateway-host LAN_IPV4
 The gateway host must be this Mac's LAN or Tailscale IPv4, reachable by the
 simulator; localhost is intentionally rejected by the app's gateway policy.
 
