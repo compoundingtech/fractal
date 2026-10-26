@@ -2243,9 +2243,43 @@ pub fn replication_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))
         .timeout(REPLICATION_EXCHANGE_TIMEOUT)
+        // Bound idle reuse independently of carrier tunnel and TCP liveness.
+        // Axum's listener has no configured finite idle deadline.
+        .pool_idle_timeout(Duration::from_secs(10))
         .connector_layer(ExchangeConnectLayer)
         .build()
         .expect("the replication HTTP client configuration is valid")
+}
+
+/// Only exchanges are replay-safe here: the signed digest reuses an active job,
+/// and envelope receipt is idempotent even if the original answer was lost.
+/// `execute` failing means no complete response headers, not zero received bytes.
+async fn send_exchange_request(
+    http: &reqwest::Client,
+    request: reqwest::Request,
+    path: &str,
+    timing: &ExchangeTiming,
+) -> Result<reqwest::Response> {
+    // Buffered reqwest bodies clone their bytes without duplicating the payload.
+    let retry = (path == EXCHANGE_PATH).then(|| {
+        request.try_clone().expect("signed exchanges have buffered request bodies")
+    });
+    match http.execute(request).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let error = request_route_failure(error);
+            if route_failure(&error) == RouteFailure::Application {
+                return Err(error);
+            }
+            let Some(retry) = retry else {
+                return Err(error);
+            };
+            timing.record("client-fresh-retry");
+            // A private, newly constructed client has an empty pool. Cloning the
+            // original client or Connection: close would not guarantee fresh dial.
+            replication_http_client().execute(retry).await.map_err(request_route_failure)
+        }
+    }
 }
 
 const EXCHANGE_CORRELATION_HEADER: &str = "x-fractal-exchange-id";
@@ -3778,7 +3812,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
         body
     };
     let body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
-    let request = request.body(body);
+    let request = request.body(body).build().map_err(request_route_failure)?;
     let started = std::time::Instant::now();
     *preparation = Some(RequestPreparation {
         elapsed_ms: u64::try_from(started.duration_since(timing.started).as_millis()).unwrap_or(u64::MAX),
@@ -3786,8 +3820,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
         uncompressed_body_bytes,
     });
     timing.record("client-send-start");
-    let response = request.send().await
-        .map_err(request_route_failure)
+    let response = send_exchange_request(http, request, path, timing).await
         .map_err(|error| exchange_failure(error, ReplicationFailurePhase::RequestHeaders, started, None))?;
     *client_stage = crate::replication::ReplicationClientStage::HeadersReceived;
     timing.record("client-headers-received");

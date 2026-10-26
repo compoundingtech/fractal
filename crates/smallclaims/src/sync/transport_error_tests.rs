@@ -5,9 +5,9 @@
 //! A failure with no response head says only that this node saw no response. The peer may have
 //! accepted the request and acted on it before the connection was lost.
 //!
-//! Every attempt, whatever its outcome, first exports and signs its payload (`exchange_inner`
-//! exports, `post_signed_to` serializes, digests and signs before `send`). A policy that retries
-//! sooner repeats that local work, including any sealing export does under the writer.
+//! Each logical exchange first exports and signs its payload (`exchange_inner` exports,
+//! `post_signed_to` serializes, digests and signs). Its one fresh-connection transport retry
+//! reuses those buffered signed bytes; a later logical attempt repeats the local work.
 //!
 //! A passing run records only that each observation fell inside the asserted set. Which branch
 //! it took (an incomplete message or a reset, for the closing link) is printed only when an
@@ -107,6 +107,109 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> usize {
         body += count;
     }
     length
+}
+
+#[tokio::test]
+async fn pooled_socket_blackhole_times_out_without_recovery_and_retries_on_fresh_connection() {
+    for recover in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stale, _) = listener.accept().await.unwrap();
+            read_request(&mut stale).await;
+            stale.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+            // Simulate a carrier/proxy that leaves TCP established but stops
+            // forwarding this stream. Do not read or close the pooled socket.
+            let (mut fresh, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request(&mut fresh).await, 960_927);
+            fresh.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await.unwrap();
+            drop(stale);
+        });
+        let http = replication_http_client();
+        let url = format!("http://{address}{EXCHANGE_PATH}");
+        http.get(&url).send().await.unwrap().bytes().await.unwrap();
+        let request = http.post(&url)
+            .timeout(Duration::from_millis(100))
+            .body(vec![b'x'; 960_927]).build().unwrap();
+        let timing = ExchangeTiming {
+            id: uuid::Uuid::now_v7().to_string(),
+            started: std::time::Instant::now(),
+            server: false,
+            boundaries: Default::default(),
+        };
+        if recover {
+            let response = send_exchange_request(&http, request, EXCHANGE_PATH, &timing).await.unwrap();
+            assert_eq!(response.bytes().await.unwrap().as_ref(), b"ok");
+            server.await.unwrap();
+        } else {
+            let error = http.execute(request).await.unwrap_err();
+            assert!(error.is_timeout(), "{error:?}");
+            server.abort();
+            let _ = server.await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn fresh_connection_retry_is_once_and_does_not_retry_received_headers_or_other_paths() {
+    for (path, response) in [
+        (EXCHANGE_PATH, None),
+        (EXCHANGE_PATH, Some(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".as_slice())),
+        (CHECKPOINT_PATH, None),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted = Arc::clone(&connects);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                read_request(&mut stream).await;
+                if let Some(response) = response {
+                    stream.write_all(response).await.unwrap();
+                }
+                // EOF before headers, or a complete application refusal.
+            }
+        });
+        let http = replication_http_client();
+        let request = http.post(format!("http://{address}{path}"))
+            .body("payload").build().unwrap();
+        let timing = ExchangeTiming {
+            id: uuid::Uuid::now_v7().to_string(),
+            started: std::time::Instant::now(),
+            server: false,
+            boundaries: Default::default(),
+        };
+        let result = send_exchange_request(&http, request, path, &timing).await;
+        assert_eq!(result.is_ok(), response.is_some());
+        assert_eq!(connects.load(std::sync::atomic::Ordering::Relaxed),
+            if path == EXCHANGE_PATH && response.is_none() { 2 } else { 1 });
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
+async fn replication_client_expires_idle_connections_before_reuse() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stale, _) = listener.accept().await.unwrap();
+        read_request(&mut stale).await;
+        stale.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        let (mut fresh, _) = listener.accept().await.unwrap();
+        read_request(&mut fresh).await;
+        fresh.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        drop(stale);
+    });
+    let http = replication_http_client();
+    let url = format!("http://{address}{EXCHANGE_PATH}");
+    http.get(&url).send().await.unwrap().bytes().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    // No retry helper: expiry itself must force a fresh connection.
+    http.get(&url).timeout(Duration::from_secs(1)).send().await.unwrap().bytes().await.unwrap();
+    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -306,7 +409,7 @@ async fn failure_stage_distinguishes_connected_timeout_from_refused_connect() {
 }
 
 #[tokio::test]
-async fn failure_stage_does_not_invent_a_connect_for_a_pooled_connection() {
+async fn pooled_failure_reports_the_fresh_retry_connection_when_it_also_times_out() {
     use crate::replication::ReplicationClientStage;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -330,7 +433,7 @@ async fn failure_stage_does_not_invent_a_connect_for_a_pooled_connection() {
         &serde_json::json!({}), false,
     ).await.unwrap_err();
     let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
-    assert_eq!(failure.client_stage, Some(ReplicationClientStage::PooledOrUnknown));
+    assert_eq!(failure.client_stage, Some(ReplicationClientStage::Connected));
     assert_eq!(failure.code, "replication-timeout");
     server.abort();
     let _ = server.await;

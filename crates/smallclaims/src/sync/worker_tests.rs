@@ -1062,6 +1062,66 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
     );
 }
 
+#[tokio::test]
+async fn fresh_retry_after_accepted_but_unanswered_exchange_applies_envelope_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+    let auth = FleetAuth::test(fleet_id, &[7; 32]);
+    let source = plain_memory("source").unwrap();
+    let target = Arc::new(plain_memory("target").unwrap());
+    source.bind_fleet(fleet_id).unwrap();
+    target.bind_fleet(fleet_id).unwrap();
+    source.append_claim(&ClaimInput {
+        subject: "note/copper".into(),
+        kind: "example.note".into(),
+        actor: None,
+        fields: BTreeMap::from([("status".into(), Value::String("up".into()))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("source-up".into()),
+    }).unwrap();
+    let request = source.export_replication_exchange(fleet_id, &ReplicationInventory::default()).unwrap();
+    let state = PeerState::new(
+        Local(Arc::clone(&target)), "target".into(), auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["source".into()])),
+    );
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&attempts);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let unblock = Arc::clone(&release);
+    let router = peer_router(state, Router::new()).layer(axum::middleware::from_fn(
+        move |request: Request<Body>, next: axum::middleware::Next| {
+            let seen = Arc::clone(&seen);
+            let unblock = Arc::clone(&unblock);
+            async move {
+                let first = seen.fetch_add(1, Ordering::Relaxed) == 0;
+                // Apply and authenticate before losing the first response.
+                let response = next.run(request).await;
+                if first {
+                    unblock.notified().await;
+                }
+                response
+            }
+        },
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig { name: "target".into(), url: format!("http://{}", listener.local_addr().unwrap()) };
+    let server = tokio::spawn(axum::serve(listener, router).into_future());
+    let http = reqwest::Client::builder().timeout(Duration::from_millis(250)).build().unwrap();
+    let result = post_signed_to::<_, ReplicationExchange>(
+        &http, &peer, "source", &auth,
+        &FleetContext::legacy(BTreeSet::from(["target".into()])),
+        EXCHANGE_PATH, &request, false,
+    ).await;
+    release.notify_one();
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    assert_eq!(target.claims_for("note/copper", Some("example.note")).unwrap().len(), 1);
+    server.abort();
+    let _ = server.await;
+}
+
 #[test]
 fn the_dial_set_comes_from_membership_and_skips_dial_out_members() {
     let member =
@@ -3121,7 +3181,10 @@ mod retry_tests {
             })
             .await;
         }
-        assert_eq!(attempts.lock().iter().filter(|&&route| route).count(), 1);
+        assert_eq!(
+            attempts.lock().iter().filter(|&&route| route).count(), 2,
+            "one failed send plus one fresh retry; cooldown must add no preferred attempts"
+        );
         notify.send_modify(|generation| *generation += 1);
         tokio::time::advance(Duration::from_secs(31)).await;
         settled(&local, |worker| {
