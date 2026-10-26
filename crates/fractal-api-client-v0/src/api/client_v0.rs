@@ -21935,14 +21935,15 @@ mission "example/zero-run" state="ready" {
                 .count(),
             1
         );
+        let local = state.store.local_observations_tail(100).unwrap();
         assert_eq!(
-            page.claims
+            local
                 .iter()
                 .filter(|claim| claim.kind == "client.action-result")
                 .count(),
             1
         );
-        let stored = serde_json::to_string(&page).unwrap();
+        let stored = serde_json::to_string(&(page, local)).unwrap();
         assert!(!stored.contains(capability));
         assert!(!stored.contains("st3.cap."));
         assert!(!stored.contains("stream_capability"));
