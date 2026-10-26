@@ -88,6 +88,9 @@ struct PtyStats {
     name: String,
     process: PtyStatsProcess,
     daemon: PtyStatsDaemon,
+    // The registry incarnation, not just a reusable daemon PID.
+    #[serde(default)]
+    created_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -814,6 +817,62 @@ impl PtyRuntime {
             anyhow::bail!("PTY `{id}` changed incarnation before the control action");
         }
         Ok(session)
+    }
+
+    /// Observe the live terminal child of this exact incarnation, never its supporting server.
+    /// Legacy/missing identity evidence is deliberately insufficient for credential inheritance.
+    pub fn process_identity_if(&self, id: &str, incarnation: &str) -> Result<Option<(u32, u64)>> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (id, incarnation);
+            Ok(None)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            crate::procfs::require_matching_procfs()?;
+            let session = self.require_incarnation(id, Some(incarnation))?;
+            if session.identity != pty_core::registry::DaemonIdentityCheck::Match {
+                return Ok(None);
+            }
+            let Some(daemon_pid) = session.pid else {
+                return Ok(None);
+            };
+            let status = pty_core::registry::with_root(&self.root, || {
+                pty_client::query_status_json(id, pty_client::STATS_TIMEOUT)
+            }).map_err(|error| anyhow::anyhow!("read PTY process identity failed: {error}"))?;
+            let stats: PtyStats = serde_json::from_str(&status).context("parse PTY process identity")?;
+            if stats.name != id || stats.daemon.pid != daemon_pid || !stats.process.alive
+                || stats.created_at.as_deref()
+                    != session.metadata.as_ref().map(|metadata| metadata.created_at.as_str())
+            {
+                return Ok(None);
+            }
+            let Some(pid) = stats.process.pid.filter(|pid| *pid > 1) else {
+                return Ok(None);
+            };
+            // Parent and birth token come from one kernel row. A reused child PID is not
+            // authority merely because the server's last stats still names that number.
+            let Some(process) = pty_core::proctable::process(pid).known() else {
+                return Ok(None);
+            };
+            if process.ppid != daemon_pid || process.is_zombie() || process.is_exiting() {
+                return Ok(None);
+            }
+            let Some(token) = process.identity.as_ref()
+                .and_then(|identity| identity.as_str().strip_prefix("linux:"))
+                .and_then(|token| token.parse::<u64>().ok())
+            else {
+                return Ok(None);
+            };
+            let current = self.require_incarnation(id, Some(incarnation))?;
+            if current.identity != pty_core::registry::DaemonIdentityCheck::Match
+                || current.metadata.as_ref().and_then(|metadata| metadata.daemon_start_token())
+                    != session.metadata.as_ref().and_then(|metadata| metadata.daemon_start_token())
+            {
+                return Ok(None);
+            }
+            Ok(Some((pid as u32, token)))
+        }
     }
 
     /// Ends what an ended session's harness left running in its work scope: a build whose parent
@@ -2509,6 +2568,33 @@ exit 0
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_identity_captures_the_harness_not_the_pty_server_and_fences_incarnation() {
+        let Some(pty) = scoped_pty() else {
+            eprintln!("skipped: no systemd user scopes or no pty binary");
+            return;
+        };
+        let session = Started::orphaning(&pty, "process-identity", "exec sleep 600", &[]);
+        let incarnation = session.incarnation();
+        let identity = session.runtime.process_identity_if(&session.id, &incarnation)
+            .unwrap().expect("the live PTY must prove its terminal child's identity");
+        assert_eq!(identity.0, session.harness);
+        assert_ne!(Some(identity.0), session.observe().unwrap().pid);
+        assert_eq!(identity.1, crate::process_start_token(session.harness).unwrap());
+        assert!(session.runtime.process_identity_if(&session.id, "stale-incarnation").is_err());
+
+        // Same PID with a different start token is not the supporting daemon we observed.
+        let metadata_path = session.runtime.root().join(format!("{}.json", session.id));
+        let original = fs::read_to_string(&metadata_path).unwrap();
+        let mut metadata: serde_json::Value = serde_json::from_str(&original).unwrap();
+        metadata["daemonStartToken"] = serde_json::json!("linux:0");
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let missing = session.runtime.process_identity_if(&session.id, &incarnation).unwrap();
+        fs::write(&metadata_path, original).unwrap();
+        assert_eq!(missing, None, "PID reuse must not establish provenance");
     }
 
     #[test]

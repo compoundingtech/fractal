@@ -2306,8 +2306,10 @@ An existing active seat requires a different name; a stopped seat may be deliber
 Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
 emitted exactly once. Short names retain the usual host qualification.
 
-When the authenticated caller is an agent, the new agent is a run-owned helper,
-regardless of harness. The server records an owner-local `agent.launcher-bound`
+When an agent with runtime evidence creates another agent, the new agent is a
+run-owned helper, regardless of harness. An agent identity with no runtime
+observation retains the ordinary non-inheriting creation flow: no launcher run or
+credential reference is inferred. The server records an owner-local `agent.launcher-bound`
 receipt with the authenticated launcher, its person owner (if known), the selected
 declaration, and the exact launcher runtime incarnation. Claude and Codex helpers
 must match the launcher's credential-bearing harness and inherit only that
@@ -2317,10 +2319,14 @@ arguments or environment variables. Absolute credential-directory references rem
 host-local; replicated action receipts carry only non-authoritative attribution
 labels. Peer-replicated binding claims cannot grant person or credential authority.
 An unowned launcher does not confer person ownership.
-Credential-directory references are local to the launcher's host, so helpers
-must launch on that host. Older account-bound launcher incarnations without an
-effective credential-directory receipt must be relaunched before creating a
-helper; Fractal does not guess an account or substitute another login directory.
+Credential-directory references are local to the launcher's host, so helpers must
+launch on that host. Inheritance also requires kernel-authenticated Unix socket
+peer credentials and proof that the peer descends from the launcher's exact
+daemon-recorded harness PID and Linux process-start token. `ST_AGENT`, headers,
+and other environment values cannot establish this grant. Old launcher runs
+without process provenance must be relaunched. Platforms without verified process
+ancestry (currently non-Linux), missing peer PIDs, or unavailable process evidence
+fail closed with a clear refusal; no alternative account or login is selected.
 
 Reconciliation stops a helper when that exact launcher incarnation ends.
 Spawning and restarting refuse an ended binding, including after a daemon

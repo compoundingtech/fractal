@@ -162,7 +162,7 @@ fn helper_launcher_cross_provider_refuses_other_person_default_login() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_memory("node").unwrap());
     let source = format!(
-        "version 2\naccount \"ada/codex\" {{ provider \"openai\"; owner \"person/ada\"; login {:?} }}\naccount \"mallory/claude\" {{ provider \"anthropic\"; owner \"person/mallory\"; login {:?} }}\nagent \"launcher\" {{ workspace {:?}; harness \"codex\" {{ account \"ada/codex\" }}; env {{ HOME {:?} }} }}",
+        "version 2\naccount \"ada/codex\" {{ provider \"openai\"; owner \"person/ada\"; login {:?} }}\naccount \"intruder/claude\" {{ provider \"anthropic\"; owner \"person/intruder\"; login {:?} }}\nagent \"launcher\" {{ workspace {:?}; harness \"codex\" {{ account \"ada/codex\" }}; env {{ HOME {:?} }} }}",
         root.path().join("ada").display().to_string(),
         root.path().join(".claude").display().to_string(),
         root.path().display().to_string(), root.path().display().to_string(),

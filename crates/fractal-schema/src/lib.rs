@@ -3592,6 +3592,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("runtime_id", string()),
             ("terminal", boolean()),
             ("incarnation_id", string()),
+            ("runtime_pid", integer()),
+            ("runtime_pid_start_token", string()),
             ("deadline_key", string()),
             ("desired_token", string()),
             ("rollout_operation", string()),
@@ -4459,6 +4461,27 @@ fn validate_harness_todo(fields: &BTreeMap<String, Value>) -> Result<(), Validat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_start_process_provenance_fields_are_optional_and_typed() {
+        let mut fields = BTreeMap::from([("action".into(), Value::from("start"))]);
+        registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
+        fields.insert("runtime_pid".into(), Value::from(1234));
+        fields.insert("runtime_pid_start_token".into(), Value::from("987654321"));
+        registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
+        for (name, invalid) in [
+            ("runtime_pid", Value::from("1234")),
+            ("runtime_pid_start_token", Value::from(987654321)),
+        ] {
+            let mut invalid_fields = fields.clone();
+            invalid_fields.insert(name.into(), invalid);
+            assert_eq!(
+                registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &invalid_fields)
+                    .unwrap_err().code,
+                "invalid-claim-field",
+            );
+        }
+    }
 
     #[test]
     fn run_report_stall_policy_is_an_optional_boolean() {

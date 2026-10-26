@@ -141,6 +141,31 @@ fn launcher_runtime(store: &Store, launcher: &str) -> Result<Option<(Value, Stri
     Ok(latest_actual_at(&connection, launcher, None)?.zip(origin))
 }
 
+#[cfg(target_os = "linux")]
+fn require_launcher_ancestry(mut peer: u32, root: u32, token: u64) -> Result<()> {
+    anyhow::ensure!(root > 1 && fractal_runtime::process_start_token(root)? == token,
+        "the launcher process generation ended or was replaced");
+    let mut seen = BTreeSet::new();
+    for _ in 0..128 {
+        if peer == root {
+            anyhow::ensure!(fractal_runtime::process_start_token(root)? == token,
+                "the launcher process generation changed during authorization");
+            return Ok(());
+        }
+        anyhow::ensure!(peer > 1 && seen.insert(peer),
+            "the socket peer is not a descendant of the claimed launcher runtime");
+        let stat = std::fs::read_to_string(format!("/proc/{peer}/stat"))?;
+        peer = stat.rsplit_once(") ").and_then(|(_, fields)| fields.split_whitespace().nth(1))
+            .context("socket peer process ancestry is unavailable")?.parse()?;
+    }
+    anyhow::bail!("socket peer process ancestry exceeds the authorization bound")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn require_launcher_ancestry(_peer: u32, _root: u32, _token: u64) -> Result<()> {
+    anyhow::bail!("helper inheritance requires verified process ancestry, unavailable on this platform")
+}
+
 
 impl Store {
     /// Return only the binding authored for the selected declaration by its authenticated launcher.
@@ -154,15 +179,58 @@ impl Store {
         Ok(lifetime_binding_at(&self.readers.get(), subject)?.is_some())
     }
 
+    /// Credential grants require kernel peer credentials and the daemon's exact process witness.
+    pub fn verify_helper_launcher_peer(&self, launcher: &str, peer_pid: Option<u32>) -> Result<String> {
+        let peer_pid = peer_pid.context("helper inheritance requires a kernel-authenticated local socket peer PID")?;
+        let (actual, host) = launcher_runtime(self, launcher)?
+            .context("the launcher has no unambiguous current runtime")?;
+        anyhow::ensure!(host.trim_start_matches("host/") == self.origin().trim_start_matches("host/"),
+            "helper inheritance requires daemon-owned local runtime provenance");
+        let actual = actual.get("fields").unwrap_or(&actual);
+        anyhow::ensure!(actual["status"] == "running", "the launcher runtime is not running");
+        let incarnation = actual["incarnation_id"].as_str().context("the launcher has no incarnation")?;
+        let receipt = self.observations_for(launcher, "runtime.action.succeeded")?.into_iter().rev()
+            .find(|claim| claim.id.starts_with(LOCAL_OBSERVATION_ID_PREFIX)
+                && claim.actor.is_none()
+                && claim.body["fields"]["action"] == "start"
+                && claim.body["fields"]["incarnation_id"] == incarnation)
+            .context("helper inheritance requires daemon-owned runtime process provenance; relaunch the launcher")?;
+        let fields = &receipt.body["fields"];
+        let root = fields["runtime_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+            .context("helper inheritance requires a recorded launcher process PID; relaunch the launcher")?;
+        let token = fields["runtime_pid_start_token"].as_str()
+            .context("helper inheritance requires a recorded launcher process generation; relaunch the launcher")?
+            .parse()?;
+        require_launcher_ancestry(peer_pid, root, token)?;
+        Ok(incarnation.to_owned())
+    }
+
+    pub fn bind_helper_launcher_from_peer(
+        &self, desired: &DesiredSubject, creation_key: &str, launcher: &str,
+        harness: &str, peer_pid: Option<u32>,
+    ) -> Result<()> {
+        let incarnation = self.verify_helper_launcher_peer(launcher, peer_pid)?;
+        let bound = self.capture_helper_launcher_binding(desired, creation_key, launcher, harness)?;
+        anyhow::ensure!(bound == incarnation, "the launcher restarted during helper authorization");
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bind_helper_launcher(
+        &self, desired: &DesiredSubject, creation_key: &str, launcher: &str, harness: &str,
+    ) -> Result<()> {
+        self.capture_helper_launcher_binding(desired, creation_key, launcher, harness).map(|_| ())
+    }
+
     /// Capture references only, before publishing the declaration so reconciliation cannot race it.
     /// All authority fields come from the authenticated actor and current server runtime evidence.
-    pub fn bind_helper_launcher(
+    fn capture_helper_launcher_binding(
         &self,
         desired: &DesiredSubject,
         creation_key: &str,
         launcher: &str,
         harness: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         anyhow::ensure!(launcher.starts_with("agent/"), "helper launcher must be an authenticated agent");
         let (actual, launcher_host) = launcher_runtime(self, launcher)?
             .ok_or_else(|| anyhow::anyhow!("the launcher has no unambiguous current runtime"))?;
@@ -210,7 +278,7 @@ impl Store {
             actor: Some(launcher.into()), fields, evidence: Vec::new(), expected_subject: None,
             idempotency_key: Some(format!("helper-launcher:{creation_key}")),
         })?;
-        Ok(())
+        Ok(incarnation.to_owned())
     }
 
     /// A helper cannot outlive the exact launcher runtime captured at creation.
@@ -269,6 +337,34 @@ mod tests {
         intent
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn helper_launcher_peer_requires_recorded_exact_process_generation() {
+        let store = Store::open_memory("node").unwrap();
+        launcher(&store, Some("person/ada"));
+        let intent = helper();
+        let desired = intent.subjects.values().next().unwrap();
+        let pid = std::process::id();
+        let token = fractal_runtime::process_start_token(pid).unwrap();
+        assert!(store.bind_helper_launcher_from_peer(desired, "create-helper",
+            "agent/node.launcher", "codex", None).unwrap_err().to_string().contains("kernel-authenticated"));
+        assert!(store.bind_helper_launcher_from_peer(desired, "create-helper",
+            "agent/node.launcher", "codex", Some(pid)).unwrap_err().to_string().contains("recorded"));
+        for (start_token, accepted) in [(token.wrapping_add(1), false), (token, true)] {
+            append(&store, "agent/node.launcher", "runtime.action.succeeded",
+                json!({"action":"start", "incarnation_id":"launcher-1", "harness":"codex",
+                    "credential_home":"/logins/codex", "runtime_pid":pid,
+                    "runtime_pid_start_token":start_token.to_string()}));
+            let result = store.bind_helper_launcher_from_peer(desired, "create-helper",
+                "agent/node.launcher", "codex", Some(pid));
+            assert_eq!(result.is_ok(), accepted);
+        }
+        append(&store, "agent/node.launcher", "runtime.observed",
+            json!({"status":"running", "incarnation_id":"launcher-2"}));
+        assert!(store.bind_helper_launcher_from_peer(desired, "different-run",
+            "agent/node.launcher", "codex", Some(pid)).is_err());
+    }
+
     #[test]
     fn shared_start_receipts_cannot_supply_credential_authority() {
         let store = Store::open_memory("node").unwrap();
@@ -321,7 +417,7 @@ mod tests {
         claim.kind = "agent.launcher-bound".into();
         claim.actor = Some("agent/node.launcher".into());
         claim.body = json!({"fields":{
-            "launcher":"agent/node.launcher", "person":"person/mallory", "harness":"codex",
+            "launcher":"agent/node.launcher", "person":"person/intruder", "harness":"codex",
             "credential_home":"/peer/stolen-login", "incarnation":"forged",
             "creation_key":"create-helper", "desired_digest":declaration_digest(desired).unwrap()
         }});
