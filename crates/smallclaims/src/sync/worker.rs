@@ -3778,7 +3778,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
         body
     };
     let body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
-    let request = request.body(body).build()?;
+    let request = request.body(body);
     let started = std::time::Instant::now();
     *preparation = Some(RequestPreparation {
         elapsed_ms: u64::try_from(started.duration_since(timing.started).as_millis()).unwrap_or(u64::MAX),
@@ -3786,7 +3786,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
         uncompressed_body_bytes,
     });
     timing.record("client-send-start");
-    let response = http.execute(request).await
+    let response = request.send().await
         .map_err(request_route_failure)
         .map_err(|error| exchange_failure(error, ReplicationFailurePhase::RequestHeaders, started, None))?;
     *client_stage = crate::replication::ReplicationClientStage::HeadersReceived;
