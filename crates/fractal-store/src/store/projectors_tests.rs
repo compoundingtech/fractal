@@ -24,6 +24,7 @@ fn open_installs_each_domain_in_order() {
             "identities",
             "custom",
             "resources",
+            "completion-health",
             "glass-heads",
             "directive-notes",
             "agent-messages",
@@ -36,19 +37,19 @@ fn open_installs_each_domain_in_order() {
 #[test]
 fn append_projects_each_claim_kind_in_order() {
     for (kind, expected) in [
-        ("resource.observed", &["custom", "resources"][..]),
-        ("glass.upserted", &["custom", "glass-heads"]),
-        ("glass.deleted", &["custom", "glass-heads"]),
-        ("agent.retired", &["identities", "custom", "retirements"]),
-        ("agent.renamed", &["identities", "custom"]),
-        ("mission.renamed", &["identities", "custom"]),
-        ("person.directive-note-set", &["custom", "directive-notes"]),
-        ("message.sent", &["custom", "agent-messages"]),
-        ("harness.limits", &["custom", "limits"]),
-        ("arrangement.edited", &["custom", "arrangements"]),
-        ("intent.desired", &["identities", "custom"]),
-        ("work.claimed", &["custom"]),
-        ("message.read", &["custom"]),
+        ("resource.observed", &["custom", "resources", "resource-preparation"][..]),
+        ("glass.upserted", &["custom", "resource-preparation", "glass-heads"]),
+        ("glass.deleted", &["custom", "resource-preparation", "glass-heads"]),
+        ("agent.retired", &["identities", "custom", "resource-preparation", "retirements"]),
+        ("agent.renamed", &["identities", "custom", "resource-preparation"]),
+        ("mission.renamed", &["identities", "custom", "resource-preparation"]),
+        ("person.directive-note-set", &["custom", "resource-preparation", "directive-notes"]),
+        ("message.sent", &["custom", "resource-preparation", "agent-messages"]),
+        ("harness.limits", &["custom", "resource-preparation", "limits"]),
+        ("arrangement.edited", &["custom", "resource-preparation", "arrangements"]),
+        ("intent.desired", &["identities", "custom", "resource-preparation"]),
+        ("work.claimed", &["custom", "resource-preparation"]),
+        ("message.read", &["custom", "resource-preparation"]),
     ] {
         assert_eq!(taking(projectors::APPEND, kind), expected, "append order for {kind}");
     }
@@ -58,6 +59,7 @@ fn append_projects_each_claim_kind_in_order() {
             "identities",
             "custom",
             "resources",
+            "resource-preparation",
             "glass-heads",
             "retirements",
             "directive-notes",
@@ -80,7 +82,7 @@ fn replicated_claims_project_arrangements_only() {
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["custom", "identities", "resources", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements"]
+        ["custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements"]
     );
 }
 
@@ -88,7 +90,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "glass-heads", "directive-notes", "arrangements"]
+        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -96,6 +98,7 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/planning",
             "full-replay/identities",
             "full-replay/resources",
+            "full-replay/completion-health",
             "full-replay/glass-heads",
             "full-replay/directive-notes",
             "full-replay/custom",

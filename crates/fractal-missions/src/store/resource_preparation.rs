@@ -1,4 +1,4 @@
-//! The part of `store::resource_preparation` that moved up from st3-store.
+//! The part of `store::resource_preparation` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -12,7 +12,7 @@ pub use fractal_delivery::store::resource_preparation::*;
 pub use fractal_store::store::resource_preparation::tests_shared_seats;
 pub use fractal_delivery::store::resource_preparation::{Fence, NativeCut, Prepared};
 #[cfg(test)]
-#[allow(hidden_glob_reexports)] // st3-store's module of the same name is private; this one holds the tests that moved
+#[allow(hidden_glob_reexports)] // fractal-store's module of the same name is private; this one holds the tests that moved
 mod tests;
 
 pub struct Inputs {
@@ -50,15 +50,16 @@ pub fn inputs(
     facts: &Value,
     subscriptions: &[(String, SubscriptionSpec)],
 ) -> Result<Inputs, St3Error> {
-    inputs_with_actuals(transaction, Observation {
+    fractal_store::store::completion_state::flush(transaction).map_err(internal)?;
+    read_inputs(transaction, Observation {
         observer, desired_revision, attempt, resource, facts, subscriptions,
-    }, &mut |subject| latest_actual(transaction, subject))
+    })
 }
 
-pub fn inputs_with_actuals(
+/// Read prepared inputs from the connection's committed snapshot, without mutating that cut.
+pub fn read_inputs(
     transaction: &Connection,
     observation: Observation<'_>,
-    actual: &mut dyn FnMut(&str) -> Result<Option<Value>>,
 ) -> Result<Inputs, St3Error> {
     let Observation { observer, desired_revision, attempt, resource, facts, subscriptions } = observation;
     let mut active_subscriptions = Vec::new();
@@ -74,7 +75,12 @@ pub fn inputs_with_actuals(
             active_subscriptions.push((subject.clone(), expected.clone()));
         }
     }
-    let normalized_observation = normalize_resource_observation(
+    let resource_observation =
+        fractal_store::store::resources::preparation_observation(transaction, resource)
+            .map_err(internal)?;
+    let previous = resource_observation.actual.as_ref()
+        .and_then(|actual| actual.get("facts").cloned());
+    let normalized_observation = fractal_store::store::normalize_resource_observation_with_actuals(
         transaction,
         &ClaimInput {
             subject: resource.into(),
@@ -85,14 +91,13 @@ pub fn inputs_with_actuals(
             expected_subject: None,
             idempotency_key: None,
         },
+        resource_observation.kind,
+        || Ok(resource_observation.actual),
     )?
     .expect("a resource observation is normalized");
     let facts = normalized_observation
         .get("facts")
         .expect("a normalized resource observation has facts");
-    let previous = actual(resource)
-        .map_err(internal)?
-        .and_then(|actual| actual.get("facts").cloned());
     let baseline = previous.is_none();
     let previous_object = previous.as_ref().and_then(Value::as_object);
     let current_object = facts.as_object().ok_or_else(|| {
@@ -139,23 +144,12 @@ pub fn inputs_with_actuals(
             .filter_map(|item| item.get("number").and_then(Value::as_u64))
         {
             let subject = format!("{resource}/{segment}/{number}");
-            let recorded = actual(&subject)
-                .map_err(internal)?
+            let observation =
+                fractal_store::store::resources::preparation_observation(transaction, &subject)
+                    .map_err(internal)?;
+            let recorded = observation.actual
                 .and_then(|actual| actual.get("facts").cloned());
-            let observed_at = transaction
-                .query_row(
-                    /* sqlite-large-value: allow-for-now lv-h310c8b4305ae owner=fractal_missions::store::resource_preparation TODO=trace-statement-and-value-representation */ &canonical_sql(
-                        "SELECT accepted_at_unix_ms FROM claims
-                                     WHERE subject=?1 AND kind='resource.observed'
-                                     ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",
-                    ),
-                    [&subject],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(internal)?
-                .and_then(|at| at.parse::<u128>().ok())
-                .unwrap_or_default();
+            let observed_at = observation.observed_at;
             recorded_items.insert(subject, recorded.map(|facts| (facts, observed_at)));
         }
     }
@@ -182,7 +176,7 @@ pub fn inputs_with_actuals(
         discovered.extend(items.into_iter().map(|item| (field, item)));
     }
     let changed_fields = changed_fields.into_iter().collect::<Vec<_>>();
-    let observer_health_is_current = actual(observer)
+    let observer_health_is_current = fractal_store::store::completion_state::actual(transaction, observer)
         .map_err(internal)?
         .is_some_and(|actual| {
             actual.get("state").and_then(Value::as_str) == Some("healthy")
@@ -205,7 +199,7 @@ pub fn inputs_with_actuals(
             true
         };
         let status = if target_exists { "active" } else { "pending" };
-        let current_status = actual(subscription_subject)
+        let current_status = fractal_store::store::completion_state::actual(transaction, subscription_subject)
             .map_err(internal)?
             .and_then(|actual| {
                 actual

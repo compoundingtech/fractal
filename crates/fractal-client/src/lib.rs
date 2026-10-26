@@ -7,6 +7,7 @@ mod checkout;
 pub use checkout::{agent_branch, checkout_label};
 mod contract;
 pub mod device;
+pub mod fabric;
 pub mod follow;
 mod generated;
 pub mod product_dirs;
@@ -44,8 +45,8 @@ pub const DEFAULT_ASSISTANT_RESPONSE_BYTES: usize = 4096;
 pub const MAX_ASSISTANT_RESPONSE_BYTES: usize = 16384;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
 const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-const RAW_TERMINAL_SUBPROTOCOL: &str = "st3.client.pty.v0";
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
+const RAW_TERMINAL_SUBPROTOCOL: &str = "fractal.client.pty.v0";
 const RAW_TERMINAL_CHUNK_BYTES: usize = 16_384;
 
 /// Resolve the local daemon socket in the same order as the `st3` CLI.
@@ -116,7 +117,13 @@ fn xdg_path(variable: &str, home_suffix: &str) -> Result<PathBuf, ClientError> {
 #[derive(Clone, Debug)]
 pub enum Endpoint {
     Unix(PathBuf),
+    Fabric(fabric::FabricEndpoint),
     FabricLoopback(String),
+}
+
+enum TransportEndpoint<'a> {
+    Unix(std::borrow::Cow<'a, Path>),
+    FabricLoopback(&'a str),
 }
 
 /// The name and build this process reports to st in the `x-st3-client` header, for example
@@ -837,26 +844,40 @@ impl ClientError {
         matches!(self, ClientError::Transport(_)) || self.applied() == Some("unknown")
     }
 
-    /// What went wrong in words a person reads: no codes and no Rust names. st's own message
-    /// follows where it says something the sentence does not.
+    /// Stable plain diagnostic used by gate reports and other machine/durable consumers.
+    /// Keep its legacy wording; use `human()` only at a human presentation boundary.
     pub fn plain(&self) -> String {
+        self.render_plain(false)
+    }
+
+    /// Human-only diagnostic. Does not mutate the server envelope or stored message.
+    pub fn human(&self) -> String {
+        self.render_plain(true)
+    }
+
+    fn render_plain(&self, human: bool) -> String {
+        let product = if human { "Fractal" } else { "st" };
         match self {
             ClientError::Api(..) if self.applied() == Some("unknown") => {
-                "st may have taken it and has not confirmed it yet; sending it again is safe".into()
+                format!(
+                    "{product} may have taken it and has not confirmed it yet; sending it again is safe"
+                )
             }
-            ClientError::Api(code, message, _) => plain_message(Some(code), message),
+            ClientError::Api(code, message, _) => render_message(Some(code), message, human),
             ClientError::Transport(message) if message.contains("deadline") => {
-                "st took too long to answer; it may or may not have done it".into()
+                format!("{product} took too long to answer; it may or may not have done it")
             }
-            ClientError::Transport(message) => format!("the connection to st broke ({message})"),
+            ClientError::Transport(message) => {
+                format!("the connection to {product} broke ({message})")
+            }
             ClientError::Unreachable(unreachable) => {
                 format!(
-                    "st is not answering at {} (restarting?)",
+                    "{product} is not answering at {} (restarting?)",
                     unreachable.endpoint
                 )
             }
             ClientError::Protocol(message) => {
-                format!("st sent something this client cannot read ({message})")
+                format!("{product} sent something this client cannot read ({message})")
             }
         }
     }
@@ -892,8 +913,18 @@ impl ClientError {
 /// begins with it keeps st's own words.
 pub const PROMPT_REFUSAL_PREFIX: &str = "that prompt ";
 
-/// An error st sent (a code, when it gave one, and its message) as a person reads it.
+/// Stable diagnostic wording for machine/durable consumers, including gate reports.
 pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
+    render_message(code, message, false)
+}
+
+/// Human-only rendering of an API error; raw code and message remain unchanged.
+pub fn human_message(code: Option<&ErrorCode>, message: &str) -> String {
+    render_message(code, message, true)
+}
+
+fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> String {
+    let product = if human { "Fractal" } else { "st" };
     let Some(code) = code else {
         return message.to_owned();
     };
@@ -906,7 +937,7 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         // answered elsewhere or replaced, or only its terminal can answer it.
         ErrorCode::StaleFence if message.starts_with(PROMPT_REFUSAL_PREFIX) => message.to_owned(),
         ErrorCode::StaleFence => {
-            "st changed while this was on its way, so it was not applied".into()
+            format!("{product} changed while this was on its way, so it was not applied")
         }
         ErrorCode::PageCursorExpired | ErrorCode::CursorGap => {
             "the list changed while it was being read".into()
@@ -915,23 +946,30 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
             Some(host) => format!("{host} cannot be reached right now"),
             None => "the host this lives on cannot be reached right now".into(),
         },
-        ErrorCode::RateLimited => "st asked to slow down for a moment".into(),
+        ErrorCode::RateLimited => format!("{product} asked to slow down for a moment"),
         ErrorCode::RuntimeAuthorityIndeterminate => {
-            "st cannot tell yet which host runs this".into()
+            format!("{product} cannot tell yet which host runs this")
         }
         ErrorCode::RuntimeListNotReady => {
-            "st is still preparing the runtime list; try again shortly".into()
+            format!("{product} is still preparing the runtime list; try again shortly")
         }
-        ErrorCode::RuntimeListEnded => "the runtime list stopped updating; restart st".into(),
+        ErrorCode::RuntimeListEnded => {
+            "the runtime list stopped updating; restart fractal".into()
+        }
         ErrorCode::IdempotencyConflict => {
             "this was already sent once in another form, so it was not sent again".into()
         }
         ErrorCode::UnsupportedCapability => {
-            format!("this st does not do that yet ({message})")
+            format!("this {product} does not do that yet ({message})")
         }
         ErrorCode::NotFound => format!("it is gone: {message}"),
         ErrorCode::Forbidden => format!("not allowed: {message}"),
-        ErrorCode::Internal => format!("st hit a problem: {message}"),
+        ErrorCode::Internal => format!("{product} hit a problem: {message}"),
+        ErrorCode::TimelineHistoryIncomplete
+            if human && message == "the retained transcript starts after its first entries; st cannot show it from the start" =>
+        {
+            "the retained transcript starts after its first entries; Fractal cannot show it from the start".into()
+        }
         ErrorCode::TimelineHistoryIncomplete
         | ErrorCode::InventoryUnavailable
         | ErrorCode::ConversationContentInvalidated
@@ -942,7 +980,9 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::UnsupportedMediaType => {
             "only PNG, JPEG, GIF and WebP images can be attached".into()
         }
-        ErrorCode::BlobContentMismatch => "the file is not the kind of image it says it is".into(),
+        ErrorCode::BlobContentMismatch => {
+            "the file is not the kind of image it says it is".into()
+        }
         ErrorCode::BlobQuotaExceeded => {
             "too many images were uploaded recently; try again later".into()
         }
@@ -961,9 +1001,7 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::ResponseBudgetExceeded => {
             "the answer is larger than the requested response budget".into()
         }
-        ErrorCode::ContentNotText => {
-            "this content is not plain text, so it was not returned".into()
-        }
+        ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
@@ -995,6 +1033,8 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
+        | ErrorCode::InvalidCustodySuccessor
+        | ErrorCode::CustodyPending
         | ErrorCode::MessageSelectorsNotReady
         | ErrorCode::Unknown => message.to_owned(),
     }
@@ -1089,9 +1129,9 @@ impl Client {
 
     fn features(&self) -> &'static str {
         if self.messages_paging {
-            "custom-subjects.v1, conversation-blocks.v1, messages-paging.v2"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, messages-paging.v2"
         } else {
-            "custom-subjects.v1, conversation-blocks.v1"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1"
         }
     }
 
@@ -1114,6 +1154,34 @@ impl Client {
         self.announce_outage_wait = announce;
         self
     }
+    /// Connect natively through the local Fabric daemon, without an HTTP proxy.
+    pub fn fabric(endpoint: fabric::FabricEndpoint) -> Self {
+        let mut client = Self::unix(Path::new(""));
+        client.endpoint = Endpoint::Fabric(endpoint);
+        client
+    }
+
+    /// Attach a paired credential to this transport. Fabric trust does not replace API auth.
+    pub fn with_credential(mut self, credential: impl Into<String>) -> Self {
+        self.credential = Some(credential.into());
+        self
+    }
+
+    async fn transport_endpoint(&self, path: &str) -> Result<TransportEndpoint<'_>, ClientError> {
+        match &self.endpoint {
+            Endpoint::Unix(socket) => {
+                Ok(TransportEndpoint::Unix(std::borrow::Cow::Borrowed(socket)))
+            }
+            Endpoint::Fabric(endpoint) => {
+                fabric::FabricEndpoint::validate_path(path)?;
+                Ok(TransportEndpoint::Unix(std::borrow::Cow::Owned(
+                    endpoint.dial().await?,
+                )))
+            }
+            Endpoint::FabricLoopback(base) => Ok(TransportEndpoint::FabricLoopback(base)),
+        }
+    }
+
     pub fn unix(path: impl AsRef<Path>) -> Self {
         Self {
             endpoint: Endpoint::Unix(path.as_ref().to_owned()),
@@ -2032,6 +2100,29 @@ impl Client {
         self.launch_children(launch_id, "approvals", cursor, limit)
             .await
     }
+    pub async fn schedules_list(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        unheard_after_ms: Option<u64>,
+    ) -> Result<Envelope<SchedulesPage>, ClientError> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        if let Some(age) = unheard_after_ms {
+            query.push(format!("unheard_after_ms={age}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/client/schedules{suffix}")).await
+    }
     pub async fn missions_list(
         &self,
         cursor: Option<&str>,
@@ -2210,6 +2301,15 @@ impl Client {
         history: bool,
     ) -> Result<Envelope<Page>, ClientError> {
         self.list_internal("terminals", cursor, limit, history)
+            .await
+    }
+    pub async fn runtime_starts_list(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        history: bool,
+    ) -> Result<Envelope<Page>, ClientError> {
+        self.list_internal("runtime-starts", cursor, limit, history)
             .await
     }
     pub async fn operations_list(
@@ -3455,10 +3555,10 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // WebSocket names switch independently of the unchanged HTTP headers.
             let protocols = capability.map_or_else(
                 || RAW_TERMINAL_SUBPROTOCOL.to_owned(),
-                |capability| format!("{RAW_TERMINAL_SUBPROTOCOL}, st3.cap.{capability}"),
+                |capability| format!("{RAW_TERMINAL_SUBPROTOCOL}, fractal.cap.{capability}"),
             );
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
@@ -3470,8 +3570,8 @@ impl Client {
         let config = WebSocketConfig::default()
             .max_message_size(Some(HARD_MAX_RESPONSE_BYTES))
             .max_frame_size(Some(HARD_MAX_RESPONSE_BYTES));
-        match &self.endpoint {
-            Endpoint::Unix(socket) => {
+        match &self.transport_endpoint(&path).await? {
+            TransportEndpoint::Unix(socket) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(socket),
@@ -3497,7 +3597,7 @@ impl Client {
                 validate_raw_terminal_subprotocol(&response)?;
                 raw_terminal_connector(websocket, mode == RawTerminalMode::Peek)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3536,8 +3636,8 @@ impl Client {
             "/v1/client/terminals/{}/stream{suffix}",
             percent_encode_segment(terminal_id.trim_start_matches("terminal/"))
         );
-        let socket = match &self.endpoint {
-            Endpoint::Unix(socket) => {
+        let socket = match &self.transport_endpoint(&path).await? {
+            TransportEndpoint::Unix(socket) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(socket),
@@ -3566,7 +3666,7 @@ impl Client {
                 validate_terminal_subprotocol(&response)?;
                 TerminalSocket::Unix(websocket)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3612,15 +3712,15 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // Offer one alias: #3430 receivers reject dual surface offers.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
-                hyper::header::HeaderValue::from_static("st3.client.collections.v0"),
+                hyper::header::HeaderValue::from_static("fractal.client.collections.v0"),
             );
             Ok(request)
         };
-        let socket = match &self.endpoint {
-            Endpoint::Unix(path) => {
+        let socket = match &self.transport_endpoint(path).await? {
+            TransportEndpoint::Unix(path) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(path),
@@ -3642,7 +3742,7 @@ impl Client {
                 validate_collection_subprotocol(&response)?;
                 TerminalSocket::Unix(socket)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3717,15 +3817,15 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // Offer one alias: #3430 receivers reject dual surface offers.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
-                hyper::header::HeaderValue::from_static("st3.client.conversation.v0"),
+                hyper::header::HeaderValue::from_static("fractal.client.conversation.v0"),
             );
             Ok(request)
         };
-        let socket = match &self.endpoint {
-            Endpoint::Unix(path) => {
+        let socket = match &self.transport_endpoint(&path).await? {
+            TransportEndpoint::Unix(path) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(path),
@@ -3747,7 +3847,7 @@ impl Client {
                 validate_conversation_subprotocol(&response)?;
                 TerminalSocket::Unix(socket)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3904,8 +4004,8 @@ impl Client {
         // Measured only when someone asked: no timer and no copy otherwise.
         let guard = RequestGuard::begin(&method, path);
         let request = async {
-            match &self.endpoint {
-                Endpoint::Unix(socket) => {
+            match &self.transport_endpoint(path).await? {
+                TransportEndpoint::Unix(socket) => {
                     unix_request(
                         socket,
                         method,
@@ -3921,7 +4021,7 @@ impl Client {
                     )
                     .await
                 }
-                Endpoint::FabricLoopback(base) => {
+                TransportEndpoint::FabricLoopback(base) => {
                     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
                     let mut request = self
                         .http
@@ -3977,6 +4077,26 @@ impl Client {
             .and_then(|result| result);
         let (status, bytes) = outcome?;
         if !(200..300).contains(&status) {
+            // A schedule collection has no missing-item 404. An older router may answer an
+            // empty Axum 404 rather than a client envelope: report unsupported, never scan.
+            if status == 404 && path.split('?').next() == Some("/v1/client/schedules") {
+                let error = ErrorEnvelope {
+                    api_version: "st3.client.v0".into(),
+                    error_version: "st3.client.error.v0".into(),
+                    request_id: String::new(),
+                    code: ErrorCode::UnsupportedCapability,
+                    message: "this server does not support schedules.list; upgrade the server"
+                        .into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    details: Default::default(),
+                };
+                return Err(ClientError::Api(
+                    error.code.clone(),
+                    error.message.clone(),
+                    Box::new(error),
+                ));
+            }
             if status == 404 && bytes.is_empty() && path.starts_with("/v1/client/launches/") {
                 let error = ErrorEnvelope {
                     api_version: "st3.client.v0".into(),
@@ -4159,7 +4279,7 @@ fn append_bounded(bytes: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(),
     Ok(())
 }
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+// WebSocket-only sender cutover; HTTP header names remain deployed spellings.
 fn websocket_request(
     url: &str,
     credential: Option<&str>,
@@ -4178,7 +4298,7 @@ fn websocket_request(
     request.headers_mut().insert(
         hyper::header::SEC_WEBSOCKET_PROTOCOL,
         hyper::header::HeaderValue::from_str(&match stream_capability {
-            Some(capability) => format!("{TERMINAL_SUBPROTOCOL}, st3.cap.{capability}"),
+            Some(capability) => format!("{TERMINAL_SUBPROTOCOL}, fractal.cap.{capability}"),
             None => TERMINAL_SUBPROTOCOL.into(),
         })
         .map_err(|error| ClientError::Protocol(error.to_string()))?,
@@ -4209,8 +4329,8 @@ fn websocket_request(
 }
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
-// Sunset: 60 days after the first release shipping this bridge. Requests still offer
-// only the deployed spelling; tungstenite must continue rejecting unoffered protocols.
+// Sunset: 2026-11-01 (#3032 R5). Senders offer only Fractal protocols after every
+// host runs #3430; tungstenite must continue rejecting unoffered protocols.
 fn selected_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Option<&str> {
@@ -4226,7 +4346,13 @@ fn wire_protocol_matches(selected: &str, expected: &str) -> bool {
     selected == expected
         || expected
             .strip_prefix("st3.")
-            .is_some_and(|suffix| selected.strip_prefix("fractal.") == Some(suffix))
+            .or_else(|| expected.strip_prefix("fractal."))
+            .is_some_and(|suffix| {
+                selected
+                    .strip_prefix("st3.")
+                    .or_else(|| selected.strip_prefix("fractal."))
+                    == Some(suffix)
+            })
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 
@@ -4240,8 +4366,8 @@ mod wire_receiver_tests {
             &tokio_tungstenite::tungstenite::handshake::client::Response,
         ) -> Result<(), ClientError>;
         let receivers: [(&str, Validator); 4] = [
-            (RAW_TERMINAL_SUBPROTOCOL, validate_raw_terminal_subprotocol),
-            (TERMINAL_SUBPROTOCOL, validate_terminal_subprotocol),
+            ("st3.client.pty.v0", validate_raw_terminal_subprotocol),
+            ("st3.client.terminal.v0", validate_terminal_subprotocol),
             (
                 "st3.client.conversation.v0",
                 validate_conversation_subprotocol,
@@ -4312,13 +4438,13 @@ mod wire_receiver_tests {
             assert_eq!(decoded.error_version, error);
             assert_eq!(decoded.code, ErrorCode::NotFound);
         }
-        // Alias readers must never change emitted request bytes.
+        // WebSocket sender cutover does not change the HTTP API/error versions.
         let request = websocket_request(
             "ws://localhost/stream",
             None,
             None,
             None,
-            "custom-subjects.v1, conversation-blocks.v1",
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1",
         )
         .unwrap();
         assert_eq!(
@@ -4327,6 +4453,20 @@ mod wire_receiver_tests {
         );
         assert_eq!(API_VERSION, "st3.client.v0");
         assert_eq!(ERROR_VERSION, "st3.client.error.v0");
+        assert_eq!(TERMINAL_SUBPROTOCOL, "fractal.client.terminal.v0");
+        assert_eq!(RAW_TERMINAL_SUBPROTOCOL, "fractal.client.pty.v0");
+        let request = websocket_request(
+            "ws://localhost/stream",
+            None,
+            None,
+            Some("secret"),
+            "custom-subjects.v1, conversation-blocks.v1",
+        )
+        .unwrap();
+        assert_eq!(
+            request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
+            "fractal.client.terminal.v0, fractal.cap.secret"
+        );
     }
 }
 
@@ -4828,8 +4968,8 @@ mod tests {
 
     #[test]
     fn messages_paging_is_explicit_for_every_constructor_and_websocket_request() {
-        let legacy = "custom-subjects.v1, conversation-blocks.v1";
-        let negotiated = "custom-subjects.v1, conversation-blocks.v1, messages-paging.v2";
+        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1";
+        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, messages-paging.v2";
         for client in [
             Client::unix("/unused"),
             Client::unix_as("/unused", "person/test"),
@@ -5060,6 +5200,37 @@ mod tests {
             }
             lines
         })
+    }
+
+    #[test]
+    fn schedule_models_preserve_unknown_fields_and_state_strings() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/schedules-page.json"
+        ))
+        .unwrap();
+        let decoded: Envelope<SchedulesPage> = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.value.items[0].state, "future-state");
+        assert_eq!(decoded.value.items[0].standby_state, "future-state");
+        assert_eq!(decoded.value.items[0].knowledge.completeness, "unknown");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+    }
+    #[test]
+    fn schedule_reads_encode_explicit_parameters_and_keep_old_server_unsupported() {
+        runtime().block_on(async {
+            let fixture=include_str!("../../../docs/st3/client-v0/fixtures/schedules-page.json");
+            let directory=tempfile::tempdir().unwrap(); let socket=directory.path().join("schedules.sock");
+            let error=serde_json::json!({"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/old","code":"not-found","message":"unknown route","retryable":false,"details":{}}).to_string();
+            let server=scripted_server(&socket,vec![(0,200,fixture.into()),(0,404,error),(0,404,String::new())]);
+            let client=Client::unix_as(&socket,"person/ada");
+            let page=client.schedules_list(Some("next&cursor"),Some(1),Some(300000)).await.unwrap();
+            assert_eq!(page.value.items.len(),1);
+            assert!(matches!(client.schedules_list(None,None,None).await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            assert!(matches!(client.schedules_list(None,None,None).await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            let lines=server.await.unwrap();
+            assert_eq!(lines.len(),3);
+            assert_eq!(lines[0],"GET /v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000 HTTP/1.1");
+            assert_eq!(lines[1],"GET /v1/client/schedules HTTP/1.1");
+        });
     }
 
     #[test]
@@ -5452,7 +5623,7 @@ mod tests {
                                 .unwrap()
                                 .to_str()
                                 .unwrap(),
-                            format!("{TERMINAL_SUBPROTOCOL}, st3.cap.fixture-stream-capability-0000000000000000")
+                            format!("{TERMINAL_SUBPROTOCOL}, fractal.cap.fixture-stream-capability-0000000000000000")
                         );
                         response.headers_mut().insert(
                             hyper::header::SEC_WEBSOCKET_PROTOCOL,

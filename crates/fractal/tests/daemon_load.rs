@@ -32,7 +32,7 @@
 //!   upgrade-under-load report is saved in its sibling `upgrade` directory. Both cases keep
 //!   the same workload, budgets and baseline. Migration setup/completion is reported separately.
 //! - `ST_LOAD_PROFILE=collections-v1` has each of the 22 subscribers also hold missions, work,
-//!   attention, summary, glasses and arrangements windows on its socket, as an attached stui or
+//!   attention, summary, glasses and arrangements windows on its socket, as an attached Fractal TUI or
 //!   phone does. Each window's first snapshot has the roster's 300 ms budget. The default,
 //!   `agents-v1`, holds the agents roster only. A report compares only with main's reports of
 //!   its own profile.
@@ -231,7 +231,7 @@ fn mix(conditions: Conditions, duration: Duration) -> Vec<Load> {
     mix
 }
 
-/// What a person reads while moving through stui, one after another, and each read's p99 budget.
+/// What a person reads while moving through Fractal TUI, one after another, and each read's p99 budget.
 const PERSON_READS: &[(&str, u64)] = &[
     ("/v1/client/now", 250),
     // The agents list reads every agent's state: 0.6 to 2 s at this size already.
@@ -886,10 +886,9 @@ fn absolute_failures(report: &Report) -> Vec<String> {
     failures
 }
 
-/// Whether reads refused while a published list refolds fail the run. They are reported only
-/// until the store keeps serving each list through a chunked replication receive: today it
-/// withdraws every list once per backlog chunk (#3553). That fix turns this on.
-const AVAILABILITY_GATED: bool = false;
+/// Whether reads refused while a published list refolds fail the run. The store keeps serving
+/// each list through a chunked replication receive (#3553), so a withdrawn list is a failure.
+const AVAILABILITY_GATED: bool = true;
 
 /// What a published list says when it is withdrawn and has not folded again, as a failure key
 /// keeps it (cut at 90 characters): the code where the client keeps it, else the message, for a
@@ -1591,7 +1590,7 @@ fn every_held_window_needs_a_timed_snapshot_per_subscriber_within_the_roster_bud
 /// Everything a request needs.
 struct Context {
     client: Client,
-    /// Client reads come from a person, as stui and the app make them.
+    /// Client reads come from a person, as Fractal TUI and the app make them.
     person: Client,
     collections: fractal_client::Client,
     store: Arc<Store>,

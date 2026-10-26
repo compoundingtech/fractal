@@ -16,10 +16,11 @@ macro_rules! message_desired_recipient_match {
 // Store methods by domain (the crate plan's domain rules); core stays in this file.
 pub mod attention;
 pub mod delivery;
+pub mod deploy;
 pub mod evidence;
 pub mod missions;
-mod mission_projection_upgrade;
 pub mod seats;
+pub mod helper_launchers;
 pub mod trace_principal;
 #[cfg(test)]
 pub mod accountable_tests;
@@ -28,6 +29,7 @@ pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
 pub mod declarations;
+pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
 pub mod directive_notes;
@@ -40,6 +42,7 @@ pub mod arrangements_tests;
 pub mod authored_pull_requests_tests;
 #[cfg(test)]
 pub mod schedule_active_run_tests;
+pub mod schedule_standby;
 pub mod glasses;
 pub mod mailbox_wakes;
 pub mod mailbox_changes;
@@ -63,8 +66,10 @@ pub mod usage_fold_tests;
 pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
+pub mod completion_state;
 #[cfg(test)]
 pub mod resource_preparation_fence_tests;
+pub mod message_versions;
 pub mod github_workflow_failures;
 pub mod git_change_tables;
 pub mod message_subscriptions;
@@ -120,7 +125,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -175,6 +180,7 @@ pub use smallclaims::store::{
     configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
     newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
 };
+use smallclaims::windows::holds;
 
 
 pub mod accounts;
@@ -183,6 +189,7 @@ pub use runtime_starts::RuntimeStartOperation;
 pub mod roster_admission;
 
 pub mod adhoc_work;
+pub mod attention_history;
 pub mod attention_snapshot;
 pub use attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
@@ -195,6 +202,7 @@ pub mod summary_list;
 // Registration stays opt-in until the shared installer certifies every source family.
 pub mod attention_ivm;
 pub mod backup;
+pub mod backup_ledgers;
 pub mod checkpoint_rules;
 pub mod harness_questions;
 pub mod checkpoint_status;
@@ -207,6 +215,8 @@ pub mod database_size;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
+mod slo_breaches;
+pub use slo_breaches::{PreparedSloMission, Check as SloCheck, Observation as SloObservation, HealthyWitness as SloHealthyWitness};
 
 pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
@@ -250,6 +260,7 @@ pub mod coordination;
 pub mod agent_view;
 pub mod conversation_reads;
 pub use conversation_reads::Owner as ConversationOwner;
+pub mod conversation_deliveries;
 pub mod usage_period;
 pub mod runtime;
 pub mod published_views;
@@ -263,16 +274,16 @@ pub mod tombstones_tests;
 pub mod step_wait_tests;
 #[cfg(test)]
 pub mod work_renew_tests;
-pub use runtime::SmalltalkRuntime;
+pub use runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 
-/// The graph's checkpoints with smalltalk's checkpoint rules beside them.
+/// The graph's checkpoints with Fractal's checkpoint rules beside them.
 pub mod checkpoint {
     pub use super::checkpoint_rules::*;
     pub use smallclaims::store::checkpoint::*;
 
-    /// Prove a drop plan on a copy of the store with smalltalk's projections and readers.
+    /// Prove a drop plan on a copy of the store with Fractal's projections and readers.
     #[cfg(any(test, feature = "test-support"))]
     pub fn prove_on_copy(
         copy: &std::path::Path,
@@ -280,7 +291,7 @@ pub mod checkpoint {
         plan: &DropPlan,
     ) -> anyhow::Result<CheckpointProof> {
         smallclaims::store::checkpoint::prove_on_copy(
-            &super::SmalltalkRuntime::default(),
+            &super::FractalRuntime::default(),
             copy,
             sealed,
             plan,
@@ -288,7 +299,7 @@ pub mod checkpoint {
     }
 }
 
-/// The graph's projection digests over smalltalk's shared tables.
+/// The graph's projection digests over Fractal's shared tables.
 pub mod projection_digest {
     pub use smallclaims::store::projection_digest::*;
 
@@ -660,9 +671,9 @@ pub struct AgentWorkQueue {
     pub queued_work_count: u64,
 }
 
-/// smalltalk's projection tables, and the indexes its folds read the claim log through. The
+/// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6a0f08109ee2 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h967324b862ed owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -978,6 +989,37 @@ BEGIN
     INSERT INTO message_index(subject, created_index, closed)
     SELECT subject, MIN(store_index), MAX(kind = 'message.closed')
     FROM claims WHERE subject = OLD.subject GROUP BY subject;
+END;
+
+-- Qualified native identities attached to a newly appended mailbox consumption
+-- receipt in its existing writer savepoint. This is owner-local receipt provenance,
+-- not a replicated claim or transcript payload. There is no historical backfill.
+CREATE TABLE IF NOT EXISTS local_native_delivery_receipts_v2 (
+    claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE CASCADE,
+    claim_hash TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    store_index INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS local_native_delivery_identity_v2
+ON local_native_delivery_receipts_v2(session_id, native_id, actor, origin, store_index);
+CREATE INDEX IF NOT EXISTS local_native_delivery_owner_cut_v2
+ON local_native_delivery_receipts_v2(actor, store_index);
+-- A changed, repaired or deleted physical claim no longer carries the original proof.
+-- No trigger reconstructs or guesses a native identity from a claim body.
+CREATE TRIGGER IF NOT EXISTS local_native_delivery_update_v2
+AFTER UPDATE OF id, subject, kind, actor, origin, body ON claims
+WHEN OLD.id IS NOT NEW.id OR OLD.subject IS NOT NEW.subject OR OLD.kind IS NOT NEW.kind
+  OR OLD.actor IS NOT NEW.actor OR OLD.origin IS NOT NEW.origin OR OLD.body IS NOT NEW.body
+BEGIN
+    DELETE FROM local_native_delivery_receipts_v2 WHERE claim_id=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS local_native_delivery_delete_v2 AFTER DELETE ON claims
+WHEN OLD.kind='message.read'
+BEGIN
+    DELETE FROM local_native_delivery_receipts_v2 WHERE claim_id=OLD.id;
 END;
 
 CREATE TABLE IF NOT EXISTS capabilities (
@@ -1493,9 +1535,10 @@ fn runtime_subject(subject: &str) -> bool {
 }
 
 /// Status reductions kept per subject between snapshots. `through` is the newest snapshot whose
-/// arrivals were applied: a subject that gained a claim, acted in one, or whose owning run or
-/// generation gained one since an answer was read loses it. `conflicts` counts conflicting
-/// operations, which change a subject's status without a claim of its own.
+/// arrivals were applied. Runtime statuses and membership follow the input generation of the
+/// subject and its owning run/generation; runtime harnesses also follow authored work activity.
+/// Other modes invalidate on every authored claim.
+/// `conflicts` counts conflicting operations, which change status without a claim of its own.
 #[derive(Default)]
 pub struct SubjectCache {
     through: u64,
@@ -1967,11 +2010,12 @@ pub type AgentStatusEntry = (u64, u64, bool, ClaimsReduction, Arc<StatusResponse
 /// The claims of one idempotency key used for different requests, each as `(subject, writer)`.
 pub type IdempotencyConflict = Vec<(String, String)>;
 
-/// smalltalk's store: the graph store, which it derefs to, and smalltalk's runtime, which
+/// Fractal's store: the graph store, which it derefs to, and Fractal's runtime, which
 /// keeps the caches of its projections and plugs its claim kinds into the graph.
 pub struct Store {
     pub graph: GraphStore,
-    pub smalltalk: Arc<SmalltalkRuntime>,
+    pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
+    pub fractal: Arc<FractalRuntime>,
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2078,7 +2122,7 @@ pub fn stale_pull_request_request_tx(
     Ok(None)
 }
 
-fn migrate_schema(connection: &Connection) -> Result<()> {
+pub fn migrate_schema(connection: &Connection) -> Result<()> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version == 0 || (13..=fractal_schema::STORAGE_VERSION).contains(&version)
     {
@@ -2313,9 +2357,9 @@ fn backfill_message_index(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The runtime smalltalk opens the graph with, for code that opens the graph store itself.
+/// The runtime Fractal opens the graph with, for code that opens the graph store itself.
 pub fn runtime() -> Arc<dyn smallclaims::Runtime> {
-    Arc::new(SmalltalkRuntime::default())
+    Arc::new(FractalRuntime::default())
 }
 
 /// The runs that wait on a person, and the open human gates among them.
@@ -2325,50 +2369,50 @@ impl Store {
     /// The explicitly registered keyed views for this graph. This getter performs no reads
     /// or installation; availability and source coverage must be checked in a snapshot.
     pub fn ivm_views(&self) -> Option<Arc<smallclaims::ivm::Views>> {
-        self.smalltalk.ivm_views.clone()
+        self.fractal.ivm_views.clone()
     }
 
     pub fn open(path: &Path, origin: impl Into<String>) -> Result<Self> {
-        let smalltalk = Arc::new(SmalltalkRuntime::default());
-        let graph = GraphStore::open(path, origin, smalltalk.clone())?;
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
-        publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        publication_facts::install_cache_observer(&graph, &fractal);
+        Ok(Self { graph, fractal, standby_observations: Default::default() })
     }
 
-    /// Open explicitly registered shadow views beside Smalltalk's production admission and
+    /// Open explicitly registered shadow views beside Fractal's production admission and
     /// projections. Source adapters own installation and certification before any read switch.
     pub fn open_with_ivm_views(
         path: &Path,
         origin: impl Into<String>,
         views: Arc<smallclaims::ivm::Views>,
     ) -> Result<Self> {
-        let smalltalk = Arc::new(SmalltalkRuntime::with_ivm_views(views));
-        let graph = GraphStore::open(path, origin, smalltalk.clone())?;
+        let fractal = Arc::new(FractalRuntime::with_ivm_views(views));
+        let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
-        publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        publication_facts::install_cache_observer(&graph, &fractal);
+        Ok(Self { graph, fractal, standby_observations: Default::default() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
     /// Concurrent server tests should use [`Self::open`]: shared-cache read/write
     /// contention returns `SQLITE_LOCKED` immediately instead of waiting.
     pub fn open_memory(origin: impl Into<String>) -> Result<Self> {
-        let smalltalk = Arc::new(SmalltalkRuntime::default());
-        let graph = GraphStore::open_memory(origin, smalltalk.clone())?;
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
-        publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        publication_facts::install_cache_observer(&graph, &fractal);
+        Ok(Self { graph, fractal, standby_observations: Default::default() })
     }
 
     /// Simulate a different build's registry on this node.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_claim_registry(&self, registry: fractal_schema::Registry) {
         assert!(
-            self.smalltalk.claim_registry.set(registry).is_ok(),
+            self.fractal.claim_registry.set(registry).is_ok(),
             "the registry is set once"
         );
     }
@@ -2826,6 +2870,7 @@ impl Store {
                     return cache_local_apply_receipt_tx(transaction,
                         serde_json::from_str(&response).map_err(internal)?,local_receipt,idempotency_key);
                 }
+                schedule_standby::validate_publication(transaction, &self.origin, intent)?;
                 crate::provenance::validate_publication(transaction, intent)?;
                 message_subscriptions::validate(transaction, intent, current_index_tx(transaction).map_err(internal)?)?;
                 let owned_plan = owned.map(|options| owned_sets::plan_tx(transaction, intent, options)).transpose()?;
@@ -3932,9 +3977,10 @@ impl Store {
         loop {
             let connection = self.connection.write_background();
             let removed = connection.execute(
-                /* sqlite-large-value: allow-for-now lv-ha389fca051ea owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                /* sqlite-large-value: allow-for-now lv-ha799bfe026cb owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                     SELECT id FROM local_observations AS old
                     WHERE observed_at_unix_ms < ?1
+                      AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                       AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
                       AND EXISTS (SELECT 1 FROM local_observations AS newer
                                   WHERE newer.subject=old.subject AND newer.kind=old.kind
@@ -3983,9 +4029,10 @@ impl Store {
                     break;
                 };
                 let removed = connection.execute(
-                    /* sqlite-large-value: allow-for-now lv-ha907c5aecc06 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                    /* sqlite-large-value: allow-for-now lv-h7762c849fb0b owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                         SELECT id FROM local_observations
                         WHERE subject=?1 AND kind=?2 AND id<=?3
+                          AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                           AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
                         ORDER BY id LIMIT ?4
                      )",
@@ -4030,27 +4077,44 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Daemon-only evidence captured while holding the runtime spawn locks.
+    pub fn operational_repair_plan_with_legacy_starts(
+        &self,
+        native_evidence: &[Value],
+    ) -> Result<OperationalRepairPlan> {
+        self.operational_repair_plan_with_legacy_starts_and_filter(native_evidence, &[], &[])
+    }
+
+    pub fn operational_repair_plan_with_legacy_starts_and_filter(
+        &self, native_evidence: &[Value], subjects: &[String], classes: &[String],
+    ) -> Result<OperationalRepairPlan> {
+        let filter = OperationalRepairFilter::new(subjects, classes);
+        let connection = self.readers.get();
+        filter_repair_plan(operational_repair_plan_with_legacy_starts_tx(
+            &connection, now_ms(), &self.origin, native_evidence,
+        )?, &filter)
+    }
+
+    /// Filters are carried inside the approval token; apply never guesses a wider plan.
+    pub fn operational_repair_token_filters(token: &str) -> Result<(Vec<String>, Vec<String>), St3Error> {
+        let (_, filter) = decode_repair_token(token)?;
+        Ok((filter.subjects, filter.classes))
+    }
+
     pub fn apply_operational_repair(
         &self,
         token: &str,
     ) -> Result<OperationalRepairResult, St3Error> {
-        if !token.starts_with("orpv0:") {
-            return Err(St3Error::new(
-                "invalid-repair-token",
-                "an operational repair token must start with `orpv0:`",
-            ));
-        }
-        let digest = token.trim_start_matches("orpv0:");
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(St3Error::new(
-                "invalid-repair-token",
-                "an operational repair token must contain one lowercase SHA-256 digest",
-            ));
-        }
+        self.apply_operational_repair_with_legacy_starts(token, &[])
+    }
+
+    /// Rechecks the complete evidence-bound plan inside the normal writer fence.
+    pub fn apply_operational_repair_with_legacy_starts(
+        &self,
+        token: &str,
+        native_evidence: &[Value],
+    ) -> Result<OperationalRepairResult, St3Error> {
+        let (digest, filter) = decode_repair_token(token)?;
         let repair_subject = format!("repair/{digest}");
         let mut connection = self.connection.write();
         let transaction = connection.transaction().map_err(internal)?;
@@ -4091,7 +4155,9 @@ impl Store {
             });
         }
 
-        let plan = operational_repair_plan_tx(&transaction, now_ms()).map_err(internal)?;
+        let plan = filter_repair_plan(operational_repair_plan_with_legacy_starts_tx(
+            &transaction, now_ms(), &self.origin, native_evidence,
+        ).map_err(internal)?, &filter).map_err(internal)?;
         if plan.token != token {
             return Err(St3Error::new(
                 "stale-repair-plan",
@@ -4122,6 +4188,16 @@ impl Store {
         for item in &plan.items {
             affected_subjects.extend(item.affected_subjects.iter().cloned());
             match item.class.as_str() {
+                "revoked-legacy-runtime-start" => {
+                    let operation_id = item.details["operation"]["id"].as_str()
+                        .ok_or_else(|| St3Error::new("invalid-repair-plan", "missing runtime operation"))?;
+                    runtime_starts::retain_runtime_start_producer_closed_tx(
+                        &transaction,
+                        &self.origin,
+                        operation_id,
+                        item.details.get("native_evidence"),
+                    ).map_err(internal)?;
+                }
                 "terminal-descendants" => {
                     let generation = item
                         .details
@@ -4255,6 +4331,21 @@ impl Store {
         }
         affected_subjects.sort();
         affected_subjects.dedup();
+        // Keep the replicated receipt within the existing closed field schema.
+        // Older peers quarantine unknown fields, so legacy evidence is encoded
+        // in the already-defined reason string, not a new receipt field.
+        let closures = plan.items.iter()
+            .filter(|item| item.class == "revoked-legacy-runtime-start")
+            .map(|item| json!({
+                "operation_id": item.details["operation"]["id"],
+                "native_evidence": item.details["native_evidence"],
+            })).collect::<Vec<_>>();
+        let reason = if closures.is_empty() {
+            "applied the exact graph-authorized operational repair plan".to_owned()
+        } else {
+            format!("applied the exact graph-authorized operational repair plan; legacy runtime start closures: {}",
+                serde_json::to_string(&closures).map_err(internal)?)
+        };
         let receipt = append_claim_tx(
             &transaction,
             &self.origin,
@@ -4265,7 +4356,7 @@ impl Store {
                 "token": token,
                 "item_count": plan.items.len(),
                 "affected_subjects": affected_subjects,
-                "reason": "applied the exact graph-authorized operational repair plan",
+                "reason": reason,
             }}),
             &claim_ids,
             None,
@@ -4383,8 +4474,7 @@ impl Store {
     /// answers read at `store_index` may be kept: only those at the newest applied snapshot are
     /// known to hold afterwards.
     fn advance_subject_cache(&self, connection: &Connection, store_index: u64) -> Result<bool> {
-        let mut cache = self
-            .smalltalk
+        let mut cache = self.fractal
             .subject_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -4404,13 +4494,23 @@ impl Store {
                 || !cache.card_statuses.is_empty() {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
-                    "SELECT subject, actor FROM claims WHERE store_index>?1 AND store_index<=?2",
+                    "SELECT subject, actor, kind IN ('work.claimed','work.progress')
+                     FROM claims WHERE store_index>?1 AND store_index<=?2",
                 )?;
                 let mut changed = HashSet::new();
+                // Membership reads only subject/owner claims. Runtime statuses also
+                // read authored work activity in the harness fold, but not other
+                // authored claims. Keep those input generations distinct.
+                let mut changed_subjects = HashSet::new();
+                let mut runtime_work_actors = HashSet::new();
                 for row in statement.query_map(params![cache.through, store_index], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?))
                 })? {
-                    let (subject, actor) = row?;
+                    let (subject, actor, work_activity) = row?;
+                    if work_activity && let Some(actor) = &actor {
+                        runtime_work_actors.insert(actor.clone());
+                    }
+                    changed_subjects.insert(subject.clone());
                     changed.insert(subject);
                     changed.extend(actor);
                 }
@@ -4418,14 +4518,20 @@ impl Store {
                 let stale = |subject: &String, owners: &[String]| {
                     changed.contains(subject) || owners.iter().any(|owner| changed.contains(owner))
                 };
+                let runtime_stale = |subject: &String, owners: &[String]| {
+                    changed_subjects.contains(subject)
+                        || owners.iter().any(|owner| changed_subjects.contains(owner))
+                };
                 cache
                     .views
-                    .retain(|subject, entry| !stale(subject, &entry.owners));
+                    .retain(|subject, entry| !runtime_stale(subject, &entry.owners));
                 cache
                     .statuses
                     .retain(|subject, entry| !stale(subject, &entry.owners));
                 cache.summary_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
-                cache.runtime_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
+                cache.runtime_statuses.retain(|subject, entry| {
+                    !runtime_stale(subject, &entry.owners) && !runtime_work_actors.contains(subject)
+                });
                 cache.card_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
             }
             cache.through = store_index;
@@ -4459,8 +4565,7 @@ impl Store {
     fn kept_subject_status(
         &self, subject: &str, store_index: u64, claims: ClaimsReduction,
     ) -> Option<(SubjectStatus, Option<PlannedAction>)> {
-        let cache = self
-            .smalltalk
+        let cache = self.fractal
             .subject_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -4486,8 +4591,7 @@ impl Store {
         &self, subject: &str, store_index: u64, claims: ClaimsReduction,
         status: &SubjectStatus, action: &Option<PlannedAction>,
     ) {
-        let mut cache = self
-            .smalltalk
+        let mut cache = self.fractal
             .subject_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -4556,8 +4660,7 @@ impl Store {
         let mut candidates = BTreeSet::new();
         let mut unknown = Vec::new();
         {
-            let cache = self
-                .smalltalk
+            let cache = self.fractal
                 .subject_cache
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
@@ -4589,8 +4692,7 @@ impl Store {
                 .expect("every runtime read has a view entry");
             let history = entry.history;
             if newest && owners {
-                let mut cache = self
-                    .smalltalk
+                let mut cache = self.fractal
                     .subject_cache
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
@@ -4609,7 +4711,7 @@ impl Store {
     /// graph without arriving anew.
     #[cfg(any(test, feature = "test-support"))]
     pub fn forget_current_views(&self) {
-        self.smalltalk.forget_views();
+        self.fractal.forget_views();
     }
 
     /// Append a claim in a write transaction that then rolls back, as a failed write does.
@@ -5045,18 +5147,7 @@ impl Store {
     ) -> Result<Option<(DesiredSubject, Option<String>)>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        connection
-            .query_row(
-                "SELECT desired.subject, desired.kind, desired.body, desired.member,
-                        desired.owner_run, desired.owner_generation, desired.owner_step,
-                        claims.actor
-                 FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
-                 WHERE desired.subject = ?1",
-                [subject],
-                |row| Ok((desired_from_row(row)?, row.get::<_, Option<String>>(7)?)),
-            )
-            .optional()
-            .map_err(Into::into)
+        desired_subject_with_writer_at(&connection, subject)
     }
 
     /// Among `subjects`, each declaration whose member this build cannot read, with the reason.
@@ -5412,6 +5503,24 @@ impl Store {
           AND run.status NOT IN ('completed','cancelled','failed')
     )";
 
+    /// The newest claim of `kind` on `subject` in canonical order, never by arrival: members that
+    /// admitted the same claims in another order name the same one.
+    pub fn newest_claim_for_subject_kind(&self, subject: &str, kind: &str) -> Result<Option<ClaimRecord>> {
+        let connection = self.readers.get();
+        Ok(connection
+            .query_row(
+                /* sqlite-large-value: allow-for-now lv-h7c545c3d21a9 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+                    "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+                 FROM claims INDEXED BY claims_subject_kind_accepted_index
+                 WHERE subject=?1 AND kind=?2
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+                ),
+                params![subject, kind],
+                claim_from_row,
+            )
+            .optional()?)
+    }
+
     /// Bounded claim history for one subject/kind projection, backed by the composite index.
     pub fn claims_for_subject_kind_at(
         &self,
@@ -5719,6 +5828,9 @@ impl Store {
 
     pub fn latest_actual_value(&self, subject: &str) -> Result<Option<Value>> {
         smallclaims::touched::note_read(|| subject.to_owned());
+        if subject.starts_with("resource/slo-breach/") {
+            return slo_breaches::fact(&self.readers.get(), subject);
+        }
         let connection = self.readers.get();
         // The actual state folds only this subject's append-only claims, so the subject's newest
         // claim identifies it. A write elsewhere in the graph must not make every reconcile pass
@@ -5726,8 +5838,7 @@ impl Store {
         let newest: u64 = connection
             .prepare_cached("SELECT COALESCE(MAX(store_index), 0) FROM claims WHERE subject=?1")?
             .query_row(/* sqlite-large-value: allow-for-now lv-h2b7668e3f927 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?;
-        if let Some((_, value)) = self
-            .smalltalk
+        if let Some((_, value)) = self.fractal
             .actual_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -5739,8 +5850,7 @@ impl Store {
         // A claim committed after `newest` can only make this value newer than its key, and the
         // next read then misses and folds again.
         let value = latest_actual(&connection, subject)?;
-        let mut cache = self
-            .smalltalk
+        let mut cache = self.fractal
             .actual_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -5864,7 +5974,8 @@ impl Store {
     fn simple_replication_kind(kind: &str) -> bool {
         matches!(
             kind,
-            "lane.approved"
+            "slo.breach-transition"
+                | "lane.approved"
                 | "arrangement.edited"
                 | "lane.joined"
                 | "lane.left"
@@ -7647,6 +7758,23 @@ pub fn normalize_resource_observation(
         return Ok(None);
     }
     let prior_kind = latest_resource_kind(transaction, &input.subject)?;
+    normalize_resource_observation_with_actuals(transaction, input, prior_kind, || {
+        latest_actual(transaction, &input.subject)
+    })
+}
+
+/// Normalize using resource history already selected at the caller's read cut.
+/// The ordinary append path keeps its canonical history reader; preparation supplies
+/// the semantically identical materialized state from its pinned connection.
+pub fn normalize_resource_observation_with_actuals(
+    transaction: &Connection,
+    input: &ClaimInput,
+    prior_kind: Option<String>,
+    previous: impl FnOnce() -> Result<Option<Value>>,
+) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
+    if input.kind != "resource.observed" {
+        return Ok(None);
+    }
     let desired_kind = current_desired_row_tx(transaction, &input.subject)
         .map_err(internal)?
         .filter(|desired| desired.kind == "resource")
@@ -7677,12 +7805,13 @@ pub fn normalize_resource_observation(
     let spec = fractal_schema::registry()
         .validate_resource_facts(&kind, &facts)
         .map_err(|error| St3Error::new(error.code, error.message))?;
-    if let Some(previous) = latest_actual(transaction, &input.subject).map_err(internal)? {
+    if let Some(previous) = previous().map_err(internal)? {
+        let empty = serde_json::Map::new();
         let previous = previous
             .get("facts")
             .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_else(|| previous.as_object().cloned().unwrap_or_default());
+            .or_else(|| previous.as_object())
+            .unwrap_or(&empty);
         // Issue and pull request attribution belongs to its publisher, not to the latest
         // observer or fixer. Keep each named field, including a mission-run-only opener, across
         // observations, so a partial snapshot such as a merge never erases it.
@@ -7849,7 +7978,10 @@ pub fn migrate_local_usage_seen(connection: &Connection) -> Result<()> {
 const USAGE_PUBLISH_INTERVAL_MS: u128 = 5 * 60 * 1000;
 
 pub fn validate_local_observation(input: &ClaimInput) -> Result<(), St3Error> {
-    if input.expected_subject.is_some() {
+    let action_receipt_cas = input.kind == "client.action-result"
+        && input.actor.is_none()
+        && input.expected_subject == Some(None);
+    if input.expected_subject.is_some() && !action_receipt_cas {
         return Err(St3Error::new(
             "local-observation-head",
             "a local observation does not take part in the subject's claim head",
@@ -8988,6 +9120,7 @@ pub fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
+    holds::rebuilt(claim_ids.len());
     clear_quarantined_claims_tx(transaction, "projection:planning")?;
     for id in claim_ids {
         let claim = claim_by_id_tx(transaction, &id)?
@@ -9281,7 +9414,8 @@ fn validate_message_transition(
             .filter(|kind| *kind == "message")
             .map(|_| "sent")
     };
-    if requested != "sent" && current == Some(requested) {
+    if requested != "sent" && current == Some(requested)
+        && !(requested == "read" && input.fields.contains_key("acting_for")) {
         if input.fields.contains_key("delegation") {
             return Err(St3Error::new(
                 "delegation-refused",
@@ -9319,6 +9453,23 @@ fn validate_message_transition(
             | (Some("delivered"), "read")
             | (Some("read"), "closed")
     );
+    let custody_read = requested == "read"
+        && input.fields.contains_key("acting_for")
+        && matches!(current, Some("sent" | "staged" | "read"));
+    if custody_read && current == Some("read") {
+        // OLD may have read the mail before retirement. NEW still needs its own signed
+        // receipt, but a different key must not create unlimited duplicate NEW reads.
+        let prior: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+             WHERE subject=?1 AND kind='message.read' AND actor=?2
+               AND json_extract(body,'$.fields.acting_for')=?3)",
+            params![input.subject, input.actor, input.fields.get("acting_for").and_then(Value::as_str)],
+            |row| row.get(0),
+        ).map_err(internal)?;
+        if prior {
+            return Err(St3Error::new("invalid-message-transition", "custody read is already recorded"));
+        }
+    }
     // A person's displayed message has no native harness handoff. Its explicit read receipt
     // is also delivery evidence; only the actual person recipient may skip that boundary.
     let person_read = if requested == "read"
@@ -9353,7 +9504,7 @@ fn validate_message_transition(
         && requested == "closed"
         && input.actor.as_deref() == Some("daemon/runtime");
     let delegated_close = requested == "closed" && input.fields.contains_key("delegation");
-    if !valid && !person_read && !daemon_withdrawal && !delegated_close {
+    if !valid && !custody_read && !person_read && !daemon_withdrawal && !delegated_close {
         return Err(St3Error::new(
             "invalid-message-transition",
             format!(
@@ -9465,6 +9616,8 @@ pub fn append_claim_tx_with_assistant_answer(
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
     crate::terminal_binding::validate_claim(kind, body, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::slo_breaches::validate_claim(subject, kind, body, origin, actor)
+        .map_err(anyhow::Error::msg)?;
     fractal_schema::accountable::validate_claim(subject, kind, body, actor).map_err(anyhow::Error::new)?;
     fractal_schema::owned_terminals::validate_declaration_owner(subject, kind, actor)
         .map_err(anyhow::Error::new)?;
@@ -9479,6 +9632,9 @@ pub fn append_claim_tx_with_assistant_answer(
         || fields.contains_key("delegation")
         || fields.contains_key("acted_for")
         || (kind == "work.person-done" && actor.is_some_and(|actor| actor.starts_with("agent/")))
+        || (kind == "harness.diagnostic"
+            && fields.get("code") == Some(&json!("native-prompt-answered"))
+            && actor.is_some_and(|actor| actor.starts_with("agent/")))
     {
         let evidence = serde_json::from_value::<Vec<String>>(
             body.get("evidence").cloned().unwrap_or_else(|| json!([])),
@@ -9754,10 +9910,13 @@ fn event_tail_sql(migrating: bool) -> &'static str {
 pub /* sqlite-large-value-flow: allow-for-now flow-hae49bfcdc951 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ fn insert_event(
     transaction: &Transaction<'_>,
     store_index: u64,
-    _kind: &str,
+    kind: &str,
     subject: &str,
     _body: &Value,
 ) -> Result<()> {
+    if kind == fractal_schema::slo_breaches::KIND {
+        slo_breaches::project_index(transaction, store_index)?;
+    }
     if subject.starts_with("glass/") {
         return Ok(());
     }
@@ -10100,12 +10259,20 @@ fn nonowner_terminal_observation(
         )
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static ACTUAL_HISTORY_BODIES_DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn latest_actual_at(
     connection: &Connection,
     subject: &str,
     at_index: Option<u64>,
 ) -> Result<Option<Value>> {
     let at_index = at_index.unwrap_or(i64::MAX as u64);
+    if subject.starts_with("resource/slo-breach/") && at_index == i64::MAX as u64 {
+        return slo_breaches::fact(connection, subject);
+    }
     if subject.starts_with("arrangement/") {
         return arrangements::arrangement_at(connection, subject, at_index);
     }
@@ -10137,6 +10304,8 @@ pub fn latest_actual_at(
             let index: u64 = row.get(0)?;
             let (kind, body): (String, String) =
                 bodies.query_row(/* sqlite-large-value: allow-for-now lv-h6a4734d1f7f8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            #[cfg(any(test, feature = "test-support"))]
+            ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
             Ok((kind, serde_json::from_str::<Value>(&body)?))
         })())
     }))
@@ -10153,41 +10322,51 @@ fn fold_latest_parsed_values(
     rows: impl IntoIterator<Item = Result<(String, Value)>>,
 ) -> Result<Option<Value>> {
     let mut merged = serde_json::Map::new();
-    let registry = fractal_schema::registry();
     let mut any = false;
     for row in rows {
         let (kind, value) = row?;
         any = true;
-        let source = match value {
-            Value::Object(mut body) => match body.remove("fields") {
-                Some(fields) => fields,
-                None => Value::Object(body),
-            },
-            other => other,
-        };
-        if let Value::Object(fields) = source {
-            if kind == "resource.observed" {
-                resources::merge_observation(&mut merged, &fields);
-                continue;
-            }
-            if registry
-                .claim(&kind)
-                .is_some_and(|spec| spec.cardinality == fractal_schema::Cardinality::StateTransition)
-            {
-                for field in registry
-                    .claim(&kind)
-                    .into_iter()
-                    .flat_map(|spec| spec.fields.keys())
-                {
-                    merged.remove(field);
-                }
-            }
-            for (key, value) in fields {
-                merged.insert(key, value);
-            }
-        }
+        merge_actual_value(&mut merged, &kind, value);
     }
     Ok(any.then_some(Value::Object(merged)))
+}
+
+/// Apply one eligible claim in canonical order, shared by history folds and the
+/// rebuildable current-cut resource preparation projection.
+fn merge_actual_value(
+    merged: &mut serde_json::Map<String, Value>,
+    kind: &str,
+    value: Value,
+) {
+    let source = match value {
+        Value::Object(mut body) => match body.remove("fields") {
+            Some(fields) => fields,
+            None => Value::Object(body),
+        },
+        other => other,
+    };
+    if let Value::Object(fields) = source {
+        if kind == "resource.observed" {
+            resources::merge_observation(merged, &fields);
+            return;
+        }
+        let registry = fractal_schema::registry();
+        if registry
+            .claim(kind)
+            .is_some_and(|spec| spec.cardinality == fractal_schema::Cardinality::StateTransition)
+        {
+            for field in registry
+                .claim(kind)
+                .into_iter()
+                .flat_map(|spec| spec.fields.keys())
+            {
+                merged.remove(field);
+            }
+        }
+        for (key, value) in fields {
+            merged.insert(key, value);
+        }
+    }
 }
 
 /// `columns` of subject `?1`'s claims of one `kind` at or before store index `?2`, newest first
@@ -11332,6 +11511,114 @@ pub fn mission_definition_token_tx(
         .collect())
 }
 
+fn desired_subject_with_writer_at(
+    connection: &Connection,
+    subject: &str,
+) -> Result<Option<(DesiredSubject, Option<String>)>> {
+    smallclaims::touched::note_read(|| subject.to_owned());
+    connection
+        .query_row(
+            "SELECT desired.subject, desired.kind, desired.body, desired.member,
+                        desired.owner_run, desired.owner_generation, desired.owner_step,
+                        claims.actor
+                 FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
+                 WHERE desired.subject = ?1",
+            [subject],
+            |row| Ok((desired_from_row(row)?, row.get::<_, Option<String>>(7)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+/// The new writer's ownership lookup stays on its transaction. Its requester
+/// query uses the same authoritative header join as the existing public view.
+pub fn agent_person_at(connection: &Connection, agent: &str) -> Result<Option<String>> {
+    agent_person_walk(
+        agent,
+        |subject| desired_subject_with_writer_at(connection, subject),
+        |subject| helper_launchers::binding_at(connection, subject),
+        |run| {
+            smallclaims::touched::note_read(|| {
+                format!(
+                    "mission-run/{}",
+                    run.strip_prefix("mission-run/").unwrap_or(run)
+                )
+            });
+            connection
+                    .query_row(
+                        // Match mission_run_header_tx's current-generation join: a
+                        // header with no generation has no requester to follow.
+                        "SELECT mission_runs.requester FROM mission_runs
+                         JOIN run_generations ON run_generations.id=mission_runs.current_generation_id
+                         WHERE mission_runs.id=?1",
+                        [run.strip_prefix("mission-run/").unwrap_or(run)],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional().map_err(Into::into)
+        },
+    )
+}
+
+/// One bounded ownership precedence/cycle walk. Public reads retain their original
+/// full-view resolver; writer admission supplies its same-transaction resolver.
+fn agent_person_walk<D, B, R>(
+    agent: &str,
+    mut lookup_desired: D,
+    mut lookup_binding: B,
+    mut lookup_requester: R,
+) -> Result<Option<String>>
+where
+    D: FnMut(&str) -> Result<Option<(DesiredSubject, Option<String>)>>,
+    B: FnMut(&str) -> Result<Option<helper_launchers::HelperLauncherBinding>>,
+    R: FnMut(&str) -> Result<Option<String>>,
+{
+    let mut actor = agent.to_owned();
+    let mut seen = BTreeSet::new();
+    for _ in 0..16 {
+        if actor.starts_with("person/") {
+            return Ok(Some(actor));
+        }
+        if !seen.insert(actor.clone()) {
+            return Ok(None);
+        }
+        if let Some(binding) = lookup_binding(&actor)? {
+            return Ok(binding.person);
+        }
+        let Some((desired, writer)) = lookup_desired(&actor)? else {
+            return Ok(None);
+        };
+        if actor == agent {
+            let owner = match crate::accounts::harness_binding(&desired.desired)
+                .map(|binding| binding.binding)
+            {
+                Some(crate::accounts::Binding::Pool(person)) => Some(person),
+                Some(crate::accounts::Binding::Account(account)) => {
+                    lookup_desired(&format!("account/{account}"))?
+                        .and_then(|(account, _)| {
+                            crate::accounts::parse_account(&account.subject, &account.desired)
+                        })
+                        .and_then(|account| account.owner)
+                }
+                None => None,
+            };
+            if let Some(owner) = owner.filter(|owner| owner.starts_with("person/")) {
+                return Ok(Some(owner));
+            }
+        }
+        let requester = desired
+            .owner_run
+            .as_deref()
+            .map(&mut lookup_requester)
+            .transpose()?
+            .flatten();
+        let Some(next) = requester.or(writer) else {
+            return Ok(None);
+        };
+        actor = next;
+    }
+    Ok(None)
+}
+
 pub fn desired_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DesiredSubject> {
     let desired = row.get::<_, String>(2)?;
     let desired = serde_json::from_str(&desired).unwrap_or(Value::Null);
@@ -12338,6 +12625,129 @@ pub fn operational_repair_plan_tx(
         },
         items,
     })
+}
+
+#[derive(Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct OperationalRepairFilter {
+    subjects: Vec<String>,
+    classes: Vec<String>,
+}
+
+impl OperationalRepairFilter {
+    fn new(subjects: &[String], classes: &[String]) -> Self {
+        let mut filter = Self { subjects: subjects.to_vec(), classes: classes.to_vec() };
+        filter.subjects.sort();
+        filter.subjects.dedup();
+        filter.classes.sort();
+        filter.classes.dedup();
+        filter
+    }
+}
+
+fn decode_repair_token(token: &str) -> Result<(String, OperationalRepairFilter), St3Error> {
+    let invalid = || St3Error::new("invalid-repair-token", "expected an orpv0 digest and optional canonical filter");
+    let body = token.strip_prefix("orpv0:").ok_or_else(invalid)?;
+    let (digest, encoded) = body.split_once(':').map_or((body, None), |(digest, filter)| (digest, Some(filter)));
+    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(invalid());
+    }
+    let filter = if let Some(encoded) = encoded {
+        if encoded.len() > 65536 { return Err(invalid()); }
+        let bytes = hex::decode(encoded).map_err(|_| invalid())?;
+        let filter: OperationalRepairFilter = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if filter == OperationalRepairFilter::default()
+            || filter != OperationalRepairFilter::new(&filter.subjects, &filter.classes)
+            || hex::encode(serde_json::to_vec(&filter).map_err(internal)?) != encoded
+        {
+            return Err(invalid());
+        }
+        filter
+    } else {
+        OperationalRepairFilter::default()
+    };
+    Ok((digest.into(), filter))
+}
+
+fn filter_repair_plan(mut plan: OperationalRepairPlan, filter: &OperationalRepairFilter) -> Result<OperationalRepairPlan> {
+    if *filter == OperationalRepairFilter::default() { return Ok(plan); }
+    plan.items.retain(|item| {
+        (filter.subjects.is_empty() || filter.subjects.binary_search(&item.subject).is_ok())
+            && (filter.classes.is_empty() || filter.classes.binary_search(&item.class).is_ok())
+    });
+    let digest = canonical_hash(&("st3.operational-repair-filter.v0", filter, &plan.items))?;
+    plan.token = format!("orpv0:{digest}:{}", hex::encode(serde_json::to_vec(filter)?));
+    plan.status = if plan.items.is_empty() { "clean" } else { "changes" }.into();
+    Ok(plan)
+}
+
+fn operational_repair_plan_with_legacy_starts_tx(
+    connection: &Connection,
+    snapshot_unix_ms: u128,
+    origin: &str,
+    native_evidence: &[Value],
+) -> Result<OperationalRepairPlan> {
+    let mut plan = operational_repair_plan_tx(connection, snapshot_unix_ms)?;
+    let mut seen = BTreeSet::new();
+    for evidence in native_evidence {
+        let (Some(operation_id), Some(runtime_id)) = (
+            evidence["operation_id"].as_str(), evidence["runtime_id"].as_str(),
+        ) else { continue };
+        if evidence["legacy"] != true {
+            continue;
+        }
+        let operation = connection.query_row(
+            "SELECT * FROM local_runtime_starts WHERE id=?1",
+            [operation_id],
+            runtime_starts::read,
+        ).optional()?;
+        let Some(operation) = operation else { continue };
+        if !operation.finished || operation.revoked_by.is_none()
+            || operation.cleanup_verified || !operation.applied
+            || operation.result.as_ref().is_none_or(|result| !result.is_object())
+            || operation.body["member"]["terminal"] != true
+            || operation.body["member"]["runtime_id"].as_str() != Some(runtime_id)
+            || operation.body["member"]["host"].as_str() != Some(origin)
+        {
+            continue;
+        }
+        // Duplicate identical internal captures are harmless; conflicting captures
+        // remain token-bound rather than selecting an arbitrary physical witness.
+        if !seen.insert((operation_id.to_owned(), canonical_hash(evidence)?)) {
+            continue;
+        }
+        push_operational_repair_item(
+            &mut plan.items,
+            "revoked-legacy-runtime-start",
+            &operation.subject,
+            vec![operation.subject.clone()],
+            "the owner daemon proved the revoked legacy terminal producer physically closed",
+            BTreeMap::from([
+                // Bind private admission/result data without returning launch
+                // environments or other secrets in the public repair plan.
+                ("operation_fence".into(), Value::from(canonical_hash(&operation)?)),
+                ("operation".into(), json!({
+                    "id": operation.id,
+                    "subject": operation.subject,
+                    "owner": operation.owner,
+                    "revoked_by": operation.revoked_by,
+                    "finished": operation.finished,
+                    "applied": operation.applied,
+                    "cleanup_verified": operation.cleanup_verified,
+                    "dispatched": operation.dispatched,
+                    "receipted": operation.receipted,
+                })),
+                ("owner_host".into(), Value::from(origin)),
+                ("native_evidence".into(), evidence.clone()),
+            ]),
+        )?;
+    }
+    plan.items.sort_by(|left, right| {
+        (&left.class, &left.subject, &left.id).cmp(&(&right.class, &right.subject, &right.id))
+    });
+    plan.token = format!("orpv0:{}", canonical_hash(&("st3.operational-repair.v0", &plan.items))?);
+    plan.status = if plan.items.is_empty() { "clean" } else { "changes" }.into();
+    Ok(plan)
 }
 
 fn push_operational_repair_item(
@@ -13470,7 +13880,7 @@ pub fn validate_replicated_claim(
         transaction,
         batch,
         claim,
-        &SmalltalkRuntime::default(),
+        &FractalRuntime::default(),
     )
 }
 
@@ -13480,6 +13890,10 @@ pub fn classify_replicated_claim_with_registry(
     claim: &ClaimRecord,
     registry: &fractal_schema::Registry,
 ) -> Result<ReplicatedClaimAdmission, St3Error> {
+    if matches!(claim.kind.as_str(), "agent.launcher-bound" | "agent.helper-launched" | "client.action-result") {
+        return Err(St3Error::new("invalid-replicated-claim",
+            "helper launcher authority, launch history, and client action receipts cannot be admitted from peers"));
+    }
     if !registry.claims.contains_key(&claim.kind) && !fractal_schema::is_custom_claim_kind(&claim.kind)
     {
         return Ok(ReplicatedClaimAdmission::UnknownKind);
@@ -13519,6 +13933,8 @@ pub fn classify_replicated_claim_with_registry(
         ));
     }
     assistant_write::validate_replicated(&claim.kind, claim.actor.as_deref(), claim.body.get("fields").unwrap_or(&claim.body))?;
+    fractal_schema::slo_breaches::validate_claim(&claim.subject, &claim.kind, &claim.body,
+        &claim.origin, claim.actor.as_deref()).map_err(|message| St3Error::new("invalid-replicated-claim", message))?;
     crate::terminal_binding::validate_claim(&claim.kind, &claim.body, claim.actor.as_deref())?;
     fractal_schema::accountable::validate_claim(&claim.subject, &claim.kind, &claim.body, claim.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
@@ -14307,6 +14723,7 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
         )
         .collect::<BTreeSet<_>>();
     let claims = claims_in_replay_order_tx(transaction, &subjects, &generations, None)?;
+    holds::rebuilt(claims.len());
     for run in runs {
         for table in [
             "step_runs",
@@ -14403,6 +14820,7 @@ fn rebuild_base_aggregate_tx(
         &BTreeSet::new(),
         Some(&[kind]),
     )?;
+    holds::rebuilt(claims.len());
     for claim in &claims {
         project_claim_isolated_tx(transaction, "projection:base", claim, || {
             match claim.kind.as_str() {
@@ -14963,12 +15381,16 @@ pub fn try_project_simple_replication_tx(
         reconcile_carried_step_tx(transaction, claim)
             .map_err(|error| incremental_claim_error(error, claim, "claim-project"))?;
     }
-    // Missions first, since a rebuilt run reads the revision it runs.
+    // Missions first, since a rebuilt run reads the revision it runs. Each rebuild is a stage of
+    // a staged projection lend, so its hold says which kind of rebuild took its time.
     let (trees, bases): (Vec<_>, Vec<_>) = dirty
         .iter()
         .partition(|aggregate| matches!(aggregate, Aggregate::RunTree(_) | Aggregate::RunPart(_)));
     for aggregate in bases {
-        rebuild_base_aggregate_tx(transaction, aggregate).map_err(|error| {
+        holds::stage("rebuild-base", || {
+            rebuild_base_aggregate_tx(transaction, aggregate)
+        })
+        .map_err(|error| {
             let subject = match aggregate {
                 Aggregate::Desired(subject)
                 | Aggregate::Document(subject)
@@ -14982,8 +15404,14 @@ pub fn try_project_simple_replication_tx(
     }
     for aggregate in trees {
         let (rebuilt, root) = match aggregate {
-            Aggregate::RunTree(root) => (rebuild_run_tree_tx(transaction, root), root),
-            Aggregate::RunPart(top) => (rebuild_run_part_tx(transaction, top), top),
+            Aggregate::RunTree(root) => (
+                holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root)),
+                root,
+            ),
+            Aggregate::RunPart(top) => (
+                holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top)),
+                top,
+            ),
             _ => continue,
         };
         rebuilt.map_err(|error| {
@@ -14993,7 +15421,7 @@ pub fn try_project_simple_replication_tx(
         })?;
     }
     if rebuild_planning {
-        rebuild_planning_tx(transaction)
+        holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
             .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?;
     }
     owned_sets::project_tx(transaction)
@@ -15052,6 +15480,7 @@ fn replay_graph_from_nothing_with_progress_tx(
             total: None,
         })
     };
+    slo_breaches::rebuild(transaction).map_err(internal)?;
     stage("full-replay/mission-runs");
     project_replicated_mission_runs(transaction)?;
     for replay in projectors::GRAPH_REPLAY {
@@ -15397,12 +15826,8 @@ fn reconcile_carried_step_tx(
     // observation for this successor step.
     let later_step_claim = transaction
         .query_row(
-            /* sqlite-large-value: allow-for-now lv-hfdfe47383131 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!("SELECT 1 FROM claims JOIN claims carried ON carried.id=?2
-                 WHERE claims.subject=?1 AND claims.kind IN
-                 ('step-run.state','step-run.retried','work.claimed','work.renewed',
-                  'work.progress','work.submitted','work.failed','work.released','work.extended')
-                 AND {} LIMIT 1", canonical::after_sql("claims", "carried")),
-            params![claim.subject, claim.id],
+            "SELECT 1 FROM claims WHERE subject=?1 AND kind<>'step-run.carried' LIMIT 1",
+            [&claim.subject],
             |_| Ok(()),
         )
         .optional()
@@ -15429,17 +15854,14 @@ fn reconcile_carried_step_tx(
             .get(name)
             .filter(|_| matches!(status, "claimed" | "working" | "verifying" | "blocked"))
     };
-    let reason = mission_projection_upgrade::carried_reason(transaction, &claim.id)?;
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h3bfc21a711de owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, attempt=?3, worker_reported=?4,
-                    blocked_reason=?9,
+            /* sqlite-large-value: allow-for-now lv-h49652782434a owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, attempt=?3, worker_reported=?4,
+                    blocked_reason=CASE WHEN status=?2 THEN blocked_reason ELSE NULL END,
                     not_before_unix_ms=CASE WHEN status=?2 THEN not_before_unix_ms ELSE NULL END,
-                    lease_owner=CASE WHEN status<>?2 THEN ?6 ELSE lease_owner END,
-                    lease_incarnation=CASE WHEN status<>?2 THEN ?7 ELSE lease_incarnation END,
-                    lease_expires_at_unix_ms=CASE WHEN status<>?2 THEN ?8 ELSE lease_expires_at_unix_ms END,
-                    updated_at_unix_ms=CASE WHEN status<>?2 THEN ?5 ELSE updated_at_unix_ms END
-                 WHERE subject=?1 AND (status<>?2 OR blocked_reason IS NOT ?9)",
+                    lease_owner=?6, lease_incarnation=?7, lease_expires_at_unix_ms=?8,
+                    updated_at_unix_ms=?5
+                 WHERE subject=?1 AND status<>?2",
             params![
                 claim.subject,
                 status,
@@ -15451,7 +15873,6 @@ fn reconcile_carried_step_tx(
                 lease("claim_expires_at_unix_ms")
                     .and_then(Value::as_u64)
                     .map(|expiry| expiry.to_string()),
-                reason,
             ],
         )
         .map_err(internal)?;
@@ -15666,9 +16087,6 @@ pub fn project_mission_run_update(
         return Ok(());
     }
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
-    if claim.kind == "step-run.carried" {
-        return reconcile_carried_step_tx(transaction, claim);
-    }
     if person_work::project(transaction, claim)? {
         return Ok(());
     }
@@ -18365,6 +18783,13 @@ pub fn apply_effective_step_state_with_owner(
             view.claim_expires_at_unix_ms = None;
         }
     }
+    if view.status == "ready" && view.step == "fix"
+        && !slo_breaches::execution_admitted(connection, &view.run)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?
+    {
+        view.status = "pending".into();
+        view.blocked_reason = Some("this SLO episode has no positive execution-admission receipt".into());
+    }
     Ok(())
 }
 
@@ -19756,6 +20181,7 @@ pub struct ClaimCommitContext<'a> {
     pub identity_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
+    pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
 }
 
 pub fn append_claim_with_commit_context(
@@ -19792,6 +20218,7 @@ pub fn append_claim_with_commit_context(
                 input.fields.get("to").and_then(Value::as_str),
             )?;
         }
+        retirements::admit_mail_claim(connection, input)?;
         Ok(())
     };
     if context.assistant.is_none() {
@@ -19799,7 +20226,12 @@ pub fn append_claim_with_commit_context(
             input.fields.get("from").and_then(Value::as_str),
             ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| input.fields.contains_key(*key)))?;
     }
-    validate_claim_input(input)?;
+    // Retirement alone validates in its serialized admission after the operation replay
+    // check. Its successor eligibility refusal must win over a generic field-reference
+    // error, while a changed idempotency key must still report a mismatch first.
+    if !context.retirement_writer {
+        validate_claim_input(input)?;
+    }
     if local_retention(&input.kind)
         || (input.actor.is_none() && system_local_retention(&input.kind))
     {
@@ -20099,6 +20531,15 @@ pub fn append_claim_with_commit_context(
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
             }
+            if outcome.1 && let Some(native) = context.native_receipt {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-hd287e9bfd382 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_native_delivery_receipts_v2
+                     (claim_id,claim_hash,session_id,native_id,actor,origin,store_index) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![outcome.0.id, crate::conversation_delivery::receipt_fingerprint(&outcome.0.subject,
+                        input.actor.as_deref().unwrap_or_default(), &graph.origin, &outcome.0.body).map_err(internal)?,
+                        native.session_id,native.message_id,input.actor,graph.origin,outcome.0.store_index],
+                ).map_err(internal)?;
+            }
             if context.signature.is_some() {
                 // An idempotent repeat does not append/consume a signature. Remove its
                 // temporary expectation before commit; any failure rolls it back with the message.
@@ -20176,6 +20617,17 @@ fn append_local_observation_fenced(
         .connection
         .batched(|transaction| {
             check_harness_event_runtime(transaction, &input.subject, event_runtime)?;
+            // Action receipts have an owner-local empty-slot CAS, not a replicated
+            // subject-head fence. Check and insert under the same writer transaction.
+            if input.kind == "client.action-result" && input.expected_subject == Some(None) {
+                let occupied: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM local_observations WHERE subject=?1 AND kind=?2)",
+                    params![input.subject, input.kind], |row| row.get(0),
+                ).map_err(internal)?;
+                if occupied {
+                    return Err(St3Error::new("stale-subject", "the local action receipt slot is occupied"));
+                }
+            }
             insert_local_observation_tx(transaction, &graph.origin, input, now_ms())
         })
         .map_err(|error| St3Error::new("internal", error))?
@@ -20271,6 +20723,9 @@ pub fn append_latest_observation_publication(
 
 /// Shared tables the projection digest covers, with the columns each leaves out.
 const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
+    ("slo_episode_events", &[]),
+    ("slo_episode_heads", &[]),
+    ("slo_pending", &[]),
     ("operations", &[]),
     ("blobs", &[]),
     ("documents", &["created_index"]),

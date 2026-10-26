@@ -34,7 +34,7 @@ assert.deepEqual(entries.map(describe), [
   'assistant: **On it.**',
   'tool(ok): $ cargo test [ok 1|ok 2]',
   'mail: example/cos/standing/cos → Stui · Hello · Body text',
-  'event(quiet): message delivery paused 2 times while st restarted · recovered',
+  'event(quiet): message delivery paused 2 times while Fractal restarted · recovered',
   'event(fault): error: the harness exited',
   'event(quiet): something st added later',
 ]);
@@ -91,7 +91,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.equal(unreadableTranscript([mail, notice({ driver: 'omp' })]), 'This conversation could not be loaded: the transcript could not be read: line 12: expected value');
 }
 
-// A seat that has said nothing since it started shows its Small Talk and one quiet line.
+// A seat that has said nothing since it started shows its Fractal and one quiet line.
 {
   const notYet = { id: 'n', role: 'system', timestamp: '2026-10-01T10:00:01Z', type: 'error', body: { code: 'transcript-not-bound', message: 'transcript not bound: Claude session 0190 has no transcript file yet', retryable: true, details: { driver: 'claude', not_yet: true } } };
   assert.equal(unreadableTranscript([notYet]), null);
@@ -354,6 +354,36 @@ assert.equal(cleanMessageText(rawText, SHOW_EVERYTHING), rawText);
   assert.deepEqual(freshnessLine({ ...base, now: 7_300_000 }), { text: '● live · updated 2h ago', tone: 'live' });
   assert.deepEqual(freshnessLine({ ...base, refreshing: true }), { text: '↻ refreshing… · updated 1m ago', tone: 'refreshing' });
   assert.deepEqual(freshnessLine({ ...base, loaded: false, lastFrame: null }), { text: '↻ loading…', tone: 'refreshing' });
-  assert.deepEqual(freshnessLine({ ...base, lastFrame: null }), { text: '● live · waiting for st', tone: 'live' });
+  assert.deepEqual(freshnessLine({ ...base, lastFrame: null }), { text: '● live · waiting for Fractal', tone: 'live' });
   assert.deepEqual(freshnessLine({ ...base, issue: 'unreachable' }), { text: '⚠ retrying · updated 1m ago', tone: 'warn' });
+}
+
+// Generated labels name Fractal. Raw server text and quoted prose stay as stored.
+{
+  assert.equal(timeline[8].body.message, paused, 'the stored delivery reason is not rewritten');
+  const pausedOnlyText = foldDeliveryFlaps(conversationEntries([timeline[8]], names));
+  assert.equal(pausedOnlyText[0].body.text, 'message delivery is paused; Fractal will retry');
+  const mailed = conversationEntries([
+    e('message', 'user', { message_id: 'message/to-daemon', from: 'person/alex', to: 'daemon/runtime', title: 'Hi' }, 20),
+    e('content', 'user', { text: 'please use st' }, 20),
+  ], names);
+  assert.equal(mailed[0].body.kind, 'mail');
+  assert.equal(mailed[0].body.to, 'Fractal');
+  assert.equal(mailed[0].body.text, 'please use st');
+  const bare = conversationEntries([e('error', 'system', { retryable: false })], names);
+  assert.equal(bare[0].body.text, 'error: Fractal reported a problem');
+  const quoted = conversationEntries([e('error', 'system', { message: 'please use st', retryable: true, details: { severity: 'warning' } })], names);
+  assert.equal(quoted[0].body.text, 'please use st');
+}
+{
+  const asOf = '2026-10-06T12:00:00Z';
+  const header = {
+    model: { value: 'older st', source: 'older st', as_of: asOf },
+    ask: { value: { questions: [{ question: 'please use st' }] }, source: 'st', as_of: asOf },
+  };
+  assert.equal(headerLine(header, asOf), 'model older st · ask please use st [Fractal · 0s ago] · older Fractal · 0s ago');
+  assert.equal(header.model.source, 'older st');
+  assert.equal(header.model.value, 'older st');
+  assert.equal(header.ask.source, 'st');
+  assert.equal(header.ask.value.questions[0].question, 'please use st');
 }

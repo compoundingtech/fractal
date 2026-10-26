@@ -5,7 +5,7 @@ import { API_VERSION } from './Models.generated.ts';
 import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
-    ResourcesFilter, ResourcesPage, DirectiveNotes,
+    ResourcesFilter, ResourcesPage, DirectiveNotes, SchedulesPage,
     Arrangement, ArrangementId, ArrangementPage,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -65,6 +65,8 @@ export type ClientOptions = {
     /** Read the active span's W3C context once per request, stream open, or collection subscribe. */
     traceContext?: () => TraceContext | undefined;
     fetchImpl?: typeof fetch;
+    /** Default native WebSocket carrier; per-stream factories still take precedence. */
+    socket?: CollectionSocketFactory;
     /** The app's name and build, sent as `x-st3-client` ("smalltalk-ios 1.0 (42)"). st lists it as
      * reported (clients.list); it is never identity or authority. */
     client?: string;
@@ -72,10 +74,10 @@ export type ClientOptions = {
     messagesPaging?: boolean;
 };
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-export const TERMINAL_SUBPROTOCOL = 'st3.client.terminal.v0';
-export const CONVERSATION_SUBPROTOCOL = 'st3.client.conversation.v0';
-export const COLLECTIONS_SUBPROTOCOL = 'st3.client.collections.v0';
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; HTTP names stay unchanged; sunset 2026-11-01.
+export const TERMINAL_SUBPROTOCOL = 'fractal.client.terminal.v0';
+export const CONVERSATION_SUBPROTOCOL = 'fractal.client.conversation.v0';
+export const COLLECTIONS_SUBPROTOCOL = 'fractal.client.collections.v0';
 
 /** The WebSocket surface a terminal stream uses. React Native's WebSocket accepts headers. */
 export type TerminalSocket = {
@@ -219,17 +221,22 @@ export class FractalClient {
     private readonly traceContext?: ClientOptions['traceContext'];
     private readonly client?: string;
     private readonly fetchImpl: typeof fetch;
+    private readonly socket?: CollectionSocketFactory;
     private readonly messagesPaging: boolean;
     /** Shared with every `withTraceContext` view so they discover once. */
     private discoveryCache: { value?: EnvelopeOf<Capabilities> } = {};
 
     constructor(options: ClientOptions) {
+        if (/^fabric:/i.test(options.baseUrl)) {
+            throw new Error('Use createFabricClient from @fractal/client/fabric for native Fabric endpoints; browser and React Native runtimes cannot dial the local daemon');
+        }
         this.baseUrl = options.baseUrl.replace(/\/+$/, '');
         this.credential = options.credential;
         this.traceContext = options.traceContext;
         this.messagesPaging = options.messagesPaging ?? false;
         if (options.client !== undefined) this.client = options.client;
         this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+        if (options.socket !== undefined) this.socket = options.socket;
     }
 
     async capabilities(options: RequestOptions = {}): Promise<EnvelopeOf<Capabilities>> {
@@ -253,6 +260,7 @@ export class FractalClient {
             fetchImpl: this.fetchImpl,
             traceContext,
             messagesPaging: this.messagesPaging,
+            ...(this.socket === undefined ? {} : { socket: this.socket }),
             ...(this.credential === undefined ? {} : { credential: this.credential }),
             ...(this.client === undefined ? {} : { client: this.client }),
         });
@@ -306,15 +314,31 @@ export class FractalClient {
             method, headers, ...(body === undefined ? {} : { body: raw ? (body as BodyInit) : JSON.stringify(body) }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
+        // Old routers can return an empty 404 for this collection; do not parse it as JSON
+        // or try a history endpoint. This route has no missing-item 404 meaning.
+        if (response.status === 404 && path.split('?')[0] === '/v1/client/schedules') {
+            throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
+                request_id: '', code: 'unsupported-capability', message: 'This server does not support schedules.list; upgrade the server',
+                retryable: false, details: {} }, 404);
+        }
         let payload: unknown;
-        if (readAuthorization) {
-            const bytes = new Uint8Array(await response.arrayBuffer());
+        try {
+            if (readAuthorization) {
+                const bytes = new Uint8Array(await response.arrayBuffer());
+                options.signal?.throwIfAborted();
+                if (bytes.byteLength > readAuthorization.budget) throw new AssistantReadRejected('assistant response exceeded max_response_bytes');
+                payload = JSON.parse(new TextDecoder().decode(bytes));
+            } else {
+                payload = await response.json();
+                options.signal?.throwIfAborted();
+            }
+        } catch (error) {
             options.signal?.throwIfAborted();
-            if (bytes.byteLength > readAuthorization.budget) throw new AssistantReadRejected('assistant response exceeded max_response_bytes');
-            payload = JSON.parse(new TextDecoder().decode(bytes));
-        } else {
-            payload = await response.json();
-            options.signal?.throwIfAborted();
+            // HTTP middleware can reject a request before the client API writes a JSON envelope.
+            if (response.ok || !(error instanceof SyntaxError)) throw error;
+            throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
+                request_id: '', code: 'http-error', message: `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`,
+                retryable: false, details: {} }, response.status, response.headers.get('Retry-After'));
         }
         if (!payload || typeof payload !== 'object' || !acceptsApiVersion((payload as { api_version?: unknown }).api_version)) {
             throw new Error('Unexpected st client API response');
@@ -468,7 +492,7 @@ export class FractalClient {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [TERMINAL_SUBPROTOCOL, `st3.cap.${options.streamCapability}`], headers);
+        const socket = (options.socket ?? this.socket ?? defaultTerminalSocket)(url.toString(), [TERMINAL_SUBPROTOCOL, `fractal.cap.${options.streamCapability}`], headers);
         let ended = false;
         const stop = () => { ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; };
         const end = (error?: Error) => { if (ended) return; stop(); options.onEnd?.(error); };
@@ -497,7 +521,7 @@ export class FractalClient {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [CONVERSATION_SUBPROTOCOL], headers);
+        const socket = (options.socket ?? this.socket ?? defaultTerminalSocket)(url.toString(), [CONVERSATION_SUBPROTOCOL], headers);
         let ended = false;
         const end = (error?: Error) => { if (ended) return; ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; options.onEnd?.(error); };
         socket.onmessage = event => {
@@ -524,7 +548,7 @@ export class FractalClient {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? (defaultTerminalSocket as unknown as CollectionSocketFactory))(url.toString(), [COLLECTIONS_SUBPROTOCOL], headers);
+        const socket = (options.socket ?? this.socket ?? (defaultTerminalSocket as unknown as CollectionSocketFactory))(url.toString(), [COLLECTIONS_SUBPROTOCOL], headers);
         let ended = false, open = false, opening = false;
         const waiting: Record<string, unknown>[] = [];
         const stop = () => { ended = true; waiting.length = 0; socket.onopen = null; socket.onmessage = null; socket.onclose = null; socket.onerror = null; };

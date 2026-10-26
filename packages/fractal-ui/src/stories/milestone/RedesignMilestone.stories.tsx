@@ -22,6 +22,10 @@ const meta: Meta<Args> = {
   title: 'Fractal UI/Redesign milestone',
   parameters: {
     layout: 'fullscreen',
+    scenario: {
+      _tag: 'contract-fixture',
+      reason: 'Accepted RM1 composition imports milestone-fixtures at module level. Loading, empty roster, empty thread and no-match switch on its state prop, not slice data; those stories convert to slices once the composition takes roster and conversation slice data. The remaining contracts require fixture titles, Known usage and duration, unread and prose chips, a fixed last-seen instant and command, branch-named Changes, or host-settled reload promises that worlds do not express.',
+    },
     docs: { description: { component: `Accepted RM1 reference; live app ports slices separately. Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}. The sidebar uses the shared kit row.` } },
   },
   args: { scheme: 'dark', state: 'slice' },
@@ -220,6 +224,12 @@ export const ThreadRecovery: Story = {
 /** Decision sheet: every row is decided; rows settled by a decision request carry its question ID. */
 export const Decisions: Story = {
   args: { scheme: 'dark' },
+  parameters: {
+    scenario: {
+      _tag: 'contract-fixture',
+      reason: 'Static decision sheet shares this CSF module with RedesignMilestone, whose runtime import graph reaches milestone-fixtures; it is not a fixture-free primitive.',
+    },
+  },
   render: args => <article {...stylex.props(styles.sheet, ...baselineTheme, args.scheme === 'light' && lightTheme)}>
     <h1 {...stylex.props(styles.h1)}>Redesign milestone 1 — decisions</h1>
     <h2 {...stylex.props(styles.h2)}>Decided (composed, not re-asked)</h2>

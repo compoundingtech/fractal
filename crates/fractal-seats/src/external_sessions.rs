@@ -1,4 +1,4 @@
-//! The part of `external_sessions` that moved up from st3-store.
+//! The part of `external_sessions` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File};
@@ -1938,13 +1938,6 @@ fn process_fingerprint(pid: u32, started_at_unix_ms: u128, command: &str) -> Str
     format!("{pid}:{started_at_unix_ms}:{}", digest(command))
 }
 
-fn external_session_id(driver: ExternalDriver, native_id: &str) -> String {
-    format!(
-        "session/external-{}",
-        &digest(&format!("{}:{native_id}", driver.as_str()))[..24]
-    )
-}
-
 // Streaming updates to token/model/completion metadata do not change an existing part.
 // Only message fields that determine its displayed attribution/timing fence the ref.
 fn native_message_digest(id: &[u8], created: Option<i64>, message: &Value) -> String {
@@ -3642,9 +3635,23 @@ mod tests {
                 id,
                 Some(&transcript),
             )
+            .unwrap(),
+            vec!["omp", "--resume", transcript.to_str().unwrap()]
+        );
+        let other_id = "00000000-0000-4000-8000-000000000025";
+        let other = root.path().join(format!("2026-10-24_{other_id}.jsonl"));
+        fs::write(&other, format!("{{\"type\":\"session\",\"id\":\"{other_id}\"}}\n")).unwrap();
+        assert_eq!(
+            crate::native_resume::pi_family_argv(
+                "omp",
+                vec!["omp".into(), format!("--resume={}", other.display())],
+                &managed,
+                id,
+                Some(&transcript),
+            )
             .unwrap_err()
             .code,
-            "authored-session-selection"
+            "authored-session-mismatch"
         );
         assert_eq!(
             crate::native_resume::pi_family_argv(

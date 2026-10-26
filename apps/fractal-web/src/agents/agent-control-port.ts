@@ -28,7 +28,7 @@ const liveRuntime = async (client: FractalClient, agent: string): Promise<{ read
   return { ...(runtime.incarnation_id ? { incarnation: runtime.incarnation_id } : {}), ...(runtime.terminal_id ? { terminal: runtime.terminal_id } : {}) }
 }
 const explained = (error: unknown): AgentControlResult =>
-  refused(error instanceof ClientError ? `${plainError(error)}.` : 'st did not confirm it; check the agent before trying again. It was not sent again.')
+  refused(error instanceof ClientError ? `${plainError(error)}.` : 'Fractal did not confirm it; check the agent before trying again. It was not sent again.')
 
 /**
  * One action per step, each fenced to the seat's declaration as st selects it at that moment. A
@@ -55,7 +55,7 @@ export const gatewayAgentControls = (client: FractalClient): AgentControlPort =>
           // A suspension is fenced on the running incarnation too.
           const runtime = await liveRuntime(client, agent)
           if (typeof runtime === 'string') return after(at, refused(runtime))
-          if (runtime.incarnation === undefined) return after(at, refused('st does not say which process is running, so it cannot be suspended now.'))
+          if (runtime.incarnation === undefined) return after(at, refused('Fractal does not say which process is running, so it cannot be suspended now.'))
           response = await client.agentSuspend({ ...action, fence: { ...fence, runtime_incarnation: runtime.incarnation }, parameters: { agent, reason: REASON } })
         } else {
           response =
@@ -63,7 +63,7 @@ export const gatewayAgentControls = (client: FractalClient): AgentControlPort =>
               : step === 'start' ? await client.agentStart({ ...action, parameters: { agent } })
                 : await client.agentResume({ ...action, parameters: { agent } })
         }
-        if ((response.value as { status?: unknown }).status === 'rejected') return after(at, refused('st did not take this.'))
+        if ((response.value as { status?: unknown }).status === 'rejected') return after(at, refused('Fractal did not take this.'))
       }
       return { _tag: 'Sent' }
     } catch (error) {
@@ -88,7 +88,7 @@ export const gatewayAgentControls = (client: FractalClient): AgentControlPort =>
         },
         parameters: { terminal_id: runtime.terminal, mode: 'key', value: 'escape' },
       })
-      return (response.value as { status?: unknown }).status === 'rejected' ? refused('st did not take this.') : { _tag: 'Sent' }
+      return (response.value as { status?: unknown }).status === 'rejected' ? refused('Fractal did not take this.') : { _tag: 'Sent' }
     } catch (error) {
       return explained(error)
     }

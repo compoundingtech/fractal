@@ -265,6 +265,8 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn document_get(&self, name: &str) -> Result<Envelope<DocumentContent>, ClientError> {{ self.get(&format!(\"/v1/client/documents/content?name={{}}\", percent_encode(name))).await }}"
             )?;
+        } else if id == "schedules.list" {
+            writeln!(out, "    pub async fn schedules_list(&self, cursor: Option<&str>, limit: Option<usize>, unheard_after_ms: Option<u64>) -> Result<Envelope<SchedulesPage>, ClientError> {{ let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!(\"limit={{limit}}\")); }} if let Some(age) = unheard_after_ms {{ query.push(format!(\"unheard_after_ms={{age}}\")); }} let suffix = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/schedules{{suffix}}\")).await }}")?;
         } else if id == "documents.list" {
             writeln!(
                 out,
@@ -450,6 +452,8 @@ fn swift_operation_methods(
                 out,
                 "    public func documentGet(name: String) async throws -> Envelope<DocumentContent> {{ try await get(\"v1/client/documents/content\", query: [.init(name: \"name\", value: name)]) }}"
             )?;
+        } else if id == "schedules.list" {
+            writeln!(out, "    public func schedulesList(cursor: String? = nil, limit: Int? = nil, unheardAfterMS: UInt64? = nil) async throws -> Envelope<SchedulesPage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; if let unheardAfterMS {{ query.append(.init(name: \"unheard_after_ms\", value: String(unheardAfterMS))) }}; return try await get(\"v1/client/schedules\", query: query) }}")?;
         } else if id == "documents.list" {
             writeln!(
                 out,
@@ -729,6 +733,12 @@ fn validate_surfaces(
         "DocumentContent",
         "DocumentItem",
         "DocumentsPage",
+        "SchedulesPage",
+        "ScheduleDeclaration",
+        "ScheduleOwner",
+        "ScheduleKnowledge",
+        "ScheduleCoverage",
+        "ScheduleUnheardHost",
         "DocumentReference",
         "DocumentReferences",
         "MessageBody",
@@ -755,6 +765,8 @@ fn validate_surfaces(
         "ClientConnections",
         "ClientConnection",
         "UsageLimit",
+        "UsageAccount",
+        "UsageCredits",
         "LaunchPreview",
         "MissionRunSummary",
         "MissionStep",
@@ -1441,6 +1453,8 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(name: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ name }}), undefined, requestOptions); }}"
             )?;
+        } else if id == "schedules.list" {
+            writeln!(out, "    async schedulesList(options: {{ cursor?: string; limit?: number; unheard_after_ms?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SchedulesPage>> {{ return this.get('/v1/client/schedules' + query(options), undefined, requestOptions); }}")?;
         } else if id == "documents.list" {
             writeln!(
                 out,
@@ -1551,6 +1565,24 @@ mod tests {
             assert!(models.contains(field), "missing receiver union: {field}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn websocket_senders_use_fractal_without_changing_http_versions() {
+        assert!(RUST_MODELS_TEMPLATE.contains("TERMINAL_SUBPROTOCOL: &str = \"fractal.client.terminal.v0\""));
+        assert!(RUST_MODELS_TEMPLATE.contains("API_VERSION: &str = \"st3.client.v0\""));
+        assert!(SWIFT_MODELS_TEMPLATE.contains("fractalClientTerminalSubprotocol = \"fractal.client.terminal.v0\""));
+        assert!(SWIFT_MODELS_TEMPLATE.contains("fractalClientAPIVersion = \"st3.client.v0\""));
+        for (template, protocols) in [
+            (RUST_CLIENT_TEMPLATE, &["fractal.client.pty.v0", "fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
+            (TYPESCRIPT_CLIENT_TEMPLATE, &["fractal.client.terminal.v0", "fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
+            (SWIFT_CLIENT_TEMPLATE, &["fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
+        ] {
+            for protocol in protocols {
+                assert!(template.contains(protocol), "missing sender spelling: {protocol}");
+            }
+            assert!(template.contains("x-st3-features"));
+        }
     }
 
     #[test]

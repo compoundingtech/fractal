@@ -1444,7 +1444,7 @@ impl ReadPool {
                         budget.check()?;
                         unreachable!("cancellation completes only for an expired budget");
                     }
-                    _ = tokio::time::sleep(budget.remaining()) => {
+                    _ = budget.deadline_elapsed() => {
                         budget.cancel();
                         budget.check()?;
                         unreachable!("the budget deadline elapsed");
@@ -1515,7 +1515,7 @@ impl ReadPool {
             }
             crate::read_budget::check()?;
             if let Some(budget) = &budget {
-                std::thread::park_timeout(budget.remaining());
+                budget.park();
             } else {
                 std::thread::park();
             }
@@ -2916,26 +2916,52 @@ mod read_cancellation_tests {
 
     #[test]
     fn cancellation_stops_live_sql_and_the_reader_is_clean_for_another_request() {
+        for budget in [
+            ReadBudget::new("/sql", Duration::from_secs(30)),
+            ReadBudget::cancellable("/stream"),
+        ] {
+            let (_directory, pool) = pool();
+            let worker_budget = budget.clone();
+            let worker_pool = pool.clone();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                read_budget::with(Some(worker_budget), || worker_pool.request_read(|| {
+                    let reader = worker_pool.get();
+                    started_tx.send(()).unwrap();
+                    reader.query_row("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n", [], |row| row.get::<_, i64>(0))
+                }))
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            budget.cancel();
+            let error = worker.join().unwrap().unwrap().unwrap_err();
+            assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::OperationInterrupted));
+            assert_eq!(pool.usage().idle, 1);
+            let reader = pool.get();
+            assert!(reader.is_autocommit());
+            assert_eq!(reader.query_row("SELECT value FROM data", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_cancellation_withdraws_a_queued_reader_without_a_deadline_timer() {
         let (_directory, pool) = pool();
-        let budget = ReadBudget::new("/sql", Duration::from_secs(30));
+        let mut held = Vec::new();
+        while let Some(permit) = pool.try_admit_read() {
+            held.push(permit);
+        }
+        let budget = ReadBudget::cancellable("/stream");
         let worker_budget = budget.clone();
-        let worker_pool = pool.clone();
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            read_budget::with(Some(worker_budget), || worker_pool.request_read(|| {
-                let reader = worker_pool.get();
-                started_tx.send(()).unwrap();
-                reader.query_row("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n", [], |row| row.get::<_, i64>(0))
-            }))
+        let waiting_pool = pool.clone();
+        let worker = tokio::spawn(async move {
+            waiting_pool.admit_read(Some(worker_budget)).await
         });
-        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        tokio::task::yield_now().await;
         budget.cancel();
-        let error = worker.join().unwrap().unwrap().unwrap_err();
-        assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::OperationInterrupted));
-        assert_eq!(pool.usage().idle, 1);
-        let reader = pool.get();
-        assert!(reader.is_autocommit());
-        assert_eq!(reader.query_row("SELECT value FROM data", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        let result = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await.unwrap().unwrap();
+        assert_eq!(result.err().unwrap().downcast_ref::<crate::error::Error>().unwrap().code, "read-deadline");
+        drop(held);
+        assert!(pool.try_admit_read().is_some());
     }
 
     #[test]
