@@ -2148,6 +2148,12 @@ enum HarnessQuestionsCommand {
     List {
         #[arg(long = "as", value_parser = parse_harness_question_person)]
         person: String,
+        /// Maximum questions on this page (the daemon defaults to 50, capped at 200).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Continue the snapshot-bound page using its next_cursor.
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// Read one native question's metadata.
     Show {
@@ -9925,9 +9931,9 @@ async fn run_harness_questions(
     json_output: bool,
 ) -> Result<()> {
     match command {
-        HarnessQuestionsCommand::List { person } => {
+        HarnessQuestionsCommand::List { person, cursor, limit } => {
             let result = generated_client(endpoint, Some(&person))?
-                .harness_questions()
+                .harness_questions(cursor.as_deref(), limit)
                 .await?;
             print_client_value(&result, json_output)
         }

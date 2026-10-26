@@ -156,10 +156,15 @@ Use an explicit concrete person for reads and answers:
 
 ```sh
 fractal harness-questions list --as person/alex
+fractal harness-questions list --as person/alex --limit 50 --cursor CURSOR
 fractal harness-questions show QUESTION --as person/alex
 fractal harness-questions answer QUESTION --as person/alex \
   --answers-file answers.json --idempotency-key alex-harness-answer-0001
 ```
+
+List prints one page. Continue with its `page.next_cursor`, preserving `--limit`.
+The generated Rust, Swift and TypeScript list helpers expose the same cursor and limit
+controls; callers must follow `next_cursor` when `has_more` is true.
 
 `answers.json` contains only a map such as `{"q0":{"positions":[1]}}`.
 The CLI reads canonical detail to populate all three fences. Its action id is

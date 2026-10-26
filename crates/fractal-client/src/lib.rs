@@ -1790,8 +1790,25 @@ impl Client {
         .await
     }
 
-    pub async fn harness_questions(&self) -> Result<Envelope<Page>, ClientError> {
-        self.get("/v1/client/harness-questions").await
+    pub async fn harness_questions(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/client/harness-questions{suffix}"))
+            .await
     }
     pub async fn harness_question(
         &self,

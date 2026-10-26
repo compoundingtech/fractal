@@ -220,7 +220,7 @@ fn rust_operation_methods(
             continue;
         }
         if id == "harness-questions.list" {
-            writeln!(out, "    pub async fn harness_questions(&self) -> Result<Envelope<Page>, ClientError> {{ self.get(\"/v1/client/harness-questions\").await }}")?;
+            writeln!(out, "    pub async fn harness_questions(&self, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<Page>, ClientError> {{ let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!(\"limit={{limit}}\")); }} let suffix = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/harness-questions{{suffix}}\")).await }}")?;
             continue;
         }
         if id == "harness-questions.get" {
@@ -412,7 +412,7 @@ fn swift_operation_methods(
             continue;
         }
         if id == "harness-questions.list" {
-            writeln!(out, "    public func harnessQuestions() async throws -> Envelope<ResourcePage> {{ try await get(\"v1/client/harness-questions\") }}")?;
+            writeln!(out, "    public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/harness-questions\", query: query) }}")?;
             continue;
         }
         if id == "harness-questions.get" {
@@ -1450,7 +1450,7 @@ fn typescript_operation_methods(
             continue;
         }
         if id == "harness-questions.list" {
-            writeln!(out, "    async harnessQuestions(): Promise<EnvelopeOf<Page>> {{ return this.get('/v1/client/harness-questions'); }}")?;
+            writeln!(out, "    async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "harness-questions.get" {
@@ -1842,19 +1842,23 @@ mod tests {
         let reads = operations["reads"].as_array().unwrap();
         let actions = operations["actions"].as_object().unwrap();
         let rust = rust_operation_methods(reads, actions)?;
-        assert!(rust.contains("pub async fn harness_questions(&self)"));
+        assert!(rust.contains("pub async fn harness_questions(&self, cursor: Option<&str>, limit: Option<usize>)"));
+        assert!(rust.contains("cursor={}\", percent_encode(cursor)"));
+        assert!(rust.contains("/v1/client/harness-questions{suffix}"));
         assert!(rust.contains("pub async fn harness_question(&self, id: &str)"));
         assert!(rust.contains("pub async fn harness_answer("));
         assert!(rust.contains("parameters: HarnessAnswerParameters"));
         assert!(rust.contains("/v1/client/harness-questions/{}\", percent_encode(id)"));
         assert_eq!(rust, rust_operation_methods(reads, actions)?);
         let swift = swift_operation_methods(reads, actions)?;
-        assert!(swift.contains("func harnessQuestions()"));
+        assert!(swift.contains("func harnessQuestions(cursor: String? = nil, limit: Int? = nil)"));
+        assert!(swift.contains("get(\"v1/client/harness-questions\", query: query)"));
         assert!(swift.contains("func harnessQuestion(id: String)"));
         assert!(swift.contains("func harnessAnswer("));
         assert!(swift.contains("Self.routedSessionID(id)"));
         let typescript = typescript_operation_methods(reads, actions)?;
-        assert!(typescript.contains("async harnessQuestions()"));
+        assert!(typescript.contains("async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'>"));
+        assert!(typescript.contains("'/v1/client/harness-questions' + query(options), undefined, requestOptions"));
         assert!(typescript.contains("async harnessQuestion(id: string)"));
         assert!(typescript.contains("async harnessAnswer("));
         assert!(typescript.contains("harness-questions/${encodeURIComponent(id)}"));

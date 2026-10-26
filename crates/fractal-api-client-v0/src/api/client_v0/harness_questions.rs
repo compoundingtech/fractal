@@ -612,7 +612,7 @@ mod capability_tests {
         let person = ClientSession::for_tests_scoped("person/alex", "person/alex", &["terminal.control"]);
         let find = |state: &AppState, session: &ClientSession| capabilities(state, session).into_iter()
             .find(|item| item["id"] == "harness.answer").unwrap();
-        assert_eq!(find(&state, &person), json!({"id":"harness.answer","version":0,"state":"unavailable","reason":"adapter_missing"}));
+        assert_eq!(find(&state, &person), json!({"id":"harness.answer","version":0,"state":"unavailable"}));
         state.harness_question_sink = Some(Arc::new(Available));
         assert_eq!(find(&state, &person)["state"], "granted");
         let agent = ClientSession::for_tests_scoped("agent/ada", "agent/ada", &["terminal.control"]);
@@ -622,6 +622,6 @@ mod capability_tests {
         state.harness_question_sink = None;
         let value = client_capabilities(State(state.clone()), Extension(new_client_snapshot(&state)), Extension(person)).await.unwrap().0;
         let answer = value["capabilities"].as_array().unwrap().iter().find(|item| item["id"] == "harness.answer").unwrap();
-        assert_eq!(answer, &json!({"id":"harness.answer","version":0,"state":"unavailable","reason":"adapter_missing"}));
+        assert_eq!(answer, &json!({"id":"harness.answer","version":0,"state":"unavailable"}));
     }
 }

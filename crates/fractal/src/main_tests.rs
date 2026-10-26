@@ -8145,6 +8145,44 @@ fn harness_question_cli_reads_require_an_explicit_person() {
     }
 }
 
+#[tokio::test]
+async fn harness_question_cli_list_forwards_limit_and_encoded_cursor() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("questions.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0; 1024];
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let body = json!({
+            "api_version":"st3.client.v0", "error_version":"st3.client.error.v0",
+            "request_id":"request/alex-list", "code":"forbidden", "message":"fixture refusal",
+            "retryable":false, "details":{}
+        }).to_string();
+        stream.write_all(format!(
+            "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(), body
+        ).as_bytes()).await.unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let cli = Cli::try_parse_from([
+        "fractal", "harness-questions", "list", "--as", "person/alex",
+        "--limit", "1", "--cursor", "opaque+/=",
+    ]).unwrap();
+    let Command::HarnessQuestions { command } = cli.command else { panic!("expected harness questions") };
+    assert!(run_harness_questions(&Endpoint::Unix(socket), command, true).await.is_err());
+    let request = server.await.unwrap();
+    assert!(request.starts_with(
+        "GET /v1/client/harness-questions?cursor=opaque%2B/%3D&limit=1 HTTP/1.1\r\n"
+    ), "{request}");
+}
+
 #[test]
 fn harness_answer_action_identity_is_retryable_and_question_scoped() {
     let key = "harness-answer-retry-key";
@@ -8255,7 +8293,7 @@ async fn harness_answer_cli_uses_canonical_detail_identity_and_all_fences() {
         },
         true,
     ).await.unwrap_err();
-    assert!(error.to_string().contains("not-answerable"), "{error:#}");
+    assert!(error.to_string().contains("NotAnswerable"), "{error:#}");
     let requests = server.await.unwrap();
     assert!(requests[0].0.starts_with("GET /v1/client/harness-questions/"));
     assert!(requests[1].0.starts_with("POST /v1/client/actions "));
@@ -8265,9 +8303,11 @@ async fn harness_answer_cli_uses_canonical_detail_identity_and_all_fences() {
     assert_eq!(action["parameters"], json!({
         "question":canonical, "answers":{"q0":{"positions":[1]}}
     }));
-    assert_eq!(action["fence"], json!({
-        "snapshot_id":"snapshot/fixture/42",
-        "subject_revisions":{canonical:"claim/observation"},
-        "runtime_incarnation":"fixture-incarnation"
-    }));
+    let expected_fence = serde_json::to_value(ClientFence {
+        snapshot_id: "snapshot/fixture/42".into(),
+        subject_revisions: BTreeMap::from([(canonical.into(), "claim/observation".into())]),
+        runtime_incarnation: Some("fixture-incarnation".into()),
+        ..Default::default()
+    }).unwrap();
+    assert_eq!(action["fence"], expected_fence);
 }
