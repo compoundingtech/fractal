@@ -515,11 +515,30 @@ def pool_size():
     return max(slots, 1) + 1
 
 
+def normalise_origin(url):
+    """A remote URL as the same repository whatever way it was cloned: https://host/o/r.git, ssh://git@host/o/r and git@host:o/r.git alike."""
+    url = url.strip()
+    match = re.fullmatch(r'(?:[\w.-]+@)?([\w.-]+):(?!//)(.+)', url)  # scp-like: git@host:owner/repo.git
+    if match and not url.startswith(('/', '.')):
+        host, path = match.groups()
+    else:
+        match = re.fullmatch(r'[a-z][a-z0-9+.-]*://(?:[^/@]+@)?([^/:]+)(?::\d+)?/(.+)', url, re.I)
+        host, path = match.groups() if match else ('', url)
+    path = re.sub(r'(\.git)?/*$', '', path.strip('/') if host else path.rstrip('/'))
+    return f'{host}/{path}'.lower() if host else path.lower()
+
+
 def pool_root():
-    """This repository's pool: one directory per git common dir, so clones and worktrees of one repository share it."""
-    common = text(git('rev-parse', '--path-format=absolute', '--git-common-dir'))
-    key = hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:16]
-    return pool_base() / key
+    """The pool of this repository's ORIGIN: every clone of one origin shares it (one warm target and tree path per slot), so a throwaway
+    clone reuses the warm slots of an existing one instead of building a 35-44 GB target of its own. A clone without an origin keeps a pool
+    of its own, keyed by its git common dir."""
+    origin = text(git('config', '--get', 'remote.origin.url', check=False))
+    if origin:
+        key = 'o-' + hashlib.sha256(normalise_origin(origin).encode()).hexdigest()[:16]
+    else:
+        common = text(git('rev-parse', '--path-format=absolute', '--git-common-dir'))
+        key = 'c-' + hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:16]
+    return pool_base() / 'pools' / key
 
 
 def pool_base():
@@ -553,7 +572,10 @@ def du_gb(path):
 def pool_units(base):
     """[(last used, directory of the unit's lock, N, [paths])]: every pool tree with its target, across all the repositories' pools."""
     units = {}
-    for repo in sorted(path for path in base.iterdir() if path.is_dir()) if base.is_dir() else []:
+    pools = sorted(path for path in base.iterdir() if path.is_dir() and path.name != 'pools') if base.is_dir() else []  # the old layout: one per clone
+    if (base / 'pools').is_dir():
+        pools += sorted(path for path in (base / 'pools').iterdir() if path.is_dir())
+    for repo in pools:
         for entry in repo.iterdir():
             match = re.fullmatch(r'(tree|target)-(\d+)(\.lock)?', entry.name)
             if match:
@@ -627,13 +649,38 @@ def is_pool_tree(directory):
     return done.returncode == 0 and ours.returncode == 0 and os.path.realpath(text(done)) == os.path.realpath(text(ours))
 
 
+def carry_kept_inputs(old, new):
+    """Move the inputs a pool tree keeps (POOL_KEEP) from the tree another clone left to the one just registered here, by rename (same disk)."""
+    old, new = Path(old), Path(new)
+    found = [name for name in ('repos', 'target/compat-baselines') if (old / name).is_dir()]
+    for top, dirs, _ in os.walk(old):
+        if 'node_modules' in dirs:
+            found.append(os.path.relpath(os.path.join(top, 'node_modules'), old))
+        # never look inside what is kept, a git directory or a build/store output
+        dirs[:] = [name for name in dirs if name not in ('node_modules', '.git', 'target', 'buck-out', '.devenv', 'repos')]
+    for relative in found:
+        source, target = old / relative, new / relative
+        if target.exists():
+            continue  # tracked in this commit: the checkout's own is the truth
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.rename(source, target)
+        except OSError:
+            pass  # a kept input that cannot move is simply fetched again
+
+
 def prepare_tree(root, n, commit):
     """The pool tree `n`, at `commit` with nothing untracked or ignored left in it (build output lives outside, in target-N), or a
     Failure when it is still not clean: the signature is for the committed tree."""
     directory = root / f'tree-{n}'
+    kept = None
     if directory.exists() and not is_pool_tree(directory):
-        git('worktree', 'remove', '--force', str(directory), check=False)
-        shutil.rmtree(directory, ignore_errors=True)
+        # Another clone's tree (or a broken one) sits at this slot's path. The path stays: the workspace crates' cargo ids contain it, so
+        # keeping it keeps them warm. The tree is re-registered as a worktree of THIS clone (its notes land here), and the inputs the cleaning
+        # keeps (members, installed dependencies, compat baselines) move across, so they are not fetched or installed again.
+        kept = directory.with_name(directory.name + '.adopting')
+        shutil.rmtree(kept, ignore_errors=True)
+        os.rename(directory, kept)
     git('worktree', 'prune', check=False)
     if directory.exists():
         # Forced detached checkout replaces both index and tracked files, even after an interrupted run.
@@ -641,6 +688,10 @@ def prepare_tree(root, n, commit):
         git('checkout', '--detach', '-q', '-f', commit, cwd=directory)
     else:
         git('worktree', 'add', '--detach', '--force', '-q', str(directory), commit)
+    if kept:
+        carry_kept_inputs(kept, directory)
+        subprocess.run(['chmod', '-R', 'u+rwX', '--', str(kept)], check=False, capture_output=True)
+        shutil.rmtree(kept, ignore_errors=True)
     clean = ['clean', '-ffdxq', *[f'--exclude={pattern}' for pattern in POOL_KEEP]]
     if git(*clean, cwd=directory, check=False).returncode != 0:
         # A check can leave read-only directories (copies of nix store paths, under .devenv/ and repos/): make them writable, once.
