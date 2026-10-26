@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
+    let value = "fabric://devbox/st3-client-v0";
+    let cli = Cli::try_parse_from(["st", "--endpoint", value, "now"]).unwrap();
+    let endpoint = Endpoint::parse(cli.endpoint.unwrap()).unwrap();
+    assert!(matches!(endpoint, Endpoint::Fabric(_)));
+    assert_eq!(endpoint_label(&endpoint), value);
+    let client = generated_client(&endpoint, Some("person/operator")).unwrap();
+    assert!(!client.is_local_socket());
+}
+
+#[test]
+fn malformed_native_fabric_endpoint_is_not_a_local_socket() {
+    for value in [
+        "fabric://devbox", "fabric://devbox/replication",
+        "fabric://devbox/st3-client-v0/../admin",
+    ] {
+        assert!(Endpoint::parse(value).is_err(), "{value}");
+    }
+}
+
+#[test]
 fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
     let plan = OperationalRepairPlan {
         api_version: "st3.operational-repair.v0".into(),

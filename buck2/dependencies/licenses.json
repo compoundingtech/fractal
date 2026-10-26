@@ -2,7 +2,7 @@
   "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
   "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback); missing manifests from lock-integrity-verified npm archives",
   "schemaVersion": 1,
-  "lockfileSha256": "a6aed3a0c057e92b3541dfb442c322d685af6a18e40980ebb3115c14b1175f8a",
+  "lockfileSha256": "25955580891eda091dd7b8ec5d6cb9cf07ab662e5fa1ee760636976700d31982",
   "packages": [
     {
       "name": "@adobe/css-tools",
