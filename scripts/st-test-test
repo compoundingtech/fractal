@@ -535,6 +535,36 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('timed out', out)
 
+    def test_queued_seconds_is_the_union_of_the_waits_and_an_open_wait_runs_to_now(self):
+        log = Path(self.tmp.name) / 'queue'
+        self.assertEqual(st_test.queued_seconds(log, now=100), 0.0)  # no file yet
+        log.write_text('wait 10 tests\nwait 15 clippy\nslot 20 tests\nslot 30 clippy\njunk\nslot 40 nobody\nwait x tests\nwait 50 tests\n')
+        # tests 10-20 and clippy 15-30 overlap and count once (20 s); tests waits again from 50 and still does at 60 (10 s).
+        self.assertEqual(st_test.queued_seconds(log, now=60), 30.0)
+
+    def test_a_check_s_waits_for_a_build_slot_do_not_count_against_its_time_limit(self):
+        self.commit('b.txt', 'two')
+        wait = 'echo "wait $(date +%s) tests" >> "$CI_LOCAL_QUEUE_LOG"; sleep 3; echo "slot $(date +%s) tests" >> "$CI_LOCAL_QUEUE_LOG"'
+        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', command=['sh', '-c', wait])
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'waited [2-4]s for build slots')
+        # The same, streamed as scripts/ci-local's output is.
+        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun', command=['sh', '-c', wait, 'scripts/ci-local'])
+        self.assertEqual(code, 0, out + err)
+        # Three seconds spent running, not waiting, are over the limit.
+        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun', command=['sh', '-c', 'sleep 3'])
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'demo +timed out')
+
+    def test_the_waits_for_a_build_slot_have_a_limit_of_their_own(self):
+        self.commit('b.txt', 'two')
+        wait = 'echo "wait $(date +%s) tests" >> "$CI_LOCAL_QUEUE_LOG"; sleep 30'
+        started = time.monotonic()
+        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '60', '--queue-limit', '2', command=['sh', '-c', wait])
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'demo +timed out')
+        self.assertLess(time.monotonic() - started, 25)
+
     def test_behind_counts_the_bases_commits_the_branch_lacks_and_is_none_when_it_cannot_tell(self):
         self.commit('b.txt', 'feature work')
         cwd = os.getcwd()
