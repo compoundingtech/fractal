@@ -70,6 +70,8 @@ mod alert_action_tests;
 mod stream_start_tests;
 #[cfg(test)]
 mod conversation_delivery_tests;
+#[cfg(test)]
+mod conversation_participants_tests;
 
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
@@ -208,6 +210,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         )
 }
 
+/// Socket ownership ends this span only after the first data frame reaches the client.
 struct FirstFrame {
     span: tracing::Span,
     read_pending: bool,
@@ -219,6 +222,7 @@ fn subscription_first_frame(
     collection: &str,
     id: &str,
     upgrade: Option<&opentelemetry::trace::SpanContext>,
+    frame_trace: Option<&crate::otel::FrameTraceContext>,
 ) -> Option<FirstFrame> {
     let profile = (collection == "conversation")
         .then(|| crate::profile::Op::start("stream conversation/first-frame", None))
@@ -237,12 +241,14 @@ fn subscription_first_frame(
         "terminal" => "terminal",
         _ => return None,
     };
+    let remote = crate::otel::extract_frame_context(frame_trace);
     let span = tracing::info_span!(
         parent: None,
         "st.subscription.first_frame",
-        otel.kind = "internal",
+        otel.kind = if remote.is_some() { "server" } else { "internal" },
         st.collection = collection,
         st.subscription.id = id,
+        st.parent.sampled = tracing::field::Empty,
         st.projection.hit = false,
         st.projection.cold = false,
         st.projection.incremental = false,
@@ -251,7 +257,7 @@ fn subscription_first_frame(
         st.page.bytes = tracing::field::Empty,
         span.label = collection,
     );
-    span.set_parent(opentelemetry::Context::new());
+    crate::otel::set_remote_parent(&span, remote.unwrap_or_default());
     if let Some(upgrade) = upgrade.filter(|context| context.is_valid()) {
         span.add_link(upgrade.clone());
     }
@@ -2062,7 +2068,8 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         // replacements, so queued collection/conversation results cannot reuse it.
                         generation += 1;
                         first_frames.remove(&request.id);
-                        if let Some(first_frame) = subscription_first_frame(&request.collection, &request.id, upgrade.as_ref()) {
+                        // Initial telemetry must not be retained or cloned on later rereads.
+                        if let Some(first_frame) = subscription_first_frame(&request.collection, &request.id, upgrade.as_ref(), request.frame_trace.take().as_ref()) {
                             first_frames.insert(request.id.clone(), first_frame);
                         }
                         if request.collection == "conversation" {
@@ -4895,7 +4902,7 @@ pub async fn conversation_stream(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
-    let first_frame = subscription_first_frame("conversation", "conversation", upgrade.as_ref());
+    let first_frame = subscription_first_frame("conversation", "conversation", upgrade.as_ref(), None);
     require_scope(&session, "read.projections")?;
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
@@ -5716,7 +5723,7 @@ pub async fn terminal_stream(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
-    let first_frame = subscription_first_frame("terminal", "terminal", upgrade.as_ref());
+    let first_frame = subscription_first_frame("terminal", "terminal", upgrade.as_ref(), None);
     require_scope(&session, "terminal.read")?;
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
@@ -12622,7 +12629,7 @@ mission "differential" state="ready" {
             .claims_for(&sent.subject, Some("message.sent"))
             .unwrap()
             .remove(0);
-        let body = session_message_body(&state, &claim);
+        let body = session_message_body(&state, &claim, false);
         assert_eq!(
             body["attachments"],
             json!([{
@@ -12655,10 +12662,10 @@ mission "differential" state="ready" {
             .claims_for(&plain.subject, Some("message.sent"))
             .unwrap()
             .remove(0);
-        assert!(session_message_body(&state, &claim).get("attachments").is_none());
+        assert!(session_message_body(&state, &claim, false).get("attachments").is_none());
         // What a person wrote carries its provenance (here no signature: the fixture seals
         // nothing); what an agent wrote carries none.
-        let provenance = session_message_body(&state, &claim)["provenance"].clone();
+        let provenance = session_message_body(&state, &claim, false)["provenance"].clone();
         assert_eq!(provenance["verdict"], "unsigned", "{provenance}");
         assert!(provenance.get("signer").is_none());
         let agent_claim = state
@@ -12668,7 +12675,7 @@ mission "differential" state="ready" {
             .remove(0);
         let mut agent_claim = agent_claim;
         agent_claim.body["fields"]["from"] = json!("agent/terminal-test.seat");
-        assert!(session_message_body(&state, &agent_claim).get("provenance").is_none());
+        assert!(session_message_body(&state, &agent_claim, false).get("provenance").is_none());
     }
 
     #[test]
@@ -22519,7 +22526,7 @@ mission "example/zero-run" state="ready" {
             peer_process: None,
             custom_forms: false,
             conversation_blocks: false,
-            conversation_delivery_links: false,
+            conversation_delivery_links: false, conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),

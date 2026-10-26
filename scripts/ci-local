@@ -157,6 +157,9 @@ unset LD_PRELOAD
 # TMPDIR, which are removed at exit, and the account's builds share one server (127.0.0.1:4226): every compile through it then failed
 # ("sccache: error: Failed to create temp dir") until it was stopped. The kept build directory (CARGO_TARGET_DIR) is the local cache.
 unset RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER
+# The workspace crates build without debug info, as CI builds them (buildEnv in .github/workflows/workspace-ci.ts): a dev box never
+# builds more than CI does. Cargo.toml's dev and test profiles keep debug = 1 for a plain `cargo build` or `cargo test`.
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 # Each test process gets a TMPDIR of its own under this run's (scripts/ci-test-tmpdir, as the cargo target runner nextest honours): on a
 # shared TMPDIR, one test that left an empty `.git` at its top made every later test there see a repository that is not one (2026-10-23,
 # 21 failures in one local run; the stray /tmp/.git on the build hosts came the same way). A CI runner is fresh for every job.

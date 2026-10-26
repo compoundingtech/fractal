@@ -14,17 +14,17 @@ fn disconnected_adapter() -> Adapter {
 #[test]
 fn discovery_has_exactly_eleven_closed_tools_and_correct_hints() {
     let expected = [
-        ("st_alerts_list", true, false, false),
-        ("st_alert_get", true, false, false),
-        ("st_alert_answer", false, true, false),
-        ("st_missions_list", true, false, false),
-        ("st_agents_list", true, false, false),
-        ("st_conversations_list", true, false, false),
-        ("st_conversation_detail", true, false, false),
-        ("st_conversation_timeline", true, false, false),
-        ("st_conversation_search", true, false, false),
-        ("st_conversation_read", true, false, false),
-        ("st_message_send", false, false, true),
+        (ALERTS_LIST, true, false, false),
+        (ALERT_GET, true, false, false),
+        (ALERT_ANSWER, false, true, false),
+        (MISSIONS_LIST, true, false, false),
+        (AGENTS_LIST, true, false, false),
+        (CONVERSATIONS_LIST, true, false, false),
+        (CONVERSATION_DETAIL, true, false, false),
+        (CONVERSATION_TIMELINE, true, false, false),
+        (CONVERSATION_SEARCH, true, false, false),
+        (CONVERSATION_READ, true, false, false),
+        (MESSAGE_SEND, false, false, true),
     ];
     let tools = tool_definitions(Profile::ChatGpt);
     assert_eq!(tools.len(), expected.len());
@@ -42,7 +42,7 @@ fn discovery_has_exactly_eleven_closed_tools_and_correct_hints() {
 
 #[test]
 fn writes_publish_typed_closed_fences() {
-    for name in ["st_alert_answer", "st_message_send"] {
+    for name in [ALERT_ANSWER, MESSAGE_SEND] {
         let contract = schema(name);
         let fence = &contract["properties"]["fence"];
         assert_eq!(fence["type"], "object");
@@ -57,7 +57,7 @@ fn writes_publish_typed_closed_fences() {
 
 #[test]
 fn writes_publish_action_identity_constraints() {
-    for tool in tool_definitions(Profile::ChatGpt).iter().filter(|tool| matches!(tool.name.as_ref(), "st_alert_answer" | "st_message_send")) {
+    for tool in tool_definitions(Profile::ChatGpt).iter().filter(|tool| matches!(tool.name.as_ref(), ALERT_ANSWER | MESSAGE_SEND)) {
         let published = serde_json::to_value(tool).unwrap();
         let properties = &published["inputSchema"]["properties"];
         assert_eq!(properties["action_id"]["pattern"], "^action/");
@@ -78,52 +78,52 @@ fn send_arguments() -> Value {
 
 #[test]
 fn validation_accepts_every_published_tool_contract() {
-    for name in ["st_alerts_list", "st_missions_list", "st_agents_list", "st_conversations_list"] {
+    for name in [ALERTS_LIST, MISSIONS_LIST, AGENTS_LIST, CONVERSATIONS_LIST] {
         assert!(validate_arguments(name, &json!({})).is_ok());
         assert!(validate_arguments(name, &json!({"limit":1,"cursor":"opaque","max_response_bytes":16384})).is_ok());
     }
-    assert!(validate_arguments("st_alert_get", &json!({"alert_id":"attention/test"})).is_ok());
-    assert!(validate_arguments("st_conversation_read", &json!({"agent_id":"agent/example-reader","session_id":"session/a",
+    assert!(validate_arguments(ALERT_GET, &json!({"alert_id":"attention/test"})).is_ok());
+    assert!(validate_arguments(CONVERSATION_READ, &json!({"agent_id":"agent/example-reader","session_id":"session/a",
         "reference":"opaque","revision":"claim/a","start":0,"end":1,"max_response_bytes":1})).is_ok());
-    assert!(validate_arguments("st_message_send", &send_arguments()).is_ok());
-    assert!(validate_arguments("st_alert_answer", &json!({"action_id":"action/test","idempotency_key":"test-key-12345678",
+    assert!(validate_arguments(MESSAGE_SEND, &send_arguments()).is_ok());
+    assert!(validate_arguments(ALERT_ANSWER, &json!({"action_id":"action/test","idempotency_key":"test-key-12345678",
         "fence":{"snapshot_id":"snapshot/test"},"alert_id":"attention/test","episode":"episode/test",
         "option":"done","summary":"Done"})).is_ok());
 }
 
 #[test]
 fn attention_selector_is_additive_discoverable_and_exact() {
-    let contract = schema("st_alerts_list");
+    let contract = schema(ALERTS_LIST);
     assert_eq!(contract["required"], json!([]));
     assert_eq!(contract["properties"]["agent_id"]["maxLength"], 256);
-    assert!(validate_arguments("st_alerts_list", &json!({"agent_id":"agent/chief-of-staff"})).is_ok());
+    assert!(validate_arguments(ALERTS_LIST, &json!({"agent_id":"agent/chief-of-staff"})).is_ok());
     for invalid in ["chief-of-staff", "agent/", "person/operator", "agent/private prose"] {
-        assert_eq!(validate_arguments("st_alerts_list", &json!({"agent_id":invalid}))
+        assert_eq!(validate_arguments(ALERTS_LIST, &json!({"agent_id":invalid}))
             .unwrap_err()["code"], "invalid-arguments");
     }
-    assert!(validate_arguments("st_alerts_list", &json!({"agent_id":false})).is_err());
-    assert!(validate_arguments("st_missions_list", &json!({"agent_id":"agent/chief-of-staff"})).is_err());
+    assert!(validate_arguments(ALERTS_LIST, &json!({"agent_id":false})).is_err());
+    assert!(validate_arguments(MISSIONS_LIST, &json!({"agent_id":"agent/chief-of-staff"})).is_err());
     // The two selectors are independent: each tool accepts only its own.
-    assert!(validate_arguments("st_agents_list", &json!({"agent_id":"agent/chief-of-staff"})).is_ok());
+    assert!(validate_arguments(AGENTS_LIST, &json!({"agent_id":"agent/chief-of-staff"})).is_ok());
 }
 
 #[test]
 fn agent_selector_is_additive_discoverable_and_exact() {
-    let contract = schema("st_agents_list");
+    let contract = schema(AGENTS_LIST);
     assert_eq!(contract["required"], json!([]));
     assert_eq!(contract["properties"]["agent_id"]["maxLength"], 256);
-    assert!(validate_arguments("st_agents_list", &json!({"agent_id":"agent/example-reader"})).is_ok());
+    assert!(validate_arguments(AGENTS_LIST, &json!({"agent_id":"agent/example-reader"})).is_ok());
     for invalid in ["example-reader", "agent/", "person/robin", "agent/example-invalid prose"] {
-        assert_eq!(validate_arguments("st_agents_list", &json!({"agent_id":invalid}))
+        assert_eq!(validate_arguments(AGENTS_LIST, &json!({"agent_id":invalid}))
             .unwrap_err()["code"], "invalid-arguments");
     }
-    assert!(validate_arguments("st_agents_list", &json!({"agent_id":false})).is_err());
-    assert!(validate_arguments("st_alerts_list", &json!({"agent_id":"agent/example-reader"})).is_ok());
-    assert!(validate_arguments("st_missions_list", &json!({"agent_id":"agent/chief-of-staff"})).is_err());
+    assert!(validate_arguments(AGENTS_LIST, &json!({"agent_id":false})).is_err());
+    assert!(validate_arguments(ALERTS_LIST, &json!({"agent_id":"agent/example-reader"})).is_ok());
+    assert!(validate_arguments(MISSIONS_LIST, &json!({"agent_id":"agent/chief-of-staff"})).is_err());
 }
 
 fn write_arguments(name: &str) -> Value {
-    if name == "st_message_send" {
+    if name == MESSAGE_SEND {
         send_arguments()
     } else {
         json!({"action_id":"action/test","idempotency_key":"test-key-12345678",
@@ -135,7 +135,7 @@ fn write_arguments(name: &str) -> Value {
 #[tokio::test]
 async fn action_identity_violations_fail_before_contacting_gateway() {
     let adapter = disconnected_adapter();
-    for name in ["st_alert_answer", "st_message_send"] {
+    for name in [ALERT_ANSWER, MESSAGE_SEND] {
         for (field, value, rule) in [
             ("action_id", "test".to_owned(), "^action/"),
             ("action_id", "prefix/action/test".to_owned(), "^action/"),
@@ -158,7 +158,7 @@ async fn action_identity_violations_fail_before_contacting_gateway() {
 
 #[test]
 fn action_identity_accepts_inclusive_key_length_bounds() {
-    for name in ["st_alert_answer", "st_message_send"] {
+    for name in [ALERT_ANSWER, MESSAGE_SEND] {
         for length in [16, 256] {
             for character in ['k', ' ', '~'] {
                 let mut args = write_arguments(name);
@@ -173,22 +173,22 @@ fn action_identity_accepts_inclusive_key_length_bounds() {
 fn validation_rejects_unknown_tools_nonobjects_extra_missing_and_wrong_types() {
     assert_eq!(validate_arguments("shell", &json!({})).unwrap_err()["code"], "unknown-tool");
     let negatives = [
-        ("st_alerts_list", json!(null)),
-        ("st_alerts_list", json!([])),
-        ("st_alerts_list", json!({"command":"ignored?"})),
-        ("st_alerts_list", json!({"limit":"1"})),
-        ("st_alerts_list", json!({"limit":0})),
-        ("st_alerts_list", json!({"limit":-1})),
-        ("st_alerts_list", json!({"limit":1.5})),
-        ("st_alerts_list", json!({"cursor":true})),
-        ("st_alerts_list", json!({"max_response_bytes":0})),
-        ("st_alerts_list", json!({"max_response_bytes":16385})),
-        ("st_alert_get", json!({})),
-        ("st_alert_get", json!({"alert_id":null})),
-        ("st_alert_get", json!({"alert_id":3})),
-        ("st_alert_answer", json!({"action_id":"a"})),
-        ("st_conversation_read", json!({"agent_id":"a","session_id":"s","reference":"r","revision":"v","start":-1,"end":3})),
-        ("st_conversation_read", json!({"agent_id":"a","session_id":"s","reference":"r","revision":"v","start":0,"end":"3"})),
+        (ALERTS_LIST, json!(null)),
+        (ALERTS_LIST, json!([])),
+        (ALERTS_LIST, json!({"command":"ignored?"})),
+        (ALERTS_LIST, json!({"limit":"1"})),
+        (ALERTS_LIST, json!({"limit":0})),
+        (ALERTS_LIST, json!({"limit":-1})),
+        (ALERTS_LIST, json!({"limit":1.5})),
+        (ALERTS_LIST, json!({"cursor":true})),
+        (ALERTS_LIST, json!({"max_response_bytes":0})),
+        (ALERTS_LIST, json!({"max_response_bytes":16385})),
+        (ALERT_GET, json!({})),
+        (ALERT_GET, json!({"alert_id":null})),
+        (ALERT_GET, json!({"alert_id":3})),
+        (ALERT_ANSWER, json!({"action_id":"a"})),
+        (CONVERSATION_READ, json!({"agent_id":"a","session_id":"s","reference":"r","revision":"v","start":-1,"end":3})),
+        (CONVERSATION_READ, json!({"agent_id":"a","session_id":"s","reference":"r","revision":"v","start":0,"end":"3"})),
     ];
     for (name, args) in negatives {
         assert_eq!(validate_arguments(name, &args).unwrap_err()["code"], "invalid-arguments", "{name}: {args}");
@@ -203,24 +203,24 @@ fn validation_rejects_open_or_untyped_nested_fences() {
         json!({"snapshot_id":"s","subject_revisions":{"agent/example-reader":42}})] {
         let mut args = send_arguments();
         args["fence"] = fence;
-        assert_eq!(validate_arguments("st_message_send", &args).unwrap_err()["code"], "invalid-arguments");
+        assert_eq!(validate_arguments(MESSAGE_SEND, &args).unwrap_err()["code"], "invalid-arguments");
     }
     for key in ["action_id", "idempotency_key", "to", "title", "content"] {
         let mut args = send_arguments();
         args[key] = json!(false);
-        assert!(validate_arguments("st_message_send", &args).is_err(), "{key}");
+        assert!(validate_arguments(MESSAGE_SEND, &args).is_err(), "{key}");
         args.as_object_mut().unwrap().remove(key);
-        assert!(validate_arguments("st_message_send", &args).is_err(), "missing {key}");
+        assert!(validate_arguments(MESSAGE_SEND, &args).is_err(), "missing {key}");
     }
 }
 
 fn bounded_read_cases() -> Vec<(&'static str, &'static str, Value)> {
     vec![
-        ("st_conversations_list", "conversations", json!({"cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
-        ("st_conversation_detail", "conversation-detail", json!({"agent_id":"agent/example-reader","max_response_bytes":16384})),
-        ("st_conversation_timeline", "conversation-timeline", json!({"agent_id":"agent/example-reader","session_id":"session/a","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
-        ("st_conversation_search", "conversation-search", json!({"text":"hello +&? café","agent_id":"agent/example-reader","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
-        ("st_conversation_read", "conversation-content", json!({"agent_id":"agent/example-reader","session_id":"session/a","reference":"content/a +&?","revision":"revision/a","start":0,"end":12,"max_response_bytes":16384})),
+        (CONVERSATIONS_LIST, "conversations", json!({"cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
+        (CONVERSATION_DETAIL, "conversation-detail", json!({"agent_id":"agent/example-reader","max_response_bytes":16384})),
+        (CONVERSATION_TIMELINE, "conversation-timeline", json!({"agent_id":"agent/example-reader","session_id":"session/a","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
+        (CONVERSATION_SEARCH, "conversation-search", json!({"text":"hello +&? café","agent_id":"agent/example-reader","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
+        (CONVERSATION_READ, "conversation-content", json!({"agent_id":"agent/example-reader","session_id":"session/a","reference":"content/a +&?","revision":"revision/a","start":0,"end":12,"max_response_bytes":16384})),
     ]
 }
 
@@ -253,9 +253,9 @@ fn bounded_reads_validate_exact_fields_required_selectors_and_budgets() {
             assert!(validate_arguments(name, &invalid).is_err(), "{name}: {key}");
         }
     }
-    assert!(validate_arguments("st_conversations_list", &json!({})).is_ok());
-    assert!(validate_arguments("st_conversation_timeline", &json!({"agent_id":"agent/example-reader"})).is_ok());
-    assert!(validate_arguments("st_conversation_search", &json!({"text":"hello"})).is_ok());
+    assert!(validate_arguments(CONVERSATIONS_LIST, &json!({})).is_ok());
+    assert!(validate_arguments(CONVERSATION_TIMELINE, &json!({"agent_id":"agent/example-reader"})).is_ok());
+    assert!(validate_arguments(CONVERSATION_SEARCH, &json!({"text":"hello"})).is_ok());
 }
 
 #[tokio::test]
@@ -303,6 +303,71 @@ async fn bounded_reads_dispatch_exact_get_routes_queries_and_bearer_and_preserve
 }
 
 #[tokio::test]
+async fn deprecated_aliases_dispatch_identically_for_all_eleven_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("client.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let gateway = Router::new().fallback(|request: Request<Body>| async move {
+        let (parts, body) = request.into_parts();
+        let bytes = to_bytes(body, 65536).await.unwrap();
+        axum::Json(json!({"method":parts.method.as_str(), "uri":parts.uri.to_string(),
+            "body":String::from_utf8(bytes.to_vec()).unwrap()}))
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });
+    let mut adapter = Adapter {
+        client: reqwest::Client::builder().unix_socket(socket).build().unwrap(),
+        bearer: "test-only-alias-credential".into(),
+        profile: Profile::ChatGpt,
+    };
+    for profile in [Profile::ChatGpt, Profile::Mcp] {
+        adapter.profile = profile;
+        let mut cases = bounded_read_cases().into_iter()
+            .map(|(name, _, args)| (name, args)).collect::<Vec<_>>();
+        cases.extend([
+            (ALERTS_LIST, json!({})),
+            (ALERT_GET, json!({"alert_id":"attention/test"})),
+            (MISSIONS_LIST, json!({})),
+            (AGENTS_LIST, json!({})),
+            (ALERT_ANSWER, write_arguments(ALERT_ANSWER)),
+            (MESSAGE_SEND, write_arguments(MESSAGE_SEND)),
+        ]);
+        assert_eq!(cases.len(), 11);
+        for (name, args) in cases {
+            let alias = format!("st_{}", name.strip_prefix("fractal_").unwrap());
+            assert_eq!(call(&adapter, &alias, &args).await.unwrap(),
+                call(&adapter, name, &args).await.unwrap(), "{profile:?}: {alias}");
+            assert_eq!(call(&adapter, &alias, &json!(null)).await.unwrap_err(),
+                call(&adapter, name, &json!(null)).await.unwrap_err(), "{profile:?}: {alias}");
+        }
+        assert_eq!(call(&adapter, "st_unknown", &json!({})).await.unwrap_err()["code"], "unknown-tool");
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn http_tools_list_advertises_only_canonical_names() {
+    let response = http_router(disconnected_adapter()).oneshot(
+        Request::builder().method("POST").uri("/mcp")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2025-03-26")
+            .body(Body::from(json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}).to_string()))
+            .unwrap()
+    ).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    let published = result["result"]["tools"].as_array().unwrap();
+    assert_eq!(published.len(), 11);
+    for (tool, (name, _, _)) in published.iter().zip(TOOLS) {
+        assert_eq!(tool["name"], *name);
+        assert!(name.starts_with("fractal_"));
+    }
+}
+
+#[tokio::test]
 async fn bounded_read_budget_denials_remain_incomplete_errors() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("client.sock");
@@ -316,7 +381,7 @@ async fn bounded_read_budget_denials_remain_incomplete_errors() {
         bearer: "test-only-read-credential".into(),
         profile: Profile::ChatGpt,
     };
-    let result = call(&adapter, "st_conversations_list", &json!({"max_response_bytes":1})).await;
+    let result = call(&adapter, CONVERSATIONS_LIST, &json!({"max_response_bytes":1})).await;
     server.abort();
     assert_eq!(result.unwrap_err(), json!({
         "code":"incomplete","http_status":413,"daemon":{"code":"response-budget-exceeded"}
@@ -325,7 +390,7 @@ async fn bounded_read_budget_denials_remain_incomplete_errors() {
 
 #[tokio::test]
 async fn invalid_calls_fail_before_contacting_gateway() {
-    let error = call(&disconnected_adapter(), "st_message_send", &json!({"command":"no"})).await.unwrap_err();
+    let error = call(&disconnected_adapter(), MESSAGE_SEND, &json!({"command":"no"})).await.unwrap_err();
     assert_eq!(error["code"], "invalid-arguments");
 }
 
@@ -361,7 +426,7 @@ async fn alert_answer_maps_to_work_done_and_returns_direct_action_result_unchang
         "alert_id":"step-run/test/ask", "episode":"claim/ask", "option":"yes",
         "summary":"Proceed with the selected option"
     });
-    let result = call(&adapter, "st_alert_answer", &arguments).await;
+    let result = call(&adapter, ALERT_ANSWER, &arguments).await;
     server.abort();
     assert_eq!(result.unwrap(), expected);
     let (headers, body) = received.recv().await.unwrap();
@@ -459,16 +524,17 @@ async fn dispatch_telemetry_is_correlated_and_content_free() {
     assert_eq!(call(&adapter, "st_alerts_list", &json!({"cursor":"CURSOR_SECRET_SENTINEL"})).await.unwrap()["request_id"], id);
     let mut args = send_arguments();
     args["content"] = json!("ARGUMENT_CONTENT_SENTINEL");
-    assert_eq!(call(&adapter, "st_message_send", &args).await.unwrap_err()["code"], "daemon-denied");
+    assert_eq!(call(&adapter, MESSAGE_SEND, &args).await.unwrap_err()["code"], "daemon-denied");
     assert_eq!(call(&adapter, "UNKNOWN_TOOL_SECRET_SENTINEL", &json!({})).await.unwrap_err()["code"], "unknown-tool");
-    assert_eq!(call(&adapter, "st_alert_get", &json!({})).await.unwrap_err()["code"], "invalid-arguments");
+    assert_eq!(call(&adapter, ALERT_GET, &json!({})).await.unwrap_err()["code"], "invalid-arguments");
     let text = logs.text();
     assert_eq!(text.matches("ChatGPT tool call finished").count(), 4, "{text}");
-    for field in ["tool=\"st_alerts_list\"", "outcome=\"success\"", "code=\"ok\"",
+    for field in ["tool=\"fractal_alerts_list\"", "outcome=\"success\"", "code=\"ok\"",
         "outcome=\"error\"", "code=\"daemon-denied\"", "code=\"invalid-arguments\"",
         "tool=\"unknown\"", "duration_ms=", id, &format!("response_bytes={expected_bytes}")] {
         assert!(text.contains(field), "{field}: {text}");
     }
+    assert!(!text.contains("tool=\"st_alerts_list\""), "{text}");
     assert!(!text.contains("SENTINEL"), "{text}");
     server.abort();
 }
@@ -498,12 +564,12 @@ async fn dispatch_telemetry_records_decode_transport_and_cancelled_outcomes() {
         }));
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
     let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket.as_path()).build().unwrap(), bearer: "test".into(), profile: Profile::ChatGpt };
-    assert_eq!(call(&adapter, "st_alerts_list", &json!({})).await.unwrap_err()["code"], "invalid-daemon-response");
-    assert_eq!(call(&adapter, "st_missions_list", &json!({})).await.unwrap_err()["code"], "incomplete");
-    assert_eq!(call(&disconnected_adapter(), "st_alerts_list", &json!({})).await.unwrap_err()["code"], "unavailable");
+    assert_eq!(call(&adapter, ALERTS_LIST, &json!({})).await.unwrap_err()["code"], "invalid-daemon-response");
+    assert_eq!(call(&adapter, MISSIONS_LIST, &json!({})).await.unwrap_err()["code"], "incomplete");
+    assert_eq!(call(&disconnected_adapter(), ALERTS_LIST, &json!({})).await.unwrap_err()["code"], "unavailable");
     {
         let args = json!({});
-        let pending = call(&adapter, "st_agents_list", &args);
+        let pending = call(&adapter, AGENTS_LIST, &args);
         tokio::pin!(pending);
         tokio::select! {
             () = entered.notified() => {},
@@ -522,18 +588,15 @@ async fn dispatch_telemetry_records_decode_transport_and_cancelled_outcomes() {
 
 #[test]
 fn chatgpt_discovery_matches_main_golden() {
-    // Captured by serializing Adapter::list_tools's complete rmcp ListToolsResult
-    // on origin/main bed66fbea69fae546ce2a5f7d6df942ae335ce47, not regenerated
-    // from this branch's TOOLS/schema(). Keep this file immutable. Compared as JSON
-    // values because object key order depends on serde_json's preserve_order
-    // feature, which smallclaims enables under workspace feature unification only.
-    // Regenerate only in a scratch worktree at that commit: temporarily add a test
-    // in crates/st-chatgpt/src/tests.rs writing serde_json::to_vec(&ListToolsResult {
-    // tools: tool_definitions(), ..Default::default() }) to
-    // crates/st-chatgpt/src/testdata/chatgpt-tools-list.json; run
-    // `cargo test -p st-chatgpt <name>`, then remove the temporary test.
-    // main 787744ffea's crates/fractal-chatgpt/src/lib.rs is byte-identical to
-    // bed66fbea6's crates/st-chatgpt/src/lib.rs.
+    // Captured from origin/main c49adcb0e802baa643711082bc66611d9c0e5d6c,
+    // not regenerated from this branch's TOOLS/schema(). Compared as JSON values
+    // because serde_json preserve_order depends on workspace feature unification.
+    // In a scratch worktree at that SHA, temporarily add
+    // capture_main_chatgpt_tools_golden in crates/fractal-chatgpt/src/tests.rs,
+    // writing serde_json::to_vec(&ListToolsResult {
+    // tools: tool_definitions(), ..Default::default() }) to a capture file.
+    // Run `cargo test -p fractal-chatgpt capture_main_chatgpt_tools_golden`,
+    // copy those bytes here, then discard the temporary test.
     let result = ListToolsResult {
         tools: tool_definitions(Profile::ChatGpt),
         ..Default::default()
@@ -563,17 +626,17 @@ fn profiles_pin_server_identity_and_cross_profile_annotations() {
 #[test]
 fn all_eleven_mcp_output_schemas_pin_envelopes_and_value_contracts() {
     let expected = [
-        ("st_alerts_list", Some("page"), vec!["kind","items","page"]),
-        ("st_alert_get", None, vec!["id","episode","kind","title","detail","request"]),
-        ("st_alert_answer", Some("action-result"), vec!["kind","action_id","status"]),
-        ("st_missions_list", Some("page"), vec!["kind","items","page"]),
-        ("st_agents_list", Some("page"), vec!["kind","items","page"]),
-        ("st_conversations_list", Some("page"), vec!["kind","items","page"]),
-        ("st_conversation_detail", Some("conversation-detail"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
-        ("st_conversation_timeline", Some("conversation-timeline"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
-        ("st_conversation_search", Some("conversation-search"), vec!["kind","items","page"]),
-        ("st_conversation_read", Some("assistant-conversation-content"), vec!["kind","agent_id","session_id","reference","revision","start","end","text","returned_bytes","truncated","next_range"]),
-        ("st_message_send", Some("action-result"), vec!["kind","action_id","status"]),
+        (ALERTS_LIST, Some("page"), vec!["kind","items","page"]),
+        (ALERT_GET, None, vec!["id","episode","kind","title","detail","request"]),
+        (ALERT_ANSWER, Some("action-result"), vec!["kind","action_id","status"]),
+        (MISSIONS_LIST, Some("page"), vec!["kind","items","page"]),
+        (AGENTS_LIST, Some("page"), vec!["kind","items","page"]),
+        (CONVERSATIONS_LIST, Some("page"), vec!["kind","items","page"]),
+        (CONVERSATION_DETAIL, Some("conversation-detail"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
+        (CONVERSATION_TIMELINE, Some("conversation-timeline"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
+        (CONVERSATION_SEARCH, Some("conversation-search"), vec!["kind","items","page"]),
+        (CONVERSATION_READ, Some("assistant-conversation-content"), vec!["kind","agent_id","session_id","reference","revision","start","end","text","returned_bytes","truncated","next_range"]),
+        (MESSAGE_SEND, Some("action-result"), vec!["kind","action_id","status"]),
     ];
     let tools = tool_definitions(Profile::Mcp);
     assert_eq!(tools.len(), expected.len());
@@ -662,19 +725,19 @@ async fn mcp_dispatches_all_eleven_tools_over_only_the_existing_gateway_routes()
     let adapter = Adapter { client:reqwest::Client::builder().unix_socket(socket).build().unwrap(),
         bearer:"test-only-mcp-credential".into(), profile:Profile::Mcp };
     let cases = [
-        ("st_alerts_list","attention-rich",json!({})),
-        ("st_alert_get","attention-content",json!({"alert_id":"alert/example"})),
-        ("st_alert_answer","propose",json!({"action_id":"action/example-answer","idempotency_key":"example-answer-key",
+        (ALERTS_LIST,"attention-rich",json!({})),
+        (ALERT_GET,"attention-content",json!({"alert_id":"alert/example"})),
+        (ALERT_ANSWER,"propose",json!({"action_id":"action/example-answer","idempotency_key":"example-answer-key",
             "fence":{"snapshot_id":"snapshot/example"},"alert_id":"alert/example","episode":"claim/example","option":"yes","summary":"Approved"})),
-        ("st_missions_list","missions-rich",json!({})),
-        ("st_agents_list","agents-rich",json!({"agent_id":"agent/example-reader"})),
-        ("st_conversations_list","conversations",json!({})),
-        ("st_conversation_detail","conversation-detail",json!({"agent_id":"agent/example-reader"})),
-        ("st_conversation_timeline","conversation-timeline",json!({"agent_id":"agent/example-reader","session_id":"session/example"})),
-        ("st_conversation_search","conversation-search",json!({"text":"example"})),
-        ("st_conversation_read","conversation-content",json!({"agent_id":"agent/example-reader","session_id":"session/example",
+        (MISSIONS_LIST,"missions-rich",json!({})),
+        (AGENTS_LIST,"agents-rich",json!({"agent_id":"agent/example-reader"})),
+        (CONVERSATIONS_LIST,"conversations",json!({})),
+        (CONVERSATION_DETAIL,"conversation-detail",json!({"agent_id":"agent/example-reader"})),
+        (CONVERSATION_TIMELINE,"conversation-timeline",json!({"agent_id":"agent/example-reader","session_id":"session/example"})),
+        (CONVERSATION_SEARCH,"conversation-search",json!({"text":"example"})),
+        (CONVERSATION_READ,"conversation-content",json!({"agent_id":"agent/example-reader","session_id":"session/example",
             "reference":"content/example","revision":"revision/example","start":0,"end":1})),
-        ("st_message_send","propose",json!({"action_id":"action/example-message","idempotency_key":"example-message-key",
+        (MESSAGE_SEND,"propose",json!({"action_id":"action/example-message","idempotency_key":"example-message-key",
             "fence":{"snapshot_id":"snapshot/example"},"to":"agent/example-recipient","title":"Example","content":"Exact example"})),
     ];
     for (name, route, args) in cases {
@@ -689,7 +752,7 @@ async fn mcp_dispatches_all_eleven_tools_over_only_the_existing_gateway_routes()
         if route == "propose" {
             assert_eq!(method, axum::http::Method::POST);
             let body: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(body["type"], if name == "st_alert_answer" {"work.done"} else {"message.send"});
+            assert_eq!(body["type"], if name == ALERT_ANSWER {"work.done"} else {"message.send"});
             assert_eq!(body["id"], args["action_id"]);
             assert_eq!(body["idempotency_key"], args["idempotency_key"]);
             assert_eq!(body["fence"], args["fence"]);
@@ -740,7 +803,7 @@ async fn both_profiles_preserve_gateway_write_denials_without_claiming_authority
     for profile in [Profile::ChatGpt, Profile::Mcp] {
         let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket.as_path()).build().unwrap(),
             bearer: "test-only-read-credential".into(), profile };
-        for name in ["st_alert_answer", "st_message_send"] {
+        for name in [ALERT_ANSWER, MESSAGE_SEND] {
             let arguments = write_arguments(name);
             let error = call(&adapter, name, &arguments).await.unwrap_err();
             assert_eq!(error, json!({"code":"daemon-denied","http_status":403,"daemon":denial}));

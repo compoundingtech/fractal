@@ -31,8 +31,8 @@ impl Profile {
         server_name: "st",
         assistant_principal: "assistant/mcp",
         tool_descriptions: &[
-            ("st_message_send", "Send one exact message to an existing agent under write.assistant.messages and the paired assistant/mcp grant. Obtain human confirmation before calling. Person recipients are refused."),
-            ("st_alert_answer", "Execute one typed person-ask answer under write.assistant.answers and the paired assistant/mcp grant using the alert's current episode and fence. Obtain human confirmation before calling."),
+            (MESSAGE_SEND, "Send one exact message to an existing agent under write.assistant.messages and the paired assistant/mcp grant. Obtain human confirmation before calling. Person recipients are refused."),
+            (ALERT_ANSWER, "Execute one typed person-ask answer under write.assistant.answers and the paired assistant/mcp grant using the alert's current episode and fence. Obtain human confirmation before calling."),
         ],
         structured_output: true,
     };
@@ -84,18 +84,41 @@ fn read_credential(path: &Path) -> io::Result<String> {
     Ok(bearer.to_owned())
 }
 
+// Canonical MCP names: discovery, schemas and dispatch all use these constants.
+pub const ALERTS_LIST: &str = "fractal_alerts_list";
+pub const ALERT_GET: &str = "fractal_alert_get";
+pub const ALERT_ANSWER: &str = "fractal_alert_answer";
+pub const MISSIONS_LIST: &str = "fractal_missions_list";
+pub const AGENTS_LIST: &str = "fractal_agents_list";
+pub const CONVERSATIONS_LIST: &str = "fractal_conversations_list";
+pub const CONVERSATION_DETAIL: &str = "fractal_conversation_detail";
+pub const CONVERSATION_TIMELINE: &str = "fractal_conversation_timeline";
+pub const CONVERSATION_SEARCH: &str = "fractal_conversation_search";
+pub const CONVERSATION_READ: &str = "fractal_conversation_read";
+pub const MESSAGE_SEND: &str = "fractal_message_send";
+
+// Deprecated for the 0.1.0 adapter release; remove in fractal-chatgpt 0.2.0.
+// Johannes's ChatGPT connector caches tools/list. Keep old calls working without
+// advertising duplicate tools to refreshed connectors. No allocation on either path.
+fn canonical_tool_name(name: &str) -> &str {
+    let Some(rest) = name.strip_prefix("st_") else { return name };
+    TOOLS.iter().find_map(|(canonical, _, _)|
+        (canonical.strip_prefix("fractal_") == Some(rest)).then_some(*canonical))
+        .unwrap_or(name)
+}
+
 const TOOLS: &[(&str, &str, bool)] = &[
-    ("st_alerts_list", "List bounded owner alerts with actionable question/options, episode, target and evidence when present. Set agent_id to an exact canonical agent ID to select its published alerts. An empty page does not mean no work. Use st_alert_get only when further exact detail is needed.", true),
-    ("st_alert_get", "Read one exact owner alert, including its episode and named answer options.", true),
-    ("st_alert_answer", "Execute one typed person-ask answer under write.assistant.answers using the alert's current episode and fence.", false),
-    ("st_missions_list", "List mission metadata.", true),
-    ("st_agents_list", "List agent metadata. For a known canonical agent ID, set agent_id to avoid paging through the fleet. This does not read priorities or conversation content.", true),
-    ("st_conversations_list", "Discover source-bounded conversation metadata and read handles without conversation content. Each value.items entry supplies agent_id and session_id for st_conversation_timeline and a read object containing all st_conversation_read arguments (null when the bounded current timeline page has no readable text handle; use timeline to continue). Pass read unchanged to st_conversation_read; use value.page.next_cursor to page this list. Pages fit max_response_bytes; an item that cannot fit alone is named in the error.", true),
-    ("st_conversation_detail", "Read one agent's current conversation with bounded chat excerpts and revision-pinned read handles. Use agent_id from st_conversations_list; pass each non-null timeline item's read object unchanged to st_conversation_read. Content may be sensitive.", true),
-    ("st_conversation_timeline", "Page bounded chat excerpts and revision-pinned read handles. Copy agent_id and session_id from st_conversations_list to select the discovered session; omit session_id only to select the current session. Pass each non-null value.items[].read object unchanged to st_conversation_read, and use value.page.next_cursor only to continue this timeline. Content may be sensitive.", true),
-    ("st_conversation_search", "Search bounded plain conversation text snippets. Content may be sensitive.", true),
-    ("st_conversation_read", "Read one bounded revision-pinned conversation content range. Pass a non-null value.items[].read object from st_conversations_list or st_conversation_timeline unchanged; conversation detail also supplies timeline read handles. Each read object contains agent_id, session_id, reference, revision, start and end. Never invent handles or substitute a pagination cursor for a content reference. Content may contain sensitive material.", true),
-    ("st_message_send", "Send one exact message to any existing agent, authorized by write.assistant.messages and the ChatGPT confirmation card. Person recipients are refused.", false),
+    (ALERTS_LIST, "List bounded owner alerts with actionable question/options, episode, target and evidence when present. Set agent_id to an exact canonical agent ID to select its published alerts. An empty page does not mean no work. Use fractal_alert_get only when further exact detail is needed.", true),
+    (ALERT_GET, "Read one exact owner alert, including its episode and named answer options.", true),
+    (ALERT_ANSWER, "Execute one typed person-ask answer under write.assistant.answers using the alert's current episode and fence.", false),
+    (MISSIONS_LIST, "List mission metadata.", true),
+    (AGENTS_LIST, "List agent metadata. For a known canonical agent ID, set agent_id to avoid paging through the fleet. This does not read priorities or conversation content.", true),
+    (CONVERSATIONS_LIST, "Discover source-bounded conversation metadata and read handles without conversation content. Each value.items entry supplies agent_id and session_id for fractal_conversation_timeline and a read object containing all fractal_conversation_read arguments (null when the bounded current timeline page has no readable text handle; use timeline to continue). Pass read unchanged to fractal_conversation_read; use value.page.next_cursor to page this list. Pages fit max_response_bytes; an item that cannot fit alone is named in the error.", true),
+    (CONVERSATION_DETAIL, "Read one agent's current conversation with bounded chat excerpts and revision-pinned read handles. Use agent_id from fractal_conversations_list; pass each non-null timeline item's read object unchanged to fractal_conversation_read. Content may be sensitive.", true),
+    (CONVERSATION_TIMELINE, "Page bounded chat excerpts and revision-pinned read handles. Copy agent_id and session_id from fractal_conversations_list to select the discovered session; omit session_id only to select the current session. Pass each non-null value.items[].read object unchanged to fractal_conversation_read, and use value.page.next_cursor only to continue this timeline. Content may be sensitive.", true),
+    (CONVERSATION_SEARCH, "Search bounded plain conversation text snippets. Content may be sensitive.", true),
+    (CONVERSATION_READ, "Read one bounded revision-pinned conversation content range. Pass a non-null value.items[].read object from fractal_conversations_list or fractal_conversation_timeline unchanged; conversation detail also supplies timeline read handles. Each read object contains agent_id, session_id, reference, revision, start and end. Never invent handles or substitute a pagination cursor for a content reference. Content may contain sensitive material.", true),
+    (MESSAGE_SEND, "Send one exact message to any existing agent, authorized by write.assistant.messages and the ChatGPT confirmation card. Person recipients are refused.", false),
 ];
 
 // Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
@@ -126,24 +149,24 @@ fn fence_schema() -> Value {
 }
 fn schema(name: &str) -> Value {
     let props = match name {
-        "st_alert_answer" => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"alert_id":{"type":"string"},"episode":{"type":"string"},"option":{"type":"string"},"summary":{"type":"string"}}),
-        "st_message_send" => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
-        "st_alert_get" => json!({"alert_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
-        "st_conversation_detail" => json!({"agent_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
-        "st_conversation_timeline" => json!({"agent_id":{"type":"string","description":"Copy value.items[].agent_id from st_conversations_list."},"session_id":{"type":"string","description":"Copy the same conversation item's session_id to pin the discovered session; omitted selects the current session."},"cursor":{"type":"string","description":"Copy value.page.next_cursor from the preceding timeline page; omit for the first page."},"limit":{"type":"integer","minimum":1},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
-        "st_conversation_search" => json!({"text":{"type":"string"},"agent_id":{"type":"string"},"cursor":{"type":"string"},"limit":{"type":"integer","minimum":1},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
-        "st_conversation_read" => json!({"agent_id":{"type":"string","description":"Copy read.agent_id from a discovered conversation or timeline item."},"session_id":{"type":"string","description":"Copy read.session_id from the same handle; do not infer from agent_id."},"reference":{"type":"string","description":"Copy read.reference, an opaque content reference, not a pagination cursor."},"revision":{"type":"string","description":"Copy read.revision paired with this content reference to pin the source version."},"start":{"type":"integer","minimum":0,"description":"Copy read.start, the inclusive range start."},"end":{"type":"integer","minimum":0,"description":"Copy read.end, the exclusive range end."},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
-        "st_alerts_list" => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
-        "st_agents_list" => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        ALERT_ANSWER => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"alert_id":{"type":"string"},"episode":{"type":"string"},"option":{"type":"string"},"summary":{"type":"string"}}),
+        MESSAGE_SEND => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
+        ALERT_GET => json!({"alert_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        CONVERSATION_DETAIL => json!({"agent_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        CONVERSATION_TIMELINE => json!({"agent_id":{"type":"string","description":"Copy value.items[].agent_id from fractal_conversations_list."},"session_id":{"type":"string","description":"Copy the same conversation item's session_id to pin the discovered session; omitted selects the current session."},"cursor":{"type":"string","description":"Copy value.page.next_cursor from the preceding timeline page; omit for the first page."},"limit":{"type":"integer","minimum":1},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        CONVERSATION_SEARCH => json!({"text":{"type":"string"},"agent_id":{"type":"string"},"cursor":{"type":"string"},"limit":{"type":"integer","minimum":1},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        CONVERSATION_READ => json!({"agent_id":{"type":"string","description":"Copy read.agent_id from a discovered conversation or timeline item."},"session_id":{"type":"string","description":"Copy read.session_id from the same handle; do not infer from agent_id."},"reference":{"type":"string","description":"Copy read.reference, an opaque content reference, not a pagination cursor."},"revision":{"type":"string","description":"Copy read.revision paired with this content reference to pin the source version."},"start":{"type":"integer","minimum":0,"description":"Copy read.start, the inclusive range start."},"end":{"type":"integer","minimum":0,"description":"Copy read.end, the exclusive range end."},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        ALERTS_LIST => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        AGENTS_LIST => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         _ => json!({"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
     };
     let required = match name {
-        "st_alert_answer" => vec!["action_id","idempotency_key","fence","alert_id","episode","option","summary"],
-        "st_message_send" => vec!["action_id","idempotency_key","fence","to","title","content"],
-        "st_alert_get" => vec!["alert_id"],
-        "st_conversation_detail" | "st_conversation_timeline" => vec!["agent_id"],
-        "st_conversation_search" => vec!["text"],
-        "st_conversation_read" => vec!["agent_id","session_id","reference","revision","start","end"],
+        ALERT_ANSWER => vec!["action_id","idempotency_key","fence","alert_id","episode","option","summary"],
+        MESSAGE_SEND => vec!["action_id","idempotency_key","fence","to","title","content"],
+        ALERT_GET => vec!["alert_id"],
+        CONVERSATION_DETAIL | CONVERSATION_TIMELINE => vec!["agent_id"],
+        CONVERSATION_SEARCH => vec!["text"],
+        CONVERSATION_READ => vec!["agent_id","session_id","reference","revision","start","end"],
         _ => vec![],
     };
     json!({"type":"object","properties":props,"required":required,"additionalProperties":false})
@@ -184,13 +207,13 @@ fn validate_arguments(name: &str, args: &Value) -> Result<(), Value> {
     if !matches_schema(args, &schema(name)) {
         return Err(json!({"code":"invalid-arguments","message":"Use the exact published tool schema."}));
     }
-    if matches!(name, "st_alerts_list" | "st_agents_list")
+    if matches!(name, ALERTS_LIST | AGENTS_LIST)
         && let Some(id) = args.get("agent_id").and_then(Value::as_str)
         && (!(7..=256).contains(&id.len()) || !id.starts_with("agent/")
             || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/._:-@+=~".contains(&byte))) {
         return Err(json!({"code":"invalid-arguments","message":"agent_id must be an exact canonical agent identifier, not an alias."}));
     }
-    if matches!(name, "st_alert_answer" | "st_message_send") {
+    if matches!(name, ALERT_ANSWER | MESSAGE_SEND) {
         let action_id = args["action_id"].as_str().expect("validated action ID string");
         if !action_id.starts_with(ACTION_ID_PREFIX) {
             return Err(json!({"code":"invalid-arguments",
@@ -209,7 +232,7 @@ fn tool_definitions(profile: Profile) -> Vec<Tool> {
     TOOLS.iter().map(|(name,description,read)| {
         let mut definition = json!({
             "name":name,"description":profile.description(name, description),"inputSchema":schema(name),
-            "annotations":{"readOnlyHint":read,"destructiveHint":*name=="st_alert_answer","idempotentHint":true,"openWorldHint":*name=="st_message_send"}
+            "annotations":{"readOnlyHint":read,"destructiveHint":*name==ALERT_ANSWER,"idempotentHint":true,"openWorldHint":*name==MESSAGE_SEND}
         });
         if profile.structured_output() { definition["outputSchema"] = output_schema(name); }
         serde_json::from_value(definition).expect("static tool definition")
@@ -224,16 +247,16 @@ fn output_schema(name: &str) -> Value {
         "next_cursor":{"type":["string","null"]},"cursor_expires_at":{"type":["string","null"]}
     },"required":["limit","has_more","next_cursor"]});
     let value = match name {
-        "st_alert_get" => json!({"type":"object","properties":{
+        ALERT_GET => json!({"type":"object","properties":{
             "id":{"type":["string","null"]},"episode":{"type":["string","null"]},
             "kind":{"type":["string","null"]},"title":{},"detail":{},"request":{}
         },"required":["id","episode","kind","title","detail","request"]}),
-        "st_alert_answer" | "st_message_send" => json!({"type":"object","properties":{
+        ALERT_ANSWER | MESSAGE_SEND => json!({"type":"object","properties":{
             "kind":{"const":"action-result"},"action_id":{"type":"string"},
             "operation_id":{"type":"string"},"status":{"type":"string"},
             "affected_ids":{"type":"array","items":{"type":"string"}},"snapshot_id":{"type":"string"}
         },"required":["kind","action_id","status"]}),
-        "st_conversation_read" => json!({"type":"object","properties":{
+        CONVERSATION_READ => json!({"type":"object","properties":{
             "kind":{"const":"assistant-conversation-content"},"agent_id":{"type":"string"},
             "session_id":{"type":"string"},"reference":{"type":"string"},"revision":{"type":"string"},
             "start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":0},
@@ -244,15 +267,15 @@ fn output_schema(name: &str) -> Value {
             let mut result = json!({"type":"object","properties":{
                 "kind":{"type":"string"},"items":{"type":"array","items":{"type":"object"}},"page":page
             },"required":["kind","items","page"]});
-            if matches!(name, "st_conversation_detail" | "st_conversation_timeline") {
-                result["properties"]["kind"] = json!({"const":if name == "st_conversation_detail" {"conversation-detail"} else {"conversation-timeline"}});
+            if matches!(name, CONVERSATION_DETAIL | CONVERSATION_TIMELINE) {
+                result["properties"]["kind"] = json!({"const":if name == CONVERSATION_DETAIL {"conversation-detail"} else {"conversation-timeline"}});
                 for key in ["agent_id", "session_id", "current_session_id"] {
                     result["properties"][key] = json!({"type":"string"});
                     result["required"].as_array_mut().expect("array").push(json!(key));
                 }
             }
             else {
-                result["properties"]["kind"] = json!({"const":if name == "st_conversation_search" {"conversation-search"} else {"page"}});
+                result["properties"]["kind"] = json!({"const":if name == CONVERSATION_SEARCH {"conversation-search"} else {"page"}});
             }
             result
         }
@@ -329,6 +352,7 @@ impl Drop for CallObservation {
     }
 }
 async fn call(adapter: &Adapter, name: &str, args: &Value) -> Result<Value,Value> {
+    let name = canonical_tool_name(name);
     let mut observation = CallObservation::new(name, adapter.profile);
     let result = dispatch(adapter, name, args, &mut observation).await;
     observation.outcome = if result.is_ok() { "success" } else { "error" };
@@ -348,25 +372,25 @@ async fn call(adapter: &Adapter, name: &str, args: &Value) -> Result<Value,Value
 async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut CallObservation) -> Result<Value,Value> {
     validate_arguments(name, args)?;
     let object = args.as_object().expect("validated tool object");
-    let write = matches!(name,"st_alert_answer"|"st_message_send");
+    let write = matches!(name,ALERT_ANSWER|MESSAGE_SEND);
     let route = match name {
-        "st_alerts_list" => "attention-rich",
-        "st_alert_get" => "attention-content",
-        "st_missions_list" => "missions-rich",
-        "st_agents_list" => "agents-rich",
-        "st_conversations_list" => "conversations",
-        "st_conversation_detail" => "conversation-detail",
-        "st_conversation_timeline" => "conversation-timeline",
-        "st_conversation_search" => "conversation-search",
-        "st_conversation_read" => "conversation-content",
+        ALERTS_LIST => "attention-rich",
+        ALERT_GET => "attention-content",
+        MISSIONS_LIST => "missions-rich",
+        AGENTS_LIST => "agents-rich",
+        CONVERSATIONS_LIST => "conversations",
+        CONVERSATION_DETAIL => "conversation-detail",
+        CONVERSATION_TIMELINE => "conversation-timeline",
+        CONVERSATION_SEARCH => "conversation-search",
+        CONVERSATION_READ => "conversation-content",
         _ => "propose",
     };
     let url = format!("http://localhost/v1/client/assistant/{route}");
     let request = if write {
-        let parameters = if name == "st_alert_answer" {
+        let parameters = if name == ALERT_ANSWER {
             json!({"target_id":args["alert_id"],"episode":args["episode"],"summary":args["summary"],"answer":{"id":args["option"]}})
         } else {json!({"to":args["to"],"title":args["title"],"content":args["content"]})};
-        adapter.client.post(url).json(&json!({"api_version":"st3.client.v0","id":args["action_id"],"type":if name=="st_alert_answer" {"work.done"} else {"message.send"},"idempotency_key":args["idempotency_key"],"fence":args["fence"],"parameters":parameters}))
+        adapter.client.post(url).json(&json!({"api_version":"st3.client.v0","id":args["action_id"],"type":if name==ALERT_ANSWER {"work.done"} else {"message.send"},"idempotency_key":args["idempotency_key"],"fence":args["fence"],"parameters":parameters}))
     } else {
         let query: Vec<_> = object.iter().map(|(k,v)| (k.as_str(),v.as_str().map(str::to_owned).unwrap_or_else(||v.to_string()))).collect();
         adapter.client.get(url).query(&query)

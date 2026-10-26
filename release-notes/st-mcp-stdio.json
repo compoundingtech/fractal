@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "The claim registry assistant subject pattern expands from assistant/chatgpt[/session/assistant-grant/ID] to assistant/{chatgpt|mcp}[/session/assistant-grant/ID], changing the registry digest from 8e7ccde6e5aa6baf1abc62c3edd764e2cd5d54ac5a3e051e3c27506f2b485db7 to c7ff9a92287f2eda551d43d62c91da0007b4747f7297b0b9fca8685b6c1cd782. SCHEMA_NAME remains st3.v1 and storage schema remains 20 -> 20; no SQL tables, columns, indexes, claim kinds or claim fields are added by MCP. These digests include the current main registry at bbbebfdb56. Client-v0 adds assistant/mcp to principal/session contracts. Missing historical grant principal means ChatGPT only; explicit invalid or null principals are refused."
+    "detail": "The claim registry assistant subject pattern expands from assistant/chatgpt[/session/assistant-grant/ID] to assistant/{chatgpt|mcp}[/session/assistant-grant/ID], changing the registry digest from 8e7ccde6e5aa6baf1abc62c3edd764e2cd5d54ac5a3e051e3c27506f2b485db7 to c7ff9a92287f2eda551d43d62c91da0007b4747f7297b0b9fca8685b6c1cd782. SCHEMA_NAME remains st3.v1 and storage schema remains 20 -> 20; no SQL tables, columns, indexes, claim kinds or claim fields are added by MCP. These digests include the current main registry at c49adcb0e802baa643711082bc66611d9c0e5d6c. Client-v0 adds assistant/mcp to principal/session contracts. Missing historical grant principal means ChatGPT only; explicit invalid or null principals are refused."
   },
   "rules": {
     "status": "changed",
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Existing ChatGPT entrypoint, person pairing and legacy ChatGPT grants remain supported. st-mcp is stdio-only, uses a separate assistant/mcp profile and exposes eleven typed tools with outputSchema and structuredContent plus text mirrors. Older daemons reject MCP subjects with invalid-claim-subject and replicated MCP messages with assistant-send-refused; a custom grant record may persist but an older assistant session still rejects any principal other than assistant/chatgpt. Do not fall back to person credentials or relabel MCP as ChatGPT. Mixed-version deployment and Claude Code/Codex interoperability have not been exercised in this change."
+    "detail": "Existing ChatGPT entrypoint, person pairing and legacy ChatGPT grants remain supported. st-mcp is stdio-only, uses a separate assistant/mcp profile and exposes eleven typed fractal_* tools with outputSchema and structuredContent plus text mirrors. Both profiles hide deprecated st_* aliases from discovery while accepting cached alias calls until fractal-chatgpt 0.2.0. Older daemons reject MCP subjects with invalid-claim-subject and replicated MCP messages with assistant-send-refused; a custom grant record may persist but an older assistant session still rejects any principal other than assistant/chatgpt. Do not fall back to person credentials or relabel MCP as ChatGPT. Mixed-version deployment and Claude Code/Codex interoperability have not been exercised in this change."
   },
   "downtime": {
     "status": "unknown",
