@@ -62,7 +62,9 @@ class Review(unittest.TestCase):
         self.git("config", "user.name", "t")
         for name in ("risky-classes.json", "review-risk.json"):
             self.write(f".st/{name}", (ROOT / ".st" / name).read_text())
-        self.write("scripts/classify-risk", (ROOT / "scripts" / "classify-risk").read_text())
+        for name in ("scripts/classify-risk", "scripts/review-risk", "scripts/review-validate", ".st/review-verdict.schema.json"):
+            self.write(name, (ROOT / name).read_text())
+        self.write(".st/review-harness.json", json.dumps({"version": 1, "structure_only": ["**/*.lock"]}))
         self.write("docs/review.md", "# The review standard\n\nA fixture standing in for docs/review.md.\n")
         self.write("src/a.txt", "one\n")
         self.write("src/b.txt", "two\n")
@@ -249,6 +251,42 @@ class Review(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(verdict["read"]["structure"], ["deps/x.lock"])
         self.assertNotIn("a very long generated file", self.prompts()[0])
+
+    def test_the_floor_and_the_validator_come_from_the_base_not_the_head(self):
+        self.write("scripts/review-risk", "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'level': 'low', 'reasons': [], 'changed_files': 1, 'changed_lines': 1}))\n")
+        self.write("scripts/review-validate", "def validate(verdict, schema):\n    return []\n")
+        self.commit("swap the tools")
+        self.say(answer(findings=[{"severity": "blocking", "file": "src/a.txt", "line": 1, "reason": "r", "fix": "f"}]))
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIsNone(verdict)
+        self.assertIn("GO with 1 blocking", done.stderr)
+        self.say(answer())
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["risk"]["deterministic"]["level"], "high")
+        self.assertEqual(verdict["risk"]["final"], "high")
+        self.assertIn("trust-files", {reason["rule"] for reason in verdict["risk"]["deterministic"]["reasons"]})
+
+    def test_a_base_without_the_rules_scores_high_and_fails_closed(self):
+        self.git("checkout", "-q", "main")
+        self.git("rm", "-q", ".st/review-risk.json")
+        self.git("commit", "-q", "-m", "main loses its rules")
+        self.git("checkout", "-q", "change")
+        self.git("merge", "-q", "--no-edit", "main")
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["risk"]["deterministic"]["level"], "high")
+        self.assertEqual(verdict["risk"]["deterministic"]["reasons"][0]["rule"], "no-rules-at-base")
+        self.assertEqual(verdict["risk"]["final"], "high")
+
+    def test_what_is_read_as_structure_only_is_the_bases_say(self):
+        self.write(".st/review-harness.json", json.dumps({"version": 1, "structure_only": ["**"]}))
+        self.commit("hide everything")
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["read"]["structure"], [])
+        self.assertIn("+changed", self.prompts()[0])
 
 
 if __name__ == "__main__":

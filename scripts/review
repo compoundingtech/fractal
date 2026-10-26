@@ -56,9 +56,28 @@ def load_script(name):
     return module
 
 
-def glob_match(globs, path):
-    engine = load_script("classify-risk")
-    return engine.matches(globs, path)
+def base_text(repo, base, path):
+    """PATH as BASE holds it, or None: the tools that judge a change come from the base, never from the head under review."""
+    shown = subprocess.run(["git", "show", f"{base}:{path}"], cwd=repo, capture_output=True, text=True, errors="replace")
+    return shown.stdout if shown.returncode == 0 else None
+
+
+def base_script(repo, base, name, folder):
+    """scripts/NAME from BASE written into FOLDER, or None when BASE has none."""
+    text = base_text(repo, base, f"scripts/{name}")
+    if text is None:
+        return None
+    path = Path(folder) / name
+    path.write_text(text)
+    return path
+
+
+def load_path(name, path):
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def patch_ids(repo, merge_base, head, paths):
@@ -256,10 +275,26 @@ def assemble(answer, *, head, base, round_number, deterministic, patch, served, 
     return verdict
 
 
-def validate(verdict):
-    validator = load_script("review-validate")
-    schema = json.loads((ROOT / ".st/review-verdict.schema.json").read_text())
-    return validator.validate(verdict, schema)
+def validate(verdict, repo, base, folder):
+    """The verdict checked by BASE's validator against BASE's schema (the checkout's own only when the base has none yet)."""
+    script = base_script(repo, base, "review-validate", folder)
+    validator = load_path("review-validate", script) if script else load_script("review-validate")
+    schema_text = base_text(repo, base, ".st/review-verdict.schema.json") or (ROOT / ".st/review-verdict.schema.json").read_text()
+    return validator.validate(verdict, json.loads(schema_text))
+
+
+def deterministic_floor(repo, base, head, paths, folder):
+    """scripts/review-risk as BASE has it, run on the diff. A base with no rules yet cannot say what is safe, so the floor is high."""
+    script = base_script(repo, base, "review-risk", folder)
+    held = all(base_text(repo, base, path) is not None for path in (".st/review-risk.json", ".st/risky-classes.json", "scripts/classify-risk"))
+    if script is None or not held:
+        return {"level": "high", "changed_files": len(paths), "changed_lines": 0, "reasons": [{
+            "rule": "no-rules-at-base", "level": "high", "paths": [],
+            "lines": [f"{base[:12]} holds no scripts/review-risk, .st/review-risk.json, .st/risky-classes.json and scripts/classify-risk, so the floor fails closed"]}]}
+    done = subprocess.run([sys.executable, str(script), base, head, "--repo", str(repo)], text=True, capture_output=True)
+    if done.returncode:
+        raise Failed(f"review-risk: {done.stderr.strip()}")
+    return json.loads(done.stdout)
 
 
 def carry(previous, *, head, base, patch, digest, deterministic, merge_base):
@@ -287,18 +322,18 @@ def main():
     parser.add_argument("--previous", type=Path, help="an earlier verdict to read only the difference from (default: the record)")
     parser.add_argument("--round", type=int)
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--rules-from-checkout", action="store_true", help="score the risk floor with the checkout's own rules: only for the change that introduces them")
     parser.add_argument("--no-record", action="store_true", help="do not append the verdict to the review record")
     args = parser.parse_args()
     repo = args.repo.resolve()
     try:
-        return review(args, repo)
+        with tempfile.TemporaryDirectory(prefix="review-tools-") as tools:
+            return review(args, repo, tools)
     except Failed as error:
         print(f"review: failed: {error}", file=sys.stderr)
         return 1
 
 
-def review(args, repo):
+def review(args, repo, tools):
     config = harness_config(args.config)
     name = args.harness or os.environ.get("REVIEW_HARNESS") or config["default"]
     if name not in config["harnesses"]:
@@ -313,14 +348,15 @@ def review(args, repo):
     if not paths:
         raise Failed("the head has no change against main")
     patch = patch_ids(repo, merge_base, head, paths)
-    floor_run = subprocess.run([sys.executable, str(HERE / "review-risk"), base, head, "--repo", str(repo), *(["--rules-from-checkout"] if args.rules_from_checkout else [])], text=True, capture_output=True)
-    if floor_run.returncode:
-        raise Failed(f"review-risk: {floor_run.stderr.strip()}")
-    deterministic = json.loads(floor_run.stdout)
+    deterministic = deterministic_floor(repo, base, head, paths, tools)
     text, digest = standard(repo, base)
     previous = latest_record(repo, head, args.previous)
-    structure_globs = config.get("structure_only", [])
-    structure = [path for path in paths if glob_match(structure_globs, path)]
+    engine_path = base_script(repo, base, "classify-risk", tools)
+    engine = load_path("classify-risk", engine_path) if engine_path else load_script("classify-risk")
+    base_config = base_text(repo, base, CONFIG)
+    # What may be read as structure only is the base's say; with no base config nothing is, so everything is read in full.
+    structure_globs = json.loads(base_config).get("structure_only", []) if base_config else []
+    structure = [path for path in paths if engine.matches(structure_globs, path)]
     served = []
     changed = [path for path in paths if path not in structure]
     round_number = args.round or 1
@@ -337,7 +373,7 @@ def review(args, repo):
             remerge_text = git(repo, "show", "--remerge-diff", "--format=", head, check=False).strip()
         if not changed and not structure and not remerge_text and set(old) == set(patch):
             verdict = carry(previous, head=head, base=base, patch=patch, digest=digest, deterministic=deterministic, merge_base=merge_base)
-            return finish(args, repo, verdict, {"harness": "none", "seconds": 0, "carried_from": previous["head"], "cost_usd": 0})
+            return finish(args, repo, verdict, {"harness": "none", "seconds": 0, "carried_from": previous["head"], "cost_usd": 0}, base, tools)
     if round_number > MAX_ROUNDS:
         raise Failed(f"this would be round {round_number}; the standard allows {MAX_ROUNDS}, then the change goes to its author's own human")
     answers_note = ""
@@ -362,11 +398,11 @@ def review(args, repo):
                        changed=changed, structure=structure, reviewer=reviewer, digest=digest)
     metrics.update(files=len(paths), changed_lines=deterministic["changed_lines"], read_full=len(changed), served=len(served),
                    prompt_chars=len(prompt), round=round_number)
-    return finish(args, repo, verdict, metrics)
+    return finish(args, repo, verdict, metrics, base, tools)
 
 
-def finish(args, repo, verdict, metrics):
-    problems = validate(verdict)
+def finish(args, repo, verdict, metrics, base, folder):
+    problems = validate(verdict, repo, base, folder)
     if problems:
         for problem in problems:
             print(f"review: {problem}", file=sys.stderr)
