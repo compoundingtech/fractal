@@ -7518,7 +7518,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        let mut starting = member_fields(member, "starting", incarnation.as_deref(), false);
+        // Native drivers must bind before readiness can be established. Publish running
+        // authority at launch completion only for the physically observed incarnation
+        // owned by this start operation; readiness and restart completion remain separate.
+        let running = if let Some(incarnation) = incarnation.as_deref() {
+            self.runtime.observe_start(member)?.is_some_and(|observation| {
+                observation.status == "running"
+                    && observation.incarnation_id.as_deref() == Some(incarnation)
+            }) && self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+                .as_deref() == Some(operation_id)
+        } else {
+            false
+        };
+        let mut starting = member_fields(
+            member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
+        );
         if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
             && let Some(from) = actual_field(&previous, "restarting_from")
         {
@@ -23834,6 +23848,21 @@ agent "import/omp/repair-order" {{
         old.import_replication("author", &declaration.export_replication(0).unwrap())
             .unwrap();
         let append_binding = |store: &Store, incarnation: &str| {
+            // A driver's binding is accepted only while its incarnation is the running one.
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some(seat.into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("incarnation_id".into(), Value::String(incarnation.into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
             store
                 .append_claim(&ClaimInput {
                     subject: seat.into(),
@@ -24032,6 +24061,20 @@ agent "import/omp/repair-order" {{
         old_build
             .append_claim(&ClaimInput {
                 subject: seat.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(seat.into()),
+                fields: BTreeMap::from([
+                    ("status".into(), Value::String("running".into())),
+                    ("incarnation_id".into(), Value::String("old-build".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        old_build
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
                 kind: "harness.session-file".into(),
                 actor: Some(seat.into()),
                 fields: BTreeMap::from([
@@ -24104,6 +24147,21 @@ agent "import/omp/fixture" {{
                     "desired_token".into(),
                     Value::String(store.launch_lineage(&subject.subject).unwrap().pop().unwrap()),
                 );
+                // A driver's binding is accepted only while its incarnation is the running one.
+                store
+                    .append_claim(&ClaimInput {
+                        subject: subject.subject.clone(),
+                        kind: "runtime.observed".into(),
+                        actor: Some(subject.subject.clone()),
+                        fields: BTreeMap::from([
+                            ("status".into(), Value::String("running".into())),
+                            ("incarnation_id".into(), Value::String(incarnation.into())),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
             }
             store
                 .append_claim(&ClaimInput {
