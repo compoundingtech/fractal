@@ -2187,7 +2187,7 @@ mod tests {
             matches!(&item.kind, AttentionKind::Review { feedback: true, step, .. } if step == "review")
         );
         assert_eq!(item.agent.as_deref(), Some("agent/example/auditor"));
-        assert_eq!(item.raised_by.as_deref(), Some("st"));
+        assert_eq!(item.raised_by.as_deref(), Some("Fractal"));
         assert_eq!(item.waiting.as_deref(), Some("step review"));
     }
 
@@ -2600,7 +2600,7 @@ mod tests {
         })]);
         let seat = &agents(&model, &[])[0];
         assert_eq!((seat.state, seat.reported.as_deref()), (AgentState::Unknown, Some("running")));
-        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older st");
+        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older Fractal");
         let world = world(&model, "person/avery", &Extras::default());
         let legend = super::super::screens::agents_list(&world, "⠋", 80)
             .legend

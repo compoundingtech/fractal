@@ -4598,7 +4598,7 @@ fn cli_main() -> ExitCode {
     if let Some(program) = fractal_daemon::recorder::invoked_program() {
         fractal_daemon::recorder::run(program);
     }
-    let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    let arguments = std::env::args_os().collect::<Vec<_>>();
     // Parse the local launcher before any raw scanner can mistake its state path
     // for an unrelated option. Inspect clap's value sources, never raw tokens.
     if arguments.get(1).is_some_and(|argument| argument == "web") {
