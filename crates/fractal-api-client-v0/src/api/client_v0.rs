@@ -8613,9 +8613,21 @@ async fn action_inner(
         format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
     ));
     let receipt_subject = format!("custom/client/action-{}", &receipt_digest[..32]);
+    // The old open custom namespace admitted client receipts with absent/null actors.
+    // Never dispatch an already-used legacy key or infer authorship from those fields.
+    if !state.store.claims_for(&receipt_subject, Some("custom.client.action-result"))
+        .map_err(ApiError::internal)?.is_empty()
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "legacy-action-receipt-untrusted".into(),
+            message: "this idempotency key has an unverifiable legacy receipt; inspect the original outcome before choosing a new key".into(),
+            details: Box::default(),
+        });
+    }
     if let Some(receipt) = state
         .store
-        .claims_for(&receipt_subject, Some("custom.client.action-result"))
+        .claims_for(&receipt_subject, Some("client.action-result"))
         .map_err(ApiError::internal)?
         .into_iter()
         .filter(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
@@ -8862,7 +8874,7 @@ async fn action_inner(
         .remove("terminal_attachment");
     let receipt_write = state.store.append_claim(&ClaimInput {
         subject: receipt_subject.clone(),
-        kind: "custom.client.action-result".into(),
+        kind: "client.action-result".into(),
         actor: None,
         fields: BTreeMap::from([
             (
@@ -8885,7 +8897,7 @@ async fn action_inner(
         }
         let receipt = state
             .store
-            .claims_for(&receipt_subject, Some("custom.client.action-result"))
+            .claims_for(&receipt_subject, Some("client.action-result"))
             .map_err(ApiError::internal)?
             .into_iter()
             .filter(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
@@ -13171,7 +13183,7 @@ subscription "watch/source" {
             assert_eq!(result["launcher_binding"], binding.attribution());
             assert_eq!(result["launcher_binding"]["credential_home_label"], "launcher-codex");
             assert!(!result.to_string().contains("/logins/"));
-            let receipts = state.store.claims_for_kind_at("custom.client.action-result", None, true, 100).unwrap();
+            let receipts = state.store.claims_for_kind_at("client.action-result", None, true, 100).unwrap();
             let persisted = receipts.claims.first().unwrap();
             assert_eq!(persisted.body["fields"]["result"]["launcher_binding"], binding.attribution());
             assert!(!persisted.body.to_string().contains("/logins/"));
@@ -14754,7 +14766,7 @@ subscription "watch/source" {
         .unwrap()
         .0;
         assert_eq!(replay["affected_ids"], first["affected_ids"]);
-        for kind in ["message.sent", "custom.client.action-result"] {
+        for kind in ["message.sent", "client.action-result"] {
             assert_eq!(
                 state
                     .store
@@ -14855,7 +14867,7 @@ subscription "watch/source" {
         .unwrap()
         .0;
         assert!(!receipt["affected_ids"].as_array().unwrap().is_empty());
-        for kind in ["message.sent", "custom.client.action-result"] {
+        for kind in ["message.sent", "client.action-result"] {
             assert_eq!(
                 state
                     .store
@@ -14884,7 +14896,7 @@ subscription "watch/source" {
 
     #[tokio::test]
     async fn forged_action_receipts_cannot_replay_launcher_attribution() {
-        for peer in [false, true] {
+        for (peer, null_actor) in [(false, false), (false, true), (true, true)] {
             let root = tempfile::tempdir().unwrap();
             let state = test_state(root.path());
             let session = ClientSession::local(Some("person/alex")).unwrap();
@@ -14900,7 +14912,7 @@ subscription "watch/source" {
             let forged = ClaimInput {
                 subject: format!("custom/client/action-{}", &digest[..32]),
                 kind: "custom.client.action-result".into(),
-                actor: if peer { None } else { Some(session_claim_actor(&session)) },
+                actor: if null_actor { None } else { Some(session_claim_actor(&session)) },
                 fields: BTreeMap::from([
                     ("request_digest".into(), json!(action_request_digest(&request).unwrap())),
                     ("result".into(), json!({"status":"completed", "affected_ids":["agent/forged"],
@@ -14909,6 +14921,9 @@ subscription "watch/source" {
                 evidence: vec![], expected_subject: None, idempotency_key: None,
             };
             assert_eq!(state.store.append_client_claim(&forged).unwrap_err().code, "claim-write-forbidden");
+            let mut reserved = forged.clone();
+            reserved.kind = "client.action-result".into();
+            assert_eq!(state.store.append_client_claim(&reserved).unwrap_err().code, "claim-write-forbidden");
             if peer {
                 let source = Store::open_memory("malicious-peer").unwrap();
                 source.append_claim(&forged).unwrap();
@@ -14922,8 +14937,11 @@ subscription "watch/source" {
                 // Simulate a pre-hardening client-authored local claim already on disk.
                 state.store.append_claim(&forged).unwrap();
             }
-            assert!(action(State(state.clone()), Extension(new_client_snapshot(&state)),
-                Extension(session), Json(request)).await.is_err());
+            let before = state.store.status(None).unwrap().store_index;
+            let error = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session), Json(request)).await.unwrap_err();
+            assert_eq!(error.code, "legacy-action-receipt-untrusted");
+            assert_eq!(state.store.status(None).unwrap().store_index, before);
         }
     }
 
@@ -14968,7 +14986,7 @@ subscription "watch/source" {
             Json(request),
         ).await.unwrap_err();
         assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "idempotency-conflict");
+        assert_eq!(error.code, "legacy-action-receipt-untrusted");
         assert_eq!(state.store.status(None).unwrap().store_index, before);
         assert!(state.store.claims_for_kind_at("message.sent", None, true, 100)
             .unwrap().claims.is_empty());
@@ -21762,7 +21780,7 @@ mission "example/zero-run" state="ready" {
         assert_eq!(
             page.claims
                 .iter()
-                .filter(|claim| claim.kind == "custom.client.action-result")
+                .filter(|claim| claim.kind == "client.action-result")
                 .count(),
             1
         );

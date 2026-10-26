@@ -661,7 +661,9 @@ impl Registry {
                 "a custom claim must use custom.NAMESPACE.NAME",
             ));
         }
-        if subject_spec.family == "custom" && !kind.starts_with("custom.") {
+        if subject_spec.family == "custom" && !kind.starts_with("custom.")
+            && !self.claims.get(kind).is_some_and(|spec| spec.subjects.iter().any(|family| family == "custom"))
+        {
             return Err(error(
                 "invalid-custom-subject-claim",
                 "a custom/ subject requires a custom. claim",
@@ -2040,6 +2042,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Cardinality::Append, None, true, &[],
         ),
         (
+            "client.action-result", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Append, None, true, &[],
+        ),
+        (
             "agent.retired",
             &["agent"],
             WritePolicy::SystemOnly,
@@ -3362,7 +3368,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("preserved_incarnation", string()),
             ("request", FieldSpec { required: true, ..object() }),
         ],
-        "custom.client.action-result" => &[
+        "custom.client.action-result" | "client.action-result" => &[
             ("authority_actor", string()),
             ("request_digest", required_string()),
             ("result", FieldSpec { required: true, ..object() }),
@@ -5001,6 +5007,17 @@ mod tests {
         assert_eq!(
             registry().validate_subject("custom/acme").unwrap_err().code,
             "invalid-custom-subject"
+        );
+    }
+
+    #[test]
+    fn server_action_receipt_namespace_was_not_admissible_as_a_custom_claim() {
+        let mut legacy = registry().clone();
+        legacy.claims.remove("client.action-result");
+        assert_eq!(
+            legacy.validate_claim("custom/client/action-example", "client.action-result", &BTreeMap::new())
+                .unwrap_err().code,
+            "invalid-custom-subject-claim"
         );
     }
 
