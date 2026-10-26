@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { KIT_CASE_OVERRIDES } from './kit-play-commit-set.mjs'
 import { assertStrictEvidence } from './kit-play-gate-runner.mjs'
 
 // A fixture build with the strict policy's aliases and kept bases. Like Storybook's addon-a11y,
@@ -57,9 +58,10 @@ const policyFixtureIds = [
   'fractal-ui-composer--footer-width-budget-light',
   'fractal-ui-composer--footer-width-budget',
   'fractal-ui-sidebar-tree--filter-keystroke-to-paint',
+  'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed',
 ]
 
-const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides, retainWebStorage = false } = {}) => {
+const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides = [...KIT_CASE_OVERRIDES], productionPolicy = false, retainWebStorage = false } = {}) => {
   const directory = await mkdtemp(join(tmpdir(), 'kit-play-gate-test-'))
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
@@ -75,7 +77,7 @@ const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides,
     await writeFile(join(build, 'away.html'), '<!doctype html><title>Not Storybook</title>')
     // The job's own KIT_PLAY_* options (CI sets them per event) must not reach the fixture runs.
     const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('KIT_PLAY_')))
-    const args = fixtureOverrides === undefined && !retainWebStorage
+    const args = productionPolicy
       ? [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output]
       : ['--input-type=module', '--eval', `
           import { runKitPlayGate } from ${JSON.stringify(new URL('./kit-play-gate-runner.mjs', import.meta.url).href)}
@@ -125,7 +127,7 @@ test('full set with a11y requires one passed a11y report per case', { timeout: 6
   const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: '', KIT_PLAY_A11Y: '', KIT_PLAY_MAX_SECONDS: '' } })
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
-  assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 7, 17])
+  assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 8, 21])
   assert.ok(receipt.cpu.count > 0 && receipt.cpu.busyCoreMinutes >= 0 && receipt.cpu.loadavgEnd.length === 3)
   for (const row of receipt.rows) {
     assert.ok(row.timings.playMilliseconds > 0)
@@ -134,7 +136,7 @@ test('full set with a11y requires one passed a11y report per case', { timeout: 6
     assert.ok(Math.abs(sum - row.timings.readinessAfterDomMilliseconds) < 0.001)
   }
   assert.equal(receipt.phaseMilliseconds.a11yMilliseconds.samples, receipt.cases)
-  assert.equal(receipt.topCases.length, 17)
+  assert.equal(receipt.topCases.length, 20)
   assert.equal(receipt.storyFamilies.reduce((sum, family) => sum + family.cases, 0), receipt.cases)
 })
 test('receipts retain each worker predecessor despite receipt sorting', { timeout: 60000 }, async () => {
@@ -175,7 +177,14 @@ test('fixture code can inject its policy through the runner parameter, not proce
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
   assert.deepEqual(receipt.caseOverrides, {})
-  assert.equal(receipt.cases, 28)
+  assert.equal(receipt.cases, 32)
+})
+
+test('the production policy still requires the app cleanup story in the complete build', { timeout: 60000 }, async () => {
+  const { code, receipt } = await runGate({ productionPolicy: true })
+  assert.equal(code, 1)
+  assert.equal(receipt.cases, 0)
+  assert.match(receipt.fatalError, /names fractal-narrow-layout--sidebar-drag-unmount-cleanup, which is not a known story/)
 })
 
 test('empty, duplicate, and wrong-story strict evidence fail closed', () => {
