@@ -333,6 +333,8 @@ For screenshots without a real st, `node demoGateway.mjs 8791` serves invented d
 It completes the phone's real device-key verification read-only: the unauthenticated capabilities preflight is the raw advertisement, and pairing answers with an invented host-signed person-root proof and no signing grant, so the phone still runs its own checks.
 Like the real gateway, its collections socket sends a WebSocket protocol ping every eight seconds, keeping an idle native client inside its twenty-four-second receive deadline.
 
+`apps/ios/scripts/landing-screenshots --gateway-host LAN_IPV4 --output DIR` automates this on a disposable simulator. It sets `EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1`, which disables only the Debug LogBox overlay; warnings still reach `metro.log`. Normal Debug launches and Release builds do not apply this capture-only policy. The flow requires the unpinned-pairing confirmation, allows at most three presses while that confirmation is absent and its enabled button remains visible, and submits pairing only once. Alongside the four PNGs, `pairing-simulator.log` retains simulator unified logs from app launch through pairing, including on failure. Treat these diagnostic logs as private and review them before sharing.
+
 Generated `ios/`, build output, signing material, local configuration, and proof screenshots are ignored by Git. Do not commit Apple team/device IDs, credentials, machine paths, or private network addresses. Expo SDK 57 needs the `expo-build-properties` scene-lifecycle opt-in for Xcode 27/iOS 27.
 
 ## Push registration, opt-in
