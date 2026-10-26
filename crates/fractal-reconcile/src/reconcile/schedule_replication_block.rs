@@ -27,7 +27,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(failure) = self.store.operational_failure(&attention)?
             && failure.status == "pending" {
             self.store.recover_operational_failure(&attention,
-                "The replication gate cleared, or this member no longer owns the active schedule.",
+                "The gate cleared, the blocked tick progressed, or this member no longer owns the active schedule.",
                 &format!("schedule-replication-cleared:{}", failure.request))?;
         }
         Ok(())
@@ -136,7 +136,9 @@ mod tests {
     fn setup(clock: &str) -> (Arc<Store>, Reconciler<FakeRuntime>, DesiredSubject) {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, &format!(r#"version 2
-schedule "orchard" {{ {clock} }}"#), "initial");
+schedule "orchard" {{ {clock}
+ work {{ mission "orchard"; workspace "/workspace/orchard" }}
+}}"#), "initial");
         let schedule = store.desired_subjects().unwrap().into_iter().find(|s| s.kind == "schedule").unwrap();
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
             "node".into(), Arc::new(Notify::new())).with_schedule_peers(vec!["peer".into()]);
@@ -205,9 +207,43 @@ schedule "orchard" {{ {clock} }}"#), "initial");
         let warning = store.operational_failure(&attention).unwrap().unwrap();
         assert!(warning.reason.contains(&format!("occurrence {original},")));
         apply_source(&store, r#"version 2
-schedule "orchard" { every "2m"; anchor "2020-01-01T00:00:00Z"; catch-up "skip" }"#, "changed");
+schedule "orchard" {
+ every "2m"; anchor "2020-01-01T00:00:00Z"; catch-up "skip"
+ work { mission "orchard"; workspace "/workspace/orchard" }
+}"#, "changed");
         let changed = store.desired_subjects().unwrap().into_iter().find(|s| s.kind == "schedule").unwrap();
         reconciler.observe_schedule_replication_gate(&changed, false, wall + 900_001).unwrap();
         assert_ne!(store.operational_failure(&attention).unwrap().unwrap().status, "pending");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replicated_active_run_retires_warning_before_open_work_return() {
+        let (store, reconciler, schedule) = setup(r#"at "2020-01-01T00:00:00Z""#);
+        let wall = now_ms();
+        reconciler.observe_schedule_replication_gate(&schedule, false, wall).unwrap();
+        tokio::time::advance(BLOCKED_TICK_AFTER).await;
+        reconciler.observe_schedule_replication_gate(&schedule, false, wall + 900_000).unwrap();
+        let attention = attention_subject(&schedule.subject, "node");
+        assert_eq!(store.operational_failure(&attention).unwrap().unwrap().status, "pending");
+        apply_source(&store, r#"version 2
+mission "orchard" state="ready" {
+ goal "Exercise replicated schedule progress."
+ step "wait" { agentless }
+}"#, "mission");
+        let root = tempfile::tempdir().unwrap();
+        let run = store.create_mission_run(&MissionRunRequest {
+            mission: "orchard".into(), revision: None, workspace: root.path().display().to_string(),
+            requester: None, mode: Some("run".into()), inputs: BTreeMap::new(),
+            idempotency_key: "active-orchard".into(),
+        }).unwrap();
+        store.append_claim(&ClaimInput {
+            subject: schedule.subject.clone(), kind: "schedule.work-started".into(), actor: None,
+            fields: BTreeMap::from([("mission_run".into(), Value::String(run.subject))]),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("started-orchard".into()),
+        }).unwrap();
+        assert!(store.schedule_has_active_started_run(&schedule.subject).unwrap());
+        reconciler.reconcile_schedule(&schedule).unwrap();
+        assert_ne!(store.operational_failure(&attention).unwrap().unwrap().status, "pending");
+        assert!(reconciler.schedule_replication_blocks.lock().unwrap().is_empty());
     }
 }

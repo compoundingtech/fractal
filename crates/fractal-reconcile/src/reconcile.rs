@@ -14649,6 +14649,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         }
         if self.schedule_has_open_work(&schedule.subject)? {
+            if self.store.schedule_has_active_started_run(&schedule.subject)? {
+                self.clear_schedule_replication_block(schedule)?;
+            }
             return Ok(());
         }
         if !self.schedules_caught_up(schedule)? {
