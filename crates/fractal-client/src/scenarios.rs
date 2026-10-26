@@ -154,17 +154,15 @@ impl Slice {
     pub fn decode(&self) -> Result<Vec<DecodedValue>> {
         let mut out = Vec::new();
         let mut add = |pointer: String, definition: &str, value: &Value| -> Result<()> {
-            if self.decode == DecodeMode::Strict {
-                strict_validator(definition)?.validate(value)
-                    .map_err(|error| anyhow::anyhow!("strict {definition} at {pointer}: {error}"))?;
-            }
+            validator(definition, self.decode)?.validate(value)
+                .map_err(|error| anyhow::anyhow!("{:?} {definition} at {pointer}: {error}", self.decode))?;
             let decoded = match definition {
-                "TimelineEntry" => WireValue::TimelineEntry(serde_json::from_value(value.clone())?),
-                "TerminalScreen" => WireValue::TerminalScreen(serde_json::from_value(value.clone())?),
-                "Capabilities" => WireValue::Capabilities(serde_json::from_value(value.clone())?),
-                "ErrorEnvelope" => WireValue::ErrorEnvelope(serde_json::from_value(value.clone())?),
-                "SyncPeer" => WireValue::SyncPeer(serde_json::from_value(value.clone())?),
-                _ => WireValue::Resource(serde_json::from_value(value.clone())?),
+                "TimelineEntry" => WireValue::TimelineEntry(crate::TimelineEntry::deserialize(value)?),
+                "TerminalScreen" => WireValue::TerminalScreen(crate::TerminalScreen::deserialize(value)?),
+                "Capabilities" => WireValue::Capabilities(crate::Capabilities::deserialize(value)?),
+                "ErrorEnvelope" => WireValue::ErrorEnvelope(crate::ErrorEnvelope::deserialize(value)?),
+                "SyncPeer" => WireValue::SyncPeer(crate::SyncPeer::deserialize(value)?),
+                _ => WireValue::Resource(crate::Resource::deserialize(value)?),
             };
             out.push(DecodedValue { pointer, value: decoded });
             Ok(())
@@ -246,16 +244,19 @@ fn add_terminal(add: &mut AddWire<'_>, base: &str, record: &Value) -> Result<()>
 
 // Serde's production models deliberately accept future fields/enums. Strict fixtures additionally
 // use the authoritative schema with open enums closed and composed resource objects closed.
-fn strict_validator(definition: &str) -> Result<&'static jsonschema::Validator> {
-    static VALIDATORS: LazyLock<Result<BTreeMap<String, jsonschema::Validator>, String>> =
-        LazyLock::new(|| build_validators().map_err(|error| error.to_string()));
-    let validators = VALIDATORS
+fn validator(definition: &str, mode: DecodeMode) -> Result<&'static jsonschema::Validator> {
+    static STRICT: LazyLock<Result<BTreeMap<String, jsonschema::Validator>, String>> =
+        LazyLock::new(|| build_validators(DecodeMode::Strict).map_err(|error| error.to_string()));
+    static TOLERANT: LazyLock<Result<BTreeMap<String, jsonschema::Validator>, String>> =
+        LazyLock::new(|| build_validators(DecodeMode::Tolerant).map_err(|error| error.to_string()));
+    let validators = match mode { DecodeMode::Strict => &*STRICT, DecodeMode::Tolerant => &*TOLERANT }
         .as_ref().map_err(|error| anyhow::anyhow!(error.clone()))?;
     validators.get(definition).with_context(|| format!("unknown wire definition: {definition}"))
 }
 
-fn build_validators() -> Result<BTreeMap<String, jsonschema::Validator>> {
+fn build_validators(mode: DecodeMode) -> Result<BTreeMap<String, jsonschema::Validator>> {
     let mut schema: Value = serde_json::from_str(include_str!("../../../docs/st3/client-v0/schemas/client-v0.schema.json"))?;
+    if mode == DecodeMode::Strict {
     let header = schema["$defs"]["ResourceHeader"].clone();
     schema["$defs"]["UnknownResource"] = Value::Bool(false);
     for definition in schema["$defs"].as_object_mut().context("missing schema definitions")?.values_mut() {
@@ -268,12 +269,17 @@ fn build_validators() -> Result<BTreeMap<String, jsonschema::Validator>> {
                     properties.entry(key.clone()).or_insert_with(|| value.clone());
                 }
                 let required = object["required"].as_array_mut().context("missing resource required fields")?;
-                required.extend(header["required"].as_array().context("missing header required fields")?.iter().cloned());
+                for field in header["required"].as_array().context("missing header required fields")? {
+                    if !required.contains(field) { required.push(field.clone()); }
+                }
                 *definition = object;
             }
         }
     }
     close_schema(&mut schema);
+    } else {
+        allow_excess_fields(&mut schema);
+    }
     schema.as_object_mut().context("schema is not an object")?.remove("oneOf");
     let mut out = BTreeMap::new();
     for name in ["Agent", "Arrangement", "Runtime", "Machine", "Mission", "Work", "Attention", "Message", "Resource", "TimelineEntry", "TerminalScreen", "Capabilities", "ErrorEnvelope", "SyncPeer"] {
@@ -300,6 +306,19 @@ fn close_schema(schema: &mut Value) {
             for value in object.values_mut() { close_schema(value); }
         }
         Value::Array(values) => { for value in values { close_schema(value); } }
+        _ => {}
+    }
+}
+
+fn allow_excess_fields(schema: &mut Value) {
+    match schema {
+        Value::Object(object) => {
+            if object.get("additionalProperties") == Some(&Value::Bool(false)) {
+                object.remove("additionalProperties");
+            }
+            for value in object.values_mut() { allow_excess_fields(value); }
+        }
+        Value::Array(values) => { for value in values { allow_excess_fields(value); } }
         _ => {}
     }
 }
