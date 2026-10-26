@@ -25,7 +25,12 @@ def receipt(event, **fields):
 
 
 def st(*args):
-    result = subprocess.run([os.environ["ST3_BIN"], *args], capture_output=True, text=True, timeout=60)
+    argv = [os.environ["ST3_BIN"], *args]
+    if args[:2] == ("work", "claim") and (Path.cwd() / "claim-socket-denied").exists():
+        import sys
+        argv = [sys.executable, str(Path(__file__).with_name("deny-socket-connect.py")),
+                os.environ["ST3_BIN"], "--daemon-wait", "30", *args]
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     return result
 
 
@@ -42,5 +47,8 @@ def act(content):
         receipt("read", reference=reference, exit=result.returncode, stderr=result.stderr[-1000:])
     if command:
         argv = shlex.split(command.group(1))[1:]
+        started = time.monotonic()
         result = st(*argv)
-        receipt("claim", command=command.group(1), exit=result.returncode, stderr=result.stderr[-1000:])
+        receipt("claim", command=command.group(1), exit=result.returncode,
+                seconds=time.monotonic() - started, stderr=result.stderr[-4096:])
+        return command.group(1), result

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { FabricSession, nativeRefusedAfter } from './fabricSession.ts';
+import { FabricSession, nativeRefusalAfter, nativeRefusedAfter } from './fabricSession.ts';
 
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const fixture = overrides => {
@@ -100,4 +100,12 @@ test('native refusals are scoped to attempts after this trial began', () => {
   assert.equal(nativeRefusedAfter({ attempts: [{ id: 3, result: 'refused' }] }, 2), true);
   assert.equal(nativeRefusedAfter({ attempts: [{ id: '3', result: 'refused' }] }, 2), false);
   assert.equal(nativeRefusedAfter({}, 0), false);
+});
+
+test('a native refusal carries fabric\'s typed code when the bridge recorded one', () => {
+  assert.deepEqual(nativeRefusalAfter({ attempts: [{ id: 3, result: 'refused', code: 'peer_not_in_allow_list' }] }, 2), { code: 'peer_not_in_allow_list' });
+  assert.deepEqual(nativeRefusalAfter({ attempts: [{ id: 3, result: 'refused' }] }, 2), { code: null }, 'an older member sends no code');
+  assert.deepEqual(nativeRefusalAfter({ attempts: [{ id: 3, result: 'refused', code: 'Not A Code!' }] }, 2), { code: null });
+  assert.equal(nativeRefusalAfter({ attempts: [{ id: 2, result: 'refused', code: 'peer_not_in_allow_list' }, { id: 3, result: 'rejected', code: 'service_unavailable' }] }, 2), null, 'an earlier refusal or a fault is not this refusal');
+  assert.equal(nativeRefusalAfter({}, 0), null);
 });

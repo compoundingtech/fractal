@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Serve current first frames and live updates for uncaptured subscriptions in recorded scenario worlds",
+  "replay": {"status": "none", "detail": "No daemon claim replay or recovery changes. Scenario replay distinguishes captured subscribe commands from new subscriptions: captured commands retain exact wire boundaries, while new subscriptions snapshot folded state and follow timeline events without duplicate recorded frames."},
+  "schema": {"status": "none", "detail": "No public wire schema or committed fixture changes. Imported scenario transport metadata additionally retains captured subscribe commands and clock offsets."},
+  "rules": {"status": "none", "detail": "No checkpoint or rule changes."},
+  "compatibility": {"status": "none", "detail": "Conversation and collection frame shapes remain unchanged. Pending conversations receive empty replacement snapshots; present conversations receive their current folded page. Catalog onboarding already uses folded-state replay and now has exact thread-creation boundary coverage."},
+  "downtime": {"status": "none", "detail": "No service deployment or interruption required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or recovery restrictions."}
+}

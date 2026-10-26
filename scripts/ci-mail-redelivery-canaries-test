@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import runpy
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -14,7 +15,8 @@ assert len(required) >= 19
 with tempfile.TemporaryDirectory() as directory:
     tmp = Path(directory)
     cargo = tmp / 'cargo'
-    cargo.write_text('''#!/usr/bin/env python3
+    # The interpreter path is explicit so the stand-in runs where /usr/bin/env does not exist (the Nix sandbox).
+    cargo.write_text('#!' + sys.executable + '''
 import json, os, sys
 from pathlib import Path
 with Path(os.environ['CARGO_CALLS']).open('a') as stream:
@@ -36,9 +38,10 @@ else:
     # Product-boundary checks have their own suite; these stand-ins isolate status propagation.
     wrapper_root = tmp / 'wrapper'
     (wrapper_root / 'scripts').mkdir(parents=True)
-    for name in ('ci-linux', 'ci-mail-redelivery-canaries'):
+    for name in ('ci-linux', 'ci-mail-redelivery-canaries', 'script-test-supervisor',
+                 'st3_test_process.py', 'st3_test_evidence.py', 'script_process.py'):
         (wrapper_root / 'scripts' / name).write_text((ROOT / 'scripts' / name).read_text())
-    for name in ('check-st-boundary-test', 'check-st-boundary'):
+    for name in ('ci-cargo-tools-env-test', 'ci-rustc-wrapper-test', 'sccache-evidence-test', 'check-st-boundary-test', 'st3-boot-canaries-offers-test', 'check-st-boundary'):
         (wrapper_root / 'scripts' / name).write_text('pass\n')
 
     def check(case, expected, wrapper=False):

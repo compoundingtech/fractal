@@ -6,7 +6,7 @@
 use super::*;
 use rusqlite::{params_from_iter, types::Value as SqlValue};
 
-pub(super) const SCHEMA: &str = r#"
+pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h73fef5e24de5 owner=smallclaims::ivm::install::prepared TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS ivm_install_deferred (
  source TEXT PRIMARY KEY, row_limit INTEGER NOT NULL, byte_limit INTEGER NOT NULL,
  reference_limit INTEGER NOT NULL, capturing INTEGER NOT NULL DEFAULT 0
@@ -95,6 +95,12 @@ struct Table {
     columns: Vec<String>,
     keys: Vec<String>,
 }
+// Private, one-call staging only: no schema authority or reusable proof. The image
+// is consumed after the caller's final cookie check and is dropped on refusal.
+struct TableImage {
+    tables: BTreeMap<String, Table>,
+}
+
 #[derive(Clone, Debug)]
 struct Write {
     sql: String,
@@ -177,95 +183,200 @@ impl PreparedPage {
     /// Call in the SAME read snapshot as prepare_*, before any off-writer computation.
     /// Ordinary namespace-keyed tables only. Generated/virtual tables are unsupported.
     pub fn capture_table(&mut self, db: &Connection, name: &str) -> Result<()> {
-        identifier(name)?;
+        self.capture_tables(db, &[name])
+    }
+
+    /// Capture a bounded group on the supplied preparation cut, sharing one foreign-key
+    /// inventory traversal. Nothing is cached across calls/cuts; all metadata is accepted
+    /// together only after every shape and fanout check succeeds. Duplicate group names refuse;
+    /// the single-table wrapper may still recapture an existing table. Schema row caps do not
+    /// qualify SQLite metadata VM/byte work; callers still need actual work accounting.
+    pub fn capture_tables(&mut self, db: &Connection, names: &[&str]) -> Result<()> {
+        ensure!(
+            !names.is_empty() && names.len() <= self.limits.tables,
+            "prepared table bound exceeded"
+        );
+        let requested = names
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        ensure!(requested.len() == names.len(), "duplicate prepared table");
+        for &name in names {
+            identifier(name)?;
+        }
+        ensure!(
+            self.tables
+                .keys()
+                .map(String::as_str)
+                .chain(names.iter().copied())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                <= self.limits.tables,
+            "prepared table bound exceeded"
+        );
+        // The caller owns one preparation snapshot. Stage read-only metadata privately;
+        // the final schema check below rejects a changed cut before accepting any table.
+        // A second cookie read here does not strengthen that same-cut acceptance check.
+        let image = self.capture_table_image(db, names)?;
         ensure!(
             schema_version(db)? == self.schema_version,
             "prepared table schema changed"
         );
-        ensure!(
-            self.tables.len() < self.limits.tables || self.tables.contains_key(name),
-            "prepared table bound exceeded"
-        );
-        let kind: String = db.query_row(
-            "SELECT type FROM pragma_table_list WHERE schema='main' AND name=?1",
-            [name],
-            |r| r.get(0),
+        self.tables.extend(image.tables);
+        Ok(())
+    }
+
+    fn capture_table_image(&self, db: &Connection, names: &[&str]) -> Result<TableImage> {
+        let tables = self.capture_table_shapes(db, names)?;
+        // Every SQLite foreign-key declaration contains the ASCII REFERENCES keyword.
+        // Skip the per-table PRAGMA only when that keyword is absent from its schema SQL;
+        // comments/strings and missing SQL conservatively take the authoritative PRAGMA
+        // path. Keep every table in the inventory, including those without foreign keys.
+        // The materialized inventory preserves the old 256-table refusal. Stream counts to
+        // preserve the old 128 FK-column-row cap, including unrelated tables. The extra
+        // global row detects truncation instead of treating an incomplete walk as safe.
+        const SCHEMA_TABLES: usize = 256;
+        const FK_ROWS: usize = 128;
+        let mut statement = db.prepare(
+            /* sqlite-large-value: allow-for-now lv-hab8b98d376f8 owner=smallclaims::ivm::install::prepared TODO=trace-statement-and-value-representation */ "WITH inventory AS MATERIALIZED (
+               SELECT name,sql IS NULL OR instr(upper(sql),'REFERENCES')>0 AS possible_fk
+               FROM main.sqlite_schema WHERE type='table' ORDER BY name LIMIT 257
+             )
+             SELECT inventory.name,NULL,NULL FROM inventory WHERE NOT possible_fk
+             UNION ALL
+             SELECT inventory.name,f.id,f.\"table\"
+             FROM inventory LEFT JOIN pragma_foreign_key_list(inventory.name,'main') AS f ON 1
+             WHERE possible_fk
+             LIMIT ?1",
         )?;
-        ensure!(kind == "table", "prepared virtual/shadow table unsupported");
-        let mut statement =
-            db.prepare("SELECT name,pk,hidden FROM pragma_table_xinfo(?1) LIMIT 129")?;
-        let fields = statement
-            .query_map([name], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, u32>(1)?,
-                    r.get::<_, u32>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ensure!(
-            !fields.is_empty() && fields.len() <= 128 && fields.iter().all(|f| f.2 == 0),
-            "prepared generated/oversized table unsupported"
-        );
-        ensure!(
-            !db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name=?1)",
-                [name],
-                |r| r.get::<_, bool>(0)
-            )?,
-            "prepared output triggers unsupported"
-        );
-        // Reject every foreign-key edge touching this output: cascades could turn a
-        // bounded point write into unbounded work. Inspect only a bounded schema inventory.
-        let mut inventory = db
-            .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name LIMIT 257")?;
-        let names = inventory
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ensure!(
-            names.len() <= 256,
-            "prepared schema inventory exceeds bound"
-        );
-        for candidate in names {
-            let mut fk =
-                db.prepare("SELECT \"table\" FROM pragma_foreign_key_list(?1) LIMIT 129")?;
-            let targets = fk
-                .query_map([&candidate], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = statement.query([(SCHEMA_TABLES * FK_ROWS + 1) as i64])?;
+        let mut inventory = BTreeMap::<String, usize>::new();
+        let mut count = 0;
+        while let Some(row) = rows.next()? {
+            count += 1;
             ensure!(
-                targets.len() <= 128,
+                count <= SCHEMA_TABLES * FK_ROWS,
                 "prepared foreign-key inventory exceeds bound"
             );
+            let candidate: String = row.get(0)?;
+            let fk_id: Option<i64> = row.get(1)?;
+            let target: Option<String> = row.get(2)?;
+            let foreign_keys = inventory.entry(candidate.clone()).or_default();
+            match (fk_id, target) {
+                (None, None) => {}
+                (Some(_), Some(target)) => {
+                    *foreign_keys += 1;
+                    ensure!(
+                        *foreign_keys <= FK_ROWS,
+                        "prepared foreign-key inventory exceeds bound"
+                    );
+                    ensure!(
+                        !names.iter().any(|name| candidate.eq_ignore_ascii_case(name)
+                            || target.eq_ignore_ascii_case(name)),
+                        "prepared output foreign keys unsupported"
+                    );
+                }
+                _ => anyhow::bail!("prepared malformed foreign-key metadata"),
+            }
             ensure!(
-                (candidate != name || targets.is_empty())
-                    && !targets.iter().any(|t| t.eq_ignore_ascii_case(name)),
-                "prepared output foreign keys unsupported"
+                inventory.len() <= SCHEMA_TABLES,
+                "prepared schema inventory exceeds bound"
             );
         }
-        for field in &fields {
-            identifier(&field.0)?;
+        Ok(TableImage { tables })
+    }
+
+    fn capture_table_shapes(
+        &self,
+        db: &Connection,
+        names: &[&str],
+    ) -> Result<BTreeMap<String, Table>> {
+        // Names were validated and bounded before discovery. Materialize headers so
+        // table_list and trigger discovery are shared, rather than repeated per field.
+        // NOT INDEXED keeps the small bounded header join from building an autoindex.
+        // The LEFT JOIN retains missing/zero-column shapes for explicit refusal.
+        let requested = vec!["(?)"; names.len()].join(",");
+        let sql = format!(
+            "WITH requested(name) AS (VALUES {requested}),
+             kinds AS MATERIALIZED (
+               SELECT name,type FROM pragma_table_list WHERE schema='main'
+                 AND name IN (SELECT name FROM requested)
+             ), headers AS MATERIALIZED (
+               SELECT requested.name,kinds.type,
+                 EXISTS(SELECT 1 FROM main.sqlite_schema
+                        WHERE type='trigger' AND tbl_name=requested.name) AS triggered
+               FROM requested LEFT JOIN kinds NOT INDEXED ON kinds.name=requested.name
+             )
+             SELECT headers.name,headers.type,headers.triggered,f.name,f.pk,f.hidden
+             FROM headers LEFT JOIN pragma_table_xinfo(headers.name,'main') AS f ON 1
+             LIMIT {}",
+            names.len() * 128 + 1
+        );
+        let mut statement = db.prepare(/* sqlite-large-value: allow-for-now lv-h76f4e8e28808 owner=smallclaims::ivm::install::prepared TODO=trace-statement-and-value-representation */ &sql)?;
+        let mut rows = statement.query(params_from_iter(names.iter()))?;
+        let mut fields = BTreeMap::<String, Vec<(String, u32)>>::new();
+        let mut count = 0;
+        while let Some(row) = rows.next()? {
+            count += 1;
+            ensure!(
+                count <= names.len() * 128,
+                "prepared generated/oversized table unsupported"
+            );
+            let name: String = row.get(0)?;
+            let kind: Option<String> = row.get(1)?;
+            ensure!(
+                kind.as_deref() == Some("table"),
+                "prepared virtual/shadow/missing table unsupported"
+            );
+            ensure!(
+                !row.get::<_, bool>(2)?,
+                "prepared output triggers unsupported"
+            );
+            let column: Option<String> = row.get(3)?;
+            let pk: Option<u32> = row.get(4)?;
+            let hidden: Option<u32> = row.get(5)?;
+            let (Some(column), Some(pk), Some(0)) = (column, pk, hidden) else {
+                anyhow::bail!("prepared generated/oversized table unsupported");
+            };
+            identifier(&column)?;
+            let columns = fields.entry(name).or_default();
+            ensure!(
+                columns.len() < 128,
+                "prepared generated/oversized table unsupported"
+            );
+            columns.push((column, pk));
         }
-        let columns = fields.iter().map(|f| f.0.clone()).collect::<Vec<_>>();
-        let mut primary = fields.iter().filter(|f| f.1 > 0).collect::<Vec<_>>();
-        primary.sort_by_key(|f| f.1);
         ensure!(
-            primary.iter().any(|f| f.0 == "namespace"),
-            "namespace must be part of prepared primary key"
+            fields.len() == names.len(),
+            "prepared table metadata incomplete"
         );
-        let keys = primary
-            .iter()
-            .filter(|f| f.0 != "namespace")
-            .map(|f| f.0.clone())
-            .collect();
-        self.tables.insert(
-            name.into(),
-            Table {
-                name: name.into(),
-                columns,
-                keys,
-            },
-        );
-        Ok(())
+        let mut tables = BTreeMap::new();
+        for &name in names {
+            let fields = fields
+                .get(name)
+                .context("prepared table metadata incomplete")?;
+            let columns = fields.iter().map(|f| f.0.clone()).collect::<Vec<_>>();
+            let mut primary = fields.iter().filter(|f| f.1 > 0).collect::<Vec<_>>();
+            primary.sort_by_key(|f| f.1);
+            ensure!(
+                primary.iter().any(|f| f.0 == "namespace"),
+                "namespace must be part of prepared primary key"
+            );
+            let keys = primary
+                .iter()
+                .filter(|f| f.0 != "namespace")
+                .map(|f| f.0.clone())
+                .collect();
+            tables.insert(
+                name.to_owned(),
+                Table {
+                    name: name.into(),
+                    columns,
+                    keys,
+                },
+            );
+        }
+        Ok(tables)
     }
     /// Values cover all non-namespace columns in captured table order; namespace is injected.
     pub fn upsert(&mut self, table: &str, values: Vec<SqlValue>) -> Result<()> {
@@ -330,7 +441,7 @@ impl PreparedPage {
             format!("DO UPDATE SET {update}")
         };
         let sql = format!(
-            "INSERT INTO {}({fields}) VALUES({}) ON CONFLICT({conflict}) {action}",
+            /* sqlite-large-value: allow-for-now lv-hd4f075349e61 owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO {}({fields}) VALUES({}) ON CONFLICT({conflict}) {action}",
             quote(&metadata.name),
             vec!["?"; columns.len()].join(",")
         );
@@ -370,7 +481,7 @@ impl PreparedPage {
             .map(|c| format!("{}=?", quote(c)))
             .collect::<Vec<_>>()
             .join(" AND ");
-        let sql = format!("DELETE FROM {} WHERE {predicate}", quote(&metadata.name));
+        let sql = format!(/* sqlite-large-value: allow-for-now lv-h30bed07ef8c8 owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {} WHERE {predicate}", quote(&metadata.name));
         let mut args = vec![SqlValue::Text(self.namespace.0.clone())];
         args.extend(keys);
         ensure!(
@@ -506,7 +617,7 @@ impl PreparedPage {
         let mut args = vec![SqlValue::Text(self.namespace.0.clone())];
         args.extend(keys);
         let expected: Option<Vec<SqlValue>> = db
-            .query_row(&sql, params_from_iter(&args), |r| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h9086b54616bf owner=smallclaims::ivm::install::prepared TODO=trace-statement-and-value-representation */ &sql, params_from_iter(&args), |r| {
                 bounded_values(r, columns.len())
             })
             .optional()?;
@@ -571,7 +682,7 @@ impl Installer {
             )?,
             "enable deferred mode before starting jobs"
         );
-        tx.execute("INSERT INTO ivm_install_deferred(source,row_limit,byte_limit,reference_limit) VALUES(?1,?2,?3,?4)",params![expected.source,limits.rows,limits.bytes,limits.reference_bytes])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h559613f164ef owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO ivm_install_deferred(source,row_limit,byte_limit,reference_limit) VALUES(?1,?2,?3,?4)",params![expected.source,limits.rows,limits.bytes,limits.reference_bytes])?;
         Ok(())
     }
     /// Only queue/reference work in source admission. Never calls an Operator. Quota/invalid
@@ -600,7 +711,7 @@ impl Installer {
             .filter(|r| *r <= i64::MAX as u64)
             .context("deferred revision overflow")?;
         tx.execute(
-            "UPDATE ivm_install_sources SET revision=?2 WHERE name=?1",
+            /* sqlite-large-value: allow-for-now lv-h97d89b759ce0 owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_install_sources SET revision=?2 WHERE name=?1",
             params![source, position.revision],
         )?;
         if !available {
@@ -635,19 +746,19 @@ impl Installer {
             return Ok(Capture::Fenced(position));
         }
         tx.execute(
-            "UPDATE ivm_install_deferred SET capturing=1 WHERE source=?1",
+            /* sqlite-large-value: allow-for-now lv-h93bee458435b owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_install_deferred SET capturing=1 WHERE source=?1",
             [source],
         )?;
         tx.execute(
-            "INSERT INTO ivm_install_journal VALUES(?1,?2,?3,?4)",
+            /* sqlite-large-value: allow-for-now lv-he7688b88909d owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO ivm_install_journal VALUES(?1,?2,?3,?4)",
             params![source, position.revision, payload, bytes],
         )?;
         tx.execute(
-            "UPDATE ivm_install_deferred SET capturing=0 WHERE source=?1",
+            /* sqlite-large-value: allow-for-now lv-h63d654ae8618 owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_install_deferred SET capturing=0 WHERE source=?1",
             [source],
         )?;
-        tx.execute("UPDATE ivm_install_sources SET journal_rows=journal_rows+1,journal_bytes=journal_bytes+?2 WHERE name=?1",params![source,bytes])?;
-        tx.execute("UPDATE ivm_install_jobs SET queued_rows=queued_rows+1,queued_bytes=queued_bytes+?2 WHERE source=?1 AND phase IN ('scan','catchup')",params![source,bytes])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h45b32b8bb45b owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_install_sources SET journal_rows=journal_rows+1,journal_bytes=journal_bytes+?2 WHERE name=?1",params![source,bytes])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h331aa1892adb owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_install_jobs SET queued_rows=queued_rows+1,queued_bytes=queued_bytes+?2 WHERE source=?1 AND phase IN ('scan','catchup')",params![source,bytes])?;
         Ok(Capture::Queued(position))
     }
     fn prepared_page(
@@ -783,6 +894,34 @@ impl Installer {
         view: &str,
         limits: PublicationLimits,
     ) -> Result<PreparedPage> {
+        self.prepare_live_inner(db, view, limits, limits.rows, limits.bytes)
+    }
+    /// Bound input references separately from the combined input/write/evidence budget.
+    /// This allows a page to consume N inputs and publish their bounded outputs without
+    /// selecting extra inputs merely to leave room for writes. Both budgets are cumulative.
+    pub fn prepare_live_bounded(
+        &self,
+        db: &Connection,
+        view: &str,
+        limits: PublicationLimits,
+        input_rows: usize,
+        input_bytes: usize,
+    ) -> Result<PreparedPage> {
+        limits.validate()?;
+        ensure!(
+            (1..=limits.rows).contains(&input_rows) && (1..=limits.bytes).contains(&input_bytes),
+            "prepared input bound exceeds publication budget"
+        );
+        self.prepare_live_inner(db, view, limits, input_rows, input_bytes)
+    }
+    fn prepare_live_inner(
+        &self,
+        db: &Connection,
+        view: &str,
+        limits: PublicationLimits,
+        input_rows: usize,
+        input_bytes: usize,
+    ) -> Result<PreparedPage> {
         let (namespace,source,fingerprint,source_fp,epoch,applied,ready,generation,status):(String,String,String,String,u64,u64,bool,u64,u64)=db.query_row("SELECT namespace,source,fingerprint,source_fingerprint,epoch,revision,ready,generation,status_revision FROM ivm_install_roots WHERE view=?1",[view],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?)))?;
         ensure!(
             ready && self.fingerprints.get(view) == Some(&fingerprint),
@@ -805,7 +944,7 @@ impl Installer {
             page.position.epoch == epoch && page.position.fingerprint == source_fp,
             "prepared live source replaced"
         );
-        page.load_references(db, applied, limits.rows, limits.bytes)?;
+        page.load_references(db, applied, input_rows, input_bytes)?;
         Ok(page)
     }
     /// Apply only precomputed writes. Caller uses a short managed reactor transaction and
@@ -817,15 +956,15 @@ impl Installer {
         page: &PreparedPage,
         now_ms: u64,
     ) -> Result<Outcome> {
-        tx.execute_batch("SAVEPOINT ivm_prepared_page")?;
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hb314496e1bb9 owner=smallclaims::ivm::install::prepared TODO=trace-statement-and-value-representation */ "SAVEPOINT ivm_prepared_page")?;
         let result = self.publish_prepared_inner(tx, page, now_ms);
         match result {
             Ok(outcome) => {
-                tx.execute_batch("RELEASE ivm_prepared_page")?;
+                tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h554a3f319a10 owner=smallclaims::ivm::install::prepared TODO=trace-statement-and-value-representation */ "RELEASE ivm_prepared_page")?;
                 Ok(outcome)
             }
             Err(error) => {
-                tx.execute_batch("ROLLBACK TO ivm_prepared_page; RELEASE ivm_prepared_page")?;
+                tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hd93d6e4e7551 owner=smallclaims::ivm::install::prepared TODO=trace-statement-and-value-representation */ "ROLLBACK TO ivm_prepared_page; RELEASE ivm_prepared_page")?;
                 Err(error)
             }
         }
@@ -903,11 +1042,11 @@ impl Installer {
             Target::Scan {
                 id, next, finished, ..
             } => {
-                tx.execute("UPDATE ivm_install_jobs SET cursor=?2,phase=?3,pages=pages+1,extracted_rows=extracted_rows+?4 WHERE id=?1",params![id,next,if *finished {"catchup"}else{"scan"},page.rows.len()])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h440dad9d5ee8 owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_install_jobs SET cursor=?2,phase=?3,pages=pages+1,extracted_rows=extracted_rows+?4 WHERE id=?1",params![id,next,if *finished {"catchup"}else{"scan"},page.rows.len()])?;
                 Ok(Outcome::Progress)
             }
             Target::CatchUp { id, .. } => {
-                tx.execute("UPDATE ivm_install_jobs SET applied_revision=?2,queued_rows=queued_rows-?3,queued_bytes=queued_bytes-?4,pages=pages+1,applied_rows=applied_rows+?3 WHERE id=?1",params![id,page.position.revision,page.rows.len(),page.consumed_bytes])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h3debf1a7a7fa owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_install_jobs SET applied_revision=?2,queued_rows=queued_rows-?3,queued_bytes=queued_bytes-?4,pages=pages+1,applied_rows=applied_rows+?3 WHERE id=?1",params![id,page.position.revision,page.rows.len(),page.consumed_bytes])?;
                 if page.position.revision != current.revision {
                     return Ok(Outcome::Progress);
                 }
@@ -920,12 +1059,12 @@ impl Installer {
                     job.progress.queued_rows == 0 && job.progress.queued_bytes == 0,
                     "prepared journal counters disagree"
                 );
-                tx.execute("UPDATE ivm_install_roots SET namespace=?2,revision=?3,ready=1,generation=generation+1,status_revision=status_revision+1,error=NULL WHERE view=?1",params![job.progress.view,id,current.revision])?;
-                tx.execute("UPDATE ivm_install_jobs SET phase='done' WHERE id=?1", [id])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-hd0b9489032ad owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_install_roots SET namespace=?2,revision=?3,ready=1,generation=generation+1,status_revision=status_revision+1,error=NULL WHERE view=?1",params![job.progress.view,id,current.revision])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h297b886fc6d9 owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_install_jobs SET phase='done' WHERE id=?1", [id])?;
                 Ok(Outcome::Published)
             }
             Target::Live { view, .. } => {
-                tx.execute("UPDATE ivm_install_roots SET revision=?2,generation=generation+?3 WHERE view=?1",params![view,page.position.revision,page.changed])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h5e75fd4c4579 owner=smallclaims::ivm::install::prepared TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_install_roots SET revision=?2,generation=generation+?3 WHERE view=?1",params![view,page.position.revision,page.changed])?;
                 Ok(Outcome::Progress)
             }
         }
@@ -976,12 +1115,12 @@ impl PreparedPage {
         Ok(())
     }
     fn execute_write(&self, tx: &Transaction<'_>, write: &Write) -> Result<()> {
-        tx.execute(&write.sql, params_from_iter(&write.args))?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h67e884873bac owner=smallclaims::ivm::install::prepared TODO=trace-statement-and-value-representation */ &write.sql, params_from_iter(&write.args))?;
         Ok(())
     }
     fn check_row(&self, tx: &Transaction<'_>, check: &Check) -> Result<()> {
         let actual: Option<Vec<SqlValue>> = tx
-            .query_row(&check.sql, params_from_iter(&check.args), |r| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-hf702016170fa owner=smallclaims::ivm::install::prepared TODO=trace-statement-and-value-representation */ &check.sql, params_from_iter(&check.args), |r| {
                 bounded_values(r, check.columns)
             })
             .optional()?;

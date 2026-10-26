@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
-run="mission-run/$ST_MISSION_RUN"
-mission="$(env -u ST_AGENT st3 --json mission show "$run")"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+run="mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
+mission="$(env -u FRACTAL_AGENT -u ST_AGENT st3 --json missions show "$run")"
 
 completed_steps=(
   materialize-megarepo
@@ -25,7 +28,8 @@ for step in "${completed_steps[@]}"; do
 done
 
 while read -r name kind; do
-  subject="resource/mission-run/$ST_MISSION_RUN/$name"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  subject="resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/$name"
   status="$(st3 subject show "$subject" --json)"
   jq -e --arg kind "$kind" '
     .status.subjects[0].actual | (.fields // .)
@@ -39,7 +43,8 @@ feature-revision vcs.commit
 final-report custom.st3.message-receipt
 PRODUCTS
 
-published="$(st3 subject show "resource/mission-run/$ST_MISSION_RUN/feature-revision" --json \
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+published="$(st3 subject show "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/feature-revision" --json \
   | jq -r '.status.subjects[0].actual | (.fields // .) | .sha')"
 current="$(git -C "$CATALOG/wt/feature" rev-parse HEAD)"
 test "$published" = "$current"

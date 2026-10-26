@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}}"
 
 readonly REQUESTER=person/eval-requester
-readonly WORKER="agent/$ST_MISSION_RUN/wake.worker"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+readonly WORKER="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/wake.worker"
 readonly GENERATED="$PWD/generated"
 readonly STATE="$PWD/controller-state.json"
 
@@ -81,8 +84,9 @@ record_completed_step() {
 
 start_fresh() {
   local label=$1 output run step
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   output="$(st3 missions start eval/work-wake-reliability/fresh \
-    --id "fresh-$label-$ST_MISSION_RUN" \
+    --id "fresh-$label-${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" \
     --workspace "$PWD" \
     --as "$REQUESTER" \
     --json)"
@@ -108,13 +112,14 @@ first_incarnation="$(wait_for_worker)"
 state="$(jq --arg incarnation "$first_incarnation" '.incarnations += [$incarnation]' <<<"$state")"
 persist_state
 
-st3 missions publish "$fresh_file" --as "$REQUESTER" >/dev/null
+st3 apply "$fresh_file" --as "$REQUESTER" >/dev/null
 start_fresh one
 start_fresh two
 
-st3 missions publish "$revisable_v1" --as "$REQUESTER" >/dev/null
+st3 apply "$revisable_v1" --as "$REQUESTER" >/dev/null
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 revisable_output="$(st3 missions start eval/work-wake-reliability/revisable \
-  --id "revisable-$ST_MISSION_RUN" \
+  --id "revisable-${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" \
   --workspace "$PWD" \
   --as "$REQUESTER" \
   --json)"
