@@ -5,6 +5,7 @@ import { expect, within } from 'storybook/test'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { decodeConversationChunk } from '@fractal/sdk/effect'
 import { assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@fractal/ui/assistant-ui'
+import { colorVars as color, typeVars as type } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
@@ -36,7 +37,7 @@ const source = fixtureSource({ world: { ...fixtureProjections, conversations: { 
 
 const NativeTranscript = ({ scheme }: { readonly scheme: 'dark' | 'light' }) => {
   const [registry] = React.useState(() => AtomRegistry.make())
-  return <main data-scheme={scheme} style={{ height: '100vh', display: 'flex', flexDirection: 'column' }} {...stylex.props(scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
+  return <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
     <DataSourceProvider source={source} registry={registry}><ConversationPane agentRef={agentRef} agentName="Native transcript review" onOpenTool={() => undefined} /></DataSourceProvider>
   </main>
 }
@@ -60,3 +61,6 @@ const assertNative: NonNullable<Story['play']> = async ({ canvasElement }) => {
 }
 export const Dark: Story = { play: assertNative }
 export const Light: Story = { args: { scheme: 'light' }, play: assertNative }
+const styles = stylex.create({
+  root: { height: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: color.canvas, color: color.fg, fontFamily: type.fontSans, fontSize: type.uiSize, lineHeight: type.uiLeading },
+})
