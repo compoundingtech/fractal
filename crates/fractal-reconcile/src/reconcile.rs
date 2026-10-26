@@ -16090,14 +16090,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         // A changed cadence retires the old sleeping poll; its result cannot overwrite
         // a newer watcher observation if it was already in flight.
         if watched_ref && refresh_attempt.is_none() && observer_actual.as_ref().is_none_or(|actual|
-            actual["error_code"] != "rate-limited") {
+            !matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget"))) {
             next_check = next_check.min(now_ms().saturating_add(u128::from(spec.every_ms.unwrap())));
         }
-        // Provider retry deadlines remain a lower bound even after a restart or a
-        // desired revision change. Older rate-limit receipts have no revision.
+        // Provider and local admission deadlines remain lower bounds after restart or
+        // desired revision changes. Older rate-limit receipts have no revision.
         if refresh_attempt.is_none()
             && let Some(retry_at) = observer_actual.as_ref()
-                .filter(|actual| actual["error_code"] == "rate-limited")
+                .filter(|actual| matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget")))
                 .and_then(|actual| actual.get("next_check_unix_ms"))
                 .and_then(Value::as_str)
                 .and_then(|value| value.parse::<u128>().ok())
@@ -16353,8 +16353,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                         error_backoff = true;
                         let previous = store.latest_actual_value(&observer_subject).ok().flatten();
                         let condition = ObserverCondition::of(&error, previous.as_ref());
+                        let state = if matches!(condition, ObserverCondition::LocalBudget(_)) {
+                            "throttled"
+                        } else {
+                            "unreachable"
+                        };
                         let unchanged_failure = previous.as_ref().is_some_and(|actual| {
-                            actual.get("state").and_then(Value::as_str) == Some("unreachable")
+                            actual.get("state").and_then(Value::as_str) == Some(state)
                                 && actual.get("reason").and_then(Value::as_str)
                                     == Some(reason.as_str())
                                 && (refusal_deadline.is_none()
@@ -16376,7 +16381,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .as_bytes(),
                             ));
                             let mut fields = BTreeMap::from([
-                                ("state".into(), Value::String("unreachable".into())),
+                                ("state".into(), Value::String(state.into())),
                                 ("reason".into(), Value::String(reason)),
                                 ("error_code".into(), Value::String(condition.code().into())),
                                 ("revision".into(), Value::String(revision.clone())),
@@ -35900,6 +35905,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         observe_now(&reconciler, &calls).await;
         let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
         assert_eq!(state["error_code"], "local-observer-budget");
+        assert_eq!(state["state"], "throttled");
         assert_eq!(state["next_check_unix_ms"], slot.to_string());
         assert_eq!(state["reason"], format!("local observer budget reached, next slot at {slot} (Unix ms)"));
         assert!(observer_items(&store).is_empty());

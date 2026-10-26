@@ -862,6 +862,11 @@ pub fn watch_view(
         {
             "degraded"
         }
+        (None, Some(observer))
+            if observer.get("state").and_then(Value::as_str) == Some("throttled") =>
+        {
+            "throttled"
+        }
         _ => "active",
     };
     json!({
@@ -874,8 +879,12 @@ pub fn watch_view(
         "state": state,
         "ended": ended.and_then(|ended| ended.get("reason")).cloned(),
         "reason": observer_state
-            .filter(|_| state == "degraded")
+            .filter(|_| matches!(state, "degraded" | "throttled"))
             .and_then(|observer| observer.get("reason"))
+            .cloned(),
+        "next_check_unix_ms": observer_state
+            .filter(|_| state == "throttled")
+            .and_then(|observer| observer.get("next_check_unix_ms"))
             .cloned(),
         "title": facts.and_then(|facts| facts.get("title")).cloned(),
         "url": facts.and_then(|facts| facts.get("url")).cloned(),
@@ -893,6 +902,21 @@ mod tests {
             since_unix_ms: parse_rfc3339_ms("2026-09-10T05:00:00Z").unwrap(),
             until_unix_ms: None,
         }
+    }
+
+    #[test]
+    fn a_locally_throttled_watch_shows_its_next_slot_without_degradation() {
+        let observer = json!({
+            "state": "throttled", "error_code": "local-observer-budget",
+            "reason": "local observer budget reached, next slot at 1000 (Unix ms)",
+            "next_check_unix_ms": "1000"
+        });
+        let view = watch_view("watch/github/acme/garden/12/agent/node.test", &watch(), None, None, Some(&observer));
+        assert_eq!(view["state"], "throttled");
+        assert_eq!(view["reason"], observer["reason"]);
+        assert_eq!(view["next_check_unix_ms"], "1000");
+        let ended = json!({"reason": "ended"});
+        assert_eq!(watch_view("watch/test", &watch(), Some(&ended), None, Some(&observer))["state"], "ended");
     }
 
     fn entry(kind: &str, id: u64, at: &str) -> Value {

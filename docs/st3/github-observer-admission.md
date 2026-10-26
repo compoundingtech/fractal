@@ -31,7 +31,10 @@ existing transport-domain policy). These are NOT GraphQL points, search-provider
 or secondary-limit guarantees. Failed sends and conditional304s remain reserved.
 Refusal adds no reservation and returns a typed `LocalObserverBudget`, displayed
 as “local observer budget reached, next slot at T”, not a GitHub HTTP 429.
-It persists the next local slot without raising a provider-rate-limit fault.
+It persists non-fault `observer.state=throttled` with the next local slot, not
+`unreachable`; watch views show `throttled` and the next deadline. It raises no
+owner attention item. Readers must accept the new `throttled` enum before
+cross-version receipt replay; older states remain readable without migration.
 
 GitHub HTTP 429 and secondary-limit 403 responses honour `Retry-After` (seconds
 or HTTP date) and `x-ratelimit-reset`, using the latest future deadline. If neither

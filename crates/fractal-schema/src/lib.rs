@@ -3431,7 +3431,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "observer.state" => &[
             (
                 "state",
-                required_enum(&["healthy", "degraded", "unreachable", "stopped"]),
+                required_enum(&["healthy", "degraded", "unreachable", "throttled", "stopped"]),
             ),
             ("reason", string()),
             ("error_code", string()),
@@ -4783,6 +4783,16 @@ mod tests {
                 BTreeMap::from([
                     ("state".into(), Value::String("unreachable".into())),
                     ("revision".into(), Value::String("claim/revision".into())),
+                    ("next_check_unix_ms".into(), Value::String("1000".into())),
+                ]),
+            ),
+            (
+                "observer/run/throttled",
+                "observer.state",
+                BTreeMap::from([
+                    ("state".into(), Value::String("throttled".into())),
+                    ("error_code".into(), Value::String("local-observer-budget".into())),
+                    ("reason".into(), Value::String("local observer budget reached, next slot at 1000 (Unix ms)".into())),
                     ("next_check_unix_ms".into(), Value::String("1000".into())),
                 ]),
             ),

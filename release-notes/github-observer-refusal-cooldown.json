@@ -6,8 +6,8 @@
     "detail": "Repeated provider refusals persist their latest next-check deadline instead of retaining the first reset. Existing observer claims remain readable; no replay or backfill is required."
   },
   "schema": {
-    "status": "none",
-    "detail": "No tables, indexes or migrations. A separate optional budget-history JSON sidecar retains bounded 48-hour resource-specific provider header samples; the authoritative admission ledger is unchanged."
+    "status": "changed",
+    "detail": "Adds observer.state enum value throttled for non-fault local admission deferral. No tables, indexes or migrations. A separate optional budget-history JSON sidecar retains bounded 48-hour resource-specific provider header samples; the authoritative admission ledger is unchanged."
   },
   "rules": {
     "status": "changed",
@@ -15,18 +15,18 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Observer state can report error_code local-observer-budget and a local next-slot reason. Provider rate-limited remains unchanged. Older binaries read an unknown code as unreachable and ignore the diagnostic budget-history sidecar; rollout directly from any preceding binary requires no intermediate version."
+    "detail": "Local observer refusals emit state throttled, error_code local-observer-budget, and a local next-slot reason; GitHub watch views expose throttled and its next deadline. New readers accept all previous states. Older claim registries may reject throttled receipts; fleet readers must understand the new enum before relying on cross-version receipt replay. Budget-history sidecars are diagnostic and ignored by older binaries."
   },
   "downtime": {
     "status": "none",
     "detail": "Normal binary rollout."
   },
   "manual": {
-    "status": "none",
-    "detail": "No operator steps; the cap remains per daemon, not fleet-wide."
+    "status": "changed",
+    "detail": "Coordinate fleet readers to accept throttled observer receipts; do not assume a pre-change registry can replay new receipts. No live config changes; the cap remains per daemon, not fleet-wide."
   },
   "recovery": {
-    "status": "none",
-    "detail": "Ordinary binary rollback is supported; persisted deadlines remain readable."
+    "status": "changed",
+    "detail": "Use a forward fix or a rollback reader that accepts throttled observer receipts; a pre-change registry may reject the new enum. Do not delete authoritative observer history to force rollback. The diagnostic budget sidecar does not control admission."
   }
 }
