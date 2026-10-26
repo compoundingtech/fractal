@@ -1519,6 +1519,7 @@ exit 0
             socket_path: PathBuf::from("bad.sock"),
             pid: Some(-1),
             status: pty_core::registry::SessionStatus::Running,
+            identity: pty_core::registry::DaemonIdentityCheck::Unknown,
             metadata: None,
         };
         let observed = observation(record).unwrap();
@@ -2200,12 +2201,18 @@ exit 0
         .unwrap()
     }
 
-    /// A harness that writes its pid to `pid` and waits.
+    /// A harness that records its initial scope weight, writes its pid to `pid`, and waits.
     fn waiting_harness(pid: &Path) -> Launch {
         Launch::Argv(vec![
             "sh".into(),
             "-c".into(),
-            format!("echo $$ > '{}'; exec sleep 60", pid.display()),
+            format!(
+                "IFS=: read -r hierarchy controllers cgroup < /proc/$$/cgroup; \
+                 cat \"/sys/fs/cgroup$cgroup/cpu.weight\" > '{}'; \
+                 echo $$ > '{}'; exec sleep 60",
+                pid.with_extension("weight").display(),
+                pid.display(),
+            ),
         ])
     }
 
@@ -2224,8 +2231,8 @@ exit 0
     }
 
     /// Asks st to protect `id`'s server until it runs in its own scope, then checks that the
-    /// harness stayed behind in the scope st started the session in.
-    fn assert_server_left_its_harness(runtime: &PtyRuntime, id: &str, harness: u32) {
+    /// harness stayed behind in the scope st started the session in, at its original host weight.
+    fn assert_server_left_its_harness(runtime: &PtyRuntime, id: &str, harness: u32, weight: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
         let (server, work_unit) = loop {
             let observation = runtime.session(id).map(observation).unwrap().unwrap();
@@ -2243,7 +2250,7 @@ exit 0
         };
         assert_eq!(cgroup_leaf(harness), work_unit);
         assert_eq!(cgroup_file(server, "cpu.weight").trim(), "1000");
-        assert_eq!(cgroup_file(harness, "cpu.weight").trim(), "100");
+        assert_eq!(cgroup_file(harness, "cpu.weight").trim(), weight.trim());
     }
 
     #[test]
@@ -2323,7 +2330,8 @@ exit 0
             .unwrap();
         let harness = read_pid(&pid_file);
 
-        assert_server_left_its_harness(&runtime, "protect-spawn", harness);
+        let weight = fs::read_to_string(pid_file.with_extension("weight")).unwrap();
+        assert_server_left_its_harness(&runtime, "protect-spawn", harness, &weight);
         runtime.stop("protect-spawn").unwrap();
     }
 
@@ -2365,7 +2373,8 @@ exit 0
         let server = runtime.session("protect-old").unwrap().pid.unwrap() as u32;
         assert_eq!(cgroup_leaf(server), unit);
 
-        assert_server_left_its_harness(&runtime, "protect-old", harness);
+        let weight = fs::read_to_string(pid_file.with_extension("weight")).unwrap();
+        assert_server_left_its_harness(&runtime, "protect-old", harness, &weight);
         runtime.stop("protect-old").unwrap();
     }
 

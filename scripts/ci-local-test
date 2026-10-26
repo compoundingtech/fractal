@@ -203,6 +203,44 @@ class CiLocal(unittest.TestCase):
                 self.assertEqual((str(tmpdir.parent), tmpdir.name[:3]), (root, 'cl.'))
                 self.assertFalse(tmpdir.exists(), 'removed when the run ends')
 
+    def test_the_host_load_limit_is_waited_out_said_every_minute_and_never_silent(self):
+        loadavg = Path(self.tmp.name) / 'loadavg'
+        loadavg.write_text('34.00 20.00 10.00 1/100 1234\n')
+        for name, extra, expected in (('no limit', {}, 0),
+                                      ('under the limit', {'ST_TEST_MAX_LOAD': '40'}, 0)):
+            with self.subTest(name):
+                self.log.unlink(missing_ok=True)
+                done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(loadavg), **extra)
+                self.assertEqual(done.returncode, expected, done.stderr)
+                self.assertNotIn('waiting: load1', done.stderr)
+                self.assertTrue(calls)
+        self.log.unlink(missing_ok=True)
+        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(loadavg), ST_TEST_MAX_LOAD='20',
+                                     ST_TEST_LOAD_WAIT_MINUTES='0.01', CI_LOCAL_LOAD_POLL='0.1')
+        self.assertEqual(done.returncode, 3)
+        self.assertIn('ci-local: waiting: load1 34.00 > 20 (host limit)', done.stderr)
+        self.assertIn('the host stayed above its load limit: load1 34.00 > 20 (host limit)', done.stderr)
+        self.assertEqual(calls, [], 'nothing was started')
+        self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [])
+        # the limit may be a file in the account's config, and a load that drops during the wait lets the run through
+        (self.home / '.config/st-test').mkdir(parents=True)
+        (self.home / '.config/st-test/max-load').write_text('20\n')
+        dropper = subprocess.Popen(['bash', '-c', f'sleep 0.6; echo "5.00 5.00 5.00 1/100 1" > {loadavg}'])
+        self.addCleanup(dropper.wait)
+        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_LOADAVG_FILE=str(loadavg), ST_TEST_LOAD_WAIT_MINUTES='1',
+                                     CI_LOCAL_LOAD_POLL='0.1')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('waiting: load1 34.00 > 20 (host limit)', done.stderr)
+        self.assertTrue(calls)
+        done, _ = self.run_local('mail-redelivery-canaries', ST_TEST_MAX_LOAD='lots')
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('must be a number', done.stderr)
+
+    def test_a_failing_property_test_cannot_leave_a_regressions_file_in_the_tree_the_signer_checks(self):
+        done, calls = self.run_local('mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(calls[-1]['env'].get('PROPTEST_DISABLE_FAILURE_PERSISTENCE'), '1')
+
     def test_each_test_process_gets_a_tmpdir_of_its_own_through_the_cargo_target_runner(self):
         done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TARGET_TRIPLE='x86_64-unknown-linux-gnu')
         self.assertEqual(done.returncode, 0, done.stderr)
