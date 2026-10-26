@@ -740,7 +740,7 @@ pub struct Args {
 #[derive(clap::Subcommand, Debug)]
 pub enum Action {
     /// Show an agent, a mission or a machine in the person's open terminal interface, in a tab
-    /// or a split. For a seat to use; it opens nothing when no terminal interface is running.
+    /// or a split. For an agent to use; it opens nothing when no terminal interface is running.
     ///
     /// `agent/NAME` opens the conversation. `mission/NAME` and `mission-run/NAME/RUN` open the
     /// mission view, which stays open and follows the mission from step to step.

@@ -86,6 +86,8 @@ cd apps/ios
 export APP_VARIANT=dev
 export EXPO_NO_DOTENV=1
 export EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT=''
+export EXPO_PUBLIC_FRACTAL_FABRIC_PROOF_LINK=''
+export EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK=''
 export EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK="com.compoundingtech.fractal.starter://pair?gateway=http%3A%2F%2F${host}%3A8791&id=demo&code=demo"
 export EXPO_PUBLIC_FRACTAL_TEST_TAB=Now
 export EXPO_PUBLIC_FRACTAL_TEST_LINKS=''

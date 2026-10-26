@@ -24,7 +24,7 @@ pub struct SekretsArgs {
     #[command(subcommand)]
     command: Option<SekretsCommand>,
     /// The profile to run as. Without it: a person's default profile, or the one profile granted
-    /// to this seat that allows the command.
+    /// to this agent that allows the command.
     #[arg(long)]
     profile: Option<String>,
     /// The command and its arguments, after `--`.
@@ -64,7 +64,7 @@ enum SekretsCommand {
     Log(LogArgs),
     /// List policy presets.
     Presets,
-    /// Register this host's daemon key with the gateway, so seats can be told from their person.
+    /// Register this host's daemon key with the gateway, so agents can be told from their person.
     /// Run from a login session.
     Enable,
     /// Print the root commands that create the sekrets user, its store and the gateway service.

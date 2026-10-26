@@ -1909,7 +1909,7 @@
         };
         # Configuration generation must not realize the Rust/PTY/collector shell.
         devShells.genie = pkgs.mkShell {
-          packages = [ effect-utils.packages.${system}.genie pkgs.nodejs ];
+          packages = [ effect-utils.packages.${system}.genie pkgs.nodejs pkgs.python3 ];
           shellHook = ''
             [ -e repos/effect-utils ] || echo 'repos/effect-utils is missing: run `mr apply` first' >&2
           '';

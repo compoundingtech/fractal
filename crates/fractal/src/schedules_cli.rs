@@ -10,7 +10,7 @@ pub(super) enum SchedulesCommand {
 }
 #[derive(Args)]
 pub(super) struct SchedulesListArgs {
-    /// Existing declaration-read authority: this seat, or the configured local person.
+    /// Existing declaration-read authority: this agent, or the configured local person.
     #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
     actor: Option<String>,
     /// One page, 1 through 200 rows. Follow the printed cursor explicitly.

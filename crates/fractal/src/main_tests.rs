@@ -1740,6 +1740,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
                 tokens: 0,
                 refilled_at_ms: 1_234,
             },
+            claude_attachment_polled: Some((("incarnation".into(), 4, "token".into()), 1_234)),
             settle: ResumeSettle::resumed(),
         },
     };
@@ -1766,6 +1767,8 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert!(back.loop_state.predecessor_harness_record.is_none());
     // Nor does a settle: the replacement image draws its own.
     assert!(back.loop_state.settle.0.is_none());
+    // An unpushed attachment poll is not carried: the replacement image polls once at once.
+    assert!(back.loop_state.claude_attachment_polled.is_none());
 }
 
 #[test]
@@ -2458,6 +2461,15 @@ fn every_cli_command_has_a_valid_help_surface() {
                 "{} contains legacy product wording: {line}",
                 path.join(" ")
             );
+            if !line.trim_start().starts_with("Usage:") {
+                assert!(
+                    !line.split_whitespace().any(|word| {
+                        matches!(word.trim_matches(['`', '.', ',', ';', ':']), "seat" | "seats" | "seat's" | "Seat" | "Seats")
+                    }),
+                    "{} contains legacy agent terminology: {line}",
+                    path.join(" ")
+                );
+            }
         }
         let subcommands = command.get_subcommands().cloned().collect::<Vec<_>>();
         for subcommand in subcommands {
@@ -2482,6 +2494,28 @@ fn every_cli_command_has_a_valid_help_surface() {
     let command = Cli::command();
     command.clone().debug_assert();
     visit(&command, &["fractal".into()]);
+}
+
+#[test]
+fn web_help_hides_only_its_unsupported_inherited_global_options() {
+    let command = cli_command();
+    let globals = command.get_arguments()
+        .filter(|argument| argument.is_global_set())
+        .collect::<Vec<_>>();
+    assert_eq!(globals.len(), 7);
+    let web = command.find_subcommand("web").unwrap();
+    for argument in globals {
+        let id = argument.get_id().as_str();
+        assert!(web.get_arguments().find(|arg| arg.get_id().as_str() == id).unwrap().is_hide_set(), "{id}");
+    }
+    let mut setup = command.find_subcommand("setup").unwrap().clone();
+    assert!(setup.render_long_help().to_string().contains("--endpoint"));
+    let mut web = web.clone();
+    let help = web.render_long_help().to_string();
+    assert!(help.contains("--state-dir"));
+    assert!(help.contains("--help"));
+    assert!(!help.contains("--endpoint"));
+    assert!(!help.contains("--instance"));
 }
 
 #[test]
