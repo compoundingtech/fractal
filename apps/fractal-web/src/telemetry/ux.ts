@@ -24,7 +24,7 @@ export const afterNextPaint = (callback: () => void): (() => void) => {
   }
 }
 
-/** st's `alert_landed_p95_ms_lt` (clients/typescript/fractal-views/slo.ts): an answered alert leaves within 2 s. */
+/** Fractal's `alert_landed_p95_ms_lt` (clients/typescript/fractal-views/slo.ts): an answered alert leaves within 2 s. */
 const ALERT_LANDED_BUDGET_MS = 2000
 
 interface Operation {
@@ -49,7 +49,7 @@ export interface UxTelemetry {
   readonly transcriptCommitted: (ref: string) => () => void
   /** Feature layer hook: invoke at send, complete only when the verified echo DOM commits. */
   readonly beginSendEcho: () => { readonly committed: () => () => void; readonly cancel: () => void }
-  /** Invoke when st takes an answer to an alert; complete when the cleared strip paints (st's `alert_landed`). */
+  /** Invoke when Fractal takes an answer to an alert; complete when the cleared strip paints (Fractal's `alert_landed`). */
   readonly beginAlertAnswer: () => { readonly landed: () => () => void; readonly cancel: () => void }
   readonly observeSync: (options: { readonly key: object; readonly kind: 'window' | 'conversation' | 'terminal' | 'gateway'; readonly status: SyncStatus }) => void
   readonly dispose: () => void

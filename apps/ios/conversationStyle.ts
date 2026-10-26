@@ -1,8 +1,8 @@
 import { theme } from './theme';
 
-// How each kind of conversation entry is drawn, by theme token. stui's renderer reads the same
+// How each kind of conversation entry is drawn, by theme token. the Fractal terminal UI's renderer reads the same
 // table and writes it to fixtures/clients/conversation-style.json; the conversation screen
-// draws from that file, so a change in stui reaches the phone and the two stay alike.
+// draws from that file, so a change in the Fractal terminal UI reaches the phone and the two stay alike.
 
 type Label = { text: string; color: string };
 type ToolLook = { title: string; title_bold: boolean; rows: string };

@@ -27,7 +27,7 @@ export function SendFailure({ state, onRetry }: { readonly state: Extract<SendSt
   </div>
 }
 
-/** Unconfirmed send: a neutral status, not a failure; st may already have it, so Send again repeats it. */
+/** Unconfirmed send: a neutral status, not a failure; Fractal may already have it, so Send again repeats it. */
 export function SendUnconfirmed({ state, onRetry }: { readonly state: Extract<SendState, { _tag: 'Unconfirmed' }>; readonly onRetry?: () => void }) {
   const [open, setOpen] = React.useState(false)
   const detailId = React.useId()

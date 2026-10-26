@@ -5,7 +5,7 @@ import { LiveTimeline } from './fromTimeline.ts'
 import { transcriptTurnsForItems } from '../web/conversationTranscript.ts'
 
 describe('native block visibility', () => {
-  // Synthetic copy of st's normalize_omp tool_execution_start projection.
+  // Synthetic copy of Fractal's normalize_omp tool_execution_start projection.
   const raw = {
     type: 'custom', customType: 'tool_execution_start',
     data: { toolCallId: 'synthetic-call', toolName: 'bash', startedAt: 1792022400000 },
@@ -281,7 +281,7 @@ describe('mailbox provenance and server ordering', () => {
       id, sequence, type, body, role, revision: 1, final: true, timestamp,
     })
 
-  // st mints mailbox entry ids from the message claim (`client_v0.rs`): the native projection
+  // Fractal mints mailbox entry ids from the message claim (`client_v0.rs`): the native projection
   // pairs `<leaf>/<digest16>-message` with `-content`; the stored fallback mints `<leaf>/<digest24>`.
   const mailMessage = 'timeline-entry/s1/0123456789abcdef-message'
   const mailContent = 'timeline-entry/s1/0123456789abcdef-content'

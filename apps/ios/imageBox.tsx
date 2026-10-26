@@ -78,7 +78,7 @@ export function ImageZoom({ uri, label, onClose }: { uri: string; label: string;
   </Modal>;
 }
 
-// An image a message carries, read from st (from the owner of the message, through st) only while
+// An image a message carries, read from Fractal (from the owner of the message, through Fractal) only while
 // it is on screen; its box keeps one size while it loads, so the conversation does not move.
 export function MailImageView({ image, viewport }: { image: MailImage; viewport: ConversationImageViewport }) {
   const { actions } = useStore();

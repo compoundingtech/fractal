@@ -22,7 +22,7 @@ type State = 'settled' | 'expanded' | 'streaming' | 'failed' | 'interrupted' | '
 interface TranscriptStoryData { readonly turns: readonly TranscriptTurn[]; readonly sync: SyncStatus; readonly availability?: TranscriptAvailability; readonly history?: TranscriptHistory; readonly emptyState?: React.ReactNode | TranscriptEmptyState }
 function fixture(state: State, prefix: string): TranscriptStoryData {
   const running = state === 'streaming', failed = state === 'failed', interrupted = state === 'interrupted'
-  const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${prefix}/prompt`, role: 'user', text: 'Keep the row projection readable and verify that selection survives the change.', attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' }, sendState: state === 'pending-send' ? { _tag: 'Pending' } : state === 'failed-send' ? { _tag: 'Failed', reason: { _tag: 'Failed' }, detail: 'The connection dropped while sending. Your draft is still saved; try again in a moment.' } : state === 'unconfirmed-send' ? { _tag: 'Unconfirmed', detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.' } : undefined }
+  const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${prefix}/prompt`, role: 'user', text: 'Keep the row projection readable and verify that selection survives the change.', attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' }, sendState: state === 'pending-send' ? { _tag: 'Pending' } : state === 'failed-send' ? { _tag: 'Failed', reason: { _tag: 'Failed' }, detail: 'The connection dropped while sending. Your draft is still saved; try again in a moment.' } : state === 'unconfirmed-send' ? { _tag: 'Unconfirmed', detail: 'Fractal may have taken this message and has not confirmed it yet. Sending it again is safe.' } : undefined }
   const calls: ConversationItem[] = [
     { _tag: 'ToolCall', id: `${prefix}/read`, callId: `${prefix}/read`, name: 'read', input: { path: 'src/rows.ts' }, status: 'success', result: { content: source, mediaType: 'text/plain', isError: false, at: '2026-01-15T12:00:03Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' },
     { _tag: 'ToolCall', id: `${prefix}/run`, callId: `${prefix}/run`, name: 'run', input: { command: 'pnpm test rows' }, status: failed ? 'error' : interrupted ? 'interrupted' : running ? 'running' : 'success', result: running ? undefined : { content: failed ? 'The row assertion did not match the observed selection.' : interrupted ? 'Stopped before the checks completed.' : 'Passed: selection retained\nPassed: visible count matches\nPassed: empty rows handled', mediaType: 'text/x-shellscript', isError: failed, at: '2026-01-15T12:00:18Z' }, callSeen: true, at: '2026-01-15T12:00:05Z' },
@@ -518,7 +518,7 @@ export const FailedSend: Story = { tags: ['critical'], args: { state: 'failed-se
   await expect(failure).toHaveTextContent('The connection dropped while sending')
 } }
 export const FailedSendLight: Story = { ...FailedSend, args: { state: 'failed-send', scheme: 'light' } }
-/** st may have taken the send: a neutral status with Send again, never failure copy or an alert. */
+/** Fractal may have taken the send: a neutral status with Send again, never failure copy or an alert. */
 export const UnconfirmedSend: Story = { tags: ['critical'], args: { state: 'unconfirmed-send' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const prompt = await canvas.findByTestId('user-message')

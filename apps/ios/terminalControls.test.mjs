@@ -47,7 +47,7 @@ await assert.rejects(withFreshTerminalFence(
 ), /offline/);
 assert.equal(nonStaleAttempts, 1);
 
-// An st that predates unfenced typing says it wants the screen's sequence; anything else is a real error.
+// A Fractal version that predates unfenced typing says it wants the screen's sequence; anything else is a real error.
 assert.equal(wantsScreenSequence({ response: { code: 'invalid-request', message: 'terminal control requires a sequence fence' } }), true);
 assert.equal(wantsScreenSequence({ response: { code: 'stale-fence', message: 'the terminal incarnation fence is stale' } }), false);
 assert.equal(wantsScreenSequence(new Error('offline')), false);

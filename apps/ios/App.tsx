@@ -35,7 +35,7 @@ import { DiagnosticsBoundary } from './DiagnosticsBoundary';
 // The chrome is native: one UITabBarController (react-native-screens' tabs, through
 // @react-navigation/bottom-tabs' native navigator) holding a UINavigationController per tab
 // (@react-navigation/native-stack). It keeps the system look and fonts. Everything inside a
-// screen is React, drawn like stui: IBM Plex Mono on the Mocha palette.
+// screen is React, drawn like the Fractal terminal UI: IBM Plex Mono on the Mocha palette.
 
 const Tabs = createNativeBottomTabNavigator<TabParams>();
 const Stack = createNativeStackNavigator<StackParams>();
@@ -175,7 +175,7 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
     screenOptions={({ route }) => ({
       headerShown: false,
       tabBarActiveTintColor: systemSurface ? colors.action : theme.accent,
-      // Spaces: one rounded rect, as stui's ▢.
+      // Spaces: one rounded rect, as the Fractal terminal UI's ▢.
       tabBarIcon: { type: 'sfSymbol', name: ICONS[route.name as Tab] as never },
       tabBarStyle: { display: tabBarHidden(route) ? 'none' : 'flex' },
     })}

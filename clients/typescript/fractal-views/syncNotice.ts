@@ -1,6 +1,6 @@
 import type { SyncNotice, SyncPeer } from '@fractal/client';
 
-// The optional `sync` notice on a client page, in the words stui and `st now` use (SyncPeer::summary
+// The optional `sync` notice on a client page, in the words the Fractal terminal UI and `fractal now` use (SyncPeer::summary
 // in crates/fractal-client/src/generated.rs): this host lacks records a peer holds, so what a page shows
 // can be out of date, or it holds the same records as a peer and projects a different graph.
 

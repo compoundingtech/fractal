@@ -1,7 +1,7 @@
 import { ClientError, plainError, type FractalClient } from '@fractal/client'
 
 /**
- * One read of an st document by name (the newest version) or by its immutable `name@hash`
+ * One read of a Fractal document by name (the newest version) or by its immutable `name@hash`
  * reference: its text, or why it cannot be shown.
  */
 export type DocumentRead =
@@ -13,7 +13,7 @@ export interface DocumentPort {
   readonly read: (name: string) => Promise<DocumentRead>
 }
 
-/** A document name or reference as st writes one: `doc/` and a path, optionally `@` its hash. */
+/** A document name or reference as Fractal writes one: `doc/` and a path, optionally `@` its hash. */
 export const DOCUMENT_REF = /^doc\/[A-Za-z0-9._~\-/]+(?:@[0-9a-f]{6,64})?$/
 
 /** `doc/name` and the short version from a `doc/name@hash` reference. */
@@ -24,7 +24,7 @@ export const documentVersion = (reference: string): { readonly name: string; rea
 
 const utf8 = new TextDecoder('utf-8', { fatal: true })
 
-/** Reads through `GET /v1/client/documents/content`, the route stui and the phone read. */
+/** Reads through `GET /v1/client/documents/content`, the route the Fractal terminal UI and the phone read. */
 export const gatewayDocuments = (client: FractalClient): DocumentPort => ({
   read: async (name) => {
     try {
