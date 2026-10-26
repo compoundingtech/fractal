@@ -602,15 +602,10 @@ impl RuntimeStartsStore for Store {
             operation: &mut RuntimeStartOperation,
             limit: usize,
         ) -> Result<RuntimeStartAdmission> {
-        if let Some(actor) = operation
-            .body
-            .pointer("/request/actor")
-            .and_then(Value::as_str)
-        {
-            self.graph.ensure_principal_key(actor).map_err(|error| anyhow::anyhow!(
-                "runtime-start admission refused: cannot prepare signing key for actor {actor}: {error}"
+        if operation.body.pointer("/request/actor").and_then(Value::as_str).is_some() {
+            self.graph.ensure_principal_key("agent/st3/reconciler").map_err(|error| anyhow::anyhow!(
+                "runtime-start admission refused: cannot prepare signing key for actor agent/st3/reconciler: {error}"
             ))?;
-            self.graph.ensure_principal_key("agent/st3/reconciler")?;
         }
         self.connection.batched(|tx| -> Result<RuntimeStartAdmission> {
             let selected = current_desired_row_tx(tx, &operation.subject)?;
@@ -1319,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn keyless_agent_restart_mints_its_key_or_refuses_before_any_admission() {
+    fn reconciler_restart_mints_its_key_or_refuses_before_any_admission() {
         for blocked in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let store = Store::open(&directory.path().join("claims.db"), "node").unwrap();
@@ -1349,7 +1344,7 @@ mod tests {
                 connection
                     .query_row(
                         "SELECT COUNT(*) FROM held_keys WHERE principal=?1",
-                        [actor],
+                        ["agent/st3/reconciler"],
                         |row| row.get::<_, u64>(0),
                     )
                     .unwrap()
@@ -1361,7 +1356,7 @@ mod tests {
             if blocked {
                 assert!(
                     format!("{:#}", admitted.unwrap_err())
-                        .contains("cannot prepare signing key for actor agent/example/keyless")
+                        .contains("cannot prepare signing key for actor agent/st3/reconciler")
                 );
                 assert!(store.pending_runtime_starts().unwrap().is_empty());
                 assert_eq!(held(&store.readers.get()), 0);
@@ -1385,6 +1380,7 @@ mod tests {
                 let control: ClaimRecord =
                     serde_json::from_value(start.body["control_request_receipt"].clone()).unwrap();
                 assert_eq!(control.actor.as_deref(), Some("agent/st3/reconciler"));
+                assert_eq!(control.body["evidence"][0], request.id);
                 assert!(store.runtime_start_for(actor).unwrap().is_some());
             }
         }
