@@ -351,6 +351,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "applies an operational repair plan",
     ),
     (
+        "POST /v1/repair/apply-attributed",
+        "applies an operational repair plan with an authenticated harness binding absent from generated cost stores; API repair tests cover actor enforcement",
+    ),
+    (
         "POST /v1/replication/repair",
         "repairs one replication record",
     ),
