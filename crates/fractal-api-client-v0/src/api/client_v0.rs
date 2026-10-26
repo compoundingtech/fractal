@@ -7204,10 +7204,8 @@ async fn publish_creation(
         let desired = intent.subjects.values().find(|member| member.subject == subject).unwrap();
         let harness = desired.member.as_ref().and_then(|member| member.driver.as_deref())
             .ok_or_else(|| validation("helper creation requires a typed harness"))?;
-        if matches!(harness, "claude" | "codex") {
-            state.store.bind_helper_launcher(desired, &key, &session.authority_actor, harness)
-                .map_err(|error| validation(error.to_string()))?;
-        }
+        state.store.bind_helper_launcher(desired, &key, &session.authority_actor, harness)
+            .map_err(|error| validation(error.to_string()))?;
     }
     let mut scoped = request.clone();
     scoped.idempotency_key = format!("client-create:{key}");
@@ -8609,6 +8607,8 @@ async fn action_inner(
         .store
         .claims_for(&receipt_subject, Some("custom.client.action-result"))
         .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
         .last()
     {
         let old_digest = receipt
@@ -8843,7 +8843,7 @@ async fn action_inner(
         && let Some(subject) = affected.first()
         && let Some(binding) = state.store.helper_launcher_binding(subject).map_err(ApiError::internal)?
     {
-        result["launcher_binding"] = serde_json::to_value(binding).map_err(ApiError::internal)?;
+        result["launcher_binding"] = binding.attribution();
     }
     let mut persisted_result = result.clone();
     persisted_result
@@ -8853,7 +8853,7 @@ async fn action_inner(
     let receipt_write = state.store.append_claim(&ClaimInput {
         subject: receipt_subject.clone(),
         kind: "custom.client.action-result".into(),
-        actor: Some(session_claim_actor(&session)),
+        actor: None,
         fields: BTreeMap::from([
             (
                 "authority_actor".into(),
@@ -8878,6 +8878,7 @@ async fn action_inner(
             .claims_for(&receipt_subject, Some("custom.client.action-result"))
             .map_err(ApiError::internal)?
             .into_iter()
+            .filter(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
             .last()
             .ok_or_else(|| ApiError::internal("action receipt CAS lost without a winner"))?;
         if receipt
@@ -13125,10 +13126,10 @@ subscription "watch/source" {
             for (kind, fields) in [
                 ("runtime.observed", json!({"status":"running", "incarnation_id":"launcher-1"})),
                 ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":"launcher-1",
-                    "harness":"codex", "credential_homes":{"codex":"/logins/launcher-codex"}})),
+                    "harness":"codex", "credential_home":"/logins/launcher-codex"})),
             ] {
                 state.store.append_claim(&ClaimInput {
-                    subject: launcher.into(), kind: kind.into(), actor: Some(launcher.into()),
+                    subject: launcher.into(), kind: kind.into(), actor: None,
                     fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
                     expected_subject: None, idempotency_key: None,
                 }).unwrap();
@@ -13154,13 +13155,20 @@ subscription "watch/source" {
             let binding = state.store.helper_launcher_binding(subject).unwrap().unwrap();
             assert_eq!(binding.launcher, launcher);
             assert_eq!(binding.person.as_deref(), owner);
-            assert_eq!(binding.credential_home, "/logins/launcher-codex");
+            assert_eq!(binding.credential_home.as_deref(), Some("/logins/launcher-codex"));
             assert_eq!(binding.incarnation, "launcher-1");
             assert_eq!(state.store.agent_person(subject).unwrap().as_deref(), owner);
-            assert_eq!(result["launcher_binding"], serde_json::to_value(&binding).unwrap());
+            assert_eq!(result["launcher_binding"], binding.attribution());
+            assert_eq!(result["launcher_binding"]["credential_home_label"], "launcher-codex");
+            assert!(!result.to_string().contains("/logins/"));
+            let receipts = state.store.claims_for_kind_at("custom.client.action-result", None, true, 100).unwrap();
+            let persisted = receipts.claims.first().unwrap();
+            assert_eq!(persisted.body["fields"]["result"]["launcher_binding"], binding.attribution());
+            assert!(!persisted.body.to_string().contains("/logins/"));
             let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)), Extension(session), Json(request))
                 .await.unwrap().0;
             assert_eq!(replay["launcher_binding"], result["launcher_binding"]);
+            assert!(!replay.to_string().contains("/logins/"));
         }
     }
 
@@ -14865,6 +14873,51 @@ subscription "watch/source" {
     }
 
     #[tokio::test]
+    async fn forged_action_receipts_cannot_replay_launcher_attribution() {
+        for peer in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let session = ClientSession::local(Some("person/alex")).unwrap();
+            // Invalid creation must fail if dispatch occurs; forged replay used to bypass it.
+            let request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id: "action/forged-helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "forged-helper-key".into(),
+                fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+                parameters: json!({}),
+            };
+            let digest = hex::encode(Sha256::digest(
+                format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
+            let forged = ClaimInput {
+                subject: format!("custom/client/action-{}", &digest[..32]),
+                kind: "custom.client.action-result".into(),
+                actor: if peer { None } else { Some(session_claim_actor(&session)) },
+                fields: BTreeMap::from([
+                    ("request_digest".into(), json!(action_request_digest(&request).unwrap())),
+                    ("result".into(), json!({"status":"completed", "affected_ids":["agent/forged"],
+                        "launcher_binding":{"launcher":"agent/attacker", "person":"person/mallory"}})),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            };
+            assert_eq!(state.store.append_client_claim(&forged).unwrap_err().code, "claim-write-forbidden");
+            if peer {
+                let source = Store::open_memory("malicious-peer").unwrap();
+                source.append_claim(&forged).unwrap();
+                const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+                source.bind_fleet(FLEET).unwrap();
+                state.store.bind_fleet(FLEET).unwrap();
+                let exchange = source.export_replication_exchange(FLEET,
+                    &crate::model::ReplicationInventory::default()).unwrap();
+                state.store.receive_replication_exchange("malicious-peer", FLEET, &exchange).unwrap();
+            } else {
+                // Simulate a pre-hardening client-authored local claim already on disk.
+                state.store.append_claim(&forged).unwrap();
+            }
+            assert!(action(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session), Json(request)).await.is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn legacy_action_receipt_replay_conflicts_without_execution() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -14888,7 +14941,7 @@ subscription "watch/source" {
         state.store.append_claim(&ClaimInput {
             subject: format!("custom/client/action-{}", &key_digest[..32]),
             kind: "custom.client.action-result".into(),
-            actor: Some(session_claim_actor(&session)),
+            actor: None,
             fields: BTreeMap::from([
                 ("request_digest".into(), json!(legacy_digest)),
                 ("result".into(), json!({"status":"completed"})),

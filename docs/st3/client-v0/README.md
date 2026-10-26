@@ -2298,13 +2298,16 @@ An existing active seat requires a different name; a stopped seat may be deliber
 Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
 emitted exactly once. Short names retain the usual host qualification.
 
-When the authenticated caller is an agent and the requested harness is Claude or
-Codex, the new agent is a run-owned helper. The server records an
-`agent.launcher-bound` receipt with the authenticated launcher, its person owner
-(if known), the selected declaration, the exact launcher runtime incarnation, and
-the requested harness's credential-directory reference. The helper retains its
-own agent identity. Only the directory path is shared; credential files and
-secret values are not copied into claims, arguments, or environment variables.
+When the authenticated caller is an agent, the new agent is a run-owned helper,
+regardless of harness. The server records an owner-local `agent.launcher-bound`
+receipt with the authenticated launcher, its person owner (if known), the selected
+declaration, and the exact launcher runtime incarnation. Claude and Codex helpers
+must match the launcher's credential-bearing harness and inherit only that
+harness's credential-directory reference; cross-provider creation is refused.
+The helper retains its own agent identity. Credential files and secret values are never copied into
+arguments or environment variables. Absolute credential-directory references remain
+host-local; replicated action receipts carry only non-authoritative attribution
+labels. Peer-replicated binding claims cannot grant person or credential authority.
 An unowned launcher does not confer person ownership.
 Credential-directory references are local to the launcher's host, so helpers
 must launch on that host. Older account-bound launcher incarnations without an
@@ -2316,12 +2319,17 @@ Spawning and restarting refuse an ended binding, including after a daemon
 restart; the credential reference is no longer usable for a new launch.
 Restarting the launcher ends its helpers: the new incarnation must create them
 again. Historical binding receipts remain for attribution.
+Each successful helper launch atomically records a server-only, durable owner-local
+`agent.helper-launched` receipt with its launcher, person owner, credential-home
+label, launcher incarnation, and operation ID. Age and count retention preserve it.
+Client-writable or peer-replicated receipts cannot grant binding authority.
 A declaration edit cannot silently switch the helper to a different login:
 if it no longer matches its credential receipt, stop and recreate the helper.
 
 This is a Fractal lifecycle bound, not native process containment: while the
 daemon is unavailable, a helper can outlive its launcher until reconciliation
-resumes. This is the same limitation as other runtime tasks.
+resumes. Agent Policy accepts this explicit exception; native containment is
+tracked in [#3923](https://github.com/compoundingtech/fractal/issues/3923).
 
 `repo` is an existing repository's absolute path on the selected host. It adds the existing
 `checkout` declaration and creates the agent workspace as a worktree. `base` defaults to
