@@ -2,9 +2,10 @@
 //! Seeds an in-memory fixture daemon for the fractal.how CLI capture and serves it until stopped.
 //!
 //! Run (ignored by default):
-//!   CAPTURE_DIR=/tmp/fcap/run cargo test -p fractal --features test-support \
+//!   CAPTURE_DIR=/tmp/cli-capture cargo test -p fractal --features test-support \
 //!     --test website_cli_capture -- --ignored --nocapture
 //! The daemon listens on $CAPTURE_DIR/st3.sock until $CAPTURE_DIR/stop exists. Every name is invented.
+//! scripts/website-cli-capture/capture.sh then prints the transcript.
 
 #[macro_use]
 #[path = "../../../scripts/ci-test-paths.rs"]
@@ -14,8 +15,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[allow(unused_imports)]
-use fractal_daemon::{LimitsStore, MissionsStore, SeatsStore, SeatsStoreCore};
+use fractal_daemon::MissionsStore;
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::{IntentInput, MissionRunRequest, WorkRequest};
 use fractal_daemon::store::Store;
