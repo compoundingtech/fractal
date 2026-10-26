@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise download integrity, quiet installation, platform selection and launch."""
+"""Exercise download integrity, visible installation, platform selection and launch."""
 import hashlib
 import json
 import os
@@ -63,7 +63,8 @@ exec "{real}" "$@"
         return subprocess.run(['sh', str(repo / 'install.sh'), *args], env={**env, **(extra or {})},
                               input='', text=True, capture_output=True, timeout=20)
     result = install('--no-run')
-    assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
+    assert result.returncode == 0 and 'Installed st3' in result.stdout and result.stderr == '', result
+    assert 'Upgrading Fractal' not in result.stdout, result
     installed = root / 'home/.local/bin'
     assert (installed / 'st').readlink() == Path('st3')
     assert (installed / 'fractal').readlink() == Path('st3')
@@ -73,21 +74,22 @@ exec "{real}" "$@"
     assert receipt['target'] == 'x86_64-unknown-linux-gnu' and receipt['installed_at'].endswith('Z'), receipt
     assert (installed.parent / 'share/fractal-web/index.html').read_text() == '<!doctype html><title>Fractal</title>'
     result = install('--tag', 'v0.3.18')
-    assert result.returncode == 0 and result.stdout == 'st3-fixture\n' and result.stderr == '', result
+    assert result.returncode == 0 and result.stdout.endswith('st3-fixture\n') and result.stderr == '', result
+    assert 'Upgrading Fractal' in result.stdout and 'Installed CLI:' in result.stdout, result
     assert json.loads((installed / 'RELEASE.json').read_text())['tag'] == 'v0.3.18'
     # Optional metadata failures must not turn a committed installation into a
     # failure, skip launch, overwrite the previous receipt, or leave staging files.
     previous_receipt = (installed / 'RELEASE.json').read_bytes()
     for failure in ['version', 'mktemp', 'mv']:
         result = install('--tag', 'v0.3.19', extra={'FAIL_RECEIPT': failure})
-        assert result.returncode == 0 and result.stdout == 'st3-fixture\n', (failure, result)
+        assert result.returncode == 0 and result.stdout.endswith('st3-fixture\n'), (failure, result)
         assert result.stderr == 'install: warning: release receipt unavailable; continuing with the installed binary\n', (failure, result)
         assert (installed / 'RELEASE.json').read_bytes() == previous_receipt
         assert not list(installed.glob('RELEASE.json.*')), failure
     (installed / 'fractal').unlink()
     (installed / 'fractal').write_text('foreign command')
     result = install('--no-run')
-    assert result.returncode == 0 and result.stdout == '', result
+    assert result.returncode == 0 and 'Upgrading Fractal' in result.stdout, result
     assert 'leaving fractal unchanged:' in result.stderr, result
     assert (installed / 'fractal').read_text() == 'foreign command'
     assert (installed / 'st').readlink() == Path('st3')
@@ -104,7 +106,7 @@ exec "{real}" "$@"
     assert '/download/v0.3.18/fractal-x86_64-unknown-linux-gnu.tar.gz' in requests
     assert 'smalltalk-x86_64-unknown-linux-gnu.tar.gz' not in requests
     result = install('--edge', '--no-run')
-    assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
+    assert result.returncode == 0 and 'Upgrading Fractal' in result.stdout and result.stderr == '', result
     assert (root / 'requests').read_text().count('/download/edge/') == 2
     assert json.loads((installed / 'RELEASE.json').read_text())['tag'] == 'edge'
     result = install('--edge', '--tag', 'v0.3.18', '--no-run')
@@ -126,6 +128,22 @@ exec "{real}" "$@"
     assert result.returncode != 0 and 'supported platforms' in result.stderr, result
     result = install('--tag', '../other')
     assert result.returncode != 0 and 'invalid release tag' in result.stderr, result
+    # The downloader preserves safety diagnostics from the archive installer.
+    checksum.write_text(correct)
+    (installed / 'st3').write_text('#!/bin/sh\ncase "$*" in\n--version) echo "fractal old-build";;\n"service status --json") echo \'{"services":[{"running":true}]}\';;\n*) exit 9;;\nesac\n')
+    result = install('--no-run')
+    assert result.returncode == 0 and 'Upgrading Fractal fractal old-build' in result.stdout, result
+    assert 'A daemon is running; it keeps its current build' in result.stderr, result
+    assert str(installed / 'st') + ' service restart' in result.stderr, result
+    (installed / 'st3').unlink()
+    (installed / 'st3').symlink_to('/nix/store/missing-fractal/bin/st3')
+    result = install('--no-run')
+    assert result.returncode != 0 and 'Nix-owned path' in result.stderr, result
+    assert 'docs/reference/home-manager' in result.stderr, result
+    assert (installed / 'st3').readlink() == Path('/nix/store/missing-fractal/bin/st3')
+    (installed / 'st3').unlink()
+    (installed / 'st3').write_bytes(original)
+    (installed / 'st3').chmod(0o755)
     # Exact published v0.3.17 installer from source f4cec96e414fee2a780910730b019fe6bdbddc1d.
     # It rejects --quiet and requires the historical four-command payload.
     payload_installer = payload / 'install.sh'
@@ -148,7 +166,7 @@ exec "{real}" "$@"
     checksum.write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + '  ' + archive.name + '\n')
     legacy_bin = root / 'legacy-bin'
     result = install('--tag', 'v0.3.17', '--bin-dir', str(legacy_bin), '--no-run')
-    assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
+    assert result.returncode == 0 and 'Installed st3' in result.stdout and result.stderr == '', result
     assert sorted(p.name for p in legacy_bin.iterdir()) == ['RELEASE.json', 'pty', 'st', 'st3', 'st3-migrate', 'stui']
     assert '/download/v0.3.17/smalltalk-x86_64-unknown-linux-gnu.tar.gz' in (root / 'requests').read_text()
-print('Download installer integrity, quiet install, launch and platform controls passed')
+print('Download installer integrity, visible install, launch and platform controls passed')

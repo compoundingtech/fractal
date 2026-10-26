@@ -86,11 +86,8 @@ while IFS= read -r member; do
     case "/$member/" in */../*) printf 'install: archive contains a parent path\n' >&2; exit 1 ;; esac
 done < "$work/members"
 tar -xzf "$work/$archive" -C "$work"
-# Older retained releases predate --quiet; keep their installer spelling and
-# suppress notices here while preserving failures and stderr.
-# Current archive installers add fractal only when neither the destination nor
-# PATH contains a foreign fractal command; keep their collision guidance on stderr.
-"$work/$package/install.sh" --bin-dir "$bin_dir" >/dev/null
+# Retained releases keep their historical installer spelling.
+"$work/$package/install.sh" --bin-dir "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd)
 # A release receipt is optional display metadata. Failure must never prevent a
 # successfully installed executable from launching.

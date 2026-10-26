@@ -29,6 +29,55 @@ fi
 export FRACTAL_INSTANCE=$instance ST_INSTANCE=$instance
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 bin_dir=${bin_dir:-${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}}}
+# Follow links without requiring GNU readlink -f (the installer also runs on macOS).
+# Check each hop: a Home Manager link can be dangling, and must still remain owned
+# by its package manager.
+refuse_nix_path() {
+  local path=$1 target parent hops=0
+  while :; do
+    case "$path" in
+      /nix/store/*|*/.nix-profile|*/.nix-profile/*|*/profiles/home-manager|*/profiles/home-manager/*|*/profiles/per-user/*)
+        printf 'install: refusing to overwrite Nix-owned path %s. Upgrade through the Home Manager configuration that owns this installation: https://fractal.how/docs/reference/home-manager\n' "$1" >&2
+        exit 1 ;;
+    esac
+    parent=$(dirname "$path")
+    if [[ -d $parent ]]; then path="$(cd "$parent" && pwd -P)/$(basename "$path")"; fi
+    case "$path" in /nix/store/*)
+      printf 'install: refusing to overwrite Nix-owned path %s. Upgrade through the Home Manager configuration that owns this installation: https://fractal.how/docs/reference/home-manager\n' "$1" >&2
+      exit 1 ;;
+    esac
+    [[ -L $path ]] || break
+    ((hops+=1))
+    [[ $hops -le 40 ]] || { printf 'install: cannot resolve installation link %s\n' "$1" >&2; exit 1; }
+    target=$(readlink "$path")
+    case "$target" in /*) path=$target ;; *) path="$(dirname "$path")/$target" ;; esac
+  done
+}
+for name in st3 st pty fractal; do refuse_nix_path "$bin_dir/$name"; done
+installed_version() {
+  local version
+  version=$("$1" --version 2>/dev/null) || version=unknown
+  printf '%s' "${version:-unknown}"
+}
+old_version=unknown
+new_version=$(installed_version "$source_dir/st3")
+daemon_running=false
+existing=false
+for name in st3 st; do
+  if [[ -e $bin_dir/$name || -L $bin_dir/$name ]]; then
+    existing=true
+    if [[ -x $bin_dir/$name ]]; then
+      old_version=$(installed_version "$bin_dir/$name")
+      # Service status only inspects the manager; doctor can perform maintenance.
+      status=$("$bin_dir/$name" service status --json 2>/dev/null | tr -d '[:space:]') || status=
+      case "$status" in *'"running":true'*) daemon_running=true ;; esac
+      break
+    fi
+  fi
+done
+if $existing && ! $quiet; then
+  printf 'Upgrading Fractal %s → %s in %s\n' "$old_version" "$new_version" "$bin_dir"
+fi
 binaries=(st3 pty)
 for binary in "${binaries[@]}"; do
   [[ -f $source_dir/$binary && -x $source_dir/$binary ]] || {
@@ -154,6 +203,16 @@ PY
   # from the helper's flock, so invoking the helper cannot deadlock on its own lock.
   take_lock "$macos_lock"
   macos_locked=true
+  refuse_nix_path "$macos_app"
+  if [[ -e $macos_app ]] && ! $existing; then
+    existing=true
+    old_version=$(installed_version "$macos_app/Contents/MacOS/st3")
+    status=$("$macos_app/Contents/MacOS/st3" service status --json 2>/dev/null | tr -d '[:space:]') || status=
+    case "$status" in *'"running":true'*) daemon_running=true ;; esac
+    if ! $quiet; then
+      printf 'Upgrading Fractal %s → %s in %s\n' "$old_version" "$new_version" "$macos_app"
+    fi
+  fi
   macos_state="$macos_home/.local/state/st3/macos-installs"
   mkdir -p "$macos_state"
   # Retain this job just as the helper's default installation does. It holds the
@@ -205,6 +264,15 @@ if ! $macos; then
   fi
 fi
 committed=true
+if $existing && ! $quiet; then
+  printf 'Installed CLI: %s → %s\n' "$old_version" "$(installed_version "$bin_dir/st3")"
+fi
+if $daemon_running; then
+  printf 'A daemon is running; it keeps its current build until you restart it: ' >&2
+  printf '%q ' "$bin_dir/st" >&2
+  if [[ -n $instance ]]; then printf '%q %q ' --instance "$instance" >&2; fi
+  printf 'service restart. Check with `fractal doctor` afterwards.\nUpgrade guide: https://fractal.how/docs/guides/upgrading\n' >&2
+fi
 if ! $quiet; then
   printf 'Installed st3, st -> st3, and pty in %s\n' "$bin_dir"
   echo 'Running services were not restarted.'
