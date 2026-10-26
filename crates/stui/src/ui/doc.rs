@@ -99,6 +99,8 @@ pub enum Hit {
     GlassAdd(usize),
     /// Glasses: open a palette row.
     PaletteChoice(usize),
+    /// A document page's or the documents list's own button: back, try again, more.
+    Document(super::documents::Tap),
 }
 
 pub type Target = st3_conversation_ui::doc::Target<Hit>;

@@ -398,6 +398,10 @@ enum Fetched {
     AlertOutcome(String, bool),
     /// Harness sessions st did not start, found on this machine.
     Session(String, Result<Box<st3_client::Session>, String>),
+    /// A document's page, a page of the documents list, and the documents a mission or step names.
+    Document(String, Result<st3_client::DocumentContent, st3_ui_model::documents::Unavailable>),
+    DocumentList(Option<String>, Result<st3_client::DocumentsPage, st3_ui_model::documents::Unavailable>),
+    DocumentReferences(String, Result<st3_client::DocumentReferences, String>),
     /// The Fleet tab's machines and paired devices.
     Observations { generation: u64, outcome: Result<(Vec<st3_client::ResourceObservation>, bool), String> },
     Inventory { generation: u64, result: InventoryRead },
@@ -1169,6 +1173,9 @@ pub fn run(context: Context) -> Result<()> {
                         Err((error, _)) => ui.flash(format!("Sidebar edit not done: {error}")),
                     }
                 }
+                Fetched::Document(reference, outcome) => ui.documents.got(&reference, outcome),
+                Fetched::DocumentList(prefix, outcome) => ui.documents.listed(prefix.as_deref(), outcome),
+                Fetched::DocumentReferences(subject, outcome) => ui.documents.referenced(&subject, outcome),
                 Fetched::Observations { generation, outcome } => {
                     resources_reading = false;
                     if generation == resources_generation { match outcome {
@@ -1338,6 +1345,51 @@ pub fn run(context: Context) -> Result<()> {
             });
         }
         resources_shown = showing_resources;
+        // Documents on screen, the list, and the documents of a mission on screen: read once each
+        // through the client's document routes, the same ones web and the phone read.
+        if ui.glasses.is_some() {
+            let shown = ui.shown_panes().into_iter().map(|(_, pane)| pane).collect::<Vec<_>>();
+            let background = if ui.palette_asks_documents() { vec![super::pane::Pane::Documents(None)] } else { Vec::new() };
+            let subjects = shown
+                .iter()
+                .filter_map(|pane| match pane {
+                    super::pane::Pane::Mission(Some(id)) => Some(ui.document_subjects(id)),
+                    _ => None,
+                })
+                .flatten()
+                .map(|(subject, _)| subject)
+                .collect::<Vec<_>>();
+            if !extras.live {
+                ui.documents.offline(&shown);
+            } else {
+                for want in ui.documents.wanted(&shown, &background, &subjects) {
+                    let reader = client.clone();
+                    let tx = fetched_tx.clone();
+                    runtime.spawn(async move {
+                        use super::documents::{PAGE, Want, unavailable};
+                        let fetched = match want {
+                            Want::Get(reference) => {
+                                let outcome = reader.document_get(&reference).await.map(|envelope| envelope.value).map_err(|error| unavailable(&error));
+                                Fetched::Document(reference, outcome)
+                            }
+                            Want::List { prefix, cursor } => {
+                                let outcome = reader
+                                    .documents_list(prefix.as_deref(), false, cursor.as_deref(), Some(PAGE))
+                                    .await
+                                    .map(|envelope| envelope.value)
+                                    .map_err(|error| unavailable(&error));
+                                Fetched::DocumentList(prefix, outcome)
+                            }
+                            Want::References(subject) => {
+                                let outcome = reader.document_references_get(&subject).await.map(|envelope| envelope.value).map_err(|error| error.plain());
+                                Fetched::DocumentReferences(subject, outcome)
+                            }
+                        };
+                        let _ = tx.send(fetched);
+                    });
+                }
+            }
+        }
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
             // pauses it, and coming back shows the current screen first.

@@ -712,6 +712,20 @@ impl Ui {
         (palette.naming.is_none() && query.chars().count() >= 3).then(|| query.to_owned())
     }
 
+    /// The split with the focus, as `GLASS/GROUP`: what a document trail is kept under.
+    pub(crate) fn focused_split(&self) -> Option<String> {
+        let glass = self.glasses.as_ref()?.glass();
+        Some(format!("{}/{}", glass.id, glass.focus))
+    }
+
+    /// Whether Ctrl+K is being asked for a document, so the documents list is read for its rows.
+    pub(crate) fn palette_asks_documents(&self) -> bool {
+        self.glasses
+            .as_ref()
+            .and_then(|glasses| glasses.palette.as_ref())
+            .is_some_and(|palette| palette.naming.is_none() && palette.query.trim_start().starts_with("doc"))
+    }
+
     /// st's search results for `query` as palette rows, including saved native sessions.
     /// When the index is refreshing or missed conversations, the first row says so.
     fn said_choices(&self, query: &str) -> Vec<Choice> {
@@ -902,6 +916,16 @@ impl Ui {
         }
         for row in &self.resource_sidebar.observations {
             open(1, ("◇", theme::OVERLAY1), super::observed_resources::title(row), super::observed_resources::kind(row).into(), Pane::Resource(row.id.clone()));
+        }
+        if let Some(reference) = super::documents::openable(id) {
+            open(1, ("▤", theme::OVERLAY1), reference.to_owned(), "open this document".into(), Pane::Document(reference.to_owned()));
+        }
+        open(1, ("▤", theme::OVERLAY1), "Documents".into(), "every document, by name".into(), Pane::Documents(None));
+        if id.starts_with("doc/") && id.ends_with('/') {
+            open(1, ("▤", theme::OVERLAY1), format!("Documents under {id}"), "the list under this prefix".into(), Pane::Documents(Some(id.to_owned())));
+        }
+        for row in self.documents.listed_rows() {
+            open(1, ("▤", theme::OVERLAY1), row.name.clone(), format!("document · {}", row.short_version), Pane::Document(row.name.clone()));
         }
         if id.starts_with("resource/") && !self.resource_sidebar.observations.iter().any(|row| row.id == id) {
             open(1, ("◇", theme::OVERLAY1), id.into(), "graph resource".into(), Pane::Resource(id.into()));
@@ -2012,7 +2036,10 @@ impl Ui {
                 );
             }
             // A usage tab names its group whatever the list groups by, so it draws from its key.
-            Some(pane @ Pane::Usage(_)) => self.draw_pane(buf, content, &pane),
+            Some(pane @ (Pane::Usage(_) | Pane::Documents(_))) => self.draw_pane(buf, content, &pane),
+            Some(Pane::Document(reference)) => {
+                self.draw_document(buf, content, &reference, &format!("{}/{index}", glass.id))
+            }
             // A session has no sidebar agent selection: render the tab's subject directly.
             Some(Pane::Agent(Some(id))) if id.starts_with("session/") => {
                 self.draw_pane(buf, content, &Pane::Agent(Some(id)))
@@ -2707,6 +2734,19 @@ impl Ui {
         // has the keys, whose own letters (b and p in Usage) must not type into a tab behind it.
         let conversation = self.composing_agent().filter(|_| !sidebar_keys);
         let undelivered = self.undelivered().is_some();
+        // A document page or the documents list has no box to type in: its plain letters act.
+        if !sidebar_keys
+            && !self.home_open()
+            && !self.editing
+            && self.find.is_none()
+            && !mission_form
+            && self.chat.as_ref().is_none_or(|chat| !chat.editing)
+            && self.confirm.is_none()
+            && self.popover.is_none()
+            && self.document_key(key)
+        {
+            return true;
+        }
         let Some(glasses) = self.glasses.as_mut() else {
             return false;
         };
@@ -4350,6 +4390,8 @@ pub(crate) fn pane_for(id: &str) -> Option<Pane> {
         Some(Pane::Resource(id))
     } else if id.starts_with("machine/") {
         Some(Pane::Machine(Some(id)))
+    } else if super::documents::openable(&id).is_some() {
+        Some(Pane::Document(id))
     } else {
         None
     }
