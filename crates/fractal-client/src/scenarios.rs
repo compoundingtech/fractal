@@ -119,7 +119,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 /// Errors identify the offending pointer. `now` is an integer epoch-millisecond clock.
 pub fn rebase(value: &mut Value, times: &[TimePointer], anchor: &str, now: i64) -> Result<()> {
     let anchor = DateTime::parse_from_rfc3339(anchor).context("invalid scenario anchor")?.timestamp_millis();
-    let delta = now.checked_sub(anchor).context("scenario clock delta overflows")?;
+    let delta = i128::from(now) - i128::from(anchor);
     for time in times {
         let pointer = &time.pointer;
         let target = value.pointer_mut(pointer).with_context(|| format!("missing instant at {pointer}"))?;
@@ -128,7 +128,8 @@ pub fn rebase(value: &mut Value, times: &[TimePointer], anchor: &str, now: i64) 
                 .with_context(|| format!("invalid timestamp at {pointer}"))?.timestamp_millis(),
             TimeCodec::EpochMs => target.as_i64().with_context(|| format!("expected integer epoch-ms at {pointer}"))?,
         };
-        let shifted = instant.checked_add(delta).filter(|ms| (MIN_MS..=MAX_MS).contains(ms))
+        let shifted = i64::try_from(i128::from(instant) + delta).ok()
+            .filter(|ms| (MIN_MS..=MAX_MS).contains(ms))
             .with_context(|| format!("instant out of range at {pointer}"))?;
         *target = match time.codec {
             TimeCodec::Timestamp => Value::String(DateTime::<Utc>::from_timestamp_millis(shifted)

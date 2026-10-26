@@ -114,4 +114,10 @@ fn scenarios_invalid_instants_name_the_pointer() {
         let error = scenarios::rebase(&mut input.clone(), &times, scenarios::ANCHOR, 1_893_499_200_000).unwrap_err();
         assert!(error.to_string().contains("/at"), "{error:#}");
     }
+    for now in [i64::MIN, i64::MAX] {
+        let times: Vec<TimePointer> = serde_json::from_value(serde_json::json!([{ "pointer": "/at", "codec": "timestamp" }])).unwrap();
+        let mut input = serde_json::json!({ "at": scenarios::ANCHOR });
+        let error = scenarios::rebase(&mut input, &times, scenarios::ANCHOR, now).unwrap_err();
+        assert!(error.to_string().contains("/at"), "{error:#}");
+    }
 }
