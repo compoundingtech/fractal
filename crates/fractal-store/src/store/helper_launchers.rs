@@ -332,13 +332,13 @@ mod tests {
         assert_eq!(store.import_replication("peer", &replication).unwrap_err().code, "invalid-replicated-claim");
         assert!(store.claim_by_id(&replication.batches[0].claims[0].id).unwrap().is_none());
         assert!(store.helper_launcher_binding(&desired.subject).unwrap().is_none());
-        assert_eq!(store.agent_person(&desired.subject).unwrap(), None);
+        assert_eq!(store.agent_person(&desired.subject).unwrap().as_deref(), Some("person/ada"));
         assert!(!store.helper_launcher_has_lifetime_binding(&desired.subject).unwrap());
         // A declaration edit must not discover the rejected claim via the historical path.
         helper.subjects.values_mut().next().unwrap().member.as_mut().unwrap().cwd = "/edited".into();
         publish(&store, &helper, "edited", Some("agent/node.launcher"));
         assert!(!store.helper_launcher_has_lifetime_binding("agent/node.helper").unwrap());
-        assert_eq!(store.agent_person("agent/node.helper").unwrap(), None);
+        assert_eq!(store.agent_person("agent/node.helper").unwrap().as_deref(), Some("person/ada"));
     }
 
     #[test]
