@@ -13061,7 +13061,10 @@ fn agent_stop_line(agent: &fractal_client::Agent) -> Option<String> {
         other => other.to_owned(),
     };
     line.push_str(&format!(" at {}", end.ended_at));
-    if let Some(reason) = end.reason.as_deref().or(end.diagnostic.as_deref()) {
+    // The FAULT line already prints a parked seat's reason.
+    if let Some(reason) = end.reason.as_deref().or(end.diagnostic.as_deref())
+        .filter(|reason| agent.fault.as_deref() != Some(*reason))
+    {
         line.push_str(": ");
         push_todo_terminal_text(&mut line, reason);
     }

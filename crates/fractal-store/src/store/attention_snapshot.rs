@@ -714,85 +714,56 @@ impl Store {
         }))
     }
 
+    /// A fault for each seat st parked after it failed to start, or after a failed explicit
+    /// restart, that has not run since: one per park episode. Its owner is the agent that
+    /// declared the seat when no mission run owns it, else the run's requester, else the
+    /// fleet's fault agent (`fault_owner`). It is never a person's.
     fn parked_runtime_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        if person.is_some() {
+            return Ok(Vec::new());
+        }
         let connection = self.readers.get();
-        let mut items = Vec::new();
-        for desired in self
+        let seats = self
             .desired_subjects()?
             .into_iter()
             .filter(|desired| desired.kind == "agent")
-        {
-            // Most agents have never been parked. Do not resolve their identities or
-            // declarations just to discover that there is no crash-loop decision.
-            let decisions =
-                self.claims_for(&desired.subject, Some("runtime.reconcile-decision"))?;
-            if !decisions.iter().any(|decision| {
-                let key = decision.body["fields"]["key"].as_str().unwrap_or_default();
-                key.starts_with("runtime-crash-loop:") || key.starts_with("codex-crash-loop:")
-            }) {
-                continue;
-            }
-            if !person_work::declaration_live(&connection, &desired.subject)? {
-                continue;
-            }
-            let Some(token) = self.selected_desired_token(&desired.subject)? else {
-                continue;
-            };
-            let decision = decisions.iter().find(|decision| {
-                let key = decision.body["fields"]["key"].as_str().unwrap_or_default();
-                key == format!("runtime-crash-loop:{token}")
-                    || key == format!("codex-crash-loop:{token}")
-            });
-            let Some(decision) = decision else { continue };
-            if decision.accepted_at_unix_ms > as_of {
-                continue;
-            }
-            // A retry of the parked launch that has since succeeded resolves the fault: the seat is
-            // running again without anyone revising its declaration.
-            let retry_prefix = format!("runtime-crash-loop-retry:{token}:");
-            let last_retry = decisions
-                .iter()
-                .filter(|retry| {
-                    retry.body["fields"]["key"].as_str().is_some_and(|key| key.starts_with(&retry_prefix))
-                })
-                .map(crate::store::claim_log_order)
-                .max();
-            if let Some(last_retry) = last_retry
-                && self
-                    .observations_for(&desired.subject, "runtime.action.succeeded")?
-                    .iter()
-                    .any(|success| {
-                        crate::store::claim_log_order(success) > last_retry
-                            && success.body["fields"]["desired_token"].as_str() == Some(token.as_str())
-                    })
+            .map(|desired| (desired.subject.clone(), desired))
+            .collect::<BTreeMap<_, _>>();
+        let subjects = seats.keys().cloned().collect::<Vec<_>>();
+        let mut items = Vec::new();
+        for (source, parked) in self.parked_seats_for(&subjects, current_index(&connection)?)? {
+            if parked.parked_at_unix_ms > as_of
+                || !person_work::declaration_live(&connection, &source)?
             {
                 continue;
             }
-            let codex = decision.body["fields"]["key"]
-                .as_str()
-                .unwrap_or_default()
-                .starts_with("codex-crash-loop:");
-            let reviewer = if codex {
-                "person/alex"
-            } else {
-                "person/operator"
+            let Some(desired) = seats.get(&source) else { continue };
+            // A seat no run owns answers to the agent that declared it; a run's seat to its run.
+            let owner = match &desired.owner_run {
+                Some(_) => String::new(),
+                None => self
+                    .desired_subject_with_writer(&source)?
+                    .and_then(|(_, writer)| writer)
+                    .filter(|writer| writer.starts_with("agent/"))
+                    .unwrap_or_default(),
             };
-            if person.is_some_and(|person| person != reviewer) {
-                continue;
-            }
-            let source = desired.subject;
+            let codex = desired.member.as_ref().and_then(|member| member.driver.as_deref()) == Some("codex");
             let diagnostic = self.last_driver_diagnostic(&source)?;
             items.push(AttentionItemView {
-                episode: decision.id.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
-                subject: source.clone(), person: reviewer.into(), requester_id: None, launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
+                episode: parked.episode.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
+                subject: source.clone(), person: owner, requester_id: None, launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
                 title: if codex { "A Codex agent stopped after repeated failures" } else { "An agent stopped after repeated runtime failures" }.into(),
-                detail: format!("{source}: {}.{} Inspect the seat and revise its desired declaration before restarting.", decision.body["fields"]["reason"].as_str().unwrap_or("the runtime is parked"), diagnostic.map(|diagnostic| format!(" The driver's last diagnostic: {diagnostic}.")).unwrap_or_default()),
-                mission: None, mission_run: desired.owner_run, step: None, targets: vec![source.clone()], requested_at_unix_ms: decision.accepted_at_unix_ms,
-                actions: vec![attention_action("inspect source", &["st", "subject", &source])],
+                detail: format!(
+                    "{source}: {}.{} Fix what keeps it from starting, then `st agents restart {source}`; this fault clears when it runs again.",
+                    parked.reason.trim_end_matches('.'),
+                    diagnostic.map(|diagnostic| format!(" The driver's last diagnostic: {diagnostic}.")).unwrap_or_default(),
+                ),
+                mission: None, mission_run: desired.owner_run.clone(), step: None, targets: vec![source.clone()], requested_at_unix_ms: parked.parked_at_unix_ms,
+                actions: vec![attention_action("inspect source", &["st", "agents", "show", &source])],
                 request: None,
             });
         }

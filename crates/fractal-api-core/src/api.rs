@@ -3561,7 +3561,11 @@ fn client_agent_cards_presented(
         .filter(|subject| history || subject.projection.layer == "current")
         .map(|mut subject| -> anyhow::Result<(String, Value)> {
             subject.harness = card_reads.take_harness(store, &subject.subject)?;
-            let member_fault = member_faults.get(&subject.subject);
+            // A seat st parked is a fault until it runs again, not a seat someone stopped.
+            let parked = parked_seats.get(&subject.subject)
+                .filter(|_| subject.kind.as_deref() != Some("stop"));
+            let member_fault = member_faults.get(&subject.subject)
+                .or_else(|| parked.map(|parked| &parked.reason));
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
             let fault = member_fault.or(mailbox_fault)
                 .or_else(|| stop_deferral_faults.get(&subject.subject));
@@ -3768,7 +3772,7 @@ fn client_agent_cards_presented(
                 .and_then(|state| state.suspend_operation_id.as_deref())
                 .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
                 .transpose()?.flatten();
-            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked_seats.get(&subject.subject), retired_subjects.contains(&subject.subject), &updated_at);
+            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at);
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();

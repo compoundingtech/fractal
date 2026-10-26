@@ -675,6 +675,8 @@ impl UsageFold {
 pub struct ParkedSeat {
     /// The crash-loop decision that parked it.
     pub decision: String,
+    /// The first raise since the seat last ran: one park, however many retries failed in it.
+    pub episode: String,
     pub reason: String,
     pub parked_at_unix_ms: u128,
 }
@@ -5489,9 +5491,24 @@ impl Store {
                 if !launch_lineage_tx(&connection, &subject)?.contains(&token) {
                     continue;
                 }
+                // Each failed retry raises again; the episode is the first raise since the seat
+                // last ran, so one park is one fault however many retries fail.
+                let episode: String = connection.query_row(
+                    "SELECT id FROM claims WHERE subject=?1 AND kind='runtime.reconcile-decision'
+                        AND store_index<=?2
+                        AND store_index>COALESCE((SELECT MAX(store_index) FROM claims
+                            WHERE subject=?1 AND kind='runtime.observed' AND store_index<=?2
+                              AND json_extract(body, '$.fields.status')='running'), 0)
+                        AND json_extract(body, '$.fields.decision')='raise'
+                        AND json_extract(body, '$.fields.key')=?3
+                      ORDER BY store_index LIMIT 1",
+                    params![subject, at_index, fields.get("key").and_then(Value::as_str)],
+                    |row| row.get(0),
+                )?;
                 parked.insert(
                     subject,
                     ParkedSeat {
+                        episode,
                         decision: id,
                         reason: fields
                             .get("reason")
