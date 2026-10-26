@@ -411,12 +411,16 @@ protocol/proxy settings. Both common and per-worktree configuration are checked.
 Clone preparation preflights both configuration files through that same host-Git
 allowlist before resetting the clone or writing launcher settings. All rejected
 keys are named together in the tick's `detail` and log; values are not reported.
+URL-bearing key subsections are replaced with `<redacted-subsection>` so embedded
+userinfo and query credentials cannot enter diagnostics.
 No unknown keys are removed, including stale inert GC expiry keys such as
 `gc.rerereunresolved`: the operator must reconcile them before retrying.
 Failed host-Git commands retain stderr in tick detail even without output capture.
 Preparation sets repository-local `user.name` and `user.email` from the launcher
 inputs above on every tick. Global Git configuration is never consulted for
 commit identity; the reserved-domain default identifies local integration commits.
+Identity keys in `config.worktree` are refused even when worktree config is
+enabled: their higher precedence must not override the launcher's common identity.
 
 The clone's entire `.git` directory is read-only inside bubblewrap. Linked
 snapshots additionally bind their `.git` pointer read-only; the clone mount covers

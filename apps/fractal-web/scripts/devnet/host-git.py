@@ -22,7 +22,19 @@ LOCAL_KEYS = frozenset((
 ))
 
 
-def validate_config(path, env):
+def diagnostic_key(key):
+    section, _, rest = key.partition('.')
+    subsection, separator, variable = rest.rpartition('.')
+    # Subsections can embed URLs containing credentials, query tokens and dots.
+    # Redact the whole subsection rather than attempting to recover URL boundaries
+    # from the flattened Git key. Keep section/variable names, never config values.
+    if separator and (re.search(r'[A-Za-z][A-Za-z0-9+.-]*:', subsection)
+                      or '@' in subsection or '?' in subsection):
+        return f'{section}.<redacted-subsection>.{variable}'
+    return key
+
+
+def validate_config(path, env, *, worktree=False):
     content = read_regular(path)
     # No repository discovery and no includes: parse only the safe-opened bytes.
     check = subprocess.run(['git', 'config', '--file', '-', '--no-includes', '--list', '--null'],
@@ -34,7 +46,10 @@ def validate_config(path, env):
         if not entry:
             continue
         key = entry.split(b'\n', 1)[0].decode('utf-8')
-        if key not in LOCAL_KEYS and not re.fullmatch(r'branch\.[^\n]+\.(remote|merge)', key):
+        # Worktree identity wins over common config, so only the launcher-owned
+        # common identity is accepted; preparation must not be silently overridden.
+        if ((worktree and key in ('user.name', 'user.email'))
+                or (key not in LOCAL_KEYS and not re.fullmatch(r'branch\.[^\n]+\.(remote|merge)', key))):
             rejected.add(key)
     return rejected
 
@@ -57,10 +72,10 @@ def run(args):
         rejected = validate_config(metadata / 'config', env)
         worktree_config = metadata / 'config.worktree'
         if worktree_config.exists() or worktree_config.is_symlink():
-            rejected.update(validate_config(worktree_config, env))
+            rejected.update(validate_config(worktree_config, env, worktree=True))
         if rejected:
             raise RuntimeError('host Git refuses non-allowlisted repository-local configuration: '
-                               + ', '.join(repr(key) for key in sorted(rejected)))
+                               + ', '.join(repr(diagnostic_key(key)) for key in sorted(rejected)))
     return subprocess.run(['git', *POLICY, *args], cwd=TRUSTED_CWD, env=env).returncode
 
 

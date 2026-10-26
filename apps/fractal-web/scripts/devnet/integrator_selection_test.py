@@ -185,7 +185,15 @@ class SelectionTest(unittest.TestCase):
         real_run = self.module.run
         def run(args, **kwargs):
             return self.response([]) if args[0] == 'gh' else real_run(args, **kwargs)
-        for key in ('gc.rerereunresolved', 'filter.x.clean'):
+        cases = [
+            ('gc.rerereunresolved', 'gc.rerereunresolved'),
+            ('filter.x.clean', 'filter.x.clean'),
+            ('url.https://fixture-user:fixture-secret@example.invalid/repo?access=fixture-query.insteadOf',
+             'url.<redacted-subsection>.insteadof'),
+            ('http.https://fixture-user:fixture-secret@example.invalid/repo?access=fixture-query.extraheader',
+             'http.<redacted-subsection>.extraheader'),
+        ]
+        for key, expected in cases:
             with self.subTest(key=key):
                 config.write_bytes(original)
                 subprocess.run(['git', 'config', '--file', str(config), key, 'forbidden'], check=True)
@@ -199,9 +207,25 @@ class SelectionTest(unittest.TestCase):
                 row = json.loads((self.module.L / 'live-r3.jsonl').read_text().splitlines()[-1])
                 self.assertEqual(row['build'], 'failed')
                 self.assertIn('non-allowlisted', row['detail'])
-                self.assertIn(key, row['detail'])
-                self.assertIn(key, log.getvalue())
+                self.assertIn(expected, row['detail'])
+                self.assertIn(expected, log.getvalue())
+                for secret in ('fixture-user', 'fixture-secret', 'fixture-query', 'forbidden'):
+                    self.assertNotIn(secret, log.getvalue())
                 self.assertEqual(config.read_bytes(), before)
+
+    def test_clone_preparation_rejects_worktree_identity_override(self):
+        subprocess.run(['git', 'init', '-q', str(self.module.C)], check=True)
+        subprocess.run(['git', '-C', str(self.module.C), 'config',
+                        'extensions.worktreeConfig', 'true'], check=True)
+        worktree_config = self.module.C / '.git/config.worktree'
+        worktree_config.write_text('[user]\n name = Not the launcher\n email = override@example.invalid\n')
+        before = worktree_config.read_bytes()
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            self.module.prepare_clone()
+        self.assertIn('user.name', raised.exception.stderr)
+        self.assertIn('user.email', raised.exception.stderr)
+        self.assertNotIn('override@example.invalid', raised.exception.stderr)
+        self.assertEqual(worktree_config.read_bytes(), before)
 
     def test_uncaptured_host_git_failure_retains_stderr(self):
         subprocess.run(['git', 'init', '-q', str(self.module.C)], check=True)

@@ -90,7 +90,9 @@ class HostBoundaryTest(unittest.TestCase):
                                             capture_output=True, text=True, timeout=10)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn('non-allowlisted', result.stderr)
-                    self.assertIn(key.lower(), result.stderr)
+                    expected = ('includeif.<redacted-subsection>.path'
+                                if key.startswith('includeIf.') else key.lower())
+                    self.assertIn(expected, result.stderr)
                     self.assertFalse(marker.exists())
             # Per-worktree config is validated before Git can activate it too.
             config.write_bytes(original)
