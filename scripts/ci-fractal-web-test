@@ -556,6 +556,8 @@ composer_story = ["apps/fractal-web/src/web/ComposerImages.stories.tsx", "apps/f
 assert detector_kit_paths(composer_story) == composer_story, "the composer image integration story and live adapter select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
+embed_closure = ["apps/fractal-web/src/embed/Embed.stories.tsx", "apps/fractal-web/src/embed/Embed.tsx", "apps/fractal-web/src/embed/captures/provenance.json"]
+assert detector_kit_paths(embed_closure) == embed_closure, "the product embed story and its nested fixtures select kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
 with tempfile.TemporaryDirectory() as scratch:
     def graph(*ids):
