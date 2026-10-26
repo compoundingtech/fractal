@@ -13373,7 +13373,7 @@ feedback and a custom choice need text. The resumed step's `person_answers` carr
 as {"type", "outcome", "id", "label", "text"}: read it with `fractal work show STEP --json` and
 act on `id` and `outcome`, not on the words."##;
 
-fn render_client_work_detail(work: &fractal_client::Work, driver_held: bool) -> String {
+fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bool>) -> String {
     use std::fmt::Write as _;
 
     let mut output = String::new();
@@ -16717,24 +16717,26 @@ fn renewal_lost_its_claim(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Lease guidance is optional enrichment: Fabric cannot expose the legacy status route.
+/// A failed lookup must neither hide successful work output nor assert unmanaged ownership.
 async fn claim_has_driver(
     client: &Client,
     claimant: Option<&str>,
     incarnation: Option<&str>,
-) -> Result<bool> {
+) -> Option<bool> {
     let Some(subject) = claimant.filter(|subject| subject.starts_with("agent/")) else {
-        return Ok(false);
+        return Some(false);
     };
     let Some(incarnation) = incarnation else {
-        return Ok(false);
+        return Some(false);
     };
     let status: StatusResponse = client.get(&format!(
         "/v1/status?subject={}&harness_only=true", urlencoding::encode(subject),
-    )).await?;
+    )).await.ok()?;
     let harness = status.subjects.iter()
         .find(|candidate| candidate.subject == subject)
         .and_then(|candidate| candidate.harness.as_ref());
-    Ok(claim_has_active_harness(Some(incarnation), harness))
+    Some(claim_has_active_harness(Some(incarnation), harness))
 }
 
 fn work_claim_has_active_harness(

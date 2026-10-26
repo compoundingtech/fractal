@@ -821,10 +821,13 @@ pub(crate) fn render_claim_lease(
     claimant: Option<&str>,
     incarnation: Option<&str>,
     expires: u128,
-    driver_held: bool,
+    driver_held: Option<bool>,
 ) -> String {
-    if driver_held {
+    if driver_held == Some(true) {
         return "The Fractal driver renews the lease on claimed Fractal work. A managed agent must not run a renewal loop.".into();
+    }
+    if driver_held.is_none() {
+        return "Lease renewal ownership is unavailable. A managed Fractal driver renews its claims; do not start a renewal loop without checking ownership.".into();
     }
     let expiry = i64::try_from(expires)
         .ok()
@@ -852,7 +855,7 @@ pub(crate) fn render_step_run(
     step: &StepRunView,
     style: OutputStyle,
     now_unix_ms: u128,
-    driver_held: bool,
+    driver_held: Option<bool>,
 ) -> String {
     let mut output = String::new();
     let title = step.title.as_deref().unwrap_or(&step.step);
@@ -1625,7 +1628,7 @@ mod tests {
             answer: None,
             evidence: vec![],
         });
-        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, false);
+        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, Some(false));
         assert!(rendered.contains("Sender class: external-assistant"));
         assert!(rendered.contains("Assistant grant: assistant-grant/test"));
         assert!(rendered.contains("(assistant/chatgpt, step-run/demo/ask)"));
@@ -2100,7 +2103,7 @@ mod tests {
         claimed.execution_elapsed_ms = 1_000;
         claimed.timeout_ms = Some(60_000);
 
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, true);
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true));
 
         assert!(rendered.contains("SUBJECT    step-run/demo-generation/build"));
         assert!(rendered.contains("GENERATION run-generation/demo-generation"));
@@ -2115,12 +2118,12 @@ mod tests {
         let mut claimed = step("step-run/demo-generation/build", "build", "claimed");
         claimed.claimant = Some("person/operator".into());
         claimed.claim_expires_at_unix_ms = Some(62_001);
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, false);
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false));
         assert!(rendered.contains("Lease        The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: fractal work renew step-run/demo-generation/build --as person/operator\n"));
         assert!(!rendered.contains("st driver renews"));
 
         claimed.claim_incarnation = Some("incarnation/manual".into());
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, false);
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false));
         assert!(rendered.contains("--as person/operator --incarnation incarnation/manual\n"));
     }
 
