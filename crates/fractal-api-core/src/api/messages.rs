@@ -109,6 +109,39 @@ pub async fn decide_subscription_request(
     Ok(Json(response))
 }
 
+#[derive(Deserialize)]
+pub struct RecipientQuery {
+    to: String,
+}
+
+/// Native send preflight: O(1) indexed lookups for one identity, never a roster or queue fold.
+pub async fn recipient(
+    State(state): State<AppState>,
+    Query(query): Query<RecipientQuery>,
+) -> Result<Json<Value>, ApiError> {
+    blocking_api(move || {
+        let requested = normalize_message_party(&query.to);
+        crate::model::refuse_person_recipient(&requested).map_err(ApiError::bad)?;
+        let (recipient, identity) = receipt_recipient(&state.store, &requested)?;
+        if requested.starts_with("agent/") {
+            // These are exact subject-key reads; runtime evidence may come from another host
+            // and remains proof of existence even when the seat is stopped or undeclared.
+            let declared = state.store.selected_desired_token(&identity).map_err(ApiError::internal)?;
+            let runtime = state.store.latest_claim(&identity, Some("runtime.observed"))
+                .map_err(ApiError::internal)?;
+            if declared.is_none() && runtime.is_none() {
+                return Err(ApiError::bad(St3Error::new(
+                    "unknown-recipient",
+                    format!(
+                        "recipient `{requested}` is not known to this daemon; check `fractal agents ls` and fleet replication, or explicitly use --allow-undeclared-recipient if the seat exists on another host. Nothing was sent",
+                    ),
+                ).with_detail("recipient", requested)));
+            }
+        }
+        Ok(Json(json!({"recipient": recipient, "recipient_identity": identity})))
+    }).await
+}
+
 pub async fn send_message(
     State(state): State<AppState>,
     Json(request): Json<MessageSendRequest>,

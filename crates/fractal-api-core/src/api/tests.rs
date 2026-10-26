@@ -12099,3 +12099,25 @@ mission "overview-renamed" state="ready" {
         );
     }
 }
+
+#[tokio::test]
+async fn native_recipient_preflight_refuses_unknown_without_writing_and_accepts_runtime_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let before = state.store.index().unwrap();
+    let (status, error) = get_request(app.clone(), "/v1/messages/recipient?to=agent%2Fada%2Ftester").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "unknown-recipient");
+    assert_eq!(error["details"]["recipient"], "agent/ada/tester");
+    assert_eq!(state.store.index().unwrap(), before);
+    roster_fixture_append(&state.store, "agent/ada/tester", "runtime.observed", json!({
+        "status": "stopped", "runtime_id": "tester", "incarnation_id": "fixture",
+    }));
+    let (status, recipient) = get_request(app.clone(), "/v1/messages/recipient?to=agent%2Fada%2Ftester").await;
+    assert_eq!(status, StatusCode::OK, "{recipient}");
+    assert_eq!(recipient["recipient_identity"], "agent/ada/tester");
+    let (status, error) = get_request(app, "/v1/messages/recipient?to=person%2Fada").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "person-has-no-inbox");
+}

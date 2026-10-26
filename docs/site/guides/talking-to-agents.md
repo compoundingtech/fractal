@@ -33,6 +33,9 @@ and fleet replication if a recipient is missing. If you know a seat exists on an
 but its evidence has not synced yet, explicitly pass `--allow-undeclared-recipient` on that
 send; the override is never remembered. Replies resolve their recipient from the original
 message and do not require a fresh agent lookup. People still do not have inboxes.
+The check runs before attachment uploads, so a refusal does not store attachment bytes or
+consume upload quota. An older daemon without the preflight endpoint still accepts sends;
+the CLI prints one notice that recipient validation requires a daemon upgrade.
 
 Successful delivery is not proof that the agent read or completed the request. Check its reply and, for tracked work, the run's state and evidence.
 

@@ -13702,6 +13702,27 @@ async fn for_each_message(
     }
 }
 
+async fn preflight_message_recipient(client: &Client, to: &str, allow_undeclared: bool) -> Result<()> {
+    let to = normalize_message_subject(to);
+    fractal_daemon::model::refuse_person_recipient(&to)
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if !to.starts_with("agent/") || allow_undeclared {
+        return Ok(());
+    }
+    match client.get::<serde::de::IgnoredAny>(&format!(
+        "/v1/messages/recipient?to={}", urlencoding::encode(&to),
+    )).await {
+        Ok(_) => Ok(()),
+        Err(error) if fractal_daemon::client::http_status(&error) == Some(404)
+            && fractal_daemon::client::api_error_code(&error) != Some("unknown-recipient") =>
+        {
+            eprintln!("st: this daemon has no recipient preflight; sending without checking the recipient. Upgrade the daemon to reject unknown recipients.");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn send_message(
     client: &Client,
     args: MessageSendArgs,
@@ -13778,36 +13799,6 @@ async fn send_message(
             key
         }
     };
-    if request.to.starts_with("agent/") && !args.allow_undeclared_recipient {
-        // The fleet detail view includes replicated seats, not just locally running agents.
-        // Do not use the local PTY catalog: a remote or stopped seat is a valid recipient.
-        let detail = client.get::<serde::de::IgnoredAny>(&format!(
-            "/v1/client/agents/{}",
-            urlencoding::encode(&request.to),
-        )).await;
-        if let Err(error) = detail {
-            if fractal_daemon::client::is_not_found(&error) {
-                // A stopped, undeclared runtime is historical, but still proves this identity
-                // existed. Exact status reads retain that evidence without scanning the fleet.
-                let evidence: fractal_daemon::model::StatusResponse = client.get(&format!(
-                    "/v1/status?subject={}", urlencoding::encode(&request.to),
-                )).await?;
-                if !evidence.subjects.iter().any(|subject| {
-                    subject.desired_token.is_some() || subject.actual_claim.is_some()
-                }) {
-                    return Err(fractal_daemon::model::St3Error::new(
-                        "unknown-recipient",
-                        format!(
-                            "recipient `{}` is not known to this daemon; check `fractal agents ls` and fleet replication, or explicitly use --allow-undeclared-recipient if the seat exists on another host. Nothing was sent",
-                            request.to,
-                        ),
-                    ).with_detail("recipient", request.to.as_str()).into());
-                }
-            } else {
-                return Err(error);
-            }
-        }
-    }
     match client.send_message(&request).await {
         Ok(receipt) => {
             warn_unconfirmed_silent(&request, &receipt);
