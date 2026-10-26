@@ -317,7 +317,7 @@ mod instance_uninstall_tests {
 
 fn uninstall_policy_hint(json_output: bool) -> &'static str {
     if json_output {
-        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st claude-channel uninstall-policy"
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy"
     } else {
         "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: fractal claude-channel uninstall-policy"
     }
@@ -326,6 +326,6 @@ fn uninstall_policy_hint(json_output: bool) -> &'static str {
 #[test]
 fn uninstall_policy_advice_preserves_json_stdout() {
     assert_eq!(uninstall_policy_hint(true),
-        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st claude-channel uninstall-policy");
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy");
     assert!(uninstall_policy_hint(false).ends_with("fractal claude-channel uninstall-policy"));
 }
