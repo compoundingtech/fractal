@@ -1,4 +1,4 @@
-// moves to smalltalk/clients/typescript
+// moves to fractal/clients/typescript
 /**
  * Renderer registry, generic over the platform's view type (`View` = a React component in wf, a
  * ratatui widget fn in stui, a SwiftUI view builder on iOS). Construction validates once at

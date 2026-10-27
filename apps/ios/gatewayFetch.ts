@@ -7,6 +7,6 @@ export function gatewayFetch(inner: typeof fetch = fetch): typeof fetch {
     const type = response.headers.get('content-type') ?? '';
     if (response.ok || type.includes('json')) return response;
     const route = new URL(String(input)).pathname;
-    throw new Error(`The gateway returned HTTP ${response.status} with no st response for ${route}.`);
+    throw new Error(`The gateway returned HTTP ${response.status} with no Fractal response for ${route}.`);
   };
 }

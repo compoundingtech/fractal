@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
 
 if [ -s pty-audit.log ]; then
   printf 'direct terminal interaction was observed:\n' >&2
@@ -9,7 +11,8 @@ if [ -s pty-audit.log ]; then
   exit 1
 fi
 
-worker="agent/$ST_MISSION_RUN/wake.worker"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+worker="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/wake.worker"
 count="$(st3 trace show "$worker" --json --limit 500 \
   | jq -s '[.[] | select(.kind == "terminal.input.requested")] | length')"
 test "$count" -eq 0

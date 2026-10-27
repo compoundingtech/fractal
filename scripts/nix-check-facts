@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Build one check derivation and write the facts a signed `nix` evidence note records.
+
+  scripts/nix-check-facts --check genie-freshness --out FILE [--system x86_64-linux] [--flake .] [--attempt 1]
+
+FILE is the JSON `scripts/evidence-wrap --aggregate FILE` takes: the command, its exit code, the digest of
+what it produced and the inputs. A check derivation only produces output when its tests pass, and the
+output path hashes every input (source, flake.lock, toolchain, build script), so for a passing check the
+record names that path and its NAR hash, and the signatures the Nix daemon put on it. A path that is
+already valid in the local store is not built again: the record says `cache_hit=true`, which is the
+proof that an unchanged tree needs no rebuild. A failing build is a record too (exit code 1, the derivation
+but no output path).
+
+  inputs  drv_path out_path nar_hash nar_size references cache_hit nix_signatures nix_key_id nix_unsigned
+          references (sorted store paths joined by commas; `-` when there are none)
+          (nix_signatures: the daemon's `name:base64` signatures joined by commas; `none` when unsigned)
+
+Exit status is the build's: 0 for a passing check, 1 for a failing one. A usage error or a derivation that
+cannot be named is 2 and writes nothing.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+
+NAME = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}\Z')
+SYSTEM = re.compile(r'^[a-z0-9_]+-[a-z]+\Z')
+STORE = re.compile(r'^/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+\Z')
+NAR = re.compile(r'^sha256-[A-Za-z0-9+/]{43}=\Z|^sha256:[0-9a-z]{52}\Z')
+
+
+class Unusable(Exception):
+    pass
+
+
+def nix(*args, check=True):
+    done = subprocess.run(['nix', '--extra-experimental-features', 'nix-command flakes', *args], capture_output=True, text=True)
+    if check and done.returncode != 0:
+        raise Unusable(f'nix {args[0]}: {done.stderr.strip()[-300:]}')
+    return done
+
+
+def path_info(path):
+    """The one JSON entry `nix path-info --json` prints for PATH, in either of its shapes."""
+    # `--json-format 1` pins the shape on a Nix that has the flag; an older Nix prints that shape without it.
+    shown = nix('path-info', '--json', '--json-format', '1', path, check=False)
+    data = json.loads((shown if shown.returncode == 0 else nix('path-info', '--json', path)).stdout)
+    entry = data.get(path) if isinstance(data, dict) and path in data else (data[0] if isinstance(data, list) and data else None)
+    if not isinstance(entry, dict):
+        raise Unusable(f'nix path-info --json gave no entry for {path}')
+    return entry
+
+
+def key_id(signature):
+    return signature.split(':', 1)[0]
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--check', required=True)
+    parser.add_argument('--out', required=True, type=Path)
+    parser.add_argument('--system', default='x86_64-linux')
+    parser.add_argument('--flake', default='.')
+    args = parser.parse_args(argv)
+    if not NAME.match(args.check) or not SYSTEM.match(args.system):
+        parser.error('--check and --system must be plain names')
+    ref = f'{args.flake}#checks.{args.system}.{args.check}'
+    try:
+        drv = nix('eval', '--raw', f'{ref}.drvPath').stdout.strip()
+        out_path = nix('eval', '--raw', f'{ref}.outPath').stdout.strip()
+        if not STORE.match(drv) or not STORE.match(out_path):
+            raise Unusable('the derivation or its output path is not a store path')
+    except Unusable as error:
+        print(f'nix-check-facts: cannot name {ref}: {error}', file=sys.stderr)
+        return 2
+    cache_hit = nix('path-info', out_path, check=False).returncode == 0
+    command = ['nix', 'build', ref]
+    built = subprocess.run(['nix', '--extra-experimental-features', 'nix-command flakes', 'build', ref, '--no-link', '-L'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    sys.stderr.buffer.write(built.stderr[-200000:])
+    exit_code = 0 if built.returncode == 0 else 1
+    inputs = {'drv_path': drv}
+    if exit_code == 0:
+        try:
+            entry = path_info(out_path)
+            nar_hash = entry.get('narHash') or ''
+            if not NAR.match(nar_hash):
+                raise Unusable(f'unexpected narHash {nar_hash!r}')
+            signatures = [s for s in entry.get('signatures') or [] if isinstance(s, str) and re.match(r'^[A-Za-z0-9._-]+:[A-Za-z0-9+/=]+\Z', s)]
+        except (Unusable, ValueError) as error:
+            print(f'nix-check-facts: built {out_path} but cannot read it back: {error}', file=sys.stderr)
+            return 2
+        references = sorted(r for r in entry.get('references') or [] if isinstance(r, str))
+        if not all(STORE.match(r) for r in references):
+            print('nix-check-facts: a reference is not a store path', file=sys.stderr)
+            return 2
+        inputs.update(out_path=out_path, cache_hit='true' if cache_hit else 'false', nar_hash=nar_hash, nar_size=str(int(entry.get('narSize', 0))),
+                      references=','.join(references) or '-',
+                      nix_signatures=','.join(signatures)[:480] if signatures else 'none',
+                      nix_key_id=key_id(signatures[0]) if signatures else 'none',
+                      nix_unsigned='false' if signatures else 'true')
+        output_sha256 = hashlib.sha256(nar_hash.encode()).hexdigest()
+    else:
+        output_sha256 = hashlib.sha256(built.stderr[-1000000:]).hexdigest()
+    facts = {'command': command, 'exit_code': exit_code, 'output_sha256': output_sha256, 'inputs': inputs, 'runner': 'nix'}
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(facts, indent=2, sort_keys=True) + '\n')
+    return exit_code
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

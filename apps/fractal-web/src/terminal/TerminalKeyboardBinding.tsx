@@ -1,5 +1,5 @@
 import { RegistryContext, useAtomRefresh, useAtomValue } from '@effect/atom-react'
-import type { TerminalModes } from '@smalltalk/st3-client/schema'
+import type { TerminalModes } from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import { Effect, Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'

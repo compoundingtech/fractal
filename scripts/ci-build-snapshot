@@ -19,8 +19,7 @@ spec = importlib.util.spec_from_loader(loader.name, loader)
 source = importlib.util.module_from_spec(spec)
 loader.exec_module(source)
 ALLOWED = {'.github/workflows/fleet.yml', '.github/workflows/main-upkeep.yml',
-           '.github/workflows/macos.yml', '.github/workflows/release-smalltalk.yml',
-           '.github/workflows/release-portable.yml'}
+           '.github/workflows/macos.yml', '.github/workflows/release-smalltalk.yml'}
 
 
 def paths():

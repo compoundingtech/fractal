@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { St3Client } from '@smalltalk/st3-client'
-import { Agent, decodeUnknownSync, type TerminalScreen } from '@smalltalk/st3-client/schema'
+import { FractalClient } from '@fractal/client'
+import { Agent, decodeUnknownSync, type TerminalScreen } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -19,7 +19,7 @@ import { TerminalDetail } from './TerminalDetail.tsx'
 import { gatewayTerminalInput } from './terminal-input-port.ts'
 import { makeTerminalInputFixture } from './terminalInputFixture.ts'
 
-vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const ref = 'terminal/example'
 // The daemon names the terminal `terminal/<agent id>`, not by the view's subject address.
@@ -129,7 +129,7 @@ describe('terminal detail input', () => {
 
   it('keeps the keyboard disabled with an honest reason when terminal.input is not granted', async () => {
     const { opened, factory } = sessions()
-    await mount({ terminal: observed({ value: screen }), grants: { actions: 'granted', messageSend: 'granted', terminalInput: 'ungranted' }, terminalInput: factory })
+    await mount({ terminal: observed({ value: screen }), grants: { actions: 'granted', messageSend: 'granted', attachmentUpload: 'ungranted', terminalInput: 'ungranted' }, terminalInput: factory })
     expect(field().disabled).toBe(true)
     expect(host.textContent).toContain('This device is not allowed to type into terminals.')
     expect(button('Enable input')).toBeUndefined()
@@ -172,7 +172,7 @@ describe('terminal detail input', () => {
       }
       let granted = true
       const terminalInput = gatewayTerminalInput({
-        connect: (fetchImpl) => new St3Client({ baseUrl: 'https://gateway.invalid', fetchImpl }),
+        connect: (fetchImpl) => new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl }),
         transport,
         snapshot: () => reads.shift()?.promise ?? Promise.resolve('snapshot/next'),
         liveScreen: (subject) => {
@@ -188,7 +188,7 @@ describe('terminal detail input', () => {
       if (cut === 'switches terminals') await mount({ terminal: terminals, terminalInput, at: other })
       else {
         granted = false
-        await mount({ terminal: terminals, terminalInput, grants: { actions: 'granted', messageSend: 'granted', terminalInput: 'ungranted' } })
+        await mount({ terminal: terminals, terminalInput, grants: { actions: 'granted', messageSend: 'granted', attachmentUpload: 'ungranted', terminalInput: 'ungranted' } })
       }
       await act(async () => read.resolve('snapshot/late'))
       expect(posted).toEqual([])

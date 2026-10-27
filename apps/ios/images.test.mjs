@@ -14,13 +14,13 @@ const pasted = fromDataUri(`data:image/png;base64,${png}`, 'Pasted image');
 assert.equal(typeof pasted, 'object');
 assert.equal(pasted.mediaType, 'image/png');
 assert.equal(pasted.name, 'Pasted image');
-assert.equal(fromDataUri('not an image'), 'The clipboard did not hold an image st can read.');
+assert.equal(fromDataUri('not an image'), 'The clipboard did not hold an image Fractal can read.');
 
 // st's limits are said before anything is uploaded.
 assert.equal(picked(png, 'image/jpg').mediaType, 'image/jpeg');
-assert.match(picked(png, 'image/heic', 'IMG_1.HEIC'), /IMG_1.HEIC is image\/heic; st takes PNG, JPEG, GIF or WebP/);
+assert.match(picked(png, 'image/heic', 'IMG_1.HEIC'), /IMG_1.HEIC is image\/heic; Fractal takes PNG, JPEG, GIF or WebP/);
 const huge = 'A'.repeat(Math.ceil((MAX_BYTES + 3) * 4 / 3));
-assert.match(picked(huge, 'image/png'), /is 10\.0 MB; st takes images up to 10 MB/);
+assert.match(picked(huge, 'image/png'), /is 10\.0 MB; Fractal takes images up to 10 MB/);
 
 // The same image once; at most four; refusals in words.
 const one = picked(png, 'image/png');

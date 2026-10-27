@@ -5,12 +5,18 @@ if (typeof document !== 'undefined') {
     configurable: true,
     value: Object.assign(new EventTarget(), { ready: Promise.resolve(), status: 'loaded' }),
   })
-  // jsdom has no media-query engine; these fixtures use the default motion preference.
-  window.matchMedia = (media: string): MediaQueryList => Object.assign(new EventTarget(), {
-    media,
-    matches: false,
-    onchange: null,
-    addListener(this: EventTarget, listener: EventListener) { this.addEventListener('change', listener) },
-    removeListener(this: EventTarget, listener: EventListener) { this.removeEventListener('change', listener) },
+}
+
+// jsdom has no matchMedia. Width queries answer from the test's window.innerWidth (jsdom's default is 1024);
+// every other query does not match. Change events are not simulated: tests set the width before mounting.
+if (typeof window !== 'undefined' && window.matchMedia === undefined) {
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    value: (media: string): MediaQueryList => {
+      const max = /^\(max-width:\s*(\d+)px\)$/.exec(media)?.[1]
+      const min = /^\(min-width:\s*(\d+)px\)$/.exec(media)?.[1]
+      const matches = max !== undefined ? window.innerWidth <= Number(max) : min !== undefined ? window.innerWidth >= Number(min) : false
+      return Object.assign(new EventTarget(), { media, matches, onchange: null, addListener: () => {}, removeListener: () => {} }) as MediaQueryList
+    },
   })
 }

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/ci-local also keeps FRACTAL_* and ST2_* variables from the stages it runs: since the rename a seat carries its live endpoint and identity under FRACTAL_* names, which the binary prefers over a test's own ST3_ENDPOINT, so tests reached the live daemon.",
+  "replay": {"status": "none", "detail": "No record changes."},
+  "schema": {"status": "none", "detail": "None."},
+  "rules": {"status": "none", "detail": "None."},
+  "compatibility": {"status": "none", "detail": "Stages see fewer inherited variables; CI runners have none of these."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

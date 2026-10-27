@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}}"
 
 readonly REQUESTER=person/eval-requester
-readonly AGENT="agent/$ST_MISSION_RUN/compact.codex"
-readonly RUN_TAG="mission-run:$ST_MISSION_RUN"
-readonly NONCE="${ST_MISSION_RUN##*/}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+readonly AGENT="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/compact.codex"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+readonly RUN_TAG="mission-run:${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+fractal_selected=${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}
+readonly NONCE="${fractal_selected##*/}"
 readonly STATE="$PWD/controller-state.json"
 
 state="$(jq -n --arg agent "$AGENT" --arg nonce "$NONCE" \
@@ -39,7 +45,8 @@ is_harness_state() {
 }
 
 target_work_claimed() {
-  st3 missions show "mission-run/$ST_MISSION_RUN" --json 2>/dev/null \
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  st3 missions show "mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" --json 2>/dev/null \
     | jq -e --arg agent "$AGENT" '
         any(.steps[];
           .step == "message-target"
@@ -110,7 +117,7 @@ wait_until "initial exact idle" 300 is_harness_state idle
 
 send_request \
   "Working-turn anchor" \
-  "Run the shell command sleep 20. After it finishes, send $REQUESTER exactly one Small Talk message containing ANCHOR-DONE $NONCE and tagged $RUN_TAG. Do not modify files." \
+  "Run the shell command sleep 20. After it finishes, send $REQUESTER exactly one Fractal message containing ANCHOR-DONE $NONCE and tagged $RUN_TAG. Do not modify files." \
   anchor
 anchor="$sent_subject"
 wait_until "anchor native lifecycle" 180 message_has_lifecycle "$anchor"
@@ -118,7 +125,7 @@ wait_until "Codex working state" 90 is_harness_state working
 
 send_request \
   "Working-turn steer" \
-  "Send $REQUESTER exactly one Small Talk message containing STEER-SEEN $NONCE and tagged $RUN_TAG. Do not modify files." \
+  "Send $REQUESTER exactly one Fractal message containing STEER-SEEN $NONCE and tagged $RUN_TAG. Do not modify files." \
   steer
 steer="$sent_subject"
 wait_until "steered message lifecycle" 180 message_has_lifecycle "$steer"
@@ -141,7 +148,7 @@ persist_state
 
 send_request \
   "Post-compaction delivery" \
-  "Send $REQUESTER exactly one Small Talk message containing POST-COMPACT-SEEN $NONCE and tagged $RUN_TAG. Then complete your claimed message-target work step in the graph. Do not modify files." \
+  "Send $REQUESTER exactly one Fractal message containing POST-COMPACT-SEEN $NONCE and tagged $RUN_TAG. Then complete your claimed message-target work step in the graph. Do not modify files." \
   post_compact
 post="$sent_subject"
 wait_until "post-compaction native lifecycle" 180 message_has_lifecycle "$post"
