@@ -1,4 +1,4 @@
-// moves to smalltalk/clients/typescript
+// moves to fractal/clients/typescript
 //
 // The normalized conversation view model. Both sources fold into it: the live st3 conversation
 // follow (generated `TimelineEntry`, see ./fromTimeline.ts) and offline harness history
@@ -20,11 +20,14 @@ export const Sender = Schema.Struct({
 })
 export type Sender = typeof Sender.Type
 
-/** A user-supplied file or image. st only carries an opaque `attachment_id` today (open Q3). */
+/** A file or image; mailbox headers supply metadata absent from native attachment-only content. */
 export const Attachment = Schema.Struct({
   id: Schema.String,
   mediaType: Schema.String,
   name: Schema.optional(Schema.String),
+  size: Schema.optional(Schema.Number),
+  /** Native message carrier, independent of the transcript row's presentation identity. */
+  messageId: Schema.optional(Schema.String),
 })
 export type Attachment = typeof Attachment.Type
 
@@ -77,6 +80,29 @@ export const SendState = Schema.TaggedUnion({
 })
 export type SendState = typeof SendState.Type
 
+/** Harness facts retained by the q101 app stopgap until adapters emit typed TimelineBlocks. */
+export const HarnessNotice = Schema.TaggedUnion({
+  SubagentResult: {
+    taskId: Schema.String, agent: Schema.String, status: Schema.String, duration: Schema.String,
+    payload: Schema.String, raw: Schema.String,
+    lines: Schema.optional(Schema.Int), size: Schema.optional(Schema.String),
+    fullOutput: Schema.optional(Schema.String), abortReason: Schema.optional(Schema.String),
+    error: Schema.optional(Schema.String), mergeSummary: Schema.optional(Schema.String),
+    followUp: Schema.optional(Schema.String),
+  },
+  Irc: {
+    from: Schema.String, to: Schema.optional(Schema.String), replyTo: Schema.optional(Schema.String),
+    payload: Schema.String, raw: Schema.String,
+  },
+  BackgroundJob: {
+    jobId: Schema.String, label: Schema.optional(Schema.String), state: Schema.Literal('completed'),
+    duration: Schema.optional(Schema.String),
+    payload: Schema.String, raw: Schema.String,
+  },
+  Compaction: { payload: Schema.String, raw: Schema.String },
+})
+export type HarnessNotice = typeof HarnessNotice.Type
+
 /** Shared renderer contract for live timeline entries and imported session history. */
 export const ConversationItem = Schema.TaggedUnion({
   /** Prose from a participant. `streaming` = the entry is not final yet (revisions replace it). */
@@ -91,7 +117,7 @@ export const ConversationItem = Schema.TaggedUnion({
     sender: Schema.optional(Sender),
     sendState: Schema.optional(SendState),
   },
-  /** A Small Talk message envelope joined into the conversation (st `message` entry). */
+  /** A Fractal message envelope joined into the conversation (st `message` entry). */
   Message: {
     id: Schema.String,
     messageId: Schema.String,
@@ -157,11 +183,12 @@ export const ConversationItem = Schema.TaggedUnion({
   /** Known structured harness events, never displayed as a raw JSON transcript. */
   Event: {
     id: Schema.String,
-    kind: Schema.Literals(['resource-observed', 'harness-message', 'subagent-result']),
+    kind: Schema.Literals(['resource-observed', 'harness-message', 'subagent-result', 'irc', 'background-job', 'compaction']),
     title: Schema.String,
     text: Schema.String,
     sender: Sender,
     data: Schema.Unknown,
+    notice: Schema.optional(HarnessNotice),
     at: Schema.optional(Schema.String),
   },
   /** Forward-compatible compact row with explicit type and an inspectable structured payload. */
@@ -179,7 +206,7 @@ export type ConversationItem = typeof ConversationItem.Type
 
 /** Participant prose, attachments, and streaming state. */
 export type TextItem = (typeof ConversationItem.cases.Text)['Type']
-/** Small Talk message envelope embedded in the transcript. */
+/** Fractal message envelope embedded in the transcript. */
 export type MessageItem = (typeof ConversationItem.cases.Message)['Type']
 /** Model reasoning text and optional elapsed duration. */
 export type ReasoningItem = (typeof ConversationItem.cases.Reasoning)['Type']

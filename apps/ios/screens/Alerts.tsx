@@ -2,14 +2,15 @@ import { useMemo, useState } from 'react';
 import { Alert, Linking, Pressable, ScrollView, useWindowDimensions, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import type { TimelineEntry } from '../../../clients/typescript/st3-client';
-import { ANSWERS, alertsIn, answerLabel, cleanMessageText, isRequest, offeredAnswers, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer, report, spaced, yesNo, ago, type KeptAttention, type PendingCall } from '@smalltalk/st3-views';
+import type { TimelineEntry } from '../../../clients/typescript/fractal-client';
+import { ANSWERS, alertsIn, answerLabel, requestImages, cleanMessageText, isRequest, offeredAnswers, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer, report, spaced, yesNo, ago, type KeptAttention, type PendingCall } from '@fractal/views';
 import { agentName } from '../agentsView';
 import type { RootParams } from '../navigation';
 import { attentionKindLabel } from '../presentation';
 import { useStore } from '../store';
 import { theme } from '../theme';
 import { Button, Markdown, Note, T, useTextAppearance } from '../ui';
+import { MailImageView, useWindowViewport } from '../imageBox';
 
 // Alerts in an agent's conversation: everything that waits on the person and belongs to this
 // agent, above the conversation, answerable there. Each is a line that opens to its question and
@@ -24,11 +25,12 @@ export function AlertsStrip({ agentId, entries }: { agentId: string; entries: Re
   const calls = useMemo(() => pendingCalls(entries), [entries]);
   // One line until it is opened, as in stui: the cards take the conversation's room only when asked for.
   const [expanded, setExpanded] = useState(false);
+  const { palette } = useTextAppearance();
   if (!alerts.length) return null;
   // Opened, one alert starts open; with several, each opens on a tap.
   const isOpen = (id: string) => (alerts.length === 1) !== toggled.has(id);
   const toggle = (id: string) => setToggled(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-  return <View style={{ backgroundColor: theme.mantle }}>
+  return <View style={{ backgroundColor: palette.mantle }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={`${alerts.length} alert${alerts.length === 1 ? '' : 's'}, ${expanded ? 'hide' : 'show'}`} onPress={() => setExpanded(open => !open)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 6 }}>
       <T numberOfLines={1} style={{ flex: 1 }}><T bold color={theme.person}>◆ {alerts.length} alert{alerts.length === 1 ? '' : 's'}</T><T dim> · </T><T>{alerts[0]!.title}</T></T>
       <T dim>{expanded ? '▾ hide' : '▸ show'}</T>
@@ -44,7 +46,8 @@ function AlertCard({ item, agentId, open, onToggle, calls }: { item: KeptAttenti
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const seats = (item.conversation_ids ?? []).filter(id => id !== agentId).map(id => { const seat = data.agents.find(candidate => candidate.id === id); return seat ? agentName(seat) : id.replace(/^agent\//, ''); });
   const from = (() => { const asker = data.agents.find(candidate => candidate.id === (item.requester_id ?? agentId)); return asker ? agentName(asker) : (item.requester_id ?? agentId).replace(/^agent\//, ''); })();
-  return <View style={{ borderLeftWidth: 3, borderLeftColor: theme.person, backgroundColor: theme.surface0, borderRadius: 6, padding: 8, gap: 6 }}>
+  const { palette } = useTextAppearance();
+  return <View style={{ borderLeftWidth: 3, borderLeftColor: palette.person, backgroundColor: palette.surface0, borderRadius: 6, padding: 8, gap: 6 }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={onToggle}>
       <T numberOfLines={open ? undefined : 1}><T bold color={theme.person}>◆ alert  </T><T bold>{item.title}</T></T>
       {open ? null : <T dim numberOfLines={1}>{attentionKindLabel(item.attention_kind)} · waited {ago(item.requested_at)}</T>}
@@ -122,7 +125,7 @@ function PromptAnswerView({ item, calls }: { item: KeptAttention; calls: Pending
           return <Button key={choice} label={`${on ? '✓ ' : ''}${option.label}`} color={on ? theme.green : theme.text} disabled={disabled} onPress={() => choose(index, choice, question.multiSelect)} />;
         })}
       </View>
-    </View>) : shown.map(each => <View key={each.id} style={{ backgroundColor: appearance.system ? appearance.colors.grouped : theme.crust, borderRadius: 4, padding: 8, gap: 2 }}>
+    </View>) : shown.map(each => <View key={each.id} style={{ backgroundColor: appearance.system ? appearance.colors.grouped : appearance.palette.crust, borderRadius: 4, padding: 8, gap: 2 }}>
       <T bold color={theme.person}>{each.tool}</T>
       {each.lines.map((line, index) => <T key={index} selectable>{line}</T>)}
     </View>)}
@@ -155,12 +158,16 @@ export function StructuredRequestView({ item, request, from, onAnswered }: { ite
     { text: 'Cancel', style: 'cancel' },
     { text: 'Send', onPress: () => void actions.done(item, answer.label, answer.id).then(done => { if (done) onAnswered(); }) },
   ]);
+  // The images the ask carries, read from st by its person step, as a message's are by the message.
+  const images = useMemo(() => requestImages(request, item.source_id), [request, item.source_id]);
+  const viewport = useWindowViewport();
   const words = () => Alert.prompt(`Answer ${from}`, item.title, text => { if (text.trim()) void actions.done(item, text.trim()).then(done => { if (done) onAnswered(); }); });
   return <View style={{ gap: 8 }}>
     {request.recommendation ? <T><T dim>recommends  </T><T bold color={theme.green}>{label(request.recommendation.answer)}</T><T soft>  {request.recommendation.reason}</T></T> : null}
     <RequestQuestion text={request.question} />
     {request.summary ? <Markdown text={spaced(request.summary)} color={theme.subtext0} /> : null}
     {request.reasons?.length ? <View style={{ gap: 2 }}>{request.reasons.map((reason, index) => <T key={index}><T color={theme.lavender}>•  </T>{reason}</T>)}</View> : null}
+    {images.length ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>{images.map(image => <MailImageView key={image.sha256} image={image} viewport={viewport} />)}</View> : null}
     {request.subjects?.map((subject, index) => subject.url
       ? <Pressable key={index} onPress={() => void Linking.openURL(subject.url!)}><T color={theme.accent}>↗ {subject.label}</T></Pressable>
       : <T key={index} dim>↗ {subject.label}  {subject.ref ?? ''}</T>)}

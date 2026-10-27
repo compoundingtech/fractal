@@ -33,7 +33,7 @@ normally serves one run, so its queue has one entry.
 
 ## One selector
 
-`crates/st3-kernel/src/seat_queue.rs` holds the only next-work selector, `seat_queue::select`. It is used by:
+`crates/fractal-kernel/src/seat_queue.rs` holds the only next-work selector, `seat_queue::select`. It is used by:
 
 - `Store::agent_work_queues`, which feeds `NEXT WORK`, `QUEUED WORK`, and `UPCOMING` in
   `st agents show` and the `agents` client resource;
@@ -83,7 +83,7 @@ A person moves runs with `--as person/NAME` or `person` in the st config, like o
 mutations. With `--json`, it prints the action result.
 
 An agent moves runs in any seat's queue, including its own, with `--as agent/PATH`; in
-[free mode](kdl-lifecycle.md#free-mode) it needs no grant, and a `queue-authority` block in its
+[free mode](../site/reference/configuration.md#free-mode) it needs no grant, and a `queue-authority` block in its
 declaration is ignored. The move records the agent as its actor. The agent's queue move goes to
 `POST /v1/agent-queue-moves`; that route also accepts a person. An agent's local client-v0 session can also use the `agent.queue-move` action. With `--json`, the
 route prints the move claim.

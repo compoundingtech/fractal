@@ -9,6 +9,8 @@
     "seed": 5
   },
   "state": {
+    "launch_variants": [],
+    "launches": [],
     "missions": [
       {
         "active_runs": 1,
@@ -86,7 +88,7 @@
       "_tag": "changes",
       "at_ms": 18000,
       "removes": [],
-      "store": 18,
+      "store": 10,
       "upserts": [
         {
           "active_runs": 0,

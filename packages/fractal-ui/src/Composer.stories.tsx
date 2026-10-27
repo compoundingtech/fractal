@@ -15,7 +15,7 @@ import { developmentMeasurements } from './assistant-ui/perf/measurement'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
 type EffortSupport = keyof typeof fixtureEffortControls
 interface ComposerArgs {
@@ -119,9 +119,10 @@ function SingleComposer(args: ComposerArgs) {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Composer',
   component: SingleComposer,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Decided composer C2 · R3 · M2 · K1 over assistant-ui native composer state and React Aria TokenField. Native queue, structured mention/command serialization, image attachments, durable local drafts and explicit local fixture send outcomes; no network transport is claimed.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'editable composer and outbox state are host-owned local contracts that no world slice models' }, layout: 'fullscreen', docs: { description: { component: 'Decided composer C2 · R3 · M2 · K1 over assistant-ui native composer state and React Aria TokenField. Native queue, structured mention/command serialization, image attachments, durable local drafts and explicit local fixture send outcomes; no network transport is claimed.' } } },
   args: { scheme: 'dark', state: 'idle', ...decided, effort: 'supported' },
   argTypes: {
     scheme: { options: ['dark', 'light'], control: 'radio' },
@@ -134,6 +135,40 @@ const meta = {
   },
 } satisfies Meta<typeof SingleComposer>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'AllStatesLight:contract-fixture',
+  'DurableDraft:contract-fixture',
+  'EffortAllStates:contract-fixture',
+  'EffortSupported:contract-fixture',
+  'EffortUnknown:contract-fixture',
+  'EffortUnsupported:contract-fixture',
+  'FailedSendRestored:contract-fixture',
+  'FooterWidthBudget:contract-fixture',
+  'FooterWidthBudgetLight:contract-fixture',
+  'Geometry:contract-fixture',
+  'Idle:contract-fixture',
+  'IdleLight:contract-fixture',
+  'ImageAttached:contract-fixture',
+  'ImeComposition:contract-fixture',
+  'KitLabelResize:contract-fixture',
+  'LayoutShapes:contract-fixture',
+  'MentionPopup:contract-fixture',
+  'MentionPopupLight:contract-fixture',
+  'OfflineDraft:contract-fixture',
+  'PlainImageAttachments:contract-fixture',
+  'PlainImageAttachmentsLight:contract-fixture',
+  'PlainTextAdapter:contract-fixture',
+  'QueuedTwice:contract-fixture',
+  'Running:contract-fixture',
+  'ShiftEnterNewline:contract-fixture',
+  'SlashCommands:contract-fixture',
+  'TargetTooltips:contract-fixture',
+  'TargetTooltipsLight:contract-fixture',
+  'TypingMultiLine:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 /** Non-interacting fixtures let the source geometry gate measure real composer state, before any play mutates it. */
@@ -430,7 +465,8 @@ export const EffortSupported: Story = { tags: ['critical'],
     await userEvent.click(picker)
     const high = await page.findByRole('menuitemradio', { name: 'High' })
     await expect(page.getByRole('menuitemradio', { name: 'Medium' })).toHaveAttribute('aria-checked', 'true')
-    await expect(within(page.getByRole('menu', { name: 'Select effort: Medium' })).getByText('Default')).toBeVisible()
+    // The menu enters from opacity 0, so visibility settles once the entry animation ends.
+    await waitFor(() => expect(within(page.getByRole('menu', { name: 'Select effort: Medium' })).getByText('Default')).toBeVisible())
     await expect(page.getByRole('menuitemcheckbox', { name: 'Keep for next messages' })).toHaveAttribute('aria-checked', 'false')
     // Frame budget: one choice commits the value subtree exactly once without dropping frames.
     const engine = developmentMeasurements?.createMeasurementEngine()
@@ -588,6 +624,112 @@ export const KitLabelResize: Story = { tags: ['critical'],
   },
 }
 
+/** The live app's plain composer with host image attachments: paste or Attach adds images; at the host limit Attach stays but explains itself, and an excess or lost upload permission withholds Send with a described refusal. */
+function PlainImages({ scheme }: { readonly scheme: Scheme }) {
+  const [source] = React.useState(() => createComposerFixture('idle'))
+  const snapshot = React.useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot)
+  const [uploadGranted, setUploadGranted] = React.useState(true)
+  const adapter = snapshot.options.adapters!.attachments!
+  const options = { ...snapshot.options, adapters: { ...snapshot.options.adapters, attachments: {
+    accept: 'image/png,image/jpeg,image/gif,image/webp',
+    add: adapter.add.bind(adapter), remove: adapter.remove.bind(adapter), send: adapter.send.bind(adapter),
+  } } }
+  return <Surface scheme={scheme}><div {...stylex.props(styles.lane)}>
+    <button onClick={() => setUploadGranted(false)}>Revoke image upload</button>
+    <EmbraceRuntimeProvider options={options}><EmbraceComposer variant="C1" readingColumn conversationLabel="Image attachments" imageAttachments={{ max: 1, ...(uploadGranted ? {} : { disabledReason: 'You can no longer send images here.' }) }} /></EmbraceRuntimeProvider>
+    <div aria-label="Accepted fixture messages" role="log" {...stylex.props(styles.receipts)}>{snapshot.receipts.map((receipt, index) => <p key={index} {...stylex.props(styles.receipt)}>Attachments: {receipt.message.attachments?.map(attachment => attachment.name).join(', ')}</p>)}</div>
+  </div></Surface>
+}
+const pngFiles = (...names: string[]) => {
+  const data = new DataTransfer()
+  for (const name of names) data.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], name, { type: 'image/png' }))
+  return data
+}
+export const PlainImageAttachments: Story = { tags: ['critical'],
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Attachment limit and send probes require a local runtime with an image adapter and fixture receipts.' } },
+  render: args => <PlainImages scheme={args.scheme} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('button', { name: 'Attach image' })).toBeVisible()
+    // Native picker rejection, including its first file: no staged attachment is required for the live notice.
+    const originalClick = HTMLInputElement.prototype.click
+    HTMLInputElement.prototype.click = function () {
+      if (this.type !== 'file') return originalClick.call(this)
+      const files = new DataTransfer()
+      files.items.add(new File(['<svg/>'], 'picker.svg', { type: 'image/svg+xml' }))
+      Object.defineProperty(this, 'files', { configurable: true, value: files.files })
+      this.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    try { await userEvent.click(canvas.getByRole('button', { name: 'Attach image' })) }
+    finally { HTMLInputElement.prototype.click = originalClick }
+    const notice = canvas.getByTestId('composer-attachment-notice')
+    await waitFor(() => expect(notice).toHaveTextContent("SVG files can't be attached. Use PNG, JPEG, GIF or WebP."))
+    await expect(notice).toHaveAttribute('aria-live', 'polite')
+    await expect(canvas.queryByTestId('composer-attachments')).toBeNull()
+    const unsupportedPaste = new DataTransfer()
+    const pickerNotice = notice.querySelector('p')
+    unsupportedPaste.items.add(new File(['<svg/>'], 'pasted.svg', { type: 'image/svg+xml' }))
+    await userEvent.click(textbox(canvasElement))
+    await userEvent.paste(unsupportedPaste)
+    await waitFor(() => expect(notice.querySelector('p')).not.toBe(pickerNotice))
+    await expect(notice).toHaveTextContent("SVG files can't be attached. Use PNG, JPEG, GIF or WebP.")
+    await expect(canvas.queryByTestId('composer-attachments')).toBeNull()
+    const draft = 'Please review the attached layout.'
+    await userEvent.click(textbox(canvasElement))
+    await userEvent.type(textbox(canvasElement), draft)
+    await userEvent.paste(pngFiles('first.png', 'second.png'))
+    await waitFor(() => expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible())
+    // The tray takes its own row above the field at every width; the one-line pill would squeeze the draft beside it.
+    await settle()
+    const tray = canvasElement.querySelector<HTMLElement>('[data-testid="composer-attachments"]')!.getBoundingClientRect()
+    await expect(tray.bottom).toBeLessThanOrEqual(textbox(canvasElement).getBoundingClientRect().top + 1)
+    // Over the limit: the excess is named; Send stays focusable but blocked, described by the refusal.
+    const refusal = canvas.getByTestId('composer-send-refusal')
+    await expect(within(refusal).getByRole('status')).toHaveTextContent('Messages can include 1 image. Remove 1 to send.')
+    const send = canvas.getByRole('button', { name: 'Send' })
+    await expect(send).toBeEnabled()
+    await expect(send).toHaveAttribute('aria-disabled', 'true')
+    await expect(send).toHaveAccessibleDescription('Messages can include 1 image. Remove 1 to send.')
+    // Attach keeps its place, explains the limit and adds nothing.
+    const attach = canvas.getByRole('button', { name: 'Attach image' })
+    await expect(attach).toHaveAttribute('aria-disabled', 'true')
+    await expect(attach).toHaveAccessibleDescription('Messages can include 1 image.')
+    // A blocked press, by pointer or keyboard, never sends: it re-renders the refusal (re-announced, highlighted) and keeps the draft.
+    await userEvent.click(send)
+    await waitFor(() => expect(refusal.querySelector('[data-refusal-attempt="1"]')).not.toBeNull())
+    send.focus()
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(refusal.querySelector('[data-refusal-attempt="2"]')).not.toBeNull())
+    await expect(send).toHaveFocus()
+    await expect(receiptLog(canvasElement).children).toHaveLength(0)
+    await expect(textbox(canvasElement)).toHaveValue(draft)
+    // Remove is named for its file and reachable by keyboard.
+    canvas.getByRole('button', { name: 'Remove first.png' }).focus()
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(within(refusal).getByRole('status')).toBeEmptyDOMElement())
+    await expect(canvas.getByRole('button', { name: 'Attach image' })).toHaveAttribute('aria-disabled', 'true')
+    // Permission loss does not strand the remaining image: the refusal is count-aware with a one-step Remove.
+    await userEvent.click(canvas.getByRole('button', { name: 'Revoke image upload' }))
+    await waitFor(() => expect(within(refusal).getByRole('status')).toHaveTextContent('You can no longer send images here. Remove the image to send your text.'))
+    await expect(canvas.getByRole('button', { name: 'Send' })).toHaveAttribute('aria-disabled', 'true')
+    await expect(canvas.getByRole('img', { name: 'second.png' })).toBeVisible()
+    await expect(canvas.getByRole('button', { name: 'Attach image' })).toHaveAccessibleDescription('You can no longer send images here.')
+    await userEvent.click(textbox(canvasElement))
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(refusal.querySelector('[data-refusal-attempt="1"]')).not.toBeNull())
+    await expect(receiptLog(canvasElement).children).toHaveLength(0)
+    await expect(textbox(canvasElement)).toHaveValue(draft)
+    await userEvent.click(within(refusal).getByRole('button', { name: 'Remove image' }))
+    await waitFor(() => expect(canvasElement.querySelector('[data-testid="composer-attachments"]')).toBeNull())
+    await expect(textbox(canvasElement)).toHaveFocus()
+    await expect(textbox(canvasElement)).toHaveValue(draft)
+    await expect(canvas.getByRole('button', { name: 'Send' })).not.toHaveAttribute('aria-disabled', 'true')
+    await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(within(receiptLog(canvasElement)).getByText('Attachments:')).toBeVisible())
+  },
+}
+export const PlainImageAttachmentsLight: Story = { ...PlainImageAttachments, args: { scheme: 'light' } }
+
 /** Plain text adapter used by workbench thread panes: session-scoped draft, queue while running, explicit stop. */
 function PlainAdapter({ scheme }: { readonly scheme: Scheme }) {
   const [sent, setSent] = React.useState<readonly string[]>([])
@@ -644,7 +786,7 @@ const styles = stylex.create({
   frameTitle: { margin: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
   caption: { color: ink.fgMuted, flexGrow: 1 },
   frameBody: { minWidth: 0, padding: s.md, display: 'flex', flexDirection: 'column', gap: s.xl },
-  button: { display: 'inline-flex', justifyContent: 'center', alignItems: 'center', alignSelf: 'flex-start', gap: s.xs, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  button: { display: 'inline-flex', justifyContent: 'center', alignItems: 'center', alignSelf: 'flex-start', gap: s.xs, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   receipts: { display: 'flex', flexDirection: 'column', gap: s.md },
   receipt: { margin: 0, padding: s.md, backgroundColor: surface.rowActive, borderRadius: r.sm, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   text: { margin: 0, marginBlock: s.sm, whiteSpace: 'pre-wrap' },

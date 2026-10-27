@@ -5,7 +5,7 @@ import { surfaceVars as surface, accentVars as accent, typeVars as t, radiusVars
 
 export interface TranscriptSkeletonProps {
   readonly sync: SyncStatus
-  readonly now: number
+  readonly now?: number
   readonly observedAt: number
   readonly onRetrySync?: () => void
 }

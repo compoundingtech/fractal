@@ -1,38 +1,42 @@
-import { Component, createRef, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ActionSheetIOS, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import type { St3Client, TimelineEntry } from '../../../clients/typescript/st3-client';
-import type { ConversationContentRef } from '../../../clients/typescript/st3-client';
-import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@smalltalk/st3-views';
+import type { FractalClient, TimelineEntry } from '../../../clients/typescript/fractal-client';
+import type { ConversationContentRef } from '../../../clients/typescript/fractal-client';
+import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@fractal/views';
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentReported, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
 import { Banners } from '../chrome';
 import { quality } from '../qualityNative';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
-import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
+import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@fractal/views';
 import { wholeText, wholeTextFailure } from '../messageBody';
 import { draftSize, messageLimit, restoreDraft, sendReason } from '../composer';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
 import { rememberBounded } from '../boundedCache';
-import { ConversationImageViewport, VisibleConversationImage, type VisibleImageState } from '../visibleConversationImages';
+import { ConversationImageViewport } from '../visibleConversationImages';
+import { ImageBox, MailImageView, useWindowViewport } from '../imageBox';
+import { IMAGES } from '../imageView';
 import { dictationAvailable, startDictation } from '../modules/st-dictation';
 import type { RootScreen } from '../navigation';
 import { openSubagentConversation } from '../conversationNavigation';
 import { useStore, type MessageRequest, type Sent } from '../store';
 import { fonts, theme } from '../theme';
-import { Button, Field, LINE, Markdown, T } from '../ui';
+import { Button, Field, LINE, Markdown, SchemeScreen, T, useTextAppearance } from '../ui';
 import { AlertsStrip } from './Alerts';
 
-// Drawn by stui's rules (fixtures/clients/conversation-style.json), so both apps look alike.
+// Drawn by stui's rules (fixtures/clients/conversation-style.json), so both apps look alike. Text
+// names its colour by Mocha token and `T` repaints it for the system appearance; fills and edges
+// take the scope's palette here, so the conversation is dark or light as the phone is, live.
 const RULES: ConversationRules = rules;
 const c = tokenColor;
 
-const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, older: { paged: false, start: false, loading: false } };
+const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, historyVersion: 0, older: { paged: false, start: false, loading: false } };
 // `unconfirmed` is the exact request st may have taken and has not confirmed, to send again unchanged.
 type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
@@ -44,7 +48,11 @@ function nowClock() {
 
 // One agent's conversation, drawn as stui draws it and kept pinned to the newest entry just
 // above the composer, unless the person has scrolled back to read.
-export function ConversationScreen({ route, navigation }: RootScreen<'Conversation'>) {
+export function ConversationScreen(props: RootScreen<'Conversation'>) {
+  return <SchemeScreen><ConversationView {...props} /></SchemeScreen>;
+}
+
+function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
   const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, saveDrafts, actions, simpleOn } = useStore();
   const session = [...data.sessions, ...historicalSessions].find(candidate => candidate.id === (sessionId ?? target));
@@ -63,11 +71,13 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     const current = timelineNow.current;
     const sessionId = current.sessionId;
     if (!dragged.current || !current.hasOlder || current.older.loading || !sessionId || status !== 'online') return;
+    // A replacement can arrive while this page is loading, even for the same session.
+    const request = { sessionId, historyVersion: current.historyVersion };
     const keep = (next: Conversation<TimelineEntry>) => { rememberBounded(conversationCache.current, target, next, 24); return next; };
-    setTimeline(previous => olderLoading(previous));
+    setTimeline(previous => olderLoading(previous, request));
     void actions.olderTimeline(sessionId, current.older, current.entries[0]).then(
-      page => setTimeline(previous => keep(applyOlderPage(previous, sessionId, page))),
-      error => setTimeline(previous => olderFailed(previous, error instanceof Error ? error.message : String(error))),
+      page => setTimeline(previous => keep(applyOlderPage(previous, request, page))),
+      error => setTimeline(previous => olderFailed(previous, request, error instanceof Error ? error.message : String(error))),
     );
   };
   // Whether st has answered at all: until it has, the screen says it is loading, never "nothing".
@@ -352,10 +362,11 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     setDictated(true);
   }
   // Debug builds only: type a message and send it, as a person would, so a recording can show
-  // what the list does on send (EXPO_PUBLIC_ST3_TEST_SEND).
+  // what the list does on send (EXPO_PUBLIC_FRACTAL_TEST_SEND).
   const [devSend, setDevSend] = useState(0);
   useEffect(() => {
-    const text = __DEV__ ? process.env.EXPO_PUBLIC_ST3_TEST_SEND : undefined;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    const text = __DEV__ ? (process.env.EXPO_PUBLIC_FRACTAL_TEST_SEND ?? process.env.EXPO_PUBLIC_ST3_TEST_SEND) : undefined;
     if (!text || !loaded || !agent) return;
     // `\n` in the variable is a new line, so a recording can show a tall box after a send.
     const typed = setTimeout(() => setDraft(`${text.replaceAll('\\n', '\n')} ${new Date().toISOString().slice(11, 19)}`), 3_000);
@@ -364,10 +375,11 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   }, [loaded, agent?.id]);
   useEffect(() => { if (devSend) void send(); }, [devSend]);
   // Debug builds only: scroll back to the oldest entry every few seconds, as a person reading
-  // back would, so a recording can show earlier pages arriving (EXPO_PUBLIC_ST3_TEST_SCROLL_BACK
+  // back would, so a recording can show earlier pages arriving (EXPO_PUBLIC_FRACTAL_TEST_SCROLL_BACK
   // is how many times).
   useEffect(() => {
-    let left = __DEV__ ? Number(process.env.EXPO_PUBLIC_ST3_TEST_SCROLL_BACK ?? 0) : 0;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    let left = __DEV__ ? Number(process.env.EXPO_PUBLIC_FRACTAL_TEST_SCROLL_BACK ?? process.env.EXPO_PUBLIC_ST3_TEST_SCROLL_BACK ?? 0) : 0;
     if (!left || !loaded) return;
     const timer = setInterval(() => {
       if (left-- <= 0) { clearInterval(timer); return; }
@@ -381,19 +393,22 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   const openSession = useCallback((sessionId: string, title: string) => openSubagentConversation(navigation, sessionId, title), [navigation]);
   // The conversation header, as st last sent it: what is running, what it costs, what waits.
   const header = useMemo(() => headerLine(timeline.header, new Date(lastFrame ?? Date.now()).toISOString()), [timeline.header, lastFrame]);
+  const { palette } = useTextAppearance();
+  const strip = [styles.strip, { borderBottomColor: palette.surface0 }];
+  const bar = { backgroundColor: palette.mantle, borderTopColor: palette.surface0 };
 
   return <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={headerHeight}>
     <Banners />
-    {agent ? <AgentStrip agent={agent} onMission={(id, missionTitle) => navigation.navigate('Mission', { id, title: missionTitle })} /> : session ? <View style={styles.strip}><T dim numberOfLines={1}>{session.driver ?? 'harness'} · {session.state} · {session.id}</T></View> : null}
-    {header ? <View style={styles.strip}><T dim>{header}</T></View> : null}
+    {agent ? <AgentStrip agent={agent} onMission={(id, missionTitle) => navigation.navigate('Mission', { id, title: missionTitle })} /> : session ? <View style={strip}><T dim numberOfLines={1}>{session.driver ?? 'harness'} · {session.state} · {session.id}</T></View> : null}
+    {header ? <View style={strip}><T dim>{header}</T></View> : null}
     {agent ? <AlertsStrip agentId={agent.id} entries={timeline.entries} /> : null}
-    {issue ? <Pressable accessibilityRole={stopped ? 'button' : undefined} disabled={!stopped} onPress={retry} style={styles.strip}><T color={theme.waiting}>{staleLine(issue, loaded, lastFrame, now, stopped)}</T></Pressable> : null}
+    {issue ? <Pressable accessibilityRole={stopped ? 'button' : undefined} disabled={!stopped} onPress={retry} style={strip}><T color={theme.waiting}>{staleLine(issue, loaded, lastFrame, now, stopped)}</T></Pressable> : null}
     {!unresolved && !issue ? <Freshness refreshing={refreshing} loaded={loaded} lastFrame={lastFrame} /> : null}
-    {findOpen ? <View style={[styles.strip, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
+    {findOpen ? <View style={[strip, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
       <Field value={find} onChangeText={setFind} placeholder="Find in this conversation" autoFocus autoCapitalize="none" autoCorrect={false} spellCheck={false} returnKeyType="search" style={{ flex: 1 }} />
       <Pressable accessibilityRole="button" onPress={() => { setFinding(false); setFind(''); }}><T color={theme.accent}>Done</T></Pressable>
     </View> : null}
-    {finding ? <View style={styles.strip}><T color={theme.yellow}>{found.length === 0 ? `Nothing here says “${find.trim()}”` : `${found.length} ${found.length === 1 ? 'entry says' : 'entries say'} “${find.trim()}”`}</T></View> : null}
+    {finding ? <View style={strip}><T color={theme.yellow}>{found.length === 0 ? `Nothing here says “${find.trim()}”` : `${found.length} ${found.length === 1 ? 'entry says' : 'entries say'} “${find.trim()}”`}</T></View> : null}
     <View ref={imageViewportBox} collapsable={false} style={{ flex: 1 }} onLayout={measureImageViewport}>
     <FlatList
       ref={list}
@@ -410,7 +425,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
         // A long press turns the entry into selectable text where it is, with the handles and menu of
         // iOS; iOS paragraphs select only whole, a text view selects any part. Tapping away puts it back.
         : row.entry.id === selecting
-          ? <TextInput accessibilityLabel="Entry text, selected for copying" style={styles.selecting} value={entryText(row.entry)} multiline autoFocus selectTextOnFocus showSoftInputOnFocus={false} scrollEnabled={false} autoCorrect={false} spellCheck={false} onChangeText={() => undefined} onBlur={() => setSelecting(null)} />
+          ? <TextInput accessibilityLabel="Entry text, selected for copying" style={[styles.selecting, { color: palette.text, backgroundColor: palette.surface0 }]} value={entryText(row.entry)} multiline autoFocus selectTextOnFocus showSoftInputOnFocus={false} scrollEnabled={false} autoCorrect={false} spellCheck={false} onChangeText={() => undefined} onBlur={() => setSelecting(null)} />
           : <Pressable accessible={false} onLongPress={() => setSelecting(row.entry.id)} delayLongPress={350}><EntryView entry={row.entry} conversationId={timeline.sessionId ?? sessionId ?? target} revisionKey={row.entry.contentSources?.map(source => `${source.id}:${sourceRevisions[source.id] ?? 0}`).join('|') ?? String(sourceRevisions[row.entry.id] ?? 0)} imageViewport={imageViewport} open={open.has(row.entry.id)} onToggle={toggle} brief={simpleOn && !finding} onOpenSession={openSession} /></Pressable>}
       ListEmptyComponent={<View style={[styles.entry, { transform: [{ scaleY: -1 }] }]}>{unreadable ? <T color={theme.waiting} selectable>{unreadable}</T> : <Pressable accessibilityRole={stopped ? 'button' : undefined} disabled={!stopped} onPress={retry}><T dim>{unresolved ? 'This process has no exact native session history.' : !loaded ? (issue ? staleLine(issue, false, null, now, stopped) : status === 'online' ? 'Loading the conversation…' : 'Offline; this conversation has not been loaded yet.') : 'No conversation in the recent timeline.'}</T></Pressable>}</View>}
       // Scrolled up, a new entry must not move what is being read, so the position is kept. At
@@ -431,8 +446,8 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
       contentContainerStyle={{ paddingVertical: 8 }}
     />
     </View>
-    {away ? <Pressable accessibilityRole="button" accessibilityLabel="Scroll to latest" style={styles.latest} onPress={() => list.current?.scrollToOffset({ offset: 0, animated: true })}><T bold color={theme.accent}>↓ latest</T></Pressable> : null}
-    {agent && listening ? <View style={[styles.composer, { paddingBottom: bottom, flexDirection: 'column', alignItems: 'stretch' }]}>
+    {away ? <Pressable accessibilityRole="button" accessibilityLabel="Scroll to latest" style={[styles.latest, { backgroundColor: palette.surface0 }]} onPress={() => list.current?.scrollToOffset({ offset: 0, animated: true })}><T bold color={theme.accent}>↓ latest</T></Pressable> : null}
+    {agent && listening ? <View style={[styles.composer, bar, { paddingBottom: bottom, flexDirection: 'column', alignItems: 'stretch' }]}>
       <Waveform levels={levels} />
       <T color={heard ? theme.text : theme.overlay0}>{heard || 'Listening…'}</T>
       <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
@@ -441,16 +456,16 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
         <Button label="send" disabled={!canSend} onPress={() => void finishListening('send')} />
       </View>
     </View> : agent ? <View>
-    {images.length || imageIssue ? <View style={styles.tray}>
+    {images.length || imageIssue ? <View style={[styles.tray, bar]}>
       {images.map(image => <View key={image.key}>
-        <Image source={{ uri: `data:${image.mediaType};base64,${image.base64}` }} style={styles.thumb} accessibilityLabel={image.name ?? 'image to send'} />
-        <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${image.name ?? 'image'}`} hitSlop={8} onPress={() => setImages(previous => previous.filter(other => other.key !== image.key))} style={styles.unthumb}><T bold color={theme.text}>✕</T></Pressable>
+        <Image source={{ uri: `data:${image.mediaType};base64,${image.base64}` }} style={[styles.thumb, { backgroundColor: palette.surface0 }]} accessibilityLabel={image.name ?? 'image to send'} />
+        <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${image.name ?? 'image'}`} hitSlop={8} onPress={() => setImages(previous => previous.filter(other => other.key !== image.key))} style={[styles.unthumb, { backgroundColor: palette.surface1 }]}><T bold color={theme.text}>✕</T></Pressable>
         <T dim style={{ fontSize: 10 }}>{megabytes(image.bytes)}</T>
       </View>)}
       {imageIssue ? <T color={theme.waiting} style={{ flex: 1 }}>{imageIssue}</T> : null}
     </View> : null}
-    {sendIssue || sizeInfo.note ? <View style={styles.tray} accessibilityLiveRegion="polite"><T color={sendIssue || sizeInfo.over ? theme.waiting : theme.overlay1} style={{ flex: 1 }}>{sendIssue || sizeInfo.note}</T></View> : null}
-    <View style={[styles.composer, { paddingBottom: bottom }]}>
+    {sendIssue || sizeInfo.note ? <View style={[styles.tray, bar]} accessibilityLiveRegion="polite"><T color={sendIssue || sizeInfo.over ? theme.waiting : theme.overlay1} style={{ flex: 1 }}>{sendIssue || sizeInfo.note}</T></View> : null}
+    <View style={[styles.composer, bar, { paddingBottom: bottom }]}>
       <Pressable accessibilityRole="button" accessibilityLabel="Attach an image" hitSlop={8} onPress={attach} disabled={images.length >= MAX_IMAGES} style={styles.prompt}>
         <T color={images.length >= MAX_IMAGES ? theme.overlay0 : theme.accent} style={{ fontSize: 18 }}>＋</T>
       </Pressable>
@@ -472,7 +487,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
       </View>
       <Button label="send" disabled={!canSend || sizeInfo.over || (!draft.trim() && !images.length)} onPress={() => void send()} style={styles.send} />
     </View>
-    </View> : session ? <View style={[styles.composer, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by st · read only' : 'this session has ended · read only'}</T></View> : null}
+    </View> : session ? <View style={[styles.composer, bar, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by Fractal · read only' : 'this session has ended · read only'}</T></View> : null}
   </KeyboardAvoidingView>;
 }
 
@@ -481,11 +496,11 @@ function AgentStrip({ agent, onMission }: { agent: NonNullable<ReturnType<typeof
   const { glyph, color } = agentGlyph(state);
   const harness = harnessName(agent.driver);
   const work = agent.current_work?.[0];
-  return <View style={styles.strip}>
-    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-      <T bold color={color}>{glyph} </T><T bold>{agentName(agent)}</T><T color={color}>  {agentReported(agent) ?? agentWord(state)}</T>
-      <View style={{ flex: 1 }} />
-      <T color={harnessColor(harness)}>{harness}</T><T dim>{agentModel(agent) ? ` · ${agentModel(agent)}` : ''} · {agent.host_id?.replace(/^host\//, '') ?? '?'}</T>
+  const { palette } = useTextAppearance();
+  return <View style={[styles.strip, { borderBottomColor: palette.surface0 }]}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 8 }}>
+      <T numberOfLines={1} style={{ flex: 1, flexShrink: 1, minWidth: 0 }}><T bold color={color}>{glyph} </T><T bold>{agentName(agent)}</T><T color={color}>  {agentReported(agent) ?? agentWord(state)}</T></T>
+      <T numberOfLines={1} style={{ flexShrink: 1, maxWidth: '50%' }}><T color={harnessColor(harness)}>{harness}</T><T dim>{agentModel(agent) ? ` · ${agentModel(agent)}` : ''} · {agent.host_id?.replace(/^host\//, '') ?? '?'}</T></T>
     </View>
     <T dim numberOfLines={1}>{agent.id}</T>
     {agent.checkout ? <T soft>{checkoutLabel(agent.checkout)}</T> : null}
@@ -498,9 +513,10 @@ const PendingView = memo(function PendingView({ pending, canSend, onSendAgain }:
   const rule = RULES.pending;
   const tone = pending.failed ? rule.failed : pending.unconfirmed ? rule.unconfirmed : null;
   const label = pending.failed ? `you · not sent: ${pending.failed}`
-    : pending.unconfirmed ? (pending.resending ? 'you · sending again…' : 'you · st may have taken it and has not confirmed yet')
+    : pending.unconfirmed ? (pending.resending ? 'you · sending again…' : 'you · Fractal may have taken it and has not confirmed yet')
     : rule.sending.text;
-  return <View style={[styles.entry, styles.barred, { borderLeftColor: c(tone ?? rule.sending_edge) }]}>
+  const { color: paint } = useTextAppearance();
+  return <View style={[styles.entry, styles.barred, { borderLeftColor: paint(c(tone ?? rule.sending_edge)) }]}>
     <T color={c(tone ?? rule.sending.color)}>{label}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
     <Markdown selectable={false} text={pending.text} color={c(rule.text)} />
     {pending.unconfirmed ? <Button label="Send again" color={c(rule.unconfirmed)} disabled={!canSend || pending.resending} onPress={() => onSendAgain(pending)} /> : null}
@@ -528,49 +544,20 @@ const EntryView = memo(function EntryView(props: { entry: ConversationEntry; con
   </View>;
 });
 
-type NativeImage = { uri: string; size: number };
-type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: St3Client | null };
+type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: FractalClient | null };
 
-// Class lifecycle owns native measurement and invalidates late responses on unmount.
-// All mounted images share the viewport queue; FlatList overscan never authorizes reads.
-class VisibleConversationImageView extends Component<ConversationImageProps, VisibleImageState<NativeImage>> {
-  state: VisibleImageState<NativeImage> = { kind: 'closed' };
-  private box = createRef<View>();
-  private unregister?: () => void;
-  private image = new VisibleConversationImage<NativeImage>(this.props.viewport, async current => {
-    const { client, conversationId, reference } = this.props;
+// A transcript's image, read in chunks from st (and from the owner of the message through it) only
+// while it is on screen; st names its real type and size before the bytes arrive.
+function VisibleConversationImageView({ conversationId, reference, viewport, client }: ConversationImageProps) {
+  const load = (current: () => boolean) => IMAGES.read(`${conversationId}:${reference.ref}`, async () => {
     if (!client) throw new Error('Connect to the server and try again.');
     const content = await loadConversationContent(reference, async (ref, offset) => {
       if (!current()) throw new Error('Image is no longer visible.');
       return (await client.conversationContentChunk(conversationId, ref, offset)).value;
     });
-    return { uri: contentImageUri(content), size: content.bytes.length };
-  }, state => this.setState(state));
-
-  componentDidMount() {
-    this.unregister = this.props.viewport.register({
-      measure: done => this.box.current?.measureInWindow((x, y, width, height) => done({ x, y, width, height })),
-      visible: shown => this.image.setVisible(shown),
-    });
-  }
-
-  componentWillUnmount() { this.image.dispose(); this.unregister?.(); }
-
-  render() {
-    const state = this.state;
-    return <View style={styles.entry}>
-      <View ref={this.box} collapsable={false} style={styles.mailImage} onLayout={() => this.props.viewport.refresh()}>
-        {state.kind === 'image'
-          ? <Image accessibilityLabel="Fetched conversation image" source={{ uri: state.image.uri, cache: 'reload' }} style={StyleSheet.absoluteFill} resizeMode="contain" onError={() => this.image.fail('The image could not be displayed. Try again.')} />
-          : <T dim style={{ padding: 6 }}>{state.kind === 'failed' ? 'Image unavailable' : state.kind === 'loading' ? 'Loading image…' : 'Image'}</T>}
-      </View>
-      {state.kind === 'image' ? <T dim>{megabytes(state.image.size)}</T> : null}
-      {state.kind === 'failed' ? <View>
-        <T color={theme.red}>Could not load image: {state.message}</T>
-        <Pressable accessibilityRole="button" onPress={() => this.image.retry()}><T color={theme.accent}>Retry loading image</T></Pressable>
-      </View> : null}
-    </View>;
-  }
+    return contentImageUri(content);
+  });
+  return <View style={styles.entry}><ImageBox facts={{ mediaType: reference.media_type, size: reference.size }} viewport={viewport} load={load} /></View>;
 }
 
 function ConversationImageView(props: Omit<ConversationImageProps, 'client'>) {
@@ -604,17 +591,21 @@ function FetchedContent({ conversationId, reference, entry, onOpenSession }: { c
   </View>;
 }
 
-const EntryBodyView = memo(function EntryBodyView({ entry, open, onToggle, brief = false, onOpenSession }: { entry: ConversationEntry; open: boolean; onToggle: (id: string) => void; brief?: boolean; onOpenSession?: (sessionId: string, title: string) => void }) {
+const EntryBodyView = memo(function EntryBodyView({ entry, open, onToggle, brief = false, onOpenSession, imageViewport }: { entry: ConversationEntry; open: boolean; onToggle: (id: string) => void; brief?: boolean; onOpenSession?: (sessionId: string, title: string) => void; imageViewport?: ConversationImageViewport }) {
   const body = entry.body;
+  const { color: paint, palette } = useTextAppearance();
   switch (body.kind) {
     case 'user':
-      return <View style={[styles.user, { backgroundColor: c(RULES.user.fill) }]}>
+      // An image alone in the person's turn: the image view below is the turn.
+      if (!body.text) return <T color={c(RULES.user.time)} style={{ alignSelf: 'flex-end', paddingHorizontal: 12, paddingTop: 6 }}>{entry.at}</T>;
+      return <View style={[styles.user, { backgroundColor: tokenColor(RULES.user.fill, palette) }]}>
         <T color={c(RULES.user.time)} style={{ alignSelf: 'flex-end' }}>{entry.at}</T>
         <T color={c(RULES.user.text)}>{body.text}</T>
       </View>;
     case 'assistant':
+      if (!body.text) return null;
       return <View style={styles.entry}><Markdown selectable={false} text={body.text} color={c(RULES.assistant)} /></View>;
-    case 'mail': return <MailView entry={entry} body={body} open={open} onToggle={onToggle} brief={brief} />;
+    case 'mail': return <MailView entry={entry} body={body} open={open} onToggle={onToggle} brief={brief} imageViewport={imageViewport} />;
     case 'event': {
       const color = body.tone === 'fault' ? theme.red : body.tone === 'warning' ? theme.yellow : c(RULES.event.label);
       return <View style={[styles.entry, { flexDirection: 'row' }]}>
@@ -633,14 +624,16 @@ const EntryBodyView = memo(function EntryBodyView({ entry, open, onToggle, brief
       const look = quiet ? rule.quiet : rule.open;
       // A subagent card's `open session/…` line is the link to that conversation (q2).
       const session = subagentSession(body.output);
-      return <View accessible={false} style={[styles.tool, { borderLeftColor: color }]}>
+      return <View accessible={false} style={[styles.tool, { borderLeftColor: paint(color) }]}>
         <Pressable accessible={expandable} accessibilityRole={expandable ? 'button' : undefined} accessibilityLabel={expandable ? `${body.title}, ${open ? 'collapse' : 'expand'} output` : undefined} accessibilityState={expandable ? { expanded: open } : undefined} disabled={!expandable} onPress={() => onToggle(entry.id)}>
           <T numberOfLines={1}><T bold color={color}>{glyph} </T><T bold={look.title_bold} color={c(look.title)}>{body.title}</T></T>
           {shown.hidden ? <T color={c(rule.collapse.color)}>  … {shown.hidden} more lines · tap to show</T> : null}
           {open && expandable ? <T color={c(rule.collapse.color)}>  {rule.collapse.text}</T> : null}
         </Pressable>
         {shown.lines.filter(line => !session || line !== `open ${session}`).map((line, index) =>
-          <T key={index} numberOfLines={quiet ? 1 : undefined} style={[styles.toolLine, quiet && { opacity: 0.7 }]} color={c(line.startsWith('+') ? rule.added : line.startsWith('-') || line.includes('error') ? rule.removed : look.rows)}>{line || ' '}</T>)}
+          // Quiet rows dim further on Mocha; the light palette's overlay0 is already the quiet step
+          // and must stay at full strength to keep 4.5:1.
+          <T key={index} numberOfLines={quiet ? 1 : undefined} style={[styles.toolLine, quiet && palette === theme && { opacity: 0.7 }]} color={c(line.startsWith('+') ? rule.added : line.startsWith('-') || line.includes('error') ? rule.removed : look.rows)}>{line || ' '}</T>)}
         {session ? <Pressable accessibilityRole="link" accessibilityLabel={`Open subagent conversation ${body.title.split(' · ')[0]}`} onPress={() => onOpenSession?.(session, body.title.split(' · ')[0] ?? session)}><T color={theme.accent} style={styles.toolLine}>↗ open {body.title.split(' · ')[0]}</T></Pressable> : null}
       </View>;
     }
@@ -649,9 +642,10 @@ const EntryBodyView = memo(function EntryBodyView({ entry, open, onToggle, brief
 
 /** The microphone's last few levels as bars, newest on the right. */
 function Waveform({ levels }: { levels: number[] }) {
+  const { palette } = useTextAppearance();
   const bars = [...Array(Math.max(0, 40 - levels.length)).fill(0), ...levels];
   return <View style={{ flexDirection: 'row', alignItems: 'center', height: 32, gap: 2 }}>
-    {bars.map((level, index) => <View key={index} style={{ flex: 1, height: 3 + level * 28, borderRadius: 2, backgroundColor: theme.accent, opacity: 0.4 + level * 0.6 }} />)}
+    {bars.map((level, index) => <View key={index} style={{ flex: 1, height: 3 + level * 28, borderRadius: 2, backgroundColor: palette.accent, opacity: 0.4 + level * 0.6 }} />)}
   </View>;
 }
 
@@ -662,7 +656,8 @@ const toolGlyph = (state: Tool['state']): [string, string] => state === 'running
 // Simplified: one tool call on one line, never wrapped; a tap opens it in full.
 const CallView = memo(function CallView({ entry, tool, onToggle }: { entry: ConversationEntry; tool: Tool; onToggle: (id: string) => void }) {
   const [glyph, color] = toolGlyph(tool.state);
-  return <Pressable accessibilityRole="button" accessibilityState={{ expanded: false }} onPress={() => onToggle(entry.id)} style={[styles.call, { borderLeftColor: color }]}>
+  const { color: paint } = useTextAppearance();
+  return <Pressable accessibilityRole="button" accessibilityState={{ expanded: false }} onPress={() => onToggle(entry.id)} style={[styles.call, { borderLeftColor: paint(color) }]}>
     <T numberOfLines={1}><T bold color={color}>{glyph} </T><T color={c(RULES.tool.quiet.title)}>{tool.title}</T></T>
   </Pressable>;
 });
@@ -671,7 +666,8 @@ const CallView = memo(function CallView({ entry, tool, onToggle }: { entry: Conv
 const BundleView = memo(function BundleView({ row, onToggle }: { row: Extract<SimpleRow, { kind: 'bundle' }>; onToggle: (id: string) => void }) {
   const rule = RULES.bundle;
   const edge = row.running ? c(RULES.tool.running) : row.failed ? c(RULES.tool.failed.color) : c(RULES.tool.ok.color);
-  return <Pressable accessibilityRole="button" accessibilityState={{ expanded: row.open }} onPress={() => onToggle(row.id)} style={[styles.call, { borderLeftColor: edge }]}>
+  const { color: paint } = useTextAppearance();
+  return <Pressable accessibilityRole="button" accessibilityState={{ expanded: row.open }} onPress={() => onToggle(row.id)} style={[styles.call, { borderLeftColor: paint(edge) }]}>
     <T numberOfLines={1}>
       <T color={c(rule.label)}>{row.open ? rule.opened : rule.folded} {row.calls.length} tool calls</T>
       {row.running ? <T color={c(RULES.tool.running)}> · ⠿{row.running}</T> : null}
@@ -687,8 +683,11 @@ type Mail = Extract<ConversationEntry['body'], { kind: 'mail' }>;
 // Mail the person is part of leads; mail between others stays back and folds to a few rows,
 // like a tool call, until tapped. Mail to the person is filled like their own messages, and
 // their own says how far it got: ✓ st has it, ✓✓ the agent has it.
-const MailView = memo(function MailView({ entry, body, open, onToggle, brief = false }: { entry: ConversationEntry; body: Mail; open: boolean; onToggle: (id: string) => void; brief?: boolean }) {
+const MailView = memo(function MailView({ entry, body, open, onToggle, brief = false, imageViewport }: { entry: ConversationEntry; body: Mail; open: boolean; onToggle: (id: string) => void; brief?: boolean; imageViewport?: ConversationImageViewport }) {
+  // Outside a conversation's list (a fetched turn, a card), the window is the viewport.
+  const windowViewport = useWindowViewport();
   const rule = RULES.mail;
+  const { color: paint, palette } = useTextAppearance();
   const toYou = body.to === 'you';
   const look = folds(body) ? rule.between_others : rule.involving_you;
   const [height, setHeight] = useState(0);
@@ -701,13 +700,13 @@ const MailView = memo(function MailView({ entry, body, open, onToggle, brief = f
   if (brief && folds(body) && !open) {
     const lines = body.text.split('\n').map(line => line.trim()).filter(Boolean);
     return <Pressable accessibilityRole="button" accessibilityState={{ expanded: false }} onPress={() => onToggle(entry.id)}
-      style={[styles.entry, styles.barred, { borderLeftColor: c(look.edge) }]}>
+      style={[styles.entry, styles.barred, { borderLeftColor: paint(c(look.edge)) }]}>
       <T numberOfLines={1}><T bold={look.from_bold} color={c(look.from)}>{body.to ? `${body.from} → ${body.to}` : body.from}</T>{body.subject ? <T color={c(look.text)}>  {body.subject}</T> : null}<T dim>  {entry.at}</T>{body.dictated ? <T dim>  🎙</T> : null}{body.signed ? <T dim>  {body.signed}</T> : null}{body.images ? <T dim>  🖼 {body.images.length}</T> : null}</T>
       <T numberOfLines={1} color={c(look.text)}>{lines[0] ?? ''}{lines.length > 1 ? ' …' : ''}</T>
     </Pressable>;
   }
   return <Pressable disabled={!long} accessibilityRole={long ? 'button' : undefined} accessibilityState={long ? { expanded: open } : undefined} onPress={() => onToggle(entry.id)}
-    style={[styles.entry, styles.barred, { borderLeftColor: c(look.edge) }, toYou ? { backgroundColor: c(rule.to_you_fill) } : null]}>
+    style={[styles.entry, styles.barred, { borderLeftColor: paint(c(look.edge)) }, toYou ? { backgroundColor: tokenColor(rule.to_you_fill, palette) } : null]}>
     <T>{toYou ? <T color={c(look.edge)}>● </T> : null}<T bold={look.from_bold} color={c(look.from)}>{body.to ? `${body.from} → ${body.to}` : body.from}</T>{body.subject ? <T bold={look.from_bold} color={look.from_bold ? undefined : c(look.text)}>  {body.subject}</T> : null}<T dim>  {entry.at}</T>{body.dictated ? <T dim>  🎙</T> : null}{body.signed ? <T dim>  {body.signed}</T> : null}{mark ? <T color={c(mark.color)}>  {mark.text}</T> : null}</T>
     <View style={long && !open ? { maxHeight: limit, overflow: 'hidden' } : null}>
       {/* Measured at its full height and never shrunk by the fold: a measurement the fold could
@@ -718,7 +717,7 @@ const MailView = memo(function MailView({ entry, body, open, onToggle, brief = f
       <T color={c(RULES.tool.collapse.color)}>{whole.loading ? '  loading the whole message…' : `  show the whole message · ${kib(body.whole.bytes)}`}</T>
     </Pressable> : null}
     {whole.note ? <T color={theme.waiting} style={{ fontSize: 12 }}>{whole.note}</T> : null}
-    {body.images ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>{body.images.map(image => <MailImageView key={image.sha256} image={image} />)}</View> : null}
+    {body.images ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>{body.images.map(image => <MailImageView key={image.sha256} image={image} viewport={imageViewport ?? windowViewport} />)}</View> : null}
     {long ? <T color={c(RULES.tool.collapse.color)}>{open ? `  ${RULES.tool.collapse.text}` : '  … more · tap to show'}</T> : null}
   </Pressable>;
 });
@@ -740,44 +739,27 @@ function useWholeText(whole: { message: string; bytes: number } | undefined) {
   return { ...state, load };
 }
 
-// An image a message carries, read from st when shown. Its box keeps one size while it loads,
-// so the conversation does not move under the reader.
-function MailImageView({ image }: { image: MailImage }) {
-  const { actions } = useStore();
-  const [uri, setUri] = useState<string | null>(null), [failed, setFailed] = useState('');
-  useEffect(() => {
-    let live = true;
-    actions.image(image).then(next => { if (live) setUri(next); }, error => { if (live) setFailed(error instanceof Error ? error.message : String(error)); });
-    return () => { live = false; };
-  }, [image.sha256]); // eslint-disable-line react-hooks/exhaustive-deps
-  const label = `${image.name ?? 'image'} · ${megabytes(image.size)}`;
-  return <View style={styles.mailImage} accessibilityLabel={label}>
-    {uri ? <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-      : <T dim style={{ fontSize: 11, padding: 6 }}>{failed ? `🖼 ${label}\n${failed}` : `🖼 ${label}…`}</T>}
-  </View>;
-}
-
 const styles = StyleSheet.create({
-  tray: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, paddingTop: 8, backgroundColor: theme.mantle, borderTopColor: theme.surface0, borderTopWidth: StyleSheet.hairlineWidth * 2 },
-  thumb: { width: 56, height: 56, borderRadius: 6, backgroundColor: theme.surface0 },
-  unthumb: { position: 'absolute', top: -6, right: -6, width: 20, height: 20, borderRadius: 10, backgroundColor: theme.surface1, alignItems: 'center', justifyContent: 'center' },
-  mailImage: { width: 200, height: 150, borderRadius: 6, overflow: 'hidden', backgroundColor: theme.surface0 },
-  screen: { flex: 1, backgroundColor: theme.base },
-  freshness: { paddingHorizontal: 12, paddingVertical: 3, backgroundColor: theme.base },
-  strip: { paddingHorizontal: 12, paddingVertical: 6, borderBottomColor: theme.surface0, borderBottomWidth: StyleSheet.hairlineWidth * 2, backgroundColor: theme.base },
+  tray: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth * 2 },
+  thumb: { width: 56, height: 56, borderRadius: 6 },
+  unthumb: { position: 'absolute', top: -6, right: -6, width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  // SchemeScreen paints the screen's base; strips and bars add their palette colours where drawn.
+  screen: { flex: 1 },
+  freshness: { paddingHorizontal: 12, paddingVertical: 3 },
+  strip: { paddingHorizontal: 12, paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth * 2 },
   entry: { paddingHorizontal: 12, paddingVertical: 6 },
-  selecting: { paddingHorizontal: 12, paddingVertical: 6, color: theme.text, backgroundColor: theme.surface0, fontFamily: fonts.regular, fontSize: 14, lineHeight: LINE },
-  user: { backgroundColor: theme.userBg, paddingHorizontal: 12, paddingVertical: 8, marginVertical: 6 },
+  selecting: { paddingHorizontal: 12, paddingVertical: 6, fontFamily: fonts.regular, fontSize: 14, lineHeight: LINE },
+  user: { paddingHorizontal: 12, paddingVertical: 8, marginVertical: 6 },
   barred: { borderLeftWidth: 2, marginLeft: 10, paddingLeft: 8 },
   tool: { marginHorizontal: 8, marginVertical: 4, paddingHorizontal: 8, paddingVertical: 4, borderLeftWidth: 2 },
   toolLine: { fontSize: 12, lineHeight: 17, paddingLeft: 18 },
   call: { marginHorizontal: 8, marginVertical: 2, paddingHorizontal: 8, paddingVertical: 3, borderLeftWidth: 2 },
-  composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 6, paddingHorizontal: 10, paddingTop: 6, borderTopColor: theme.surface0, borderTopWidth: StyleSheet.hairlineWidth * 2, backgroundColor: theme.mantle },
+  composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 6, paddingHorizontal: 10, paddingTop: 6, borderTopWidth: StyleSheet.hairlineWidth * 2 },
   prompt: { paddingBottom: 9, fontFamily: fonts.bold },
   // The box grows with its text up to maxHeight. No flex here: inside the column that holds the
   // microphone, flex would set the height from the column (36) instead of the text.
   input: { minHeight: 36, maxHeight: 140, marginTop: 0 },
   mic: { position: 'absolute', right: 6, bottom: 6, zIndex: 1, padding: 2 },
   send: { marginTop: 0, marginBottom: 2 },
-  latest: { position: 'absolute', right: 12, bottom: 84, backgroundColor: theme.surface0, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 4 },
+  latest: { position: 'absolute', right: 12, bottom: 84, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 4 },
 });

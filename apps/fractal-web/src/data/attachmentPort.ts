@@ -1,13 +1,13 @@
-import { ClientError, appliedAnswer, type St3Client } from '@smalltalk/st3-client'
-import type { ActionResult } from '@smalltalk/st3-client/schema'
-import * as Native from '@smalltalk/st3-client/schema'
+import { ClientError, appliedAnswer, type FractalClient } from '@fractal/client'
+import type { ActionResult } from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema'
 
 import { conversationPortFailure, hasConversationCapability } from './conversationPort.ts'
 import type { AttachmentPort, ConversationPortResult, MessageSendAction } from './source.ts'
 
 /** Upload, chunk reads and sending use the same gateway client, never a synthetic delivery. */
 export const gatewayAttachments = (
-  client: St3Client,
+  client: FractalClient,
   snapshot: () => Promise<ConversationPortResult<string>>,
 ): AttachmentPort => ({
   capabilities: async () => {
@@ -25,15 +25,21 @@ export const gatewayAttachments = (
       return conversationPortFailure(cause)
     }
   },
-  upload: async ({ bytes, mediaType }) => {
+  upload: async ({ bytes, mediaType, signal }) => {
+    signal?.throwIfAborted()
     try {
-      const capabilities = Native.decodeUnknownSync(Native.Capabilities)((await client.capabilities()).value)
+      const response = await client.capabilities({ signal })
+      signal?.throwIfAborted()
+      const capabilities = Native.decodeUnknownSync(Native.Capabilities)(response.value)
       if (!hasConversationCapability(capabilities, 'control.messages')) {
         return { _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted attachment upload.' }
       }
-      const response = await client.uploadBlob(bytes, mediaType)
-      return { _tag: 'Success', value: Native.decodeUnknownSync(Native.BlobUpload)(response.value) }
+      const uploaded = await client.uploadBlob(bytes, mediaType, { signal })
+      signal?.throwIfAborted()
+      return { _tag: 'Success', value: Native.decodeUnknownSync(Native.BlobUpload)(uploaded.value) }
     } catch (cause) {
+      signal?.throwIfAborted()
+      if (cause instanceof Error && cause.name === 'AbortError') throw cause
       return conversationPortFailure(cause)
     }
   },
@@ -68,7 +74,7 @@ export const gatewayAttachments = (
  * senders derive the message identity from that key, so it must be single-sourced.
  */
 export const gatewayMessageSend =
-  (client: St3Client) =>
+  (client: FractalClient) =>
   async (request: MessageSendAction): Promise<ConversationPortResult<ActionResult>> => {
     let attachments: readonly Native.AttachmentInput[]
     // Validate the actual generated action contract (including max four PNG/JPEG/GIF/WebP references).

@@ -1,7 +1,8 @@
 #!/bin/sh
-# Download a verified Small Talk release, install it, and open st.
+# Download a verified Fractal release, install it, and open st.
 set -eu
-base=${ST_INSTALL_RELEASE_BASE_URL:-https://github.com/compoundingtech/smalltalk/releases}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+base=${FRACTAL_INSTALL_RELEASE_BASE_URL-${ST_INSTALL_RELEASE_BASE_URL:-https://github.com/compoundingtech/fractal/releases}}
 tag=
 edge=false
 bin_dir=${HOME:?HOME is required}/.local/bin
@@ -32,16 +33,99 @@ case "$base" in
     http://127.0.0.1:*|http://localhost:*) protocol=https,http ;;
     *) printf 'install: release downloads need HTTPS\n' >&2; exit 2 ;;
 esac
-if [ -n "$tag" ]; then channel=download/$tag; else channel=latest/download; fi
-package=smalltalk-$target
+# Retained archives predate the package installer's ownership check. Keep this
+# preflight here too, so choosing an older tag cannot overwrite a Nix installation.
+refuse_nix_path() (
+    # Safety net for real Nix/Home Manager layouts (normally absolute links), not a hardened path resolver.
+    normalize_path() (
+        prefix=$1
+        missing=
+        while [ ! -d "$prefix" ]; do
+            missing="/$(basename "$prefix")$missing"
+            prefix=$(dirname "$prefix")
+        done
+        normalized=$(cd "$prefix" && pwd -P)
+        while [ -n "$missing" ]; do
+            part=${missing%%/*}
+            if [ "$missing" = "$part" ]; then missing=; else missing=${missing#*/}; fi
+            case "$part" in
+                ''|.) ;;
+                ..) normalized=${normalized%/*} ;;
+                *) normalized=${normalized%/}/$part ;;
+            esac
+        done
+        printf '%s\n' "${normalized:-/}"
+    )
+    path=$1
+    hops=0
+    # Compare roots and candidates in the same physical spelling (/var is a
+    # symlink to /private/var on macOS), even when a profile leaf is missing.
+    home_root=$(normalize_path "$HOME")
+    default_profiles=$home_root/.local/state/nix/profiles
+    xdg_profiles=$(normalize_path "${XDG_STATE_HOME:-$HOME/.local/state}/nix/profiles")
+    while :; do
+        case "$path" in
+            /nix/store|/nix/store/*|/nix/var/nix/profiles|/nix/var/nix/profiles/*|"$home_root/.nix-profile"|"$home_root/.nix-profile/"*|"$default_profiles"|"$default_profiles/"*|"$xdg_profiles"|"$xdg_profiles/"*)
+                printf 'install: refusing to overwrite Nix-owned path %s. Upgrade through the Home Manager configuration that owns this installation: https://fractal.how/docs/reference/home-manager\n' "$1" >&2
+                exit 1 ;;
+        esac
+        parent=$(dirname "$path")
+        if [ -d "$parent" ]; then
+            resolved="$(cd "$parent" && pwd -P)/$(basename "$path")"
+            if [ "$resolved" != "$path" ]; then path=$resolved; continue; fi
+        fi
+        # A GC'd generation can leave an ancestor dangling while the leaf itself
+        # is not a symlink. Resolve the nearest symlink component, retaining the
+        # missing suffix, rather than treating a missing parent as unowned.
+        component=$path
+        suffix=
+        while [ ! -L "$component" ] && [ "$component" != / ] && [ "$component" != . ]; do
+            suffix="/$(basename "$component")$suffix"
+            component=$(dirname "$component")
+        done
+        [ -L "$component" ] || break
+        hops=$((hops + 1))
+        [ "$hops" -le 40 ] || { printf 'install: cannot resolve installation link %s\n' "$1" >&2; exit 1; }
+        link=$(readlink "$component")
+        case "$link" in /*) path=$link$suffix ;; *) path="$(dirname "$component")/$link$suffix" ;; esac
+        path=$(normalize_path "$path")
+    done
+)
+for name in st3 st pty fractal; do refuse_nix_path "$bin_dir/$name"; done
+if [ "$target" = aarch64-apple-darwin ]; then
+    install_home=${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME:-$HOME}}
+    app=${FRACTAL_MACOS_APP_PATH-${ST_MACOS_APP_PATH:-$install_home/Applications/SmallTalk.app}}
+    refuse_nix_path "$app"
+fi
+# Pin latest before downloading either asset, so the receipt and checksum name
+# the same release even when a new daily release is published during installation.
+if [ -z "$tag" ]; then
+    release_url=$(curl --fail --silent --show-error --location --proto "=$protocol" --proto-redir "=$protocol" \
+        --write-out '%{url_effective}' --output /dev/null "$base/latest")
+    tag=${release_url##*/tag/}
+    case "$tag" in ''|*[!A-Za-z0-9._-]*) printf 'install: cannot resolve latest release tag\n' >&2; exit 1 ;; esac
+fi
+channel=download/$tag
+package=fractal-$target
 archive=$package.tar.gz
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
-for name in "$archive" "$archive.sha256"; do
+download() {
     curl --fail --silent --show-error --location --proto "=$protocol" --proto-redir "=$protocol" \
-        "$base/$channel/$name" --output "$work/$name"
-done
+        "$base/$channel/$1" --output "$work/$1"
+}
+# arn:lmig:smalltalk:2026-10-20-release-artifact-aliases — sunset 2026-11-01 (#3032).
+# Retained tags predate the Fractal asset name. Only a missing asset selects the
+# legacy name; network failures and integrity failures must not trigger fallback.
+status=$(curl --silent --show-error --location --proto "=$protocol" --proto-redir "=$protocol" \
+    --write-out '%{http_code}' "$base/$channel/$archive" --output "$work/$archive")
+case "$status" in
+    200) ;;
+    404) package=smalltalk-$target; archive=$package.tar.gz; download "$archive" ;;
+    *) printf 'install: archive download failed (HTTP %s)\n' "$status" >&2; exit 1 ;;
+esac
+download "$archive.sha256"
 read -r expected filename extra < "$work/$archive.sha256"
 case "$expected" in ''|*[!0-9a-fA-F]*) printf 'install: invalid archive checksum\n' >&2; exit 1 ;; esac
 [ "${#expected}" -eq 64 ] && [ "${filename#\*}" = "$archive" ] && [ -z "$extra" ] || {
@@ -66,12 +150,42 @@ while IFS= read -r member; do
     case "/$member/" in */../*) printf 'install: archive contains a parent path\n' >&2; exit 1 ;; esac
 done < "$work/members"
 tar -xzf "$work/$archive" -C "$work"
-# Older retained releases predate --quiet; keep their installer spelling and
-# suppress notices here while preserving failures and stderr.
-# Current archive installers add fractal only when neither the destination nor
-# PATH contains a foreign fractal command; keep their collision guidance on stderr.
-"$work/$package/install.sh" --bin-dir "$bin_dir" >/dev/null
+# Retained releases keep their historical installer spelling.
+"$work/$package/install.sh" --bin-dir "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd)
+# A release receipt is optional display metadata. Failure must never prevent a
+# successfully installed executable from launching.
+write_receipt() (
+    receipt_stage=
+    trap '[ -z "$receipt_stage" ] || rm -f "$receipt_stage"' EXIT
+    version=$("$work/$package/bin/st3" --version --json) || return 1
+    case "$version" in '{"machine_version":"'*'"}') ;; *) return 1 ;; esac
+    version=${version#'{"machine_version":"'}
+    version=${version%'"}'}
+    commit=${version##*+}
+    case "$commit" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#commit}" -ge 7 ] || return 1
+    receipt="$bin_dir/RELEASE.json"
+    platform=$(uname -s) || return 1
+    if [ "$platform" = Darwin ]; then
+        # Keep the receipt outside the signed application bundle.
+        receipt=$(python3 - "$bin_dir/st3" <<'PY'
+from pathlib import Path
+import sys
+binary = Path(sys.argv[1]).resolve()
+print(str(binary.parents[2]) + '.RELEASE.json')
+PY
+) || return 1
+    fi
+    installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || return 1
+    receipt_stage=$(mktemp "$receipt.XXXXXX") || return 1
+    printf '{"tag":"%s","commit":"%s","target":"%s","installed_at":"%s"}\n' \
+        "$tag" "$commit" "$target" "$installed_at" > "$receipt_stage" || return 1
+    mv -f "$receipt_stage" "$receipt" || return 1
+)
+if ! write_receipt 2>/dev/null; then
+    printf 'install: warning: release receipt unavailable; continuing with the installed binary\n' >&2
+fi
 rm -rf "$work"
 trap - EXIT HUP INT TERM
 if "$run"; then

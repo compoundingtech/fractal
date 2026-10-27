@@ -1,5 +1,5 @@
-import { ClientError, plainError, type St3Client } from '@smalltalk/st3-client'
-import type * as Native from '@smalltalk/st3-client/schema'
+import { ClientError, plainError, type FractalClient } from '@fractal/client'
+import type * as Native from '@fractal/client/schema'
 
 /** One answer to a native prompt: sent, or refused in words a person reads. */
 export type PromptAnswerResult =
@@ -29,7 +29,7 @@ export interface PromptAnswerPort {
  * gone or answered only in its terminal is never sent again, and neither is any other refusal: the
  * person sees why and answers again if it still waits.
  */
-export const gatewayPromptAnswers = (client: St3Client): PromptAnswerPort => ({
+export const gatewayPromptAnswers = (client: FractalClient): PromptAnswerPort => ({
   respond: async ({ alert, answer }) => {
     try {
       const observed = await client.capabilities()
@@ -44,7 +44,7 @@ export const gatewayPromptAnswers = (client: St3Client): PromptAnswerPort => ({
       }
       const snapshot = (observed.snapshot as { id?: unknown } | undefined)?.id
       if (typeof snapshot !== 'string') {
-        return { _tag: 'Refused', detail: 'st did not say what it last saw. Try again in a moment.' }
+        return { _tag: 'Refused', detail: 'Fractal did not say what it last saw. Try again in a moment.' }
       }
       const id = `action/${crypto.randomUUID()}`
       const response = await client.promptRespond({
@@ -56,8 +56,8 @@ export const gatewayPromptAnswers = (client: St3Client): PromptAnswerPort => ({
       const status = (response.value as { status?: unknown }).status
       if (status === 'accepted' || status === 'completed') return { _tag: 'Sent' }
       return status === 'rejected'
-        ? { _tag: 'Refused', detail: 'st did not take this answer. Answer it in the seat\'s terminal.' }
-        : { _tag: 'Refused', detail: 'st did not say whether it took this answer; check the alert before answering again.' }
+        ? { _tag: 'Refused', detail: 'Fractal did not take this answer. Answer it in the seat\'s terminal.' }
+        : { _tag: 'Refused', detail: 'Fractal did not say whether it took this answer; check the alert before answering again.' }
     } catch (error) {
       return {
         _tag: 'Refused',

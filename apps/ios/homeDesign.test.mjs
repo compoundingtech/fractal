@@ -2,14 +2,31 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
-import { alertsHeading, homeRows, homeSections, keepClosed, openAlerts, personAnswer } from '@smalltalk/st3-views';
+import { alertsHeading, homeRows, homeSections, keepClosed, openAlerts, personAnswer } from '@fractal/views';
 
 const now = Date.parse('2026-10-14T12:00:00Z');
 const actor = 'person/demo/session/example-phone';
+// What st presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
+// derives nothing, so these rows carry it as st serves them.
+const presented = (attention_kind, extra) => {
+  const card = {
+    'human-gate': { tier: 'stopped', kind: extra.review_mode === 'feedback' ? 'feedback' : 'review' },
+    'person-step': extra.update ? { tier: 'later', kind: 'update' } : { tier: 'stopped', kind: 'request' },
+    'agent-request': { tier: 'stopped', kind: 'request' },
+    'launch-approval': { tier: 'today', kind: 'launch' },
+    'revision-approval': { tier: 'today', kind: 'revision' },
+    'harness-prompt': { tier: 'stopped', kind: 'prompt' },
+    'harness-login': { tier: 'stopped', kind: 'login' },
+    fault: { tier: null, kind: 'fault' },
+  }[attention_kind] ?? { tier: null, kind: null };
+  const step = extra.step_run_id;
+  return { ...card, agent: null, raised_by: null, waiting: step ? { step, path: step.split('/').pop() } : null };
+};
 const attention = (id, attention_kind, extra = {}) => ({
   id: `attention/demo/${id}`, kind: 'attention', attention_kind, title: 'Review the example',
   detail: 'Invented test content.', priority: 'normal', state: 'open', person_id: 'person/demo',
-  requested_at: '2026-10-14T11:00:00Z', source_id: `step-run/demo/${id}`, actions: [], ...extra,
+  requested_at: '2026-10-14T11:00:00Z', source_id: `step-run/demo/${id}`, actions: [],
+  presentation: presented(attention_kind, extra), ...extra,
 });
 const update = attention('update', 'person-step', {
   actions: ['work.done'], update: { version: 1, type: 'update', summary: 'Example completed.', about: 'message/demo' },
@@ -176,4 +193,20 @@ test('the native app permits the device light and dark appearance', () => {
   const config = JSON.parse(readFileSync(new URL('./app.json', import.meta.url), 'utf8'));
   assert.equal(config.expo.userInterfaceStyle, 'automatic');
   assert.equal(config.expo.ios.infoPlist.UIViewControllerBasedStatusBarAppearance, true, 'native stacks own status-bar appearance without an RN screens assertion');
+});
+
+test('Now draws its background, text and native chrome from the live system appearance', () => {
+  const systemScreen = namedFunction(uiSource, 'SystemScreen');
+  assert.equal(calls(systemScreen, 'useSystemColors').length, 1, 'the background re-renders with the appearance');
+  assert.equal(calls(namedFunction(uiSource, 'useSystemColors'), 'useScheme').length, 1);
+  assert.equal(calls(namedFunction(uiSource, 'useTextAppearance'), 'useScheme').length, 1, 'every T reads the appearance itself');
+  assert.equal(calls(namedFunction(uiSource, 'useScheme'), 'useColorScheme').length, 1);
+  const appSource = source('./App.tsx');
+  const stack = namedFunction(appSource, 'TabStack');
+  assert.equal(calls(stack, 'useScheme').length, 1, 'native header options follow the appearance');
+  for (const name of ['NowRoot', 'Attention']) {
+    const screen = elements(stack, 'Stack.Screen').find(element => prop(element, 'name')?.text === name);
+    assert.match(prop(screen, 'options').expression.getText(), /^\{ \.\.\.systemOptions,/, name);
+  }
+  assert.equal(calls(namedFunction(appSource, 'Main'), 'useScheme').length, 1, 'the navigation theme and tab tint follow the appearance');
 });

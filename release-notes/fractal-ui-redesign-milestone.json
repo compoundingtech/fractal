@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add the Fractal UI redesign milestone Storybook stories: a workshop-only thread view with its loading, empty, error, stale and navigation states.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Storybook stories only; no app, kit component, token or API change." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

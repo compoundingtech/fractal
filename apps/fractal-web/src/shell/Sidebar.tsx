@@ -1,4 +1,4 @@
-import type { Attention } from '@smalltalk/st3-client/schema'
+import type { Attention } from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import type * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'

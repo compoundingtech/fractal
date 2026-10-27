@@ -182,9 +182,9 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   const frames = [], issues = [];
   const follow = feed.followConversation('agent/example/worker', { onEntries: frame => frames.push(frame), onIssue: issue => issues.push(issue) });
   assert.deepEqual(sockets[0].sent.at(-1), { kind: 'subscribe', id: 'conversation', collection: 'conversation', conversation: 'agent/example/worker' });
-  sockets[0].frame({ kind: 'conversation', id: 'conversation', collection: 'conversation', session_id: 'session/one', replace: true, items: [{ id: 'entry/1' }], has_more: true });
+  sockets[0].frame({ kind: 'conversation', id: 'conversation', collection: 'conversation', session_id: 'session/one', replace: true, items: [{ id: 'entry/1' }], has_more: true, older_cursor: 'before-entry-1' });
   sockets[0].frame({ kind: 'conversation', id: 'conversation', collection: 'conversation', session_id: 'session/one', replace: false, items: [{ id: 'entry/2' }] });
-  assert.deepEqual(frames.map(frame => [frame.replace, frame.items.map(item => item.id), frame.hasMore]), [[true, ['entry/1'], true], [false, ['entry/2'], false]]);
+  assert.deepEqual(frames.map(frame => [frame.replace, frame.items.map(item => item.id), frame.hasMore, frame.olderCursor]), [[true, ['entry/1'], true, 'before-entry-1'], [false, ['entry/2'], false, undefined]]);
   sockets[0].frame({ kind: 'error', id: 'conversation', collection: 'conversation', code: 'remote-unavailable', message: 'owner host/two is temporarily unavailable' });
   assert.equal(issues.at(-1), 'two cannot be reached right now · trying again');
   // An ended subscription is asked for again after the backoff.
@@ -241,7 +241,7 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   const before = sockets[0].sent.length;
   const reason = 'the retained transcript starts after its first entries; st cannot show it from the start';
   sockets[0].frame({ kind: 'error', id: 'conversation', collection: 'conversation', code: 'timeline-history-incomplete', message: reason });
-  assert.equal(issues.at(-1), reason, 'st\'s own words, without "trying again"');
+  assert.equal(issues.at(-1), 'the retained transcript starts after its first entries; Fractal cannot show it from the start', 'the server reason is rendered without changing the raw message or adding "trying again"');
   assert.equal(stops.at(-1), true, 'the screen offers a retry instead of loading forever');
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(sockets[0].sent.length, before, 'not asked for again');
@@ -391,7 +391,7 @@ test('a collections socket that never opens is given up on and tried again', asy
   assert.deepEqual(states.at(-1), ['connecting', undefined]);
   t.mock.timers.tick(OPEN_WAIT_MS);
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(states.at(-1), ['reconnecting', 'st did not answer'], 'a hung open ends in a retry cycle');
+  assert.deepEqual(states.at(-1), ['reconnecting', 'Fractal did not answer'], 'a hung open ends in a retry cycle');
   t.mock.timers.tick(1000);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(opens, 2, 'and it tries again by itself');

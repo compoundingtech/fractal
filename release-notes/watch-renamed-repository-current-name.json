@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Watch a renamed repository's threads under its current name, so a watch no longer starts a second observer of the same repository",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."},
+  "compatibility": {"status": "changed", "detail": "st gh watch and st gh comment on OWNER/OLD-NAME#N of a renamed or transferred repository now declare the watch, and record the post, under the name GitHub links the thread to. The output names that thread, and st gh unwatch takes that name. Existing watches are unchanged."},
+  "downtime": {"status": "none", "detail": "No additional startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "No operator actions required. A watch already declared under a repository's old name keeps its second observer until the seat unwatches it and watches the current name."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or swap-back restrictions."}
+}

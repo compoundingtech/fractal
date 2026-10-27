@@ -1,6 +1,6 @@
-import type { Agent, Attention, Glass, GlassLayout, GlassTab, Mission } from '../../clients/typescript/st3-client';
+import type { Agent, Attention, Glass, GlassLayout, GlassTab, Mission } from '../../clients/typescript/fractal-client';
 import { agentGlyph, agentName, agentReported, agentState, agentWord } from './agentsView';
-import { missionWord, wordName, wordStyle } from './missionsView';
+import { missionLabel, missionWord, wordStyle } from './missionsView';
 import { missionLabels } from './presentation';
 import type { MachineView } from './projectionCache';
 
@@ -8,7 +8,7 @@ import type { MachineView } from './projectionCache';
 // named workspaces from stui, read from st. Each space has panes with their own tabs;
 // choosing a space lists its tabs grouped by pane. A tab opens its pane full screen.
 // Pane keys are stui's
-// (crates/stui/src/ui/pane.rs): `agent:agent/…`, `mission:mission/…`, `machine:machine/…`.
+// (crates/fractal-tui/src/ui/pane.rs): `agent:agent/…`, `mission:mission/…`, `machine:machine/…`.
 
 /** What a pane opens on the phone. */
 export type PaneTarget = {
@@ -113,7 +113,7 @@ export function paneTarget(key: string, lists: GlassLists, labels = missionLabel
       title: mission ? (labels.get(id) ?? mission.title) : id,
       needsYou: waiting.some(item => item.mission_id === id),
       gone: !mission,
-      status: mission ? (word => ({ ...wordStyle(word), word: wordName(word) }))(missionWord(mission, lists.attention, lists.agents)) : undefined,
+      status: mission ? { ...wordStyle(missionWord(mission)), word: missionLabel(mission) } : undefined,
     };
   }
   if (kind === 'machine') {

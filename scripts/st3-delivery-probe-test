@@ -18,6 +18,7 @@ from unittest.mock import patch
 import uuid
 
 HERE = Path(__file__).resolve().parent
+from script_process import signal_private
 def load(name, path):
     loader = SourceFileLoader(name, str(path))
     module = module_from_spec(spec_from_loader(name, loader))
@@ -347,14 +348,15 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, PROBE_TEST_API_KEY="fixture-private-key"):
             capture = probe.ChannelStderr()
         reader = asyncio.StreamReader()
-        reader.feed_data(b"st: failure fixture-private-key token=fixture-token Bearer fixture-bearer\n"
+        reader.feed_data(b"fractal: failure fixture-private-key token=fixture-token Bearer fixture-bearer\n"
                          b"st: failed https://fixture-user:fixture-password@example.invalid/\n"
                          b"st: Authorization: fixture-auth\n"
                          b"<smalltalk-message>\nst: private message body\n</smalltalk-message>\n")
         reader.feed_eof()
         await capture.drain(reader)
         report = capture.report()
-        self.assertIn("st: failure", report["diagnostic"])
+        self.assertIn("fractal: failure", report["diagnostic"])
+        self.assertIn("st: failed", report["diagnostic"])
         for private in ("fixture-private-key", "fixture-token", "fixture-bearer", "fixture-user",
                         "fixture-password", "fixture-auth", "private message body"):
             self.assertNotIn(private, json.dumps(report))
@@ -381,9 +383,9 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         child = Path(self.directory.name) / "channel"
         descendant = Path(self.directory.name) / "descendant-pid"
         child.write_text("#!" + sys.executable + "\n" +
-                         "import subprocess, sys\n"
+                         "import os, subprocess, sys\n"
                          "descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
-                         "stdout=subprocess.DEVNULL)\n"
+                         f"stdout=subprocess.DEVNULL, env={{**os.environ, 'SCRIPT_TEST_OWNER': {self.directory.name!r}}})\n"
                          f"open({str(descendant)!r}, 'w').write(str(descendant.pid))\n"
                          "sys.stderr.write('st: startup refused before hello\\n')\n"
                          "sys.exit(2)\n")
@@ -424,7 +426,8 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             tracking.stop()
             if descendant.exists():
                 try:
-                    os.kill(int(descendant.read_text()), signal.SIGKILL)
+                    signal_private(int(descendant.read_text()), signal.SIGKILL,
+                                   environment={"SCRIPT_TEST_OWNER": self.directory.name})
                 except ProcessLookupError:
                     pass
 
@@ -1017,7 +1020,10 @@ agent "operations/amber" {{
                 config = {"host": node.name, "agent": f"agent/probe/{node.name}",
                           "binary": str(node.binary), "socket": str(node.endpoint),
                           "state_dir": str(node.root / "probe"), "reviewer": "person/eval",
-                          "interval_ms": 12_000, "deadline_ms": deadline_ms,
+                          # Probes follow each other quickly; each one keeps the full deadline. With
+                          # 12 s between them the outage alert and the recovery each waited one more
+                          # interval.
+                          "interval_ms": 2_000, "deadline_ms": deadline_ms,
                           "peers": [{"host": other.name, "agent": f"agent/probe/{other.name}"}]}
                 if agent_alert:
                     config["alert_agent"] = "agent/operations/amber"
@@ -1077,7 +1083,11 @@ agent "probe/{node.name}" {{
                 if unavailable:
                     self.assertIn("agent/operations/amber", blocked["alert_warning"])
                     self.assertIn("Falling back", blocked["alert_warning"])
-            doctor = json.loads(await nodes[0].cli("doctor", "--json"))
+            # cli(check=True) discards the report a failed check is named in. Read it, then
+            # refuse the same failure with the failed checks shown.
+            doctor = json.loads(await nodes[0].cli("doctor", "--json", check=False))
+            self.assertNotEqual(doctor["status"], "fail",
+                                [check for check in doctor["checks"] if check["status"] == "fail"])
             self.assertTrue(any(check["name"] == "delivery-probes" and check["status"] == "warn" for check in doctor["checks"]))
             # This probe is seconds old and was never offered while its recipient was
             # stopped. Restart must recover it once, as well as reading new live probes.

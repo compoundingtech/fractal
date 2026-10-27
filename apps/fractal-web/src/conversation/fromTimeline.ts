@@ -1,12 +1,13 @@
 // Project decoded st3 conversation chunks into the conversation view model.
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
-import { TimelineEntryId, Timestamp, type TimelineEntry } from '@smalltalk/st3-client/schema'
-import type { ConversationChunk, UnrecognizedEntry } from '@st3/sdk/effect'
+import { TimelineEntryId, Timestamp, type TimelineEntry } from '@fractal/client/schema'
+import type { ConversationChunk, UnrecognizedEntry } from '@fractal/sdk/effect'
 import { DateTime, Option, Schema } from 'effect'
 
 import type { ConversationItem, ToolCallItem, ToolResult } from './model.ts'
 import { contentEvent, proseItem, withoutShownDeliveries } from './semantics.ts'
+import { q101OmpEnvelopeStopgap } from './q101OmpEnvelopeStopgap.ts'
 
 /**
  * Fixture-only D08 proposal, not part of the st3 wire contract.
@@ -31,6 +32,7 @@ export type FixtureConversationChunk = Omit<ConversationChunk, 'entries'> & {
 
 type Entry = TimelineEntry | ProposedReasoningEntry | UnrecognizedEntry
 type ToolResultEntry = Extract<Entry, { type: 'tool_result' }>
+type MessageEntry = Extract<Entry, { type: 'message' }>
 type PositionedResult = { readonly entry: ToolResultEntry; readonly at: number }
 
 const entryTimestamp = (entry: Exclude<Entry, UnrecognizedEntry>): string =>
@@ -76,7 +78,7 @@ const joinResult = ({
 /**
  * st's native-transcript reader (`external_sessions.rs` `push_message`) emits a `message` entry
  * carrying only the harness's own message id before each transcript message's parts. It is a turn
- * header, not a Small Talk delivery (those always name `from`/`to`), so it renders nothing; the
+ * header, not a Fractal delivery (those always name `from`/`to`), so it renders nothing; the
  * parts after it carry the content.
  */
 const isTurnHeader = (entry: Entry) =>
@@ -131,8 +133,8 @@ const unrecognizedOmpItem = (
 
 /**
  * String convention emitted by st's external_sessions.rs `push_native_block`, matching the
- * reasoning-label semantics in st3-conversation-ui/src/adapt.rs. No duration is available.
- * TODO(st#2010): typed reasoning — https://github.com/compoundingtech/smalltalk/issues/2010
+ * reasoning-label semantics in fractal-conversation-ui/src/adapt.rs. No duration is available.
+ * TODO(st#2010): typed reasoning — https://github.com/compoundingtech/fractal/issues/2010
  */
 const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): ConversationItem | undefined => {
   const prefix = '[reasoning]\n'
@@ -181,6 +183,10 @@ const itemOf = ({
       if (internal !== undefined) return internal
       const reasoning = parseNativeReasoning(entry)
       if (reasoning !== undefined) return reasoning
+      const notice = entry.body.media_type === 'text/plain' && entry.role === 'system' && entry.final
+        ? q101OmpEnvelopeStopgap({ id: entry.id, role: entry.role, text: entry.body.text ?? '', at: entryTimestamp(entry) })
+        : undefined
+      if (notice !== undefined) return notice
       const event = contentEvent({
         id: entry.id,
         text: entry.body.text ?? '',
@@ -319,6 +325,7 @@ interface CachedItem {
   readonly entry: Entry
   readonly result: ToolResultEntry | undefined
   readonly active: boolean
+  readonly mailbox: MessageEntry | undefined
   readonly item: ConversationItem
 }
 
@@ -632,7 +639,12 @@ export class LiveTimeline {
     this.itemsBefore.length = from
     const shown = this.shownMessageIds()
     const userMailContent = new Set<string>()
+    const mailboxHeaders = new Map<string, MessageEntry>()
     for (const entry of this.ordered) {
+      if (entry.type === 'message' && !isTurnHeader(entry)) {
+        const key = mailboxPairKey(entry)
+        if (key !== undefined) mailboxHeaders.set(key, entry)
+      }
       if (entry.type === 'message' && entry.role === 'user' && entry.body.from?.startsWith('person/')) {
         const id = this.ownSendIds.get(entry.body.message_id)
         const key = mailboxPairKey(entry)
@@ -675,7 +687,13 @@ export class LiveTimeline {
       }
       if (entry.type === 'tool_call')
         items.push(this.cached({ entry, result: this.joined.get(at), active: this.active }))
-      else items.push(this.cached({ entry, result: undefined, active: true }))
+      else {
+        const key = entry.type === 'content' ? mailboxPairKey(entry) : undefined
+        items.push(this.cached({
+          entry, result: undefined, active: true,
+          mailbox: key === undefined ? undefined : mailboxHeaders.get(key),
+        }))
+      }
     }
     this.items = items
     this.dirtyFrom = this.ordered.length
@@ -725,16 +743,19 @@ export class LiveTimeline {
     entry,
     result,
     active,
+    mailbox,
   }: {
     readonly entry: Exclude<Entry, { type: 'truncation' }>
     readonly result: ToolResultEntry | undefined
     readonly active: boolean
+    readonly mailbox?: MessageEntry
   }): ConversationItem {
     const key = entry.type === 'content' && entry.role === 'user' && entry.body.media_type === 'text/plain'
       ? mailboxPairKey(entry) : undefined
     const id = (key === undefined ? undefined : this.ownSendContentIds.get(key)) ?? entry.id
     const hit = this.cache.get(entry.id)
-    if (hit !== undefined && hit.entry === entry && hit.result === result && hit.active === active && hit.item.id === id)
+    if (hit !== undefined && hit.entry === entry && hit.result === result && hit.active === active &&
+      hit.mailbox === mailbox && hit.item.id === id)
       return hit.item
     let item: ConversationItem
     if (entry.type === 'tool_result') item = joinResult({ call: undefined, entry })
@@ -745,8 +766,23 @@ export class LiveTimeline {
           ? joinResult({ call: own, entry: result })
           : own
     }
+    if (item._tag === 'Text' && mailbox?.body.attachments !== undefined) {
+      item = {
+        ...item,
+        attachments: [
+          ...item.attachments,
+          ...mailbox.body.attachments.map((attachment) => ({
+            id: attachment.blob,
+            mediaType: attachment.media_type,
+            ...(Option.isSome(attachment.name) ? { name: attachment.name.value } : {}),
+            size: attachment.size,
+            messageId: mailbox.body.message_id,
+          })),
+        ],
+      }
+    }
     if (item._tag === 'Text' && item.id !== id) item = { ...item, id }
-    this.cache.set(entry.id, { entry, result, active, item })
+    this.cache.set(entry.id, { entry, result, active, mailbox, item })
     return item
   }
 }
