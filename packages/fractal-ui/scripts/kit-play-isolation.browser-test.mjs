@@ -83,7 +83,6 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
         response.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'public, max-age=3600' }).end('immutable asset')
       } else if (pathname === '/service-worker.js') {
         response.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' }).end(`
-          self.addEventListener('install', event => event.waitUntil(self.skipWaiting()))
           self.addEventListener('activate', event => event.waitUntil(self.clients.claim()))
           self.addEventListener('fetch', event => {
             if (new URL(event.request.url).pathname === '/sw-proof') {
