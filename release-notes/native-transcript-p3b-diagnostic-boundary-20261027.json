@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Finish native transcript design follow-ups: share one icon-size constant with first-line alignment, retain raw error codes as facts and add Code labels only in the view, and top-align harness story grid content.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage or wire schema changes. The in-memory app and kit Notice models retain an optional raw code separately from human detail." },
+  "rules": { "status": "none", "detail": "No checkpoint rule or digest changes." },
+  "compatibility": { "status": "none", "detail": "Visible native error wording remains Code: <code>; diagnostic codes are no longer presentation-prefixed in projection data. Icon size and first-line centering remain unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "No persisted data changes; nothing to recover." }
+}

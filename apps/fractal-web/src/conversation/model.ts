@@ -214,6 +214,7 @@ export const ConversationItem = Schema.TaggedUnion({
     kind: NoticeKind,
     text: Schema.String,
     detail: Schema.optional(Schema.String),
+    code: Schema.optional(Schema.String),
     retryable: Schema.optional(Schema.Boolean),
     at: Schema.optional(Schema.String),
     sender: Schema.optional(Sender),

@@ -166,6 +166,7 @@ export type ConversationItem =
       readonly kind: NoticeKind
       readonly text: string
       readonly detail?: string
+      readonly code?: string
       readonly retryable?: boolean
       readonly at?: string
       readonly sender?: Sender

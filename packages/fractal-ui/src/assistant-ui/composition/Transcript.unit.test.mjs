@@ -184,6 +184,10 @@ test('a converted error notice names retryability only when it is reported true'
   assert.equal(text({ ...notice, retryable: true }), 'Model call failed.\nProvider unavailable.\nCan be retried')
   assert.equal(text({ ...notice, retryable: false }), 'Model call failed.\nProvider unavailable.')
   assert.equal(text(notice), 'Model call failed.\nProvider unavailable.')
+  const coded = { ...notice, code: 'retry', retryable: true }
+  assert.equal(text(coded), 'Model call failed.\nCode: retry\nProvider unavailable.\nCan be retried')
+  assert.equal(text({ ...notice, detail: undefined, code: 'retry' }), 'Model call failed.\nCode: retry')
+  assert.equal(coded.code, 'retry')
 })
 
 test('host-owned header omits only the duplicate band, including unavailable history', () => {
