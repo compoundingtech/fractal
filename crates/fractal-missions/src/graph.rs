@@ -225,13 +225,9 @@ pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
         for child in children.as_array().ok_or_else(invalid)? {
             document.nodes_mut().push(render_desired_node(child)?);
         }
-        if !document.nodes().is_empty() || name == "harness" {
+        if !document.nodes().is_empty() {
             node.set_children(document);
         }
-    } else if name == "harness" {
-        // Older normalized trees omitted empty children. A validated harness
-        // always has a body, so recover that required syntax when rendering it.
-        node.set_children(KdlDocument::new());
     }
     Ok(node)
 }
@@ -362,7 +358,12 @@ mission "example/train" state="ready" {{
                 "version 2\nagent \"worker\" {{ workspace \"/work\"; harness {harness:?} {{}} }}\n"
             );
             let intent = parse_test_intent(&source, "node").unwrap();
-            assert!(parse_test_intent(&source.replace("{}", ""), "node").is_err());
+            let bare = parse_test_intent(&source.replace("{}", ""), "node").unwrap();
+            assert_eq!(
+                serde_json::to_value(&bare.subjects).unwrap(),
+                serde_json::to_value(&intent.subjects).unwrap(),
+                "bare and empty-body {harness} normalize identically"
+            );
             let desired = &intent.subjects["agent/node.worker"].desired;
             let body = desired["children"].as_array().unwrap()
                 .iter().find(|child| child["name"] == "harness").unwrap();
