@@ -4900,6 +4900,18 @@ fn wait_timeout_accepts_bounded_units_and_zero() {
 }
 
 #[test]
+fn progress_eta_flag_is_not_an_execution_action_flag() {
+    assert!(Cli::try_parse_from([
+        "fractal", "work", "progress", "step-run/example", "--eta", "2h"
+    ]).is_ok());
+    for action in ["claim", "renew", "complete", "fail", "release", "resume"] {
+        assert!(Cli::try_parse_from([
+            "fractal", "work", action, "step-run/example", "--eta", "2h"
+        ]).is_err(), "{action}");
+    }
+}
+
+#[test]
 fn wait_reads_resource_status_from_observed_facts() {
     let resource = json!({
         "baseline": true,
