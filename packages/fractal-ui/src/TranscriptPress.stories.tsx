@@ -44,6 +44,7 @@ export const scenarioExemptions: readonly string[] = [
 type Story = StoryObj<PressArgs>
 const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Controlled host republish, insertion and pointer timing require identity-retained local transcript turns.' } } } satisfies Story
 
+
 /** A mouse press by coordinates: the release lands on whatever is under the pointer after `during`, and the click goes to the common ancestor, as in a browser. */
 async function pressAcross(target: HTMLElement, during: () => Promise<void>) {
   const rect = target.getBoundingClientRect()
@@ -87,6 +88,7 @@ export const NewRowDuringPress: Story = { ...contractFixture, play: async ({ can
   await expect(retries).toHaveTextContent('1')
 } }
 export const NewRowDuringPressLight: Story = { ...NewRowDuringPress, args: { scheme: 'light' } }
+
 
 const pointer = (target: Element, type: 'pointerdown' | 'pointerup', pointerId: number, pointerType: 'mouse' | 'touch') => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, composed: true, pointerId, pointerType, isPrimary: pointerType === 'mouse', button: 0, buttons: type === 'pointerdown' ? 1 : 0, width: 1, height: 1, pressure: type === 'pointerdown' ? 0.5 : 0 }))
 

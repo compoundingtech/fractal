@@ -1,6 +1,7 @@
 import { sidebarArrangement } from './arrangements.ts'
 import { drawCast, type Cast, type CastSpec } from './cast.ts'
 import { type FactoryContext } from './context.ts'
+import { missionDetails } from './missionDetails.ts'
 import { fork, rngFromSeed } from './rng.ts'
 import type { RecordedTransport } from './recording.ts'
 import { SLICE_KINDS, type AnySlice, type Slice, type SliceKind, type TimelineEvent } from './slice.ts'
@@ -135,6 +136,7 @@ export const buildWorld = (definition: WorldDefinition, generic: VariantTable, n
       variants[kind] = choice === 'default' ? 'default' : name
     }
   }
+  const selected = slices as unknown as Slices
   const world: World = {
     id: definition.id,
     title: definition.title,
@@ -142,7 +144,7 @@ export const buildWorld = (definition: WorldDefinition, generic: VariantTable, n
     seed: definition.seed,
     now,
     cast,
-    slices: assignStores(slices as unknown as Slices),
+    slices: assignStores({ ...selected, details: missionDetails(ctx, selected.details, selected.roster, selected.attention) }),
     ...(definition.recording === undefined ? {} : { recording: definition.recording }),
     variants,
     available,

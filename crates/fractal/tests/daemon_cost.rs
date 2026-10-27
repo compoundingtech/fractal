@@ -355,6 +355,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "applies an operational repair plan",
     ),
     (
+        "POST /v1/repair/apply-attributed",
+        "applies an operational repair plan with an authenticated harness binding absent from generated cost stores; API repair tests cover actor enforcement",
+    ),
+    (
         "POST /v1/replication/repair",
         "repairs one replication record",
     ),
@@ -2848,7 +2852,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
 
 fn custom_manifest(version: u32) -> fractal_schema::custom::Manifest {
     let mut manifest: fractal_schema::custom::Manifest =
-        serde_json::from_str(include_str!("../../../examples/st3/custom-review.json")).unwrap();
+        serde_json::from_str(include_str!("../../../examples/fractal/custom-review.json")).unwrap();
     manifest.version = version;
     manifest.subject_prefix = format!("custom/garden/review/v{version}/");
     manifest

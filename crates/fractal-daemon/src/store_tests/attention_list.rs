@@ -57,7 +57,7 @@ ClaimInput {
 
 fn custom(store: &Store, subject: &str, person: &str) {
 let manifest =
-    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h3f11fc42fd46 owner=fractal_daemon::store_tests::attention_list TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/st3/custom-review.json"))
+    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h0be6ccb7b217 owner=fractal_daemon::store_tests::attention_list TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/fractal/custom-review.json"))
         .unwrap();
 store
     .register_custom_kind(&crate::store::custom::RegistrationRequest {
