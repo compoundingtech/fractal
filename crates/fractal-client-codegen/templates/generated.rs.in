@@ -1606,7 +1606,7 @@ pub struct Agent {
     #[serde(default)]
     pub delivery: Option<AgentDelivery>,
     /// The subagents this seat's harness runs now, oldest first. Omitted when the driver does not
-    /// report subagents, or by an older daemon.
+    /// report subagents, or by an older daemon. Claude, Codex, and OMP report them; Pi does not.
     #[serde(default)]
     pub subagents: Vec<AgentSubagent>,
     /// The seat's latest suspend or resume and its phase. An older daemon omits it.

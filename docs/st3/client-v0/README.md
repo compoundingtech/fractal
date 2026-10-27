@@ -320,6 +320,7 @@ subagent is part of its agent, not a resource of its own, and has no actions. Th
 per request, so a lease that runs out leaves it at the next read without a new claim. The field
 is omitted when the agent's driver does not report subagents, or by an older daemon. An absent
 field means not reported, while an empty list means the driver reports no running subagents.
+Claude, Codex, and OMP report subagents; Pi and OpenCode do not.
 
 ### Native harness inventory
 

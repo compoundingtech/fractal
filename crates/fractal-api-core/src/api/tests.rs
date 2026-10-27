@@ -4287,10 +4287,10 @@ fn agents_subagents_are_reported_only_for_observing_drivers() {
 
     overlay_subagents(&store, &mut agents).unwrap();
 
-    for agent in &agents[..4] {
+    for agent in &agents[..3] {
         assert_eq!(agent.get("subagents"), Some(&json!([])), "{agent}");
     }
-    for agent in &agents[4..] {
+    for agent in &agents[3..] {
         assert!(agent.get("subagents").is_none(), "{agent}");
     }
 }
