@@ -97,11 +97,15 @@ impl AttentionStore for Store {
         }
         let mut attempt = Attempt(&self.fractal, false);
         let requested = &self.fractal.agent_roster_requested_at;
+        let generation = self.fractal.presented_agents.generation();
         let pending = requested.swap(0, std::sync::atomic::Ordering::AcqRel);
         let result = refresh();
         attempt.1 = result.is_ok();
-        if result.is_err() && pending != 0 {
-            // Still unanswered: keep the oldest request time unless a newer request is waiting.
+        if result.is_err() && pending != 0
+            && self.fractal.presented_agents.generation() == generation
+        {
+            // Retry only this projection generation's unanswered request. A reset has
+            // already discarded old demand and queued any active new-generation demand.
             let _ = requested.compare_exchange(0, pending, std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed);
         }

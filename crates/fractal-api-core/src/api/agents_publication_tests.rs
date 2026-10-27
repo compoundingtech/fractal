@@ -280,3 +280,18 @@ async fn agents_publication_explicit_request_outlives_the_read_grace_while_queue
     assert!(store.agents_publication().is_some());
     assert!(!store.agents_publication_demand());
 }
+
+#[test]
+fn agents_publication_failed_old_generation_does_not_restore_cancelled_demand() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let _wake = store.start_agent_roster_refresher().unwrap();
+    store.fractal.request_roster_refresh();
+    let result: anyhow::Result<()> = store.answer_agent_roster_requests(|| {
+        store.forget_current_views();
+        anyhow::bail!("the old-generation fold was invalidated")
+    });
+    assert!(result.is_err());
+    assert!(!store.agents_publication_demand(), "an invalidated fold cannot resurrect old demand");
+}
