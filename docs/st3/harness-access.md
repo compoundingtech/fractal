@@ -130,7 +130,7 @@ declared permissions the launch fails closed (the driver does not guess that the
 replace it) and says so: `saved Codex resume binding has no persisted rollout for thread ...`. Give the
 seat one turn on its previous declaration, which saves the thread, then restart it on the new one.
 
-The live eval `evals/st3/codex-minimal-access` and `scripts/st3-codex-minimal-eval/resume-check` (a
+The live eval `evals/fractal/codex-minimal-access` and `scripts/st3-codex-minimal-eval/resume-check` (a
 restart between two turns, checking the thread id, the daemon socket, the network and the refused
 write) are paid and run by hand; no CI gate proves the real launch path. The argv tests and the
 sandbox tests are the CI evidence.
