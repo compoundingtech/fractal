@@ -5354,6 +5354,47 @@ impl Store {
     }
 
     /// Every claim and local observation of `kind` for `subject`, in log order.
+    /// A seat's harness diagnostics in canonical order, without the Claude channel's
+    /// attachment reports: those are most of a long-lived seat's diagnostics, and their own
+    /// index serves the attachment fence. An append raises the newest index and a checkpoint
+    /// trim lowers the count, so diagnostics kept under the same key, read from the kind index
+    /// alone, are the same; a pass reads the bodies again only when one was added or trimmed.
+    pub fn harness_diagnostics(&self, subject: &str) -> Result<Arc<Vec<ClaimRecord>>> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        let key: (u64, u64) = self.readers.get().query_row(
+            "SELECT COALESCE(MAX(store_index), 0), COUNT(*) FROM claims INDEXED BY claims_subject_kind_index
+             WHERE subject=?1 AND kind='harness.diagnostic'",
+            [subject],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let kept = self.extension::<HarnessDiagnostics>();
+        if let Some((_, diagnostics)) = kept
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(subject)
+            .filter(|(at, _)| *at == key)
+        {
+            return Ok(diagnostics.clone());
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        HARNESS_DIAGNOSTIC_READS.with(|reads| reads.set(reads.get() + 1));
+        let mut diagnostics = self.claims_for(subject, Some("harness.diagnostic"))?;
+        diagnostics.retain(|claim| {
+            !matches!(
+                claim.body.pointer("/fields/code").and_then(Value::as_str),
+                Some("claude-channel-attached" | "claude-channel-unattached" | "claude-channel-initialized")
+            )
+        });
+        let diagnostics = Arc::new(diagnostics);
+        let mut kept = kept.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() >= ACTUAL_CACHE_LIMIT {
+            kept.clear();
+        }
+        kept.insert(subject.to_owned(), (key, diagnostics.clone()));
+        Ok(diagnostics)
+    }
+
     pub fn observations_for(&self, subject: &str, kind: &str) -> Result<Vec<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let mut records = self.claims_for(subject, Some(kind))?;
@@ -18778,6 +18819,18 @@ pub fn step_timing_events(
         kept.insert(file, (key, Arc::new(events.clone())));
     }
     Ok(events)
+}
+
+/// Each seat's harness diagnostics as last read, under the newest index and the count of them.
+#[derive(Default)]
+struct HarnessDiagnostics(Mutex<HashMap<String, KeptDiagnostics>>);
+
+type KeptDiagnostics = ((u64, u64), Arc<Vec<ClaimRecord>>);
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// How often this thread read a seat's harness diagnostic bodies.
+    pub static HARNESS_DIAGNOSTIC_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Each step's timing events by database file and subject, under the newest index and the

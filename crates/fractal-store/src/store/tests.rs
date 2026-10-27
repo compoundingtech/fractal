@@ -11256,3 +11256,56 @@ fn a_live_seat_without_a_quiet_observation_of_its_incarnation_is_never_quiet() {
     runtime("exited", None);
     assert!(!check(2));
 }
+
+#[test]
+fn a_seats_harness_diagnostics_are_read_again_only_when_they_change() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let diagnose = |code: &str, n: usize| {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.diagnostic".into(),
+                actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({"code": code, "incarnation_id": "one"}))
+                    .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("{code}:{n}")),
+            })
+            .unwrap()
+    };
+    let reads = || HARNESS_DIAGNOSTIC_READS.with(std::cell::Cell::get);
+    let prompt = diagnose("provider-trust-prompt", 0);
+    for n in 0..20 {
+        diagnose(if n % 2 == 0 { "claude-channel-attached" } else { "claude-channel-unattached" }, n);
+    }
+    let before = reads();
+    let codes = |diagnostics: &[ClaimRecord]| {
+        diagnostics.iter().map(|claim| claim.body["fields"]["code"].clone()).collect::<Vec<_>>()
+    };
+    // The channel's attachment reports are left out; the other diagnostics stay in order.
+    assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-trust-prompt")]);
+    assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-trust-prompt")]);
+    assert_eq!(reads(), before + 1, "an unchanged seat's diagnostics were read again");
+    let later = diagnose("provider-capacity", 0);
+    assert_eq!(
+        codes(&store.harness_diagnostics(subject).unwrap()),
+        [json!("provider-trust-prompt"), json!("provider-capacity")]
+    );
+    assert_eq!(reads(), before + 2, "an added diagnostic was not read");
+    // A checkpoint trim lowers the count, so the claims that remain are read again.
+    {
+        let mut connection = store.connection.write();
+        // Only the claim goes, as a trim would delete it; its signature and record stay.
+        connection.pragma_update(None, "foreign_keys", false).unwrap();
+        let tx = connection.transaction().unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hedf22a898ad6 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_positions WHERE claim_id=?1", [&prompt.id]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h88bcdc72f0ea owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&prompt.id]).unwrap();
+        tx.commit().unwrap();
+        connection.pragma_update(None, "foreign_keys", true).unwrap();
+    }
+    assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-capacity")]);
+    assert_eq!(reads(), before + 3, "a trimmed diagnostic stayed");
+    assert_eq!(store.harness_diagnostics(subject).unwrap()[0].id, later.id);
+}
