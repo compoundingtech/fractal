@@ -2,7 +2,7 @@
 name = "fractal-drivers"
 version = "0.1.0"
 edition = "2024"
-description = "Harness drivers, native delivery, and catalog support shared by st2 and st3"
+description = "Harness drivers, native delivery, and catalog support shared by st2 and Fractal"
 license = "MIT"
 autotests = false
 

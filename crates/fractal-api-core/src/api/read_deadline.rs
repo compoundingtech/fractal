@@ -182,6 +182,7 @@ fn forwarded_deadline(operation: &crate::peer::ClientReadOperation) -> Option<Du
         | ClientReadOperation::TerminalScreenChange { .. } => Some(ORDINARY + operation.wait()),
         ClientReadOperation::ConversationContent { .. }
         | ClientReadOperation::Timeline { .. }
+        | ClientReadOperation::SessionDetail { .. }
         | ClientReadOperation::TerminalScreen { .. }
         | ClientReadOperation::SeatSnapshot { .. }
         | ClientReadOperation::AgentWorkspace { .. }
