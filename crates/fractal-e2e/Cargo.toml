@@ -2,7 +2,7 @@
 name = "fractal-e2e"
 version = "0.1.0"
 edition = "2024"
-description = "End-to-end tests that start a real st3 daemon and drive a client, the terminal UI or the feed against it"
+description = "End-to-end tests that start a real Fractal daemon and drive a client, the terminal UI or the feed against it"
 license = "MIT"
 publish = false
 

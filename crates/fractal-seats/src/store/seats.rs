@@ -12,6 +12,10 @@ pub use fractal_missions::store::seats::{EndedDeclaration};
 #[path = "identity_boundary_tests.rs"]
 mod identity_boundary_tests;
 
+#[cfg(test)]
+#[path = "harness_ready_tests.rs"]
+mod harness_ready_tests;
+
 /// How long a roster refresh request may go unanswered before the daemon warns about it.
 const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;
 
@@ -2183,12 +2187,17 @@ impl SeatsStore for Store {
         let connection = self.readers.get();
         let subject = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
         let subject = subject.as_str();
+        // Seek to this incarnation's observations rather than read every earlier incarnation's.
+        // A body without fields has no state, so the wider incarnation expression adds no match.
         let found: i64 = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims
-             WHERE subject=?1 AND kind='harness.observed'
-               AND json_extract(body, '$.fields.incarnation_id')=?2
-               AND json_extract(body, '$.fields.state') IN ('ready','working','idle')
-               AND coalesce(json_extract(body, '$.fields.reason'),'')!='providerAuth')",
+            format!(
+                "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_harness_incarnation_accepted_index
+                 WHERE subject=?1 AND kind='harness.observed'
+                   AND {INCARNATION_OF_CLAIM}=?2
+                   AND json_extract(body, '$.fields.state') IN ('ready','working','idle')
+                   AND coalesce(json_extract(body, '$.fields.reason'),'')!='providerAuth')"
+            )
+            .as_str(),
             params![subject, incarnation],
             |row| row.get(0),
         )?;

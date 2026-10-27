@@ -549,19 +549,43 @@ pub async fn acknowledge_work(
     Ok(Json(result))
 }
 
+/// `?view=lease` asks a renewal to answer with the step's row view alone. The native driver
+/// renews each held step every minute and reads nothing from the answer, so folding the step's
+/// timing, summaries and wake for it only costs reads.
+#[derive(Debug, Default, Deserialize)]
+pub struct WorkActionQuery {
+    #[serde(default)]
+    pub view: Option<String>,
+}
+
+impl WorkActionQuery {
+    pub(crate) fn lease_view(&self, action: &str) -> Result<bool, St3Error> {
+        match self.view.as_deref() {
+            None => Ok(false),
+            Some("lease") if action == "renew" => Ok(true),
+            Some(view) => Err(St3Error::new(
+                "invalid-work-view",
+                format!("`{view}` is not a view of `{action}`; only a renewal answers with `lease`"),
+            )),
+        }
+    }
+}
+
 pub async fn post_work_action(
     State(state): State<AppState>,
     AxumPath((action, subject)): AxumPath<(String, String)>,
+    Query(query): Query<WorkActionQuery>,
     bound: Option<Extension<BoundAgent>>,
     Json(mut request): Json<WorkRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
+    let lease_view = query.lease_view(&action).map_err(ApiError::bad)?;
     bind_work_incarnation(
         &state,
         bound.as_ref(),
         request.actor.as_deref(),
         &mut request.incarnation,
     )?;
-    work_action_response(state, action, subject, request, None, None).await
+    work_action_response_viewing(state, action, subject, request, None, None, lease_view).await
 }
 
 /// Add time to the execution budget of the step attempt this seat holds.

@@ -55,8 +55,12 @@ const iframe = (report, probes = [], navigation) => `<!doctype html><meta charse
 const policyFixtureIds = [
   'fractal-ui-transcript--no-green-all-states-light',
   'fractal-ui-transcript--no-green-all-states',
-  'fractal-ui-composer--footer-width-budget-light',
-  'fractal-ui-composer--footer-width-budget',
+  'fractal-ui-composer--footer-width-budget-narrow-light',
+  'fractal-ui-composer--footer-width-budget-narrow',
+  'fractal-ui-composer--footer-width-budget-medium-light',
+  'fractal-ui-composer--footer-width-budget-medium',
+  'fractal-ui-composer--footer-width-budget-wide-light',
+  'fractal-ui-composer--footer-width-budget-wide',
   'fractal-ui-sidebar-tree--filter-keystroke-to-paint',
   'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed',
 ]
@@ -124,10 +128,12 @@ const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides 
 
 test('full set with a11y requires one passed a11y report per case', { timeout: 60000 }, async () => {
   // Empty values are unset, as a workflow expression with no value yields them.
-  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: '', KIT_PLAY_A11Y: '', KIT_PLAY_MAX_SECONDS: '' } })
+  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: '', KIT_PLAY_A11Y: '', KIT_PLAY_WALL_GUARD_SECONDS: '' } })
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
-  assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 8, 21])
+  assert.deepEqual([receipt.set, receipt.a11y, receipt.wallGuardSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 12, 29])
+  assert.equal(receipt.maxSeconds, receipt.wallGuardSeconds)
+  assert.equal(receipt.overBudget, false)
   assert.ok(receipt.cpu.count > 0 && receipt.cpu.busyCoreMinutes >= 0 && receipt.cpu.loadavgEnd.length === 3)
   for (const row of receipt.rows) {
     assert.equal(row.storyFile, './Kit.stories.tsx', 'receipt paths join entry.id, not the index key')
@@ -182,7 +188,7 @@ test('fixture code can inject its policy through the runner parameter, not proce
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
   assert.deepEqual(receipt.caseOverrides, {})
-  assert.equal(receipt.cases, 32)
+  assert.equal(receipt.cases, 48)
 })
 
 test('the production policy still requires the app cleanup story in the complete build', { timeout: 60000 }, async () => {
@@ -278,18 +284,19 @@ test('a11y off rejects a case where axe still ran', { timeout: 60000 }, async ()
   assert.ok(receipt.rows.every(row => /a11y off: axe still ran/.test(row.error)))
 })
 
-test('a run over its wall-time budget fails after running every case', { timeout: 60000 }, async () => {
-  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: 'critical', KIT_PLAY_MAX_SECONDS: '0.001' } })
+test('a run over its wall hang guard fails after running every case', { timeout: 60000 }, async () => {
+  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: 'critical', KIT_PLAY_WALL_GUARD_SECONDS: '0.001' } })
   assert.equal(code, 1)
   assert.equal(receipt.pass, false)
   assert.equal(receipt.overBudget, true)
-  assert.equal(receipt.maxSeconds, 0.001)
+  assert.equal(receipt.overWallGuard, true)
+  assert.equal(receipt.wallGuardSeconds, 0.001)
   assert.equal(receipt.cases, 4)
   assert.ok(receipt.rows.every(row => row.pass))
 })
 
 test('invalid options fail before any case runs', { timeout: 60000 }, async () => {
-  for (const env of [{ KIT_PLAY_SET: 'some' }, { KIT_PLAY_A11Y: 'no' }, { KIT_PLAY_MAX_SECONDS: '-1' }, { KIT_PLAY_MAX_SECONDS: 'soon' },
+  for (const env of [{ KIT_PLAY_SET: 'some' }, { KIT_PLAY_A11Y: 'no' }, { KIT_PLAY_WALL_GUARD_SECONDS: '-1' },
     // Only the full set is sharded.
     { KIT_PLAY_SET: 'commit', KIT_PLAY_SHARD_COUNT: '2' }, { KIT_PLAY_SET: 'critical', KIT_PLAY_SHARD_INDEX: '1', KIT_PLAY_SHARD_COUNT: '2' }]) {
     await assert.rejects(() => runGate({ env }), /ENOENT/)

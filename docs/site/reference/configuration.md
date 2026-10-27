@@ -36,6 +36,79 @@ fractal apply worker.kdl --as person/ada
 
 Multiple input files form one atomic publication. Parsing, reference resolution, validation, and current-subject checks happen before the transaction commits. One failure rejects the operation rather than partially applying it.
 
+## Harnesses
+
+Supported typed harnesses are `claude`, `codex`, `pi`, `omp`, and `opencode`.
+All have defaults: a bare `harness "codex"` is equivalent to `harness "codex" {}`.
+The harness starts idle; a person can type into its terminal or send it a message.
+Omitting `model` and `effort` leaves those choices to the native harness.
+
+For example, a Codex seat using its native defaults:
+
+```kdl
+version 2
+agent "example/codex-worker" {
+  workspace "/work/example"
+  restart "always"
+  harness "codex"
+}
+```
+
+Choose one harness per agent. These are alternative harness nodes, not a single
+agent with multiple harnesses:
+
+```kdl
+harness "claude" { model "sonnet"; }
+harness "codex" { effort "high"; }
+harness "pi"
+harness "omp"
+harness "opencode"
+```
+
+`model`, `args` (a list of individual arguments), and `executable` are supported
+by every harness. `effort` is supported by all except `opencode`. Native
+authentication, supported-version requirements, and provider configuration still
+apply; an empty body does not install a harness or sign it in.
+
+### Executable selection and PATH
+
+By default the native program is named after the harness: `claude`, `codex`, `pi`,
+`omp`, or `opencode`. Fractal launches a typed driver wrapper which then invokes
+that program; selecting an executable does not replace the wrapper or change
+the driver protocol.
+
+Managed seats use the daemon user's default account shell environment, captured
+by running an **interactive login shell** (`-l -i`). Thus shell startup files,
+including version-manager initialization, affect `PATH`; this is not necessarily
+the PATH of the terminal running `fractal apply`, nor just launchd's or systemd's
+service environment. Agent `env` entries overlay that environment. Fractal also
+prepends its own executable directory so its wrapper can be found.
+
+To change lookup for one agent, set its `PATH` (the literal `${PATH}` expands to
+the captured shell PATH):
+
+```kdl
+env { PATH "/opt/codex/bin:${PATH}"; }
+```
+
+To bypass PATH lookup and version-manager shims entirely for the native program,
+set `executable` inside the harness:
+
+```kdl
+harness "codex" {
+  executable "/opt/codex/bin/codex"
+  effort "high"
+}
+```
+
+`executable` is one executable name or path, not a shell command. Spaces in a
+path are preserved; put arguments in `args`, not in this string. An absolute
+path is recommended for a pinned installation. A plain name uses the seat's
+PATH. Fractal does not interpret `CODEX_BIN` or `CLAUDE_BIN` as executable
+overrides, and there is no separate per-harness executable setting in local
+daemon configuration. A native harness may still read its own configuration
+and environment variables after it starts.
+
 ## Preview and gate checks
 
 A plain dry run stops at preview: no publication, mission start, helpers, or exec gates. It reports blockers, warnings, proposed actions, and revision information. Add `--check` to deliberately run exec gate checks during preview; provide `--workspace DIR` and required inputs for the intended execution context.

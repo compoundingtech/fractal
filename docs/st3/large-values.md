@@ -83,6 +83,25 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Person rename and review reassignment inventory review
+
+Owner review for [PR #1185](https://github.com/compoundingtech/fractal/pull/1185):
+the PR-owning fleet seat reviewed the following transitional exceptions. The
+producer modules named by the markers retain responsibility for their TODOs.
+These accept existing inline representations, not a value-size or cost bound.
+
+| Inventory ID | Producer and reviewed value flow | Reason and next step |
+| --- | --- | --- |
+| `lv-h17335d660f3b` | `fractal_store::store::attention` prepares the effective-reviewer pending-request query and hydrates request bodies and canonical episode timestamps. | Preserve exact episode and canonical ordering; trace composed SQL and reference/chunk variable request values. |
+| `lv-h9b347ba24aa6` | `fractal_evidence::store::evidence` reads request ID, owner and effective reviewer through the generated reviewer fold. | Trace composed query and reference representation while preserving exact request identity and historical authority. |
+| `lv-h1a7e1457e965` | `fractal_store::store::human_review_reassignment` reads the effective reviewer for one request, including canonical repair and receipt selection. | Trace generated SQL and move variable reviewer/request keys to a reviewed reference representation. |
+| `lv-h12810b4d74c0` | `fractal_store::store::person_rename` hydrates a receipt by idempotency key. | Preserve original report and actor/people validation; prepare a body/reference representation with identical replay semantics. |
+| `lv-h273f7a4b7c06` | `fractal_store::store::person_rename` reads the canonical receipt destination by old-person subject. | Both reducers must choose the same winner; reference variable person keys without changing canonical ordering. |
+| `lv-hfbb687ae03ed` | `fractal_store::store::person_work` evaluates receipt-winner SQL for a reassignment claim. | Trace composed SQL and variable claim/person keys toward a reference representation without changing winner selection. |
+| `lv-hf6f5b79d7be9` | `fractal_store::store::person_work` updates assignee and its index key, fenced by step and previous person. | Preserve atomic episode-fenced assignment; bound/reference values and account for old cell/index-key reclamation. |
+| `lv-h2c8b0107116f` | `fractal_store::store` hydrates the first authorized exact-request answer with effective-reviewer predicates. | Reference/chunk hydrated values while preserving answer authority at its canonical moment. |
+| `lv-h82624af80f95` | `fractal_store::store` schema adds request, answer, reassignment, reviewer-routing and exact episode indexes. | Existing variable inline keys enable indexed episode seeks but are not bounded-size proof; reference/chunk variable columns and index expressions without changing fold semantics. |
+
 ### Conversation-owner inventory review (PR #3116)
 
 The [owner-once change](https://github.com/compoundingtech/fractal/pull/3116)

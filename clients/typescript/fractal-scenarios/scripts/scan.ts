@@ -83,7 +83,7 @@ const PEOPLE = new Set(['ada', 'robin', 'avery', 'blair', 'alex', 'pat', 'operat
 
 /** Families whose references must follow the identity namespace (spec "Identity namespace"). */
 const FAMILIES =
-  /(?<![A-Za-z0-9_./-])(agent|person|host|machine|mission|mission-run|step-run|run-generation|work|runtime|session|terminal|timeline-entry|attention|message|fleet|event-cursor)\/[^\s"'`),\]}]+/g
+  /(?<![A-Za-z0-9_./-])(agent|person|host|machine|mission|mission-run|step-run|run-generation|work|runtime|session|device|launch|launch-variant|terminal|timeline-entry|attention|message|fleet|event-cursor)\/[^\s"'`),\]}]+/g
 
 const identityOk = (family: string, rest: string): boolean => {
   switch (family) {

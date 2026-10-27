@@ -481,6 +481,53 @@ fn rollout_drains_then_resumes_once_across_disk_reopens() {
 }
 
 #[test]
+fn rollout_provider_switch_is_rejected_before_draining_the_incumbent() {
+    let seat = Seat::new();
+    let original = seat.runtime.observation.lock().unwrap().clone().unwrap();
+    let revision = seat.store.owned_sets().unwrap()[0].revision.clone();
+    let source = seat
+        .source("replacement-model", "")
+        .replace("harness \"claude\"", "harness \"codex\"");
+    let input = crate::graph::parse_owned_set_intent(&source, "amber").unwrap();
+    let mut options = Options {
+        set: "garden".into(),
+        source: Source {
+            repository: "acme/garden".into(),
+            r#ref: "refs/heads/main".into(),
+            sha: format!("{:040x}", 2),
+            sequence: 2,
+        },
+        expected_set: revision.clone(),
+        rollout: Some(Policy::when_idle(1_800_000, false)),
+        adopt: Default::default(),
+        allow_empty: false,
+        confirm_retire: None,
+        expected_subjects: Default::default(),
+    };
+    let preview = seat.store.owned_set_preview(&input, &options).unwrap();
+    let refusal = "agent/garden/orchard: when-idle requires the same host and harness family";
+    assert_eq!(preview.blockers, [refusal]);
+    options.confirm_retire = Some(preview.digest.clone());
+    options.expected_subjects = preview.expected_subjects.clone();
+    let error = seat.store.apply_owned_set(
+        &input, &options, "publish-2", "person/operator",
+    ).unwrap_err();
+    assert!(error.to_string().contains(refusal), "{error:#}");
+    assert_eq!(seat.store.owned_sets().unwrap()[0].revision, revision);
+    assert_eq!(seat.desired().member.as_ref().unwrap().driver.as_deref(), Some("claude"));
+    assert!(seat.store.rollout(SUBJECT).unwrap().is_none());
+    let reconciler = Reconciler::new(
+        seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
+    );
+    assert!(!reconciler.reconcile_rollout(&seat.desired(), Some(&original), None).unwrap());
+    let observed = seat.runtime.observation.lock().unwrap().clone().unwrap();
+    assert_eq!(observed.incarnation_id, original.incarnation_id);
+    assert_eq!(observed.status, original.status);
+    assert!(seat.runtime.starts.lock().unwrap().is_empty());
+    assert!(seat.runtime.stops.lock().unwrap().is_empty());
+}
+
+#[test]
 fn rollout_wrong_incarnation_never_terminates_its_successor() {
     let seat = Seat::new();
     seat.publish(
