@@ -77,7 +77,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v9.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v10.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1730,16 +1730,16 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v9,
-/// all 17 fixed seeds converge; only seed 3 never reaches a trim. This measured
-/// characterization includes the owner-local helper and action-receipt kinds.
-/// Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
-const NEVER_TRIMS: &[u64] = &[3];
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v10,
+/// all 17 fixed seeds converge; seeds 17, 34 and 610 never reach a trim.
+/// This measured characterization adds task-grant kinds to v9. Keep the exact
+/// per-seed equality: claim generation consumes the schedule's RNG.
+const NEVER_TRIMS: &[u64] = &[17, 34, 610];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v9 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v10 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -1797,6 +1797,8 @@ seed_tests! {
 #[test]
 fn every_fixed_seed_has_a_test() {
     assert_eq!(TESTED_SEEDS, SEEDS);
+    assert!(NEVER_TRIMS.iter().all(|seed| SEEDS.contains(seed)));
+    assert!(NEVER_TRIMS.len() * 2 < SEEDS.len(), "most fixed seeds must trim");
 }
 
 /// The stores of every other test here are on tmpfs (see `scratch_dir`). This one seed runs on
@@ -1953,7 +1955,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v9.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v10.json"
         }))
         .unwrap(),
     )

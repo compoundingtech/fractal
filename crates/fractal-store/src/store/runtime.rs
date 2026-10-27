@@ -200,6 +200,7 @@ impl FractalRuntime {
         glass_heads::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
+        task_grants::create_schema(connection)?;
         if let Some(transaction) = transaction {
             transaction.commit()?;
         }
@@ -397,7 +398,7 @@ impl Runtime for FractalRuntime {
     }
 
     fn projection_versions(&self) -> BTreeMap<String, u64> {
-        BTreeMap::from([("mission_run_deadlines".into(), 3)])
+        BTreeMap::from([("mission_run_deadlines".into(), 3), ("task_grants".into(), 1)])
     }
 
     fn classify_replicated_claim(
@@ -433,6 +434,7 @@ impl Runtime for FractalRuntime {
         replacement: &str,
     ) -> Result<()> {
         select_desired_repair_tx(transaction, repaired, replacement)?;
+        task_grants::repair(transaction, repaired, replacement)?;
         slo_breaches::repair(transaction, repaired)
     }
 

@@ -68,6 +68,7 @@ use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
 pub mod wire_names;
+pub mod task_grants;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -530,9 +531,23 @@ pub fn fabric_router_with(state: AppState, families: &[RouteFamily]) -> Router {
 }
 
 pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary, families: &[RouteFamily]) -> Router {
+    router_for_transport_with_task_grant_authority(
+        state, transport, families, Arc::new(task_grants::UnavailableCallerAuthority),
+    )
+}
+
+fn router_for_transport_with_task_grant_authority(
+    state: AppState,
+    transport: ClientTransportBoundary,
+    families: &[RouteFamily],
+    authority: Arc<dyn task_grants::TaskGrantCallerAuthority>,
+) -> Router {
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/task-grants", post(task_grants::create))
+        .route("/v1/task-grants/{id}", get(task_grants::get))
+        .route("/v1/task-grants/{id}/revoke", post(task_grants::revoke))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -878,6 +893,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(host_agent_workspace),
         );
     let app = families.iter().fold(app, |app, family| family(app));
+    let app = app.layer(Extension(authority));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
             (state.clone(), transport),
