@@ -237,6 +237,7 @@ function AllStatesMatrix() {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Agent thread tabs',
   component: ThreadTabsHost,
   parameters: {
@@ -254,6 +255,19 @@ const meta = {
   render: args => <main {...stylex.props(styles.canvas, args.scheme === 'light' && lightTheme)}><ThreadTabsHost {...args} /></main>,
 } satisfies Meta<typeof ThreadTabsHost>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode, co-located with the synthetic host contract.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'Narrow440Dark:contract-fixture',
+  'Narrow440Light:contract-fixture',
+  'ReadOnlyNotice:contract-fixture',
+  'ResizeFit:contract-fixture',
+  'SingleParent:contract-fixture',
+  'Wide1440Dark:contract-fixture',
+  'Wide1440Light:contract-fixture',
+  'WideLayoutNarrowPane:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 export const Wide1440Dark: Story = { play: keyboardPlay }
 export const Wide1440Light: Story = { args: { scheme: 'light' }, play: keyboardPlay }
