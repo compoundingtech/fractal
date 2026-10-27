@@ -164,7 +164,7 @@ The release decision is a final mission product. The human gate is a mission-lev
 A human gate uses `mode="approve"` by default. On a worker-owned step, `mode="feedback"`
 offers `approved` and `changes-requested` instead of approve and reject. A request for changes
 requires free text, sends it to the worker, and starts a new attempt with that text appended to
-the step goals. See [the feedback example](../../examples/st3/human-feedback.kdl).
+the step goals. See [the feedback example](../../examples/fractal/human-feedback.kdl).
 
 After acceptance, cleanup stops both agents before the run becomes completed.
 
@@ -1576,7 +1576,7 @@ agent "parser" {
 - With `remove-at-run-end=#true`, Fractal removes the worktree after the agent's run ends and its runtime stops. For a top-level seat without an owning run, an explicit stop ends it. The branch stays in the repository.
 - Fractal keeps a worktree that has uncommitted or untracked changes, and records a `checkout-kept` warning. It also keeps a worktree whose workspace a current member still uses.
 
-[`fan-out.kdl`](../../examples/st3/fan-out.kdl) gives three parallel workers one checkout each.
+[`fan-out.kdl`](../../examples/fractal/fan-out.kdl) gives three parallel workers one checkout each.
 
 ## Native message delivery and work wake
 
