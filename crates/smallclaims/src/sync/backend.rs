@@ -1,5 +1,5 @@
-//! What the sync worker asks of the store it keeps in step: export and receive exchanges, answer
-//! heals, serve and adopt checkpoints, publish endpoints, redeem invites, and read membership.
+//! What the sync worker asks of the store it keeps in step: export and receive exchanges, serve
+//! and adopt checkpoints, publish endpoints, redeem invites, and read membership.
 
 use std::borrow::Borrow;
 use std::future::Future;
@@ -13,8 +13,8 @@ use crate::claim::ReplicaEnvelopeId;
 use crate::fleet::FleetView;
 use crate::fleet::handshake::JoinRequest;
 use crate::replication::{
-    ReplicationExchange, ReplicationExportResponse, ReplicationHealAnswer, ReplicationHealQuery,
-    ReplicationHealStep, ReplicationInventory, ReplicationReceiveResponse,
+    ReplicationExchange, ReplicationExportResponse, ReplicationInventory,
+    ReplicationReceiveResponse,
 };
 use crate::store::{
     CheckpointAction, CheckpointManifest, CheckpointManifestNeed, CheckpointManifestPage,
@@ -38,6 +38,28 @@ pub trait Backend: Clone + Send + Sync + 'static {
         signature_requests: &[ReplicaEnvelopeId],
     ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send;
 
+    /// The recent-inbound guard still requests the complete, unchanged summary.
+    /// A process boundary may mark this local request for count/wall accounting.
+    fn guard_summary(
+        &self,
+        fleet_id: &str,
+    ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send {
+        async move {
+            self.export(fleet_id, &ReplicationInventory::default(), true, &[]).await
+        }
+    }
+
+    /// Read the recent-inbound guard's scalar without requiring a process boundary to carry
+    /// every bucket. Backends without that local optimization keep the full summary path and
+    /// its errors, exactly once. The result is fresh at its read cut, not a promise about later
+    /// writes; callers must retain their existing change notifications and anti-entropy.
+    fn authority_digest(
+        &self,
+        fleet_id: &str,
+    ) -> impl Future<Output = Result<String>> + Send {
+        async move { Ok(self.guard_summary(fleet_id).await?.exchange.authority_digest) }
+    }
+
     /// Store a peer's exchange, then admit and project what it carried. `round_trip` is how
     /// long this worker's request that returned it took, when the exchange is a response.
     fn receive(
@@ -46,22 +68,8 @@ pub trait Backend: Clone + Send + Sync + 'static {
         fleet_id: &str,
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
+        carrier: crate::replication::ReplicationCarrier,
     ) -> impl Future<Output = Result<ReplicationReceiveResponse>> + Send;
-
-    /// Answer a peer's heal question from this node's claims.
-    fn heal_answer(
-        &self,
-        peer: &str,
-        fleet_id: &str,
-        query: &ReplicationHealQuery,
-    ) -> impl Future<Output = Result<ReplicationHealAnswer>> + Send;
-
-    /// Compare a peer's heal answer with this node's claims and learn what to ask next.
-    fn heal_next(
-        &self,
-        peer: &str,
-        answer: ReplicationHealAnswer,
-    ) -> impl Future<Output = Result<ReplicationHealStep>> + Send;
 
     fn checkpoint_manifest(
         &self,
@@ -94,7 +102,18 @@ pub trait Backend: Clone + Send + Sync + 'static {
         peer: &str,
         status: &str,
         error: &str,
+        carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> impl Future<Output = Result<()>> + Send;
+
+    /// Publish host-local worker progress without adding replicated claims.
+    fn record_worker(
+        &self,
+        _peer: &str,
+        _worker: crate::replication::ReplicationWorkerStatus,
+    ) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
 
     /// The store took in something new from a peer. A backend whose store has readers
     /// elsewhere tells them here; the default does nothing.
@@ -120,6 +139,14 @@ impl<S: Borrow<Store>> Local<S> {
 
 /// A redemption as the join route reads it.
 pub fn redemption_answer(store: &Store, redemption: FleetRedemption) -> Result<Value> {
+    let membership = store.fleet_membership()?;
+    let sponsor_endpoints = match membership.state(store.origin()) {
+        crate::fleet::MemberState::Current(member) => member.endpoints.clone(),
+        _ => Vec::new(),
+    };
+    let sponsor_node_id = sponsor_endpoints.iter().find_map(|endpoint| {
+        (endpoint["transport"] == "fabric").then(|| endpoint["node"].as_str()).flatten()
+    });
     Ok(match redemption {
         FleetRedemption::Closed => serde_json::json!({"status": "closed"}),
         FleetRedemption::Refused(reason) => {
@@ -138,6 +165,8 @@ pub fn redemption_answer(store: &Store, redemption: FleetRedemption) -> Result<V
             "anchor_key": store.fleet_anchor()?,
             "fleet_id": store.bound_fleet()?,
             "fabric_protocol": serde_json::Value::Null,
+            "sponsor_node_id": sponsor_node_id,
+            "sponsor_endpoints": sponsor_endpoints,
         }),
     })
 }
@@ -153,16 +182,27 @@ where
         summary_only: bool,
         signature_requests: &[ReplicaEnvelopeId],
     ) -> Result<ReplicationExportResponse> {
-        let store = self.store();
-        let exchange = if summary_only {
-            store.export_replication_summary(fleet_id)?
-        } else {
-            store.export_replication_exchange_answering(fleet_id, inventory, signature_requests)?
-        };
-        Ok(ReplicationExportResponse {
-            exchange,
-            store_index: store.index()?,
-        })
+        let backend = self.clone();
+        let fleet_id = fleet_id.to_owned();
+        let inventory = inventory.clone();
+        let signature_requests = signature_requests.to_vec();
+        tokio::task::spawn_blocking(move || crate::task_cpu::blocking("replication.export", || {
+            let store = backend.store();
+            let exchange = if summary_only {
+                store.export_replication_summary(&fleet_id)?
+            } else {
+                store.export_replication_exchange_answering(
+                    &fleet_id,
+                    &inventory,
+                    &signature_requests,
+                )?
+            };
+            Ok(ReplicationExportResponse {
+                exchange,
+                store_index: store.index()?,
+            })
+        }))
+        .await?
     }
 
     async fn receive(
@@ -171,40 +211,37 @@ where
         fleet_id: &str,
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
+        carrier: crate::replication::ReplicationCarrier,
     ) -> Result<ReplicationReceiveResponse> {
-        let store = self.store();
-        if let Some(round_trip) = round_trip {
-            store.record_replication_round_trip(round_trip);
-        }
-        let receipt = store
-            .receive_replication_exchange_asking(peer, fleet_id, exchange, round_trip.is_some())
-            .map_err(anyhow::Error::msg)?;
-        store.record_transport_observation(peer, "up", None, None)?;
-        let admission = store.validate_replication_backlog()?;
-        let repairs = store.apply_replication_repairs()?;
-        let projected = store.project_replication_backlog()?;
-        Ok(ReplicationReceiveResponse {
-            receipt,
-            changed: projected && (admission.changed || repairs != 0),
-            store_index: store.index()?,
-        })
-    }
-
-    async fn heal_answer(
-        &self,
-        peer: &str,
-        _fleet_id: &str,
-        query: &ReplicationHealQuery,
-    ) -> Result<ReplicationHealAnswer> {
-        self.store().heal_answer(peer, query)
-    }
-
-    async fn heal_next(
-        &self,
-        peer: &str,
-        answer: ReplicationHealAnswer,
-    ) -> Result<ReplicationHealStep> {
-        self.store().heal_next(peer, answer)
+        let backend = self.clone();
+        let peer = peer.to_owned();
+        let fleet_id = fleet_id.to_owned();
+        let exchange = exchange.clone();
+        self.store().connection.spawn_blocking(move || crate::task_cpu::blocking("replication.receive", || {
+            let store = backend.store();
+            if let Some(round_trip) = round_trip {
+                store.record_replication_round_trip(round_trip);
+            }
+            let receipt = store
+                .receive_replication_exchange_via(
+                    &peer,
+                    &fleet_id,
+                    &exchange,
+                    round_trip.is_some(),
+                    carrier,
+                )
+                .map_err(anyhow::Error::msg)?;
+            store.record_transport_observation(&peer, "up", None, None)?;
+            let admission = store.validate_replication_backlog()?;
+            let repairs = store.apply_replication_repairs()?;
+            let projected = store.project_replication_backlog()?;
+            Ok(ReplicationReceiveResponse {
+                receipt,
+                changed: projected && (admission.changed || repairs != 0),
+                store_index: store.index()?,
+            })
+        }))
+        .await?
     }
 
     async fn checkpoint_manifest(
@@ -234,15 +271,39 @@ where
     }
 
     async fn redeem(&self, request: &JoinRequest) -> Result<Value> {
-        redemption_answer(self.store(), self.store().redeem_fleet_invite(request)?)
+        let redeemed = self.store().redeem_fleet_invite(request)?;
+        if matches!(redeemed, FleetRedemption::Admitted { .. })
+            && let Some(node_id) = &request.node_id
+        {
+            self.store().verify_fleet_pairing_admission(&request.name, &request.member_key, node_id)?;
+        }
+        redemption_answer(self.store(), redeemed)
     }
 
     async fn fleet_view(&self) -> Result<FleetView> {
         self.store().fleet_view()
     }
 
-    async fn record_failure(&self, peer: &str, status: &str, error: &str) -> Result<()> {
-        if self.store().record_peer_failure(peer, status, error)? {
+    async fn record_worker(
+        &self,
+        peer: &str,
+        worker: crate::replication::ReplicationWorkerStatus,
+    ) -> Result<()> {
+        self.store().record_replication_worker(peer, worker);
+        Ok(())
+    }
+
+    async fn record_failure(
+        &self,
+        peer: &str,
+        status: &str,
+        error: &str,
+        carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
+    ) -> Result<()> {
+        if self
+            .store().record_peer_failure_via(peer, status, error, carrier, failure)?
+        {
             self.store()
                 .record_transport_observation(peer, status, Some(error), None)?;
         }

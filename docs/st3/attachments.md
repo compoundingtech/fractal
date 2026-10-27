@@ -1,6 +1,6 @@
 # Attachments
 
-A message can carry up to four images, so a screenshot pasted into stui on one machine reaches a
+A message can carry up to four images, so a screenshot pasted into the terminal UI on one machine reaches a
 seat on another. This page defines what is stored, where, and how it moves.
 
 ## What travels, and what does not
@@ -39,6 +39,18 @@ needs the `control.messages` scope. The answer is `{blob, sha256, size, media_ty
 is `blob/<sha256>`. The same bytes answer the same reference. `st blobs put FILE` does it from the
 CLI, and `st conversations send --attach FILE` does it as part of a send.
 
+Before it uploads, the CLI prepares the file (`crates/fractal-daemon/src/attach_image.rs`): an SVG is
+rendered to a PNG on white at twice its size (at most 4096 pixels on a side), and an `<image href>`
+such as a screenshot it marks up is drawn only from a `data:` URL or a file inside the SVG's own
+folder (after `..` and symbolic links), so an SVG from elsewhere cannot pull another local image
+into what the recipient sees; any other path refuses the attachment and names it; text is drawn in
+the font it names or else in any font the machine has, and with no font at all the attachment is
+refused rather than sent without its text; a BMP becomes a PNG; and a still image
+over 10 MiB (up to 256 MiB) is scaled down until it fits, as a PNG for a PNG and as a JPEG
+otherwise. It prints what it changed. A GIF over the limit, HEIC, AVIF, TIFF and PDF are refused
+with a way to convert them. `st blobs put --media-type TYPE` uploads the bytes exactly. The daemon
+takes only the four types in [Limits](#limits) either way.
+
 Errors: `blob-too-large` (413), `unsupported-media-type` (415), `blob-content-mismatch` (422),
 `blob-quota-exceeded` (429).
 
@@ -48,6 +60,18 @@ Errors: `blob-too-large` (413), `unsupported-media-type` (415), `blob-content-mi
 internal `POST /v1/messages` takes the same list. Each `blob` must be an upload by the sender that
 this member still holds. The daemon completes each entry with `size` and `origin` before it writes
 the claim. A message with an attachment may have empty text.
+
+## Asks
+
+An ask may carry up to four images for the person to look at, as a message does:
+`st work ask --request FILE --attach IMAGE` uploads each image and names it in the request's
+`attachments` as `{blob, media_type, name}`. The daemon completes each with its size and origin
+before it writes the ask, so the claim holds only references. An update carries none.
+
+A client reads an ask's image with the same routes, naming the ask's person step as the carrier:
+`?message=step-run/…`. The person the ask is for may read it, and anyone in the fleet may when an
+agent asks, as with a message to or from an agent. The relay to the origin carries the step the
+same way.
 
 ## Read
 
@@ -85,3 +109,32 @@ delivery like any other transient fault. A file past its retention window is nam
 envelope, and a harness opens the file with its own file tool.
 
 Seat copies are removed after the same seven days.
+
+## Images in a harness transcript
+
+An image block in a Claude, Codex, pi or OpenCode transcript is not an attachment: its bytes stay
+in the transcript on the seat's host. A client reads it as conversation content by an on-demand
+reference. The reference names the image's size and the format its own first bytes show, never
+the harness's label for it, so a client says what the image is before reading it. An image named
+by a URL is a link the person opens; nothing fetches it to draw it.
+
+## What shows where
+
+| Image | Terminal UI | iOS |
+|---|---|---|
+| A message's images, including a Discord import's | A line each, `▣ name · type · size  open`; loads inline (click or Ctrl+U), by itself where the terminal draws images | A box each under the message, naming the image, type and size; loads when it scrolls into view |
+| An image in a transcript, including a tool result's | `[image type, size]` under its turn or call; loads inline the same way | A box under its turn or call, the same way; an image alone in a turn is that box, not the words `[image · load from owner]` |
+| An ask's images | A line each on the ask's card in Now; loads inline the same way | A box each on the ask's card, in Now and above the conversation |
+| A delivery that names an image (`<attachment …/>`) | The message's image box; the seat's path is never shown | The same |
+
+Before an image loads, its line names its type and size and says how to load it. While it loads
+it says `loading…`. When its owner cannot be reached it says so with a way to try again.
+
+On the phone, a tap on a shown image opens it on the whole screen: pinch to zoom, **Close** to go
+back, and **Share** to save it to Photos or Files or open it in another app. An image past its
+retention says it has expired and offers no retry. The phone reads an image only while its box is
+on screen and lets go of it when the box leaves; up to 16 MB of read images stay for when they
+come back. React Native decodes each image at the size of the box or screen that draws it, so a
+huge image is held scaled down. A Markdown image (`![alt](url)`) is a link, `▣ alt · image link`,
+in both clients; nothing fetches it to draw it.
+

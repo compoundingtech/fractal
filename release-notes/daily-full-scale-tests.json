@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The daily long-lane run adds the whole test selection at full scale; the agent-roster proptest runs one case on pull requests and four daily",
+  "replay": {"status": "none", "detail": "Tests and CI only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product behaviour change; no required check or ruleset change."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "A red daily run opens or comments on one issue."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

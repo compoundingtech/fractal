@@ -2,31 +2,30 @@ import { useFocusEffect, useNavigation, useRoute, type RouteProp } from '@react-
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
-import type { UsagePeriod } from '../../../clients/typescript/st3-client';
-import { plainError } from '../../../clients/typescript/st3-client';
+import type { UsagePeriod } from '../../../clients/typescript/fractal-client';
+import { plainError } from '../../../clients/typescript/fractal-client';
 import { agentName } from '../agentsView';
-import { Banners, StatusLine } from '../chrome';
+import { Banners, StatusLine, useMissionsOnFocus } from '../chrome';
 import type { StackParams } from '../navigation';
 import { useStore } from '../store';
 import { theme } from '../theme';
-import { accounts, byOf, cost, groups, label, limitLine, nextBy, PERIODS, periodName, tokens, totalOf, type By, type Names, type Tone } from '../usage';
+import { accounts, byOf, cost, creditsLine, groups, label, limitLine, nextBy, PERIODS, periodName, tokens, totalOf, type By, type Names, type Tone } from '../usage';
 import { Button, ListRow, Note, Screen, SectionHeader, T } from '../ui';
 
-// Usage: spend and its API-equivalent cost over a period, from st's usage read, as stui's Usage
-// tab shows it. st keeps no stream of usage, so it is read on focus, again each minute while the
-// tab is shown, and at once over a new period.
-const READ_EVERY_MS = 60_000;
+// A focused usage screen follows its selected period. Fleet's card and a detail screen share
+// the same period window; older members read on focus and explicit pull without a timer.
 const tone: Record<Tone, string> = { ok: theme.idle, warning: theme.waiting, fault: theme.fault, quiet: theme.overlay0 };
 // The last read, so a detail screen shows what the list showed.
 let last: { hours: number; period: UsagePeriod } | null = null;
 
-export function useUsage(hours: number) {
-  const { client } = useStore();
+export function useUsage(hours: typeof PERIODS[number]) {
+  const { client, feed, inventoryGranted } = useStore();
   const [period, setPeriod] = useState<UsagePeriod | null>(last?.hours === hours ? last.period : null);
   const [issue, setIssue] = useState('');
   const [reading, setReading] = useState(false);
   const read = useCallback(async () => {
-    if (!client) return;
+    if (inventoryGranted && feed) { setReading(true); feed.refreshInventories(['usage']); return; }
+    if (!client || inventoryGranted !== false) return;
     setReading(true);
     try {
       const result = await client.usagePeriod({ since_ms: Date.now() - hours * 3_600_000 });
@@ -36,21 +35,29 @@ export function useUsage(hours: number) {
     } catch (error) {
       const text = plainError(error);
       // A daemon from before the read answers its path with a bare 404.
-      setIssue(/404|not-found|it is gone/i.test(text) ? 'This st does not serve usage yet: its daemon needs an update.' : `Could not read usage: ${text}`);
+      setIssue(/404|not-found|it is gone/i.test(text) ? 'This Fractal version does not serve usage yet; it needs an update.' : `Could not read usage: ${text}`);
     } finally {
       setReading(false);
     }
-  }, [client, hours]);
+  }, [client, hours, feed, inventoryGranted]);
   useFocusEffect(useCallback(() => {
-    void read();
-    const timer = setInterval(() => void read(), READ_EVERY_MS);
-    return () => clearInterval(timer);
-  }, [read]));
+    setPeriod(last?.hours === hours ? last.period : null);
+    if (inventoryGranted && feed) return feed.watchInventory('usage', {
+      onRows: rows => {
+        const next = rows[0]?.value ?? null;
+        if (next) last = { hours, period: next };
+        setPeriod(next); setReading(false);
+      },
+      onIssue: message => { setIssue(message); if (message) setReading(false); },
+    }, hours);
+    if (inventoryGranted === false) void read();
+  }, [read, feed, inventoryGranted, hours]));
   return { period, issue, reading, read };
 }
 
 export function useNames(): Names {
   const { data } = useStore();
+  useMissionsOnFocus();
   return useMemo(() => ({
     agents: new Map(data.agents.map(agent => [agent.id, agentName(agent)])),
     missions: new Map(data.missions.map(mission => [mission.id, mission.title])),
@@ -59,7 +66,7 @@ export function useNames(): Names {
 
 export function UsageScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<StackParams>>();
-  const [hours, setHours] = useState<number>(PERIODS[0]);
+  const [hours, setHours] = useState<typeof PERIODS[number]>(PERIODS[0]);
   const [by, setBy] = useState<By>('agent');
   const { period, issue, reading, read } = useUsage(hours);
   const names = useNames();
@@ -67,6 +74,7 @@ export function UsageScreen() {
   const now = Date.now();
   const rows = period?.rows ?? [];
   const limits = period?.limits ?? [];
+  const declared = period?.accounts ?? [];
   const total = totalOf(rows);
   const open = (id: string) => navigation.navigate('UsageDetail', { id, hours });
   const top = (grouping: By) => groups(rows, grouping).find(group => !group.id.startsWith('usage/'));
@@ -80,25 +88,28 @@ export function UsageScreen() {
       </View>
       {issue ? <Note tone="warning">{issue}</Note> : null}
       {!period && !issue ? <Note>Loading usage…</Note> : null}
-      {period && !rows.length && !limits.length ? <Note>No spend recorded in this period.</Note> : null}
-      {rows.length || limits.length ? <>
-        <SectionHeader title="accounts" count={accounts(rows, limits).length} />
-        {accounts(rows, limits).map(({ id, total: spent, limit }) => {
+      {period && !rows.length && !limits.length && !declared.length ? <Note>No spend recorded in this period.</Note> : null}
+      {rows.length || limits.length || declared.length ? <>
+        <SectionHeader title="accounts" count={accounts(rows, limits, declared).length} />
+        {accounts(rows, limits, declared).map(({ id, total: spent, limit, declared: account }) => {
           const line = limit ? limitLine(limit, now) : null;
-          return <ListRow key={id} title={label(id, names, rows)} right={<T color={theme.accent}>{cost(spent)}</T>} onPress={() => open(id)}
-            second={line
-              ? <T dim>weekly <T bold color={tone[line.weekly.tone]}>{line.weekly.text}</T>{line.resets ? ` ${line.resets}` : ''} · 5-hour <T bold color={tone[line.fiveHour.tone]}>{line.fiveHour.text}</T> · {line.measured}</T>
-              : `${tokens(spent.tokens)} tokens · no limits reported`} />;
+          const credits = account?.credits ? creditsLine(account.credits) : null;
+          return <ListRow key={id} title={label(id, names, rows, declared)} right={<T color={theme.accent}>{cost(spent)}</T>} onPress={() => open(id)}
+            second={credits
+              ? <T dim>credits <T bold color={tone[credits.tone]}>{credits.used}</T> of {credits.budget} this month</T>
+              : line
+                ? <T dim>weekly <T bold color={tone[line.weekly.tone]}>{line.weekly.text}</T>{line.resets ? ` ${line.resets}` : ''}{limit?.five_hour_percent != null ? <> · 5-hour <T bold color={tone[line.fiveHour.tone]}>{line.fiveHour.text}</T></> : null} · {line.measured}</T>
+                : `${tokens(spent.tokens)} tokens · no limits reported`} />;
         })}
         <SectionHeader title="summary" />
         <T style={{ paddingHorizontal: 12, paddingVertical: 4 }}><T bold>{cost(total)}</T><T dim> · {tokens(total.tokens)} tokens · {periodName(hours)}</T></T>
         {(['agent', 'mission'] as const).map(grouping => {
           const best = top(grouping);
-          return best ? <T key={grouping} style={{ paddingHorizontal: 12, paddingVertical: 2 }}><T dim>most by {grouping}  </T>{label(best.id, names, rows)}<T color={theme.accent}>  {cost(best.total)}</T></T> : null;
+          return best ? <T key={grouping} style={{ paddingHorizontal: 12, paddingVertical: 2 }}><T dim>most by {grouping}  </T>{label(best.id, names, rows, declared)}<T color={theme.accent}>  {cost(best.total)}</T></T> : null;
         })}
         {total.unpriced > 0 ? <Note tone="warning">{tokens(total.unpriced)} tokens had no price, so the cost is at least this.</Note> : null}
         <SectionHeader title={`by ${by}`} count={groups(rows, by).length} />
-        {groups(rows, by).map(({ id, total: spent }) => <ListRow key={id} title={label(id, names, rows)} right={<T color={theme.accent}>{cost(spent)}</T>} onPress={() => open(id)}
+        {groups(rows, by).map(({ id, total: spent }) => <ListRow key={id} title={label(id, names, rows, declared)} right={<T color={theme.accent}>{cost(spent)}</T>} onPress={() => open(id)}
           second={`${tokens(spent.tokens)} tokens · ${tokens(spent.output)} out · ${spent.tokens ? Math.floor(spent.cached * 100 / spent.tokens) : 0}% cached`} />)}
         <Note>Costs are API-equivalent list prices.</Note>
       </> : null}
@@ -111,7 +122,7 @@ export function UsageScreen() {
 export function UsageDetailScreen() {
   const route = useRoute<RouteProp<StackParams, 'UsageDetail'>>();
   const { id, hours } = route.params;
-  const { period, issue } = useUsage(hours);
+  const { period, issue } = useUsage(PERIODS.find(period => period === hours) ?? PERIODS[0]);
   const names = useNames();
   const navigation = useNavigation<NativeStackNavigationProp<StackParams>>();
   const now = Date.now();
@@ -120,9 +131,11 @@ export function UsageDetailScreen() {
   const mine = own ? rows.filter(row => groups([row], own)[0]?.id === id) : rows;
   const total = totalOf(mine);
   const limits = (period?.limits ?? []).filter(limit => id === `account/${limit.account}`);
+  const declared = period?.accounts ?? [];
+  const credits = declared.find(account => account.credits && id === `account/${account.account ?? account.name}`)?.credits;
   return <Screen>
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, paddingBottom: 32 }}>
-      <T bold style={{ fontSize: 17 }}>{label(id, names, rows)}</T>
+      <T bold style={{ fontSize: 17 }}>{label(id, names, rows, declared)}</T>
       {issue ? <Note tone="warning">{issue}</Note> : null}
       {!mine.length ? <Note>No spend recorded in {periodName(hours)}.</Note> : <>
         <T style={{ paddingVertical: 4 }}><T bold color={theme.accent}>{cost(total)}</T><T dim> API-equivalent · {tokens(total.tokens)} tokens · {periodName(hours)}</T></T>
@@ -133,19 +146,26 @@ export function UsageDetailScreen() {
           if (found.length < 2 && grouping !== 'step') return null;
           return <View key={grouping}>
             <SectionHeader title={`by ${grouping}`} count={found.length} />
-            {found.slice(0, 8).map(group => <ListRow key={group.id} title={own === 'mission' && grouping === 'step' ? group.id.split('/').pop() : label(group.id, names, rows)}
+            {found.slice(0, 8).map(group => <ListRow key={group.id} title={own === 'mission' && grouping === 'step' ? group.id.split('/').pop() : label(group.id, names, rows, declared)}
               right={<T color={theme.accent}>{cost(group.total)}  <T dim>{tokens(group.total.tokens)}</T></T>}
               onPress={() => navigation.push('UsageDetail', { id: group.id, hours })} />)}
             {found.length > 8 ? <Note>and {found.length - 8} more</Note> : null}
           </View>;
         })}
       </>}
+      {credits ? (() => {
+        const line = creditsLine(credits);
+        return <View>
+          <SectionHeader title="credits" />
+          <T>used <T bold color={tone[line.tone]}>{line.used}</T> of {line.budget} this month</T>
+        </View>;
+      })() : null}
       {limits.map(limit => {
         const line = limitLine(limit, now);
         return <View key={limit.account}>
           <SectionHeader title="limits" />
-          <T>weekly <T bold color={tone[line.weekly.tone]}>{line.weekly.text}</T>{line.resets ? ` ${line.resets}` : ''} · 5-hour <T bold color={tone[line.fiveHour.tone]}>{line.fiveHour.text}</T></T>
-          <T dim>{line.measured} by {label(limit.measured_by, names, rows)} on {limit.host} · {limit.seats.length} seat{limit.seats.length === 1 ? '' : 's'}{limit.plan ? ` · plan ${limit.plan}` : ''}</T>
+          <T>weekly <T bold color={tone[line.weekly.tone]}>{line.weekly.text}</T>{line.resets ? ` ${line.resets}` : ''}{limit.five_hour_percent != null ? <> · 5-hour <T bold color={tone[line.fiveHour.tone]}>{line.fiveHour.text}</T></> : null}</T>
+          <T dim>{line.measured} by {label(limit.measured_by, names, rows, declared)} on {limit.host} · {limit.seats.length} seat{limit.seats.length === 1 ? '' : 's'}{limit.plan ? ` · plan ${limit.plan}` : ''}</T>
         </View>;
       })}
     </ScrollView>
@@ -159,16 +179,20 @@ export function UsageCard() {
   const names = useNames();
   const now = Date.now();
   const rows = period?.rows ?? [];
-  const found = accounts(rows, period?.limits ?? []);
+  const declared = period?.accounts ?? [];
+  const found = accounts(rows, period?.limits ?? [], declared);
   return <View>
     <SectionHeader title="usage · today" />
     {issue ? <Note tone="warning">{issue}</Note> : null}
     {!period && !issue ? <Note>Loading usage…</Note> : null}
-    {found.map(({ id, total: spent, limit }) => {
+    {found.map(({ id, total: spent, limit, declared: account }) => {
       const weekly = limit ? limitLine(limit, now).weekly : null;
-      return <ListRow key={id} title={label(id, names, rows)} onPress={() => navigation.navigate('Usage')}
+      const credits = account?.credits ? creditsLine(account.credits) : null;
+      return <ListRow key={id} title={label(id, names, rows, declared)} onPress={() => navigation.navigate('Usage')}
         right={<T color={theme.accent}>{cost(spent)}</T>}
-        second={weekly ? <T dim>weekly <T bold color={tone[weekly.tone]}>{weekly.text}</T></T> : `${tokens(spent.tokens)} tokens`} />;
+        second={credits
+          ? <T dim>credits <T bold color={tone[credits.tone]}>{credits.used}</T> of {credits.budget}</T>
+          : weekly ? <T dim>weekly <T bold color={tone[weekly.tone]}>{weekly.text}</T></T> : `${tokens(spent.tokens)} tokens`} />;
     })}
     {period ? <ListRow title={<T color={theme.accent}>All usage ›</T>} onPress={() => navigation.navigate('Usage')} /> : null}
   </View>;

@@ -1,7 +1,7 @@
 import { githubRepoSettings, githubRuleset } from '../repos/effect-utils/genie/external.ts'
 
-// Landing goes through GitHub's merge queue. Apply the fifth required check only after
-// mail-redelivery-canaries has passed on main; keep the existing live checks until then.
+// Landing goes through GitHub's merge queue. This file declares the live ruleset: fractal-web
+// joined the required checks after both PR and merge-group runs had emitted it successfully.
 // Every required job must run on merge_group, or the queue never receives its checks and merges freeze.
 export default githubRepoSettings({
   repository: { allow_auto_merge: true, delete_branch_on_merge: true },
@@ -37,10 +37,9 @@ export default githubRepoSettings({
           do_not_enforce_on_create: false,
           required_status_checks: [
             { context: 'linux-gate', integration_id: 15368 },
-            { context: 'isolation-vm', integration_id: 15368 },
             { context: 'genie-freshness', integration_id: 15368 },
             { context: 'typescript-client', integration_id: 15368 },
-            { context: 'mail-redelivery-canaries', integration_id: 15368 },
+            { context: 'fractal-web', integration_id: 15368 },
           ],
         },
       },
@@ -49,18 +48,29 @@ export default githubRepoSettings({
         parameters: {
           // The repository merges with merge commits today (the st train did).
           merge_method: 'MERGE',
-          grouping_strategy: 'ALLGREEN',
-          // Namespace's measured Linux limit is 320 vCPU / 640 GiB. Each full Workspace CI group
-          // initially requests 40 vCPU / 80 GiB, so five groups fit; PR and main jobs share capacity.
-          max_entries_to_build: 5,
-          max_entries_to_merge: 5,
+          // The live queue's tuning (ruleset 20563764, 2026-10-22): a group merges when its head is green.
+          grouping_strategy: 'HEADGREEN',
+          // Start three groups with Namespace overflow; retain shared capacity for PRs.
+          max_entries_to_build: 3,
+          max_entries_to_merge: 6,
           min_entries_to_merge: 1,
-          min_entries_to_merge_wait_minutes: 5,
-          // A required check that never reports (a lost Namespace job) fails the entry after this
-          // long instead of blocking the queue for the default hour.
-          check_response_timeout_minutes: 30,
+          min_entries_to_merge_wait_minutes: 1,
+          // A finished stage must not expire merely because its dependent gate was waiting for a runner:
+          // two hours, as the live rule has it.
+          check_response_timeout_minutes: 120,
         },
       },
     ],
+  }), githubRuleset({
+    // Evidence records are tags (docs/st3/gate-evidence.md, "Records as tags"): once written, a record is never deleted or moved,
+    // so a newer failing record cannot be removed to let an older pass decide again. Creation stays open: producers create tags.
+    // No bypass actor: scripts/evidence-gc turns this ruleset's enforcement off only around its own tag deletions (--lock-config,
+    // logged, relocked in a finally and checked), and the protection that does not depend on GitHub is the signed evidence log.
+    name: 'evidence-tags',
+    target: 'tag',
+    enforcement: 'active',
+    bypass_actors: [],
+    conditions: { ref_name: { include: ['refs/tags/evidence/**'], exclude: [] } },
+    rules: [{ type: 'deletion' }, { type: 'update' }, { type: 'non_fast_forward' }],
   })],
 })

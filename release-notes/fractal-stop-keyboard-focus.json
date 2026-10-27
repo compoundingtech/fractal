@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep keyboard focus on Stop while cancellation is pending and return focus to Message when the focused Stop control leaves.",
+  "replay": { "status": "none", "detail": "No replay or rebuild; only browser focus handling changes." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and fleet coordination are unchanged." },
+  "compatibility": { "status": "none", "detail": "UI focus and pending-control behavior only; no protocol, harness contract, or persisted-state changes." },
+  "downtime": { "status": "none", "detail": "No service interruption." },
+  "manual": { "status": "none", "detail": "No manual steps." },
+  "recovery": { "status": "none", "detail": "No persisted-state changes or recovery procedure; normal UI navigation remains available." }
+}

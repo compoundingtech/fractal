@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "rule": "A change that matches a class always runs that class's full test set; the module graph does not narrow it. Globs match changed paths (** crosses directories). A content pattern matches an added or removed diff line of a file under its globs. See docs/st3/change-impact.md.",
+  "classes": [
+    {
+      "name": "schema",
+      "globs": ["crates/smallclaims/src/store.rs", "crates/smallclaims/src/**/migrat*", "crates/fractal-schema/**", "crates/fractal-storage-version/**", "crates/fractal-migrate/**", "crates/fractal-store/src/store/checkpoint_rules.rs", "docs/st3/schema.md"],
+      "content": [
+        {"globs": ["crates/fractal-store/src/store.rs", "crates/fractal-store/src/store/**", "crates/smallclaims/src/**"], "pattern": "(?i)\\b(CREATE\\s+(UNIQUE\\s+)?(TABLE|INDEX|TRIGGER|VIEW)|ALTER\\s+TABLE|DROP\\s+(TABLE|INDEX|TRIGGER|VIEW)|PRAGMA\\s+user_version|user_version\\s*=)"}
+      ],
+      "forces": ["integration", "store and smallclaims suites", "release-notes upgrade fragment"]
+    },
+    {
+      "name": "protocol",
+      "globs": ["crates/fractal-wire/**", "crates/fractal-resource-protocol/**", "crates/fractal-client/**", "crates/fractal-client-codegen/**", "clients/**", "wit/**", "crates/fractal-api-core/src/api.rs", "crates/fractal-api-core/src/api/**", "crates/fractal-api-mailbox/src/api/**", "crates/fractal-api-client-v0/src/api/**", "crates/fractal-daemon/src/api.rs", "crates/fractal-peer/src/peer.rs", "crates/fractal-peer/src/peer/**", "crates/fractal-telemetry/src/relay_trace.rs", "docs/st3/client-v0/**", "docs/st3/ios-fabric-protocol.md"],
+      "forces": ["integration", "client contract tests", "codegen --check", "scripts/read-contract-report"]
+    },
+    {
+      "name": "generated-contracts",
+      "globs": ["crates/fractal-client-codegen/**", "clients/**/generated/**", "docs/st3/action-coverage.json", "scripts/read-contract-report*"],
+      "content": [
+        {"globs": ["crates/**", "clients/**", "docs/st3/**"], "pattern": "(?i)(contract[_ -]?hash|registry[_ -]?digest|sha256:[0-9a-f]{16,})"}
+      ],
+      "forces": ["codegen --check", "action coverage", "client contract tests"]
+    },
+    {
+      "name": "authorization",
+      "globs": ["crates/fractal-api-core/src/api/client_v0*", "crates/fractal-api-client-v0/src/api/client_v0*", "crates/fractal-api-core/src/api/client_web*", "crates/fractal-secrets/src/sekrets/**", "crates/fractal-secrets/src/sekrets.rs", "crates/fractal-kernel/src/accounts.rs", "crates/fractal-store/src/store/accounts.rs", "crates/fractal-store/src/store/roster_admission.rs", "crates/fractal-store/src/store/delegation.rs", "docs/st3/device-signing.md", ".st/**"],
+      "content": [
+        {"globs": ["crates/**"], "pattern": "(?i)\\b(trusted[_ ]keys?|pairing|device[_ ]key|signing[_ ]key|verify_signature)\\b"}
+      ],
+      "forces": ["integration", "authorization tests", "scripts/audit-claim-signatures-test"]
+    },
+    {
+      "name": "claim-folding-and-replay",
+      "globs": ["crates/fractal-store/src/store/card_fold.rs", "crates/fractal-store/src/store/*_ivm.rs", "crates/fractal-store/src/store/*_ivm/**", "crates/fractal-store/src/store/checkpoint*", "crates/fractal-kernel/src/projection.rs", "crates/smallclaims/src/**/replay*", "crates/smallclaims/src/ivm*", "crates/smallclaims/src/ivm/**"],
+      "forces": ["integration", "purity and convergence suites"]
+    },
+    {
+      "name": "config-and-build",
+      "globs": ["**/Cargo.toml", "Cargo.lock", ".cargo/**", "flake.nix", "flake.lock", "nix/**", ".config/nextest.toml", ".github/**", "scripts/ci-*", "crates/fractal/build.rs", "crates/fractal-kernel/src/config.rs"],
+      "forces": ["every required check in full"]
+    },
+    {
+      "name": "routing-and-delivery",
+      "globs": ["crates/fractal-delivery-base/src/mailbox.rs", "crates/fractal-api-core/src/api/mailbox*", "crates/fractal-api-mailbox/src/api/mailbox*", "crates/fractal-store/src/store/mailbox_*", "crates/fractal-reconcile/src/placement.rs", "crates/fractal-store/src/suspension.rs", "crates/fractal-store/src/rollout.rs", "crates/fractal-reconcile/src/reconcile.rs", "crates/fractal-reconcile/src/reconcile/**"],
+      "content": [
+        {"globs": ["crates/fractal-api-core/src/api.rs", "crates/fractal-api-mailbox/src/api/mailbox.rs", "crates/fractal-api-client-v0/src/api/client_v0.rs", "crates/fractal-daemon/src/api.rs"], "pattern": "\\.(route|nest|merge|fallback)\\("}
+      ],
+      "forces": ["integration", "delivery and messaging fault suites"]
+    },
+    {
+      "name": "release-notes",
+      "globs": ["release-notes/**"],
+      "forces": ["scripts/check-release-impact"]
+    }
+  ]
+}

@@ -142,6 +142,10 @@ pub struct FleetFile {
     pub sponsor_routes: Vec<String>,
     pub mode: FleetMode,
     pub port: Option<u16>,
+    /// Enabled automatic transports, in dial preference order; loopback is always last.
+    /// An omitted list defaults to Tailscale then Fabric; an explicit empty list disables both.
+    /// Explicit config peer (`--peer`) routes retain precedence over this list.
+    #[serde(default = "default_transports")]
     pub transports: Vec<String>,
     pub fabric_protocol: Option<String>,
     /// Accept HMAC-only exchanges from config peers. True only during a migration.
@@ -154,7 +158,68 @@ pub struct FleetFile {
     pub removed: Option<FleetRemoval>,
 }
 
+fn default_transports() -> Vec<String> {
+    vec!["tailscale".into(), "fabric".into()]
+}
+
 impl FleetFile {
+    /// Serialize refusal persistence and leave cleanup, including the read before a write.
+    /// Keep the lock outside `fleet/`, and never unlink it: waiters must share one inode even
+    /// after leave removes that directory. Closing the returned file releases the lock.
+    pub fn lock_settings(state_dir: &Path) -> Result<fs::File> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let path = state_dir.join("fleet-settings.lock");
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        // A bounded isolated control observes actual contention, rather than sleeping to
+        // guess whether the CLI reached the lock while the refusal writer was paused.
+        #[cfg(feature = "test-support")]
+        if let Some(directory) = std::env::var_os("ST3_TEST_REMOVAL_WRITE_BARRIER") {
+            // SAFETY: lock owns a valid descriptor for the duration of this call.
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
+            {
+                // One line per contender: the replication worker's own endpoint publication
+                // also waits here while the refusal writer is paused.
+                use std::io::Write as _;
+                writeln!(
+                    fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(Path::new(&directory).join("contended"))?,
+                    "{}",
+                    std::process::id()
+                )?;
+            }
+        }
+        loop {
+            // SAFETY: lock owns a valid descriptor for the duration of this call.
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(lock);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error).with_context(|| format!("lock {}", path.display()));
+            }
+        }
+    }
+
+    /// Drain any refusal settings write before removing the fleet directory. A later writer
+    /// must reload under the same lock, so it cannot recreate settings after successful leave.
+    pub fn remove(state_dir: &Path) -> Result<()> {
+        let _lock = Self::lock_settings(state_dir)?;
+        let directory = state_dir.join("fleet");
+        fs::remove_dir_all(&directory)
+            .with_context(|| format!("remove fleet settings {}", directory.display()))
+    }
+
     pub fn path(state_dir: &Path) -> PathBuf {
         state_dir.join("fleet").join("fleet.toml")
     }
@@ -226,5 +291,35 @@ impl FleetFile {
             self.node_key_file.as_path()
         };
         Self::resolve(state_dir, path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_transport_list_defaults_to_tailscale_then_fabric() {
+        let file: FleetFile = toml::from_str("").unwrap();
+        assert_eq!(file.transports, ["tailscale", "fabric"]);
+    }
+
+    #[test]
+    fn explicit_transport_lists_preserve_empty_disabled_and_reordered_values() {
+        for (input, expected) in [
+            ("transports = []", vec![]),
+            ("transports = ['fabric']", vec!["fabric"]),
+            ("transports = ['tailscale']", vec!["tailscale"]),
+            (
+                "transports = ['fabric', 'tailscale']",
+                vec!["fabric", "tailscale"],
+            ),
+        ] {
+            let file: FleetFile = toml::from_str(input).unwrap();
+            assert_eq!(file.transports, expected, "{input}");
+            let round_trip: FleetFile =
+                toml::from_str(&toml::to_string(&file).unwrap()).unwrap();
+            assert_eq!(round_trip.transports, expected, "{input}");
+        }
     }
 }

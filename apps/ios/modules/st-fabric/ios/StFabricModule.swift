@@ -2,20 +2,26 @@ import ExpoModulesCore
 import Foundation
 import Network
 import Security
+import UIKit
+import Darwin
 import StFabricRust
 
 public class StFabricModule: Module {
   private let bridge = FabricBridge()
-  private let queue = DispatchQueue(label: "smalltalk.fabric-proof")
+  private let queue = DispatchQueue(label: "fractal.fabric")
 
   public func definition() -> ModuleDefinition {
     Name("StFabric")
-    OnCreate { self.bridge.observePaths(on: self.queue) }
+    // Linked and usable. It makes no identity and opens nothing.
+    AsyncFunction("available") { () -> Bool in true }
     AsyncFunction("identity") { () -> [String: Any] in
       try self.bridge.identity()
     }.runOnQueue(queue)
-    AsyncFunction("dial") { (node: String, service: String, address: String?) -> [String: Any] in
-      try self.bridge.dial(node: node, service: service, address: address)
+    AsyncFunction("dial") { (node: String, service: String, address: String?, mode: String) -> [String: Any] in
+      try self.bridge.dial(node: node, service: service, address: address, mode: mode, queue: self.queue)
+    }.runOnQueue(queue)
+    AsyncFunction("stats") { () -> [String: Any] in
+      try self.bridge.stats()
     }.runOnQueue(queue)
     AsyncFunction("stop") { () in
       self.bridge.stop()
@@ -27,34 +33,40 @@ public class StFabricModule: Module {
 
 private final class FabricBridge {
   // This key is separate from the device bearer and P-256 action-signing key.
-  private let service = "com.compoundingtech.smalltalk.fabric-proof"
+  private let service = "com.compoundingtech.fractal.fabric-proof"
   private let account = "iroh-secret-v1"
-  private let monitor = NWPathMonitor()
+  // The path monitor runs only while a bridge is open (a monitor cannot restart once cancelled, so each
+  // dial makes its own). An app that never chose fabric never starts one.
+  private var monitor: NWPathMonitor?
+  private var networkType = "unknown"
+  private var networkSatisfied = false
 
-  func observePaths(on queue: DispatchQueue) {
-    #if DEBUG
-    monitor.pathUpdateHandler = { _ in
+  private func observePaths(on queue: DispatchQueue) {
+    guard monitor == nil else { return }
+    let monitor = NWPathMonitor()
+    monitor.pathUpdateHandler = { path in
+      self.networkType = path.usesInterfaceType(.cellular) ? "cellular" : path.usesInterfaceType(.wifi) ? "wifi" : path.usesInterfaceType(.wiredEthernet) ? "wired" : "other"
+      self.networkSatisfied = path.status == .satisfied
       let result = st_fabric_network_change()
       st_fabric_string_free(result)
     }
     monitor.start(queue: queue)
-    #endif
+    self.monitor = monitor
   }
 
-  func destroy() { monitor.cancel(); stop() }
+  func destroy() { stop() }
 
   func identity() throws -> [String: Any] {
-    try requireDebug()
     let secret = try loadOrCreateKey()
     return try secret.withUnsafeBytes { bytes in
       try response(st_fabric_identity(bytes.bindMemory(to: UInt8.self).baseAddress, secret.count))
     }
   }
 
-  func dial(node: String, service: String, address: String?) throws -> [String: Any] {
-    try requireDebug()
+  func dial(node: String, service: String, address: String?, mode: String, queue: DispatchQueue) throws -> [String: Any] {
+    observePaths(on: queue)
     let secret = try loadOrCreateKey()
-    var target: [String: Any] = ["node": node, "service": service]
+    var target: [String: Any] = ["node": node, "service": service, "mode": mode]
     if let address {
       target["addr"] = try JSONSerialization.jsonObject(with: Data(address.utf8))
     }
@@ -69,17 +81,30 @@ private final class FabricBridge {
     }
   }
 
-  func stop() {
-    #if DEBUG
-    let result = st_fabric_stop()
-    st_fabric_string_free(result)
-    #endif
+  func stats() throws -> [String: Any] {
+    var result = try response(st_fabric_stats())
+    var usage = rusage()
+    getrusage(RUSAGE_SELF, &usage)
+    result["cpuSeconds"] = Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1_000_000
+    result["maxResidentBytes"] = Int64(usage.ru_maxrss)
+    result["networkType"] = networkType
+    result["networkSatisfied"] = networkSatisfied
+    result["thermalState"] = ProcessInfo.processInfo.thermalState.rawValue
+    // UIKit device properties are sampled on main, without opening any window.
+    DispatchQueue.main.sync {
+      UIDevice.current.isBatteryMonitoringEnabled = true
+      let level = UIDevice.current.batteryLevel
+      result["batteryFraction"] = level >= 0 ? Double(level) : NSNull()
+      result["batteryState"] = UIDevice.current.batteryState.rawValue
+    }
+    return result
   }
 
-  private func requireDebug() throws {
-    #if !DEBUG
-    throw Exception(name: "FabricDisabled", description: "Fabric proof is available only in a development build")
-    #endif
+  func stop() {
+    monitor?.cancel()
+    monitor = nil
+    let result = st_fabric_stop()
+    st_fabric_string_free(result)
   }
 
   private func loadOrCreateKey() throws -> Data {

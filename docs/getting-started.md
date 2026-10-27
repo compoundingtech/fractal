@@ -1,202 +1,252 @@
-# Get started with Small Talk
+# Get started with Fractal
 
-Small Talk (`st`) keeps coding agents running as durable **seats** and gives them work as **missions**. Its graph remembers work, messages, and decisions across agent and daemon restarts.
+Download Fractal and run `fractal`. The first run sets up your machine and opens a
+conversation with the built-in Fractal Assistant, when a coding harness is available. The Assistant
+helps you give agents a mission and follow its progress in the terminal interface.
 
-For now, each person runs their own fleet. Start with one machine; [add your second machine](two-machines.md) when you need it.
+Start with one machine. Each person currently runs their own fleet; a phone, another
+machine and GitHub integration can wait until you need them.
 
-## 1. Install
+## 1. Download and open fractal
 
-Choose one route. If you already use Nix, go straight to [With Nix](#with-nix).
-
-### Prebuilt release
-
-Use a terminal running Bash or Zsh. The prebuilt tools support Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+), and Apple Silicon with macOS 15+; you need `curl` and `tar`, plus Python 3 on macOS. On a fresh Ubuntu machine, install the prerequisites:
+Run this in your terminal:
 
 ```sh
-sudo apt-get update
-sudo apt-get install -y curl ca-certificates git
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh
 ```
 
-**On macOS — not yet verified on a fresh Mac:** Python 3 is required. The source installer (`scripts/install`) and extracted release installer put `st3` and `stui` inside `~/Applications/SmallTalk.app`, with links in your bin directory. macOS ties permissions, such as the microphone for stui's voice mode, to this stable app identity so grants can survive updates. Without a signing identity, the app is ad-hoc signed and macOS may ask again after each update. An optional Developer ID setting avoids that repeated approval; configure it **before installing**, using [macOS signing](st3/macos-installation.md).
+The installer detects your platform, downloads the latest release and its SHA256
+sidecar, checks the archive, installs `fractal`, its `fractal` link and `pty` in `~/.local/bin`,
+and opens `fractal`. The checksum comes from the same release endpoint as the archive;
+it checks the downloaded bytes, rather than supplying an independent signature.
 
-The optional voice helper, `StListen.app`, needs Xcode with the macOS 26 SDK to build. You can use st without it; voice mode says when the helper is missing.
+Linux x86_64 needs glibc 2.35+ (Ubuntu 22.04+), `curl`, `tar` and `sha256sum` or
+`shasum`. Apple Silicon macOS needs macOS 15+, those download tools and Python 3.
+If a required tool is missing, install it with your operating system's package
+manager before downloading Fractal. Neither Rust, Nix nor the GitHub CLI is needed.
 
-Download the latest release into a new directory:
+For an existing installation, read [upgrading fractal](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/upgrading.md) and the selected
+release's Upgrade impact before replacing binaries or restarting a populated store.
+To download without opening the interface, use the same installer with `--no-run`.
+`--tag` chooses a release and `--bin-dir` changes the command destination; see
+[binary releases](st3/binary-releases.md).
+
+On macOS, the installer puts `fractal` in `~/Applications/Fractal.app` and links the
+command to that stable app path. Configure an optional persistent signing identity
+before installation using [macOS installation and signing](st3/macos-installation.md).
+The default is ad-hoc signing, which can require renewed OS approvals after an update.
+Native installer and Darwin archive tests run in CI; clean-machine real-app, launchd
+and TCC permission setup remain a separate manual rehearsal.
+
+## 2. Answer the first-run screen
+
+In a terminal, `fractal setup` (and the first plain `fractal`) shows one screen instead of asking
+questions one at a time. It says in a few lines what Fractal is and that your first
+agent runs on your own Claude or Codex account and uses its usage. Then it lists
+everything to choose:
+
+- **Your name and this machine's name.** `ada` and `studio` are invented examples; use
+  your own. Names use lowercase letters, digits, hyphens and underscores, and the
+  machine name `local` is reserved. Setup merges them into `~/.config/st3/config.toml`
+  without replacing unrelated settings.
+- **Start fractal when I log in**, ticked. This installs a user service (no administrator
+  rights) and the screen says where it goes and how to remove it. On Linux, **Keep
+  running after I log out** appears when lingering is off and can be turned on for you.
+  If a user service manager is unavailable, setup explains the detached-daemon fallback;
+  it does not survive a reboot. On macOS, follow the permission instructions in
+  [daemon details](#daemon-details).
+- **Every supported agent**: Claude Code, Codex, OpenCode, Pi and Omp. Those found on the
+  daemon's login PATH are ticked and you can untick them. Each row keeps four facts
+  apart: whether its program was found, whether it is selected, whether fractal's integration
+  is ready, and whether you are signed in (or that setup cannot tell). Each row says what
+  setup does for it and the exact local paths it touches. An agent that is not installed
+  says how to get it; install it, then press `r` to look again.
+- **Let Codex work without asking**, only when Codex is found, ticked by default. Ticked,
+  Codex gets the same access mode as every agent fractal starts (see
+  [Managed harness access](st3/harness-access.md)). Unticked, Codex asks. The choice is
+  saved as `codex_work_without_asking` in the config.
+
+One dim line under the login choices names the **work folder**: `~/st` by default (an
+`--instance` has its own `work` folder), or `work_root` in the config. Setup creates it.
+Agents started without a folder of their own work in a subfolder of it, so none of them
+has to look through your home folder, which on macOS would raise a permission prompt.
+`work_root` must be an absolute path, not the home folder itself and not inside Documents,
+Desktop or Downloads. `fractal uninstall` leaves its contents alone.
+
+One consent line sits above the two buttons: *Set up fractal for the selected agents, adding
+its local integrations and required workspace configuration?* **Set up** does it for
+every ticked agent at once; **Skip for now** sets up fractal itself and no agent. Signing in
+and trusting a folder are never part of that consent, and setup asks no permission-mode question. Each
+agent ends **ready**, **needs you to sign in**, or **failed**, with the whole error on
+screen, and one agent's failure never undoes another's setup. If an agent has not
+finished its own first launch (Claude's theme and sign-in, a Codex or OpenCode login),
+setup hands you the terminal for it and carries on when you leave it. **Retry** runs only
+the rows that did not finish. The first agent that is ready starts the Assistant while the
+screen is still up.
+
+Pipes, `--yes` and anything that is not a terminal keep the line-mode setup: flags
+supply the answers and nothing is asked. `fractal setup --help` lists them.
+
+An installed program does not prove that its account is signed in. With no supported
+agent, setup starts no onboarding run and still opens the interface. After installing
+one, make the command available in this shell and run:
 
 ```sh
-mkdir -p ~/smalltalk-install
-cd ~/smalltalk-install
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) archive=smalltalk-x86_64-unknown-linux-gnu.tar.gz ;;
-  Darwin-arm64) archive=smalltalk-aarch64-apple-darwin.tar.gz ;;
-  *) echo 'Use the Nix installation below for this platform'; exit 1 ;;
-esac
-release=https://github.com/compoundingtech/smalltalk/releases/latest/download
-curl -fLO "$release/$archive"
-curl -fLO "$release/$archive.sha256"
-if command -v sha256sum >/dev/null; then
-  sha256sum -c "$archive.sha256"
-else
-  shasum -a 256 -c "$archive.sha256"
-fi
-tar -xzf "$archive"
-"./${archive%.tar.gz}/install.sh" --bin-dir "$HOME/.local/bin"
 export PATH="$HOME/.local/bin:$PATH"
+st setup
 ```
 
-Keep that PATH in new terminals:
+For Claude, setup offers the user-owned Fractal message channel without needing
+administrator rights. A machine approval policy is optional: without it, agents use
+the development-channel flag and fractal handles its admission dialog. Provider or
+organization restrictions can still block the channel. Fractal never asks for or
+types a password; optional machine policy, GitHub login and `gh` do not block setup.
+
+Before expecting a Claude Assistant to be ready, run `claude` in a normal terminal as
+the same user and with the same profile (`CLAUDE_CONFIG_DIR`, if set) used by the
+daemon. Complete Claude's native welcome, text style/theme selection and account
+login or explicit API-key confirmation. Successful `claude auth status` or a print
+request alone does not establish that the interactive agent can authenticate or that
+this setup is complete. Complete any native permission-bypass consent required for
+unattended operation too. See
+[Claude's authentication instructions](https://code.claude.com/docs/en/authentication#authentication-precedence).
+
+If `agent/st/assistant` is already waiting at those screens, complete native Claude
+setup first, then run `fractal agents restart agent/st/assistant --as person/ada` to retry
+the existing agent (replace `ada` with your configured person). Keep its
+original onboarding run; do not use `fractal setup --onboarding` while that run is active.
+
+Setup prints the access mode your agents run in. A new install uses `auto`: the provider's
+managed permission checks, which reduce accidents but are not a security boundary. A config
+without an access mode keeps reading as `bypass`, which runs agents without permission
+prompts. Choose the projects and tasks you give your agents accordingly.
+
+You can change the mode later by asking one of your agents: "switch my agents to bypass" or
+"switch them back to auto". Agents started by fractal read the `fractal` skill, which tells them where
+the setting lives and how to change it; they say back the change and wait for your yes before
+editing. Auto asks the provider to check permissions; bypass removes the checks, so nothing
+waits for you. The setting is `access_mode` in `~/.config/st3/config.toml`. An existing install
+without the key stays on `bypass` until you ask for a change. See
+[Managed harness access](st3/harness-access.md) for what each mode does.
+
+## 3. Work with the Fractal Assistant
+
+When a usable harness is available, the first run, the one that creates your configuration,
+asks before it starts anything. It says that the built-in Fractal Assistant is an agent that runs on your
+own harness account, so it uses that harness's usage and quota, and which access mode it
+runs in, then asks `Start the built-in Fractal Assistant now?` (default yes). `--yes` answers yes and
+`--assistant false` declines; a decline prints `Not started. Run fractal setup --onboarding when you
+want it.` On yes, setup creates `agent/st/assistant` and starts `mission/st/onboarding`, and says
+what it created and how to stop it. When setup publishes the Assistant during a plain `fractal`
+launch, the interface opens that conversation. You can also open its conversation from the sidebar or **Ctrl+K**.
+The Assistant greets you and plays three short acts, in about five minutes. First, two agents
+talk to each other (a Claude and a Codex when both are ready). Second, a small mission runs in a split
+beside the conversation. Third, an alert from the Assistant appears above the message input, where you
+can read it and dismiss it, and the Assistant asks what you want to accomplish in Fractal today. That
+question ends onboarding; it starts real work only if you answer. Say `skip` at any point to stop, and
+`fractal setup --onboarding` brings the tour back. The Assistant stays available afterward.
+The follow-on [mission guide](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/missions-in-practice.md) explains how to declare
+the `garden/worker` agent used in its examples.
+
+**Now** shows questions, decisions and failures that need you. Open an agent
+conversation or a mission from the sidebar or **Ctrl+K**; **Ctrl+H** returns to Now.
+**Ctrl+Q** quits the interface while agents keep working.
+
+After quitting, make the installed commands available in this shell and reopen fractal:
 
 ```sh
-case "$SHELL" in
-  */zsh) printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> ~/.zprofile ;;
-  *) printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> ~/.profile ;;
-esac
+export PATH="$HOME/.local/bin:$PATH"
+st
 ```
 
-### With Nix
+If setup reported that the login PATH lacks `~/.local/bin`, add that export to your
+shell's startup file so new terminals can find `fractal` too. The installer can open fractal
+using its full path even before that PATH change.
 
-Install the same tools from source (this can take a while):
+You can also send the Assistant a question from the shell. This example assumes you
+chose `ada`; replace `person/ada` with your configured person:
 
 ```sh
-nix --extra-experimental-features 'nix-command flakes' profile install github:compoundingtech/smalltalk
-command -v st stui pty
+st conversations send agent/st/assistant --from person/ada \
+  --subject 'Getting started' --body 'Help me make my first mission.'
+st
 ```
 
-Nix builds `st3`, its `st` alias, `stui`, and `st3-migrate`, and supplies the pinned `pty` runtime and build dependencies. You do not need a separate Rust toolchain or PTY install. Use this **instead of** the archive route; the commands below are the same. Check that the paths above belong to your Nix profile, then continue with the daemon setup.
+Setup starts the Assistant on its own only on that first run. On a machine that already has a
+configuration, plain `fractal` and `fractal setup` start nothing and, for `fractal setup`, say so. To begin
+(or begin again) deliberately, finish or cancel any active onboarding run, then use
+`fractal setup --onboarding`. That command skips the question because it is the request, can
+restore a stopped Assistant and starts a distinct onboarding run; it refuses when the running
+daemon is too old to report onboarding history. It does not cancel an existing run for you.
+Use `fractal setup --help` for scripted answers and other options.
 
-For a declarative setup, use the [Home Manager module](../README.md#home-manager): it installs the tools, writes the person configuration, and starts the user daemon on Linux or macOS. If that module owns your daemon, configure its person there and skip the manual config/service-install block in step 3. Lingering on Linux, macOS permissions, harness login, and fleet joining remain host setup. Nix profile installs use store paths; the macOS app-bundle setup above belongs to the source/release installers.
-
-See [binary releases](st3/binary-releases.md) for pinned versions and upgrades, and [macOS installation](st3/macos-installation.md) for Python, signing, and permission setup.
-
-## 2. Prepare your workspace
-
-A seat uses a separate coding tool and its account. This walkthrough assumes you already installed and logged in to [Claude Code](https://code.claude.com/docs/en/setup) as the OS user who will run `st`. Create the example workspace:
-
-```sh
-mkdir -p ~/st/garden
-cd ~/st/garden
-git init
-```
-
-Install Small Talk's Claude message channel (it may ask for your administrator password). Finish any workspace trust prompt when you attach to the seat in step 4:
+## 4. Check the installation
 
 ```sh
-st claude-channel install
-st claude-channel status
-```
-
-Other harnesses work too; their [seat examples](../examples/st3/README.md#run-a-durable-agent) show the KDL to use.
-
-## 3. Start the daemon
-
-Choose a person identity. `ada` is an invented example; use the same identity on your own machines.
-
-```sh
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/st3"
-printf 'person = "person/ada"\n' > "${XDG_CONFIG_HOME:-$HOME/.config}/st3/config.toml"
-st service install
-st service status
+st --version
 st doctor
+st service status
 ```
 
-On Linux, keep the user service running after logout:
+`doctor` should show a reachable daemon and `pty`. A machine with no fleet configured
+is healthy. If an older daemon was already running, compare `fractal --version --json`
+with its `machine_version` in `fractal doctor --json` before continuing. See
+[when something is wrong](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/troubleshooting.md) for failed checks, provider
+login and channel-delivery problems.
 
-```sh
-loginctl enable-linger "$USER"
-```
+## Reference
 
-On macOS, run the permission helper and follow its instructions:
+### With Nix and Home Manager
+
+Nix users can install a pinned release source with `nix profile install` instead of
+using the archive. Choose a source after reading its Upgrade impact; see
+[binary releases](st3/binary-releases.md) and [development](development.md#build-from-source)
+for the package and source-build commands. Nix supplies build dependencies and the
+pinned PTY runtime. Do not mix an archive destination with a Nix-owned command path.
+
+The [Home Manager module](https://github.com/compoundingtech/fractal/blob/main/docs/site/reference/home-manager.md) installs the tools, writes person
+configuration and starts the user daemon on Linux or macOS. If it owns your daemon,
+configure the person there and let the module manage service definitions. Harness
+login, lingering, OS permissions and fleet joining remain host setup. Nix profile
+installs use store paths; source and release installers own the macOS app bundle.
+
+### Daemon details
+
+The background service is a systemd user unit on Linux and a launchd agent on macOS.
+To inspect it, use `fractal service status`. On Linux, lingering allows the service to run
+after logout and before login after a reboot. Setup prints the needed command if it
+cannot enable it. On macOS, run:
 
 ```sh
 st service permissions
 ```
 
-`doctor` should report a reachable daemon and `pty`. A machine with no fleet configured is healthy. Warnings about optional build tools, GitHub login, or Linux IO priority do not block this walkthrough. Fix any failed check before continuing; [daemon setup](../README.md#run-the-daemon) has the details.
+Follow the instructions for the OS permissions you must grant, including Full Disk
+Access and Developer Tools. Fractal does not automate those approval prompts.
 
-## 4. Declare your first seat
+For an upgrade, `fractal service install` refreshes definitions and restarts services;
+`fractal service restart` suffices when definitions already point at the intended binaries.
+Coordinate that restart with active work and any continuous health checks. Replacing
+archive files alone does not restart running services.
 
-A seat declares the agent's workspace and harness. Save this KDL file in the workspace you just trusted:
+State lives in `~/.local/state/st3`. The local API uses a Unix socket. On Linux it
+normally lives in `XDG_RUNTIME_DIR`, with `STATE/run/st3.sock` linking to it; on macOS
+it lives in the state directory. An explicit `--endpoint` or `ST3_ENDPOINT` takes
+precedence. Commands wait up to 30 seconds for a restarting daemon, then exit with
+status 5; `--daemon-wait` and `ST3_DAEMON_WAIT` change that wait. Restarting the daemon
+leaves durable agents running so it can adopt them again. For foreground operation,
+use `fractal up`.
 
-```sh
-cd ~/st/garden
-cat > worker.kdl <<EOF
-version 2
-agent "garden/worker" {
-  workspace "$PWD"
-  restart "always"
-  harness "claude" {
-    model "sonnet"
-  }
-}
-EOF
-st agents apply worker.kdl --as person/ada
-st agents show agent/garden/worker
-st terminals attach agent/garden/worker
-```
-
-The harness starts and waits for work. Finish any first-run prompts in its terminal, then press **Ctrl+\\** to detach; the seat keeps running.
-
-## 5. Give it a mission
-
-Create a short work brief and a finite mission. Goals describe the result; the brief supplies instructions.
-
-```sh
-cat > BRIEF.md <<'EOF'
-Create garden-note.md with three sentences about an invented community garden.
-Use only invented names. Keep the note in this workspace.
-EOF
-cat > first-mission.kdl <<'EOF'
-version 2
-mission "garden/first-note" state="ready" {
-  goal "garden-note.md contains a three-sentence introduction to an invented community garden."
-  constraint "Follow BRIEF.md in the workspace."
-  step "write" timeout="20m" {
-    assigned-to "agent/garden/worker"
-    goal "garden-note.md exists and follows the brief."
-  }
-}
-EOF
-st missions publish first-mission.kdl --as person/ada
-st missions start garden/first-note --id garden/first-note/one \
-  --workspace "$PWD" --as person/ada
-stui
-```
-
-The new step wakes the seat automatically. In `stui`, open **Missions** and select `garden/first-note`; open **Agents** to see the worker. Use the sidebar or **Ctrl+K** to find them. **Ctrl+Q** quits the UI and leaves the work running.
-
-Back in the shell, inspect the run. Once it says `completed`, read the result:
-
-```sh
-st missions show mission-run/garden/first-note/one
-cat garden-note.md
-```
-
-## 6. Send a message
-
-```sh
-st conversations send agent/garden/worker --from person/ada \
-  --subject 'Hello' --body 'What did you finish in the first mission?'
-stui
-```
-
-Open the worker under **Agents** to read its answer. Messages are conversation; put new work in a mission so its result is tracked.
-
-When you are done experimenting:
-
-```sh
-st agents stop agent/garden/worker --as person/ada
-```
+The [daemon troubleshooting guide](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/troubleshooting.md),
+[command recorder](st3/command-recorder.md) and [compatibility policy](st3/compatibility.md)
+cover socket paths, recorded commands and recovery details.
 
 ## Next
 
-- [Two machines](two-machines.md): connect your machines and check graph replication.
-- [Missions in practice](missions-in-practice.md): revise work, queue runs, and ask for human decisions.
-- [Talking to agents](talking-to-agents.md): UI, phone, CLI, attachments, and structured requests.
-- [Build and run the iOS app](ios-app.md): local simulator and iPhone builds, then gateway pairing.
-- [Seat lifecycle](seat-lifecycle.md): restart, suspend/resume, native sessions, and stopped seats.
-- [Upgrading st](upgrading-st.md): install the same build everywhere and check recovery options.
-- [GitHub integration](github-integration.md): repository intake, review, triage, and landing work.
-- [When something is wrong](when-something-is-wrong.md): health, work, usage, and stop reasons.
-- [Runnable examples](../examples/st3/README.md): other harnesses, schedules, gates, and parallel work.
-- [KDL lifecycle](st3/kdl-lifecycle.md): the complete declaration and revision workflow.
-- [Terminal client](../crates/stui/README.md): UI controls and remote clients.
+- [Missions in practice](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/missions-in-practice.md): define work, revise it, and answer person-only decisions.
+- [Talking to agents](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/talking-to-agents.md): UI, phone, CLI, attachments, and requests.
+- [Two machines](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/two-machines.md): create a fleet, invite another machine and check replication.
+- [Web and iOS clients](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/web-and-ios.md): follow work and pair the phone app.
+- [Runnable examples](../examples/st3/README.md): agents, other harnesses, schedules and gates.
+- [Agent lifecycle](seat-lifecycle.md): restart, suspend/resume and stopped agents.
+- [GitHub integration](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/github-integration.md): optional repository intake and review.

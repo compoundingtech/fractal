@@ -4,7 +4,7 @@ Each KDL file here is a complete, runnable example. Its header comment says what
 commands that run it. Every file passes the normative st parser in the test suite:
 
 ```sh
-cargo test -p st3 --test integration examples::
+cargo test -p fractal --test integration examples::
 ```
 
 All names, repositories, paths, and people are invented. Replace them before you use an example.
@@ -12,7 +12,7 @@ All names, repositories, paths, and people are invented. Replace them before you
 ## How the pieces fit
 
 - **A durable agent is a seat.** Declare it as a top-level `agent` in its own file and apply it with
-  `st agents apply FILE --as person/NAME`. A seat has no mission owner, so no mission's end stops
+  `st apply FILE --as person/NAME`. A seat has no mission owner, so no mission's end stops
   it. Stop it with `st agents stop`. Do not model a durable agent as a mission with no steps: that
   run completes at once and stops the agent it owns.
 - **Work reaches a seat as mission steps.** A step `assigned-to` the seat's exact subject waits in
@@ -26,7 +26,7 @@ All names, repositories, paths, and people are invented. Replace them before you
   starts a run. A mission that owns an observer, subscription, or schedule needs a step that keeps
   its run open, such as the `retire` gate in [`github-intake.kdl`](github-intake.kdl).
 
-Publish exact hand-authored missions with `st missions publish FILE --as ACTOR`. For
+Publish exact hand-authored missions with `st apply FILE --as ACTOR`. For
 conversational planning, use `st launch start`, review the candidate with `st launch preview`,
 and approve it with `st launch approve-and-launch`. An authorized agent uses
 `st work publish-mission` while it owns the declared producing step.
@@ -47,8 +47,8 @@ and approve it with `st launch approve-and-launch`. An authorized agent uses
 Every harness file declares the same `agent/example/worker` seat, and every mission example
 assigns work to it, so the missions run with whichever harness you apply. The planner, reviewer,
 and chief seat files declare other seats, named for their roles. omp seats run best on
-`openai-codex/gpt-6-astra`; [Running st with omp](../../docs/st3/omp.md) explains why and lists
-the setup.
+`openai-codex/gpt-6-astra` (see the comment in [`seats/omp.kdl`](seats/omp.kdl));
+[Running st with omp](../../docs/st3/omp.md) lists the setup.
 
 ### Give a seat work and order it
 

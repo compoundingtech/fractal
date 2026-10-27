@@ -2,13 +2,14 @@
 
 `st agents suspend` stops a quiet seat and keeps its harness's own session. `st agents resume`
 relaunches the harness on that same session and confirms it is the same one. This works on one
-host for Claude, Codex, pi, omp, and OpenCode. Moving a suspended seat to another host is planned
-in #901 and is not built yet.
+host for Claude, Codex, pi, omp, and OpenCode. pi and omp can also resume on another fleet host
+with `--host`, keeping the same seat identity and native conversation.
 
 ```sh
 st agents suspend agent/example/worker --as person/ada --reason "idle overnight"
 st agents show agent/example/worker
 st agents resume agent/example/worker --as person/ada
+st agents resume agent/example/worker --host jade --as person/ada
 ```
 
 Both commands wait until the operation finishes or fails, and `--timeout` sets how long they
@@ -17,6 +18,11 @@ fenced on the running incarnation and the selected declaration; resume is fenced
 declaration.
 
 ## When a seat can suspend
+
+Suspend first checks the declaration's native session arguments. An authored selector such as
+`--resume`, `--session`, or `-c` refuses with `suspend-authored-session-selection`, naming the
+selector in `details.selector`. Native resume would refuse that selector even if its transcript
+exists. This check reads no transcript, appends no claims, and leaves the seat running.
 
 A seat suspends only at a clean boundary. Core does not read harness state. Each driver adds
 `quiescent` and `blocking` to the `harness.observed` claims it already publishes, and core reads
@@ -40,9 +46,21 @@ seat running, and `st agents show` prints the refusal.
 
 The seat's driver reports the native session its harness is running as a `harness.session-file`
 claim for that incarnation, through `POST /v1/agents/native-session`, once the harness has
-written what a resume reads. That session is the snapshot. Suspend records it, stops the runtime, and leaves the seat `suspended`. A suspended seat
+written what a resume reads. Suspend captures a Git snapshot commit, records the native session,
+stops the runtime, and freezes portable transcript files after the process ends. It leaves the seat `suspended`. A suspended seat
 stays declared. Its restart policy does not restart it, `st agents restart` refuses it, and mail
 sent to it waits until it resumes.
+
+An incarnation-bearing report is accepted only while the latest runtime observation records
+that incarnation as running. The writer checks this authority before replaying or deduplicating
+a report, so retries from an ended or superseded incarnation cannot replace its successor's
+binding. During a rollout, verification records the observed replacement's runtime authority
+before waiting for its native binding.
+
+Consecutive identical native-session reports reuse the current binding claim. Switching to
+another session and then returning appends a fresh binding for the revisited session, so the
+latest claim continues to identify the active native session. Todo observations from another
+session or incarnation remain visible with stale provenance rather than appearing current.
 
 Resume launches the driver with the session in `ST3_NATIVE_RESUME_SESSION`. Each driver
 relaunches its harness on exactly that session:
@@ -52,7 +70,7 @@ relaunches its harness on exactly that session:
 | Claude | `claude --resume ID` | the transcript is in the workspace's Claude project directory |
 | Codex | `codex --remote … resume THREAD`, then the control connection's `thread/resume` | the app-server accepts the thread |
 | pi | `pi --session TRANSCRIPT` | the seat's transcript has the session's header |
-| omp | `omp --resume ID`, or `omp --resume TRANSCRIPT` for an explicit binding | the exact transcript has the session's header |
+| omp | `omp --resume TRANSCRIPT` | the seat's transcript has the session's header |
 | OpenCode | `opencode --session ID`, with delivery held to that session | the session is in `opencode.db`, and the server returns it |
 
 A driver that cannot resume ends the launch before the harness picks another session. It records
@@ -85,14 +103,40 @@ An import's provenance remains binding authority only while it is the latest bin
 A later native-session report supersedes it; querying an incarnation without its own
 binding must not revive a historical import.
 
-Ordinary continuation passes the recorded path through `ST3_NATIVE_CONTINUE_PATH`.
-Rollout restoration passes it through `ST3_NATIVE_RESUME_PATH`. Suspend/resume recovers
+Ordinary continuation passes the recorded path through `FRACTAL_NATIVE_CONTINUE_PATH`.
+Rollout restoration passes it through `FRACTAL_NATIVE_RESUME_PATH`. Suspend/resume recovers
 the path from the durable binding for the suspended incarnation and snapshot's native
 ID, then uses the same resume-path carrier; the snapshot schema is unchanged. A changed
 binding fails with `snapshot-binding-changed`. Missing, unreadable, or foreign explicit
 files are refused rather than replaced with a managed transcript. Without an explicit
-path, fresh managed-session publication and ID-based OMP restoration remain unchanged.
+path, fresh managed-session publication and checked managed-transcript restoration remain unchanged.
 
+## Leaving an existing suspension when resume refuses
+
+Older daemons accepted suspends whose declaration already selects a session. For omp and pi, resume
+accepts such a declaration when its one selector (omp `--resume TRANSCRIPT`, `--resume=TRANSCRIPT`
+or `-r TRANSCRIPT`; pi `--session TRANSCRIPT` or `--session=TRANSCRIPT`) is an absolute path of
+the suspended session's own transcript: the file name and the header both name that session, and
+the seat's transcript inventory resolves to the same file. st then replaces the authored selector
+with its single selector for the checked path. A selector that names another session, a relative
+path, a missing, unreadable or mismatched transcript, an inventory entry that is a different file
+(`transcript-ambiguous`), a second or conflicting selection flag, or any other harness is refused
+before the harness starts, as `authored-session-selection`, `resume-path-relative`,
+`transcript-missing`, `transcript-unreadable`, `authored-session-mismatch` or
+`transcript-ambiguous`. Suspend itself still refuses a declaration that selects a session.
+
+If resume reports `authored-session-selection`, the exit is to stop the seat and then start it:
+
+```sh
+st agents stop agent/example/worker --as person/ada
+st agents start agent/example/worker --as person/ada
+```
+
+Stop ends the suspension. Start launches the declaration with its authored selector, such as
+`--resume TRANSCRIPT`. The session kept by suspend is no longer guaranteed: the authored selector
+chooses the conversation, which may differ from the suspended session. This exit does not delete
+the saved transcript, but it gives up suspend's promise to resume that exact session. A start
+without a stop leaves the suspension in place; restart refuses while it holds the seat.
 
 ## Phases
 
@@ -101,16 +145,64 @@ requester, so every phase change is a change of the agent.
 
 ```text
 suspend: quiescing -> snapshotting -> suspended     (failed: refused, the seat keeps running)
-resume:  restoring -> verifying   -> resumed        (failed: back to suspended, with a code)
+resume:  restoring -> verifying   -> resumed
+move:    fencing-source -> transferring -> restoring -> verifying -> resumed        (failed: back to suspended, with a code)
 ```
 
-A suspension belongs to the launch it was taken under. Stopping the seat, or applying a
-declaration that changes how it launches, ends the suspension, and the next start follows the
-usual rules. A label change does not end it.
+A suspension belongs to the launch it was taken under. Stopping the seat or immediately applying
+a non-manual declaration that changes its launch ends the suspension. A label change does not end it.
+
+Publishing a changed launch for an owned seat with `rollout "manual"` keeps the suspension,
+including a suspend that is still in flight. Publication does not start the seat or replace its
+saved native session. Same-host resume runs the incumbent declaration on that exact session;
+the new declaration stays pending. An explicit rollout while the suspension holds the seat
+refuses with `rollout-suspended`. Resume first, then request the rollout to apply the pending
+declaration through strict native resume. See [owned-seat rollout](owned-seat-cutover.md).
+
+While the manual launch change is pending, resume on the current host. Apply the rollout
+before requesting a cross-host move. This keeps resume from applying part of the pending launch.
+
+## Cross-host continuation
+
+`resume --host jade` and client-v0 `agent.resume {agent, host: "jade"}` pull the source host's
+archive on demand through the authenticated peer client-read relay. The source must be online;
+transcripts and Git bundles never enter fleet replication. Requests and phases do replicate.
+
+Suspend uses a private Git index to capture tracked files and non-ignored untracked files at
+`refs/st/suspended/<seat identity>`. It preserves the source HEAD, branch, normal index, and
+working tree. The archive carries that snapshot and its history, plus the native transcript and
+its companion state directory. Resume restores the original branch and HEAD with the captured
+files as working tree changes; it does not preserve which edits were staged.
+
+The destination validates the archive digest, transcript digest and header session ID, and the
+transcript's recorded cwd before starting anything. It recreates the workspace at the **same
+absolute path**, restores the transcript into the destination's per-seat driver session directory,
+and then publishes the placement change under the same seat subject. The existing placement
+fence requires the source to acknowledge that declaration with its runtime gone. The destination
+launches using strict native resume and completes only after the live native ID matches.
+
+An occupied target workspace or native-session directory refuses restoration. Preserve those
+files elsewhere before retrying. There is no automatic path remapping or overwrite. A failed move
+leaves the seat suspended with a code and reason; it never silently starts a fresh conversation.
+
+| refusal | meaning |
+| --- | --- |
+| `workspace-not-git`, `workspace-unborn`, `workspace-not-root` | suspend needs a committed Git working tree rooted at the workspace |
+| `workspace-path-mismatch` | the declaration, archive, or native transcript records a different cwd |
+| `workspace-occupied`, `transcript-occupied` | the target already contains files that would be overwritten |
+| `snapshot-harness-unsupported` | this harness has no portable export adapter yet |
+| `source-unavailable` | the source cannot supply the current operation's archive |
+| `native-session-mismatch` | the transcript header or live driver reports another native session |
+| `snapshot-too-large` | the archive exceeds the 256 MiB v1 bound |
 
 ## Limits
 
-- A seat resumes only on the host where it suspended. Moving it is planned in #901.
+- Cross-host native export currently supports pi and omp. Claude, Codex, and OpenCode keep their
+  single-host resume support; cross-host requests refuse until their storage adapters are built.
+- Suspend requires an absolute Git workspace path, a commit, and the working tree root.
+  Workspaces containing submodules refuse with `workspace-submodule-unsupported`.
+- Archives are host-local and capped at 256 MiB, including Git history. Ignored files and
+  host-owned credentials and environment are not transported.
 - Every other relaunch continues the seat's last native session when its harness can, and
   otherwise starts a new one: it names the session in `ST3_NATIVE_CONTINUE_SESSION`, which a
   driver may refuse without ending the launch. Only a resume must come back on its exact session.
@@ -118,5 +210,7 @@ usual rules. A label change does not end it.
 - OpenCode delivery follows the session the server reports most recently. A seat whose OpenCode
   session ran a subagent session last may record that session.
 
-The boot canaries cover suspend and resume for every harness. See
+The boot canaries cover single-host suspend and resume for every harness. The isolated two-node
+fleet test moves an omp seat with tracked and untracked changes and its prior conversation,
+checks occupied-target refusal, verifies the live native ID, and delivers mail after the move. See
 [scripts/st3-boot-canaries](../../scripts/st3-boot-canaries/README.md).

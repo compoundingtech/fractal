@@ -4,8 +4,14 @@ import { existsSync, mkdtempSync, writeFileSync, readFileSync, mkdirSync, openSy
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('ST_') && !name.startsWith('ST3_') && !name.startsWith('FABRIC_')));
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — an isolated member must inherit neither namespace.
+const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('FRACTAL_') && !name.startsWith('ST_') && !name.startsWith('ST3_') && !name.startsWith('SMALLTALK_') && !name.startsWith('FABRIC_')));
 const kind = 'st-fabric-isolated-proof-v1';
+// The phone is granted inbound-only, which needs fabric 0.2.41 or later.
+const expectedVersion = process.env.FABRIC_EXPECTED_VERSION ?? '0.2.41+84c3208';
+if (expectedVersion !== '0.2.41+84c3208') throw new Error('Unsupported fabric proof pin');
+// The separate offline Debug app (prepare-phone.mjs) has its own scheme; a simulator Debug build uses the starter scheme.
+const scheme = (separate) => `com.compoundingtech.fractal.${separate ? 'fabricproof' : 'starter'}://fabric-proof`;
 const command = (binary, args) => {
   const result = spawnSync(binary, args, { env: environment, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`${binary} test command failed: ${result.stderr}`);
@@ -13,15 +19,19 @@ const command = (binary, args) => {
 };
 
 if (process.argv[2] === 'grant') {
-  const file = process.argv[3], phone = process.argv[4];
+  const file = process.argv[3], phone = process.argv[4], mode = process.argv[5];
+  if (mode && !['auto', 'direct', 'relay'].includes(mode)) throw new Error('Optional full-client mode must be auto, direct or relay');
   if (!file || !/^[a-f0-9]{64}$/i.test(phone ?? '')) throw new Error('grant requires the isolated member descriptor and phone NodeID');
   const member = JSON.parse(readFileSync(file, 'utf8'));
   if (member.kind !== kind || !member.root.startsWith('/tmp/st-fabric-proof-')) throw new Error('This is not an isolated proof member');
-  command(member.fabric, ['--home', member.home, 'add', phone, 'demo-phone', '--allow', member.service]);
+  if (member.version !== expectedVersion || command(member.fabric, ['--version']).trim() !== member.version) throw new Error('Isolated fabric binary changed');
+  // The member serves the phone when it connects and never dials, probes or announces to it.
+  command(member.fabric, ['--home', member.home, 'add', phone, 'demo-phone', '--inbound-only', '--allow', member.service]);
   command(member.fabric, ['--home', member.home, 'reload-peers']);
-  const paired = JSON.parse(command(member.st, ['--endpoint', member.socket, 'devices', '--as', 'person/demo', 'pair', 'Demo fabric simulator', '--json']));
+  const paired = JSON.parse(command(member.st, ['--endpoint', member.socket, 'devices', '--as', 'person/demo', 'pair', 'Demo fabric proof', ...(mode ? ['--full-control'] : []), '--json']));
   const challenge = paired.value;
-  const link = new URL('com.compoundingtech.smalltalk.starter://fabric-proof');
+  const link = new URL(scheme(mode || member.separateApp));
+  if (mode) { link.searchParams.set('client', '1'); link.searchParams.set('mode', mode); }
   link.searchParams.set('node', member.node);
   link.searchParams.set('service', member.service);
   link.searchParams.set('addr', JSON.stringify(member.addr));
@@ -35,7 +45,7 @@ if (process.argv[2] === 'grant') {
 
 const st = process.argv[2], fabric = process.argv[3];
 if (!st || !fabric) throw new Error('Usage: node proof-member.mjs /path/to/st /path/to/fabric');
-if (command(fabric, ['--version']).trim() !== '0.2.30+8bd9017') throw new Error('This proof requires fabric 0.2.30+8bd9017');
+if (command(fabric, ['--version']).trim() !== expectedVersion) throw new Error(`This proof requires fabric ${expectedVersion}`);
 const root = mkdtempSync('/tmp/st-fabric-proof-');
 const home = join(root, 'fabric'), state = join(root, 'state');
 mkdirSync(home, { mode: 0o700 });
@@ -60,10 +70,11 @@ try {
   if (!addr) throw new Error('Isolated test member did not start');
   const service = 'demo-client/0';
   command(fabric, ['--home', home, 'expose', service, '--socket', gateway, '--ephemeral']);
-  const description = { kind, root, home, state, socket, gateway, node: addr.id, addr, service, st, fabric };
+  const separateApp = process.env.FABRIC_PROOF_APP === 'separate';
+  const description = { kind, root, home, state, socket, gateway, node: addr.id, addr, service, st, fabric, version: expectedVersion, separateApp };
   const descriptor = join(root, 'member.json');
   writeFileSync(descriptor, JSON.stringify(description), { mode: 0o600 });
-  const link = new URL('com.compoundingtech.smalltalk.starter://fabric-proof');
+  const link = new URL(scheme(separateApp));
   link.searchParams.set('node', addr.id); link.searchParams.set('service', service); link.searchParams.set('addr', JSON.stringify(addr));
   writeFileSync(join(root, 'identity-link.txt'), link.toString(), { mode: 0o600 });
   console.log(`Isolated proof member: ${descriptor}`);
