@@ -3,8 +3,10 @@ import { Button } from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import { Markdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import type { WorkLogCall } from '@fractal/ui/assistant-ui/work-log'
 import type { ToolCallItem } from '../conversation/model.ts'
 import { semanticToolFor, type SemanticTool } from '../conversation/semanticToolModel.ts'
+import { TypedToolPreview } from './TypedToolPreview.tsx'
 
 export const SemanticToolDetail = ({ model, onOpenInspector }: { readonly model: SemanticTool; readonly onOpenInspector?: () => void }): ReactNode => {
   if (model.type === 'skipped') return <p data-testid="skipped-tool" {...stylex.props(styles.marker)}>Skipped · interrupted before execution</p>
@@ -19,6 +21,10 @@ export const semanticToolDetail = (item: ToolCallItem, onOpenInspector?: () => v
   const model = semanticToolFor(item)
   return model === undefined ? undefined : <SemanticToolDetail model={model} onOpenInspector={onOpenInspector} />
 }
+
+/** The transcript's semantic slot: typed results where the app has a reading, else wait/message/skipped cards. The kit keeps the raw disclosure beside either. */
+export const recordedToolDetail = (item: ToolCallItem, call: WorkLogCall, onOpenInspector: () => void): ReactNode =>
+  !call.skipped && (call.kind === 'subagent' || call.kind === 'search' || call.kind === 'web') ? <TypedToolPreview call={call} onOpen={onOpenInspector} /> : semanticToolDetail(item, onOpenInspector)
 const styles = stylex.create({
   marker: { color: c.fgMuted, fontSize: t.metaSize, lineHeight: 1.5 },
   card: { backgroundColor: c.raised, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: 8, padding: s.lg, color: c.fg, overflowWrap: 'anywhere' },

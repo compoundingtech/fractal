@@ -113,7 +113,7 @@ read, embed, replicate or verify the image bytes; a consumer must check the file
 The 1Password carrier accepts only an exact `op://vault/item/field` locator (≤1024 JSON
 bytes). Each of its three components starts with an ASCII letter or digit and contains only
 ASCII letters, digits, `_` or `-`. Use IDs or simple names; v1 deliberately excludes spaces,
-section-qualified fields, query strings, fragments and encoded components. st never resolves
+section-qualified fields, query strings, fragments and encoded components. Fractal never resolves
 the locator. The schema has no secret-value, document, content or free-text field, and rejects
 extra fields. A locator's identifiers are graph data visible to graph readers; use invented
 names in public examples and keep credentials in the [sekrets](sekrets.md) workflow.

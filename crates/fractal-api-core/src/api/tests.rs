@@ -12463,3 +12463,67 @@ mission "overview-renamed" state="ready" {
         );
     }
 }
+
+#[test]
+fn agent_card_shows_current_incarnation_background_jobs() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let source = r#"
+version 2
+mission "agent-jobs" state="ready" {
+  goal "Exercise harness background jobs."
+  agent "worker" { workspace "/tmp"; harness "omp" {} }
+  step "queued" { assigned-to "agent/${ST_MISSION_RUN}/worker" }
+}
+"#;
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = store.mission(&intent, crate::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    store.apply(&intent, &planned.subject_tokens, "agent-jobs-source").unwrap();
+    let run = store.create_mission_run(&MissionRunRequest {
+        mission: "agent-jobs".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/test".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "agent-jobs-run".into(),
+    }).unwrap();
+    materialize_run_agents(&state, &run);
+    let worker = format!("agent/{}/worker", run.id);
+    let append = |kind: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: worker.clone(), kind: kind.into(),
+            actor: (kind == "harness.observed").then(|| worker.clone()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    let card = || client_agent_resources(&store, false, "snapshot", store.index().unwrap())
+        .unwrap().into_iter().find(|card| card["id"] == worker).unwrap();
+    append("runtime.observed", json!({"status":"running","runtime_id":"node.worker","incarnation_id":"one"}));
+    assert!(card()["background_jobs"].is_null());
+    for count in [2, 0] {
+        append("harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one","background_jobs":count}));
+        assert_eq!(card()["background_jobs"], count);
+    }
+    append("harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one"}));
+    assert!(card()["background_jobs"].is_null());
+    append("harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one","background_jobs":3}));
+    append("runtime.observed", json!({"status":"running","runtime_id":"node.worker","incarnation_id":"two"}));
+    assert!(card()["background_jobs"].is_null());
+    append("harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"two","background_jobs":1}));
+    assert_eq!(card()["background_jobs"], 1);
+    let fault = crate::model::AttentionRequest {
+        reviewer: "person/test".into(), title: "Mailbox unavailable".into(),
+        reason: "The current mailbox lost delivery custody.".into(), severity: "error".into(),
+        targets: vec![worker.clone()], actor: "daemon/runtime".into(),
+        idempotency_key: "agent-jobs-mailbox-loss".into(),
+    };
+    let episode = "attention/agent-jobs-mailbox";
+    store.record_runtime_failure(episode, &fault, "mailbox-channel-lost").unwrap();
+    assert_eq!(card()["harness_state"], "indeterminate");
+    assert!(card()["background_jobs"].is_null(), "a mailbox availability fence clears the count");
+    store.recover_operational_failure(episode, "authenticated replay control", "agent-jobs-repaired").unwrap();
+    assert_eq!(card()["background_jobs"], 1);
+    append("harness.observed", json!({"state":"ended","driver":"omp","incarnation_id":"two","background_jobs":1}));
+    assert!(card()["background_jobs"].is_null());
+}

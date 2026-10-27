@@ -4,7 +4,6 @@ import { LiveTimeline } from './fromTimeline.ts'
 import type { ToolCallItem } from './model.ts'
 import { toolKindFor } from './toolClassification.ts'
 import { semanticToolFor } from './semanticToolModel.ts'
-import { prepareTranscriptTurns } from '../web/conversationTranscript.ts'
 const at = '2026-01-15T12:00:00Z'
 const call = (name: string, input: unknown = {}, extra: Partial<ToolCallItem> = {}): ToolCallItem => ({ _tag: 'ToolCall', id: 'example/call', callId: 'example/call', name, input, status: 'success', callSeen: true, at, ...extra })
 

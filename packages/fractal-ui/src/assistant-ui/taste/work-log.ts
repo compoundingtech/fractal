@@ -27,7 +27,7 @@ export interface WorkLogCall {
   readonly outputLanguage?: string
   /** Observed edit/write path, not a guessed title. */
   readonly changedPath?: string
-  /** A run's own command or script source; display it only as code inside the raw disclosure. */
+  /** A run's own command or script source, also kept when the host reads that run as a message; display it only as code inside the raw disclosure. */
   readonly command?: string
 }
 export interface WorkLogTurn {
@@ -167,7 +167,7 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
       view: call.result?.view ?? call.view, metadata: call.result?.metadata,
       outputLanguage: (media === undefined ? undefined : outputMediaLanguages[media]) ?? (kind === 'run' ? 'bash' : kind === 'read' ? extension : undefined),
       changedPath: kind === 'edit' && call.callSeen && call.status === 'success' ? path : undefined,
-      command: kind === 'run' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined,
+      command: kind === 'run' || kind === 'message' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined,
     }]
   })
   const complete = facts.completeHistory === true
