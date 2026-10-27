@@ -799,7 +799,7 @@ fn every_selected_eval_uses_current_grammar_and_harness_policy() {
         "network-smoke",
         "network-isolation",
     ] {
-        let st3_file = root.join("st3").join(name).join("eval.kdl");
+        let st3_file = root.join("fractal").join(name).join("eval.kdl");
         let st3_source = fs::read_to_string(&st3_file).expect("read st3 eval");
         let st3_document: kdl::KdlDocument = st3_source.parse().expect("parse st3 KDL");
 
@@ -852,12 +852,12 @@ fn selected_eval_harness_counts_match_the_inventory() {
     let mut model_gates = Vec::new();
 
     for (name, st3_expected) in expected {
-        let st3_source = fs::read_to_string(root.join("st3").join(name).join("eval.kdl")).unwrap();
+        let st3_source = fs::read_to_string(root.join("fractal").join(name).join("eval.kdl")).unwrap();
         let st3_counts = authored_harness_counts(&st3_source, &format!("st3 {name}"));
         assert_eq!(st3_counts, st3_expected, "st3 {name}");
         model_gates.extend(authored_model_gates(&st3_source));
     }
-    let mission_lift = fs::read_to_string(root.join("st3/mission-document-lift/eval.kdl")).unwrap();
+    let mission_lift = fs::read_to_string(root.join("fractal/mission-document-lift/eval.kdl")).unwrap();
     assert_eq!(
         authored_harness_counts(&mission_lift, "st3 mission-document-lift"),
         (0, 1)
@@ -1465,20 +1465,20 @@ fn new_paid_eval_fixtures_match_their_native_harnesses() {
         .join("../..")
         .join("evals");
 
-    let test_root = root.join("st3/test-writing");
+    let test_root = root.join("fractal/test-writing");
     for seat in ["sup", "worker"] {
         let workspace = test_root.join(seat);
         assert!(workspace.join("AGENTS.md").is_file());
         assert!(!workspace.join("CLAUDE.md").exists());
     }
 
-    let weird_root = root.join("st3/weird-git-setup");
+    let weird_root = root.join("fractal/weird-git-setup");
     assert!(weird_root.join("persona/AGENTS.md").is_file());
     let setup = fs::read_to_string(weird_root.join("setup-megarepo.sh")).unwrap();
     assert!(setup.contains("persona/AGENTS.md"));
     assert!(!setup.contains("persona/CLAUDE.md"));
 
-    let skill_root = root.join("st3/claude-skill-inheritance");
+    let skill_root = root.join("fractal/claude-skill-inheritance");
     assert_eq!(
         fs::read_to_string(skill_root.join("repo/CLAUDE.md")).unwrap(),
         "@PERSONA.md\n"
