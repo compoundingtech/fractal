@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Observe native OMP question opens and closure statuses through the durable text-free native event outbox behind an off-by-default flag; answering remains unavailable",
+  "summary": "Observe native OMP question opens and closure statuses through the durable text-free native event outbox behind an off-by-default flag; answering remains unavailable. Route cost coverage measures fresh native open/close storage lifecycles.",
   "replay": {"status": "none", "detail": "No historical import or replay migration. Current native opens and closes replay idempotently after channel interruption using their original hashed call identity and native session."},
   "schema": {"status": "none", "detail": "Uses existing harness-question claims and retention. Native ids are hashed before entering the local outbox; descriptors carry only ordinal q0-q15 ids, option counts and selection flags. Closure claims contain status only, empty answers and no person receipt."},
   "rules": {"status": "none", "detail": "No checkpoint or replication rule changes."},
