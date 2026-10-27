@@ -485,9 +485,18 @@ fn rollout_provider_switch_starts_fresh_and_verifies_the_replacement_provider() 
     for reported_provider in ["codex", "claude"] {
         let mut seat = Seat::new();
         // Switching back to a provider must not revive its older conversation either.
+        let original = seat.runtime.observation.lock().unwrap().clone().unwrap();
+        seat.append("runtime.observed", json!({
+            "status":"running", "runtime_id":original.runtime_id, "terminal":original.terminal,
+            "incarnation_id":"historical", "host":"amber"
+        }));
         seat.append("harness.session-file", json!({
             "harness":"codex", "session_id":"historical-codex", "incarnation_id":"historical",
             "path":"/codex/historical.jsonl"
+        }));
+        seat.append("runtime.observed", json!({
+            "status":"running", "runtime_id":original.runtime_id, "terminal":original.terminal,
+            "incarnation_id":original.incarnation_id, "host":"amber"
         }));
         seat.append("harness.session-file", json!({
             "harness":"claude", "session_id":"native-one", "incarnation_id":"original-1",
