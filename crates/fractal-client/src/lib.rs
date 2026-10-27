@@ -440,7 +440,7 @@ impl Capabilities {
     pub fn grants(&self, id: &str, version: u32) -> bool {
         self.capabilities.iter().any(|capability| {
             capability.id == id
-                && capability.version >= version
+                && capability.version >= u64::from(version)
                 && capability.state == CapabilityState::Granted
         })
     }

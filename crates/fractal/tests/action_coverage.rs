@@ -690,7 +690,7 @@ impl Daemon {
         let mut fence = self.fence(WORKER).await;
         fence.mission_generation = Some(work.generation);
         fence.step_definition = Some(work.definition_hash);
-        fence.attempt = Some(work.attempt);
+        fence.attempt = Some(u64::from(work.attempt));
         fence.readiness_epoch = Some(u64::from(work.readiness_epoch));
         fence.runtime_incarnation = Some("4242:fixture".into());
         fence
