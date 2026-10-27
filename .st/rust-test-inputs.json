@@ -374,7 +374,9 @@
    "extra": [
     "fixtures/clients/documents-v1.json",
     "fixtures/clients/sidebar-v2.json",
-    "fixtures/clients/words.json"
+    "fixtures/clients/words.json",
+    "fixtures/scenarios",
+    "scripts/ci-test-paths.rs"
    ]
   },
   "fractal-vista-component": {

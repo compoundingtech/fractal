@@ -59,7 +59,7 @@ Mission Inputs, Local File Refresh, and Constraint Inheritance are also model-fr
 
 Run Generation Revision starts one Codex planner through the launch API.
 
-The st3 corpus has 46 active evals. Twenty-three are model-free, and twenty-three use at least one model.
+The Fractal corpus has 46 active evals. Twenty-three are model-free, and twenty-three use at least one model.
 
 Each eval KDL starts with a document version. A missing version means version zero.
 
@@ -75,34 +75,34 @@ The seat counts include every native agent seat. The LLM judge counts are separa
 | st2 | Ghost bug | Codex × 2 | None |
 | st2 | Signal rename | Codex × 4 | None |
 | st2 | Restart continuity | Claude Sonnet × 2 | None |
-| st3 | License MIT | Claude Sonnet × 2 | Codex × 1 |
-| st3 | Ghost bug | Codex × 2 | Codex × 1 |
-| st3 | Signal rename | Codex × 4 | Codex × 1 |
-| st3 | Restart continuity | Claude Sonnet × 2 | None |
+| Fractal | License MIT | Claude Sonnet × 2 | Codex × 1 |
+| Fractal | Ghost bug | Codex × 2 | Codex × 1 |
+| Fractal | Signal rename | Codex × 4 | Codex × 1 |
+| Fractal | Restart continuity | Claude Sonnet × 2 | None |
 | st2 | Fork in the road | Codex × 4 | None |
-| st3 | Fork in the road | Codex × 4 | None |
+| Fractal | Fork in the road | Codex × 4 | None |
 | st2 | Poisoned pull request | Codex × 2 | None |
-| st3 | Poisoned pull request | Codex × 2 | None |
+| Fractal | Poisoned pull request | Codex × 2 | None |
 | st2 | Test Writing | Codex × 2 | None |
-| st3 | Test Writing | Codex × 2 | None |
+| Fractal | Test Writing | Codex × 2 | None |
 | st2 | Weird Git Setup | Codex × 1 | None |
-| st3 | Weird Git Setup | Codex × 1 | None |
+| Fractal | Weird Git Setup | Codex × 1 | None |
 | st2 | Claude Skill Inheritance | Claude Sonnet × 1 | None |
-| st3 | Claude Skill Inheritance | Claude Sonnet × 1 | None |
-| st3 | Mission Document Lift | Codex × 1 | None |
-| st3 | Mixed Worker Pool | Claude Sonnet × 1, Codex × 1 | None |
-| st3 | Cross-harness message wake | Claude Opus × 1, Codex × 1, Pi × 1, OMP × 1 | None |
-| st3 | Work wake reliability | Codex × 1 | None |
-| st3 | Seat mission work | Codex × 1 | None |
-| st3 | Seat queue | Claude Sonnet × 1, or Codex × 1 or OMP × 1 chosen by its runner | None |
-| st3 | Planning Mode | Codex × 1, created by the launch API | None |
-| st3 | Run Generation Revision | Codex × 1, created by the launch API | None |
-| st3 | Continuous Stewardship | Codex × 1 | None |
-| st3 | Agent Migration Rehearsal | Codex × 1 | None |
-| st3 | Automatic GitHub Intake | Codex × 1 | None |
-| st3 | Codex compaction message delivery | Codex × 1 | None |
-| st3 | Native session import | Claude × 1, Codex × 1, Pi × 1, OMP × 1, OpenCode × 1 (raw, then imported) | None |
-| st3 | Graceful messaging | One seat for each harness its runner names: Claude, Codex, OMP, Pi, OpenCode | None |
+| Fractal | Claude Skill Inheritance | Claude Sonnet × 1 | None |
+| Fractal | Mission Document Lift | Codex × 1 | None |
+| Fractal | Mixed Worker Pool | Claude Sonnet × 1, Codex × 1 | None |
+| Fractal | Cross-harness message wake | Claude Opus × 1, Codex × 1, Pi × 1, OMP × 1 | None |
+| Fractal | Work wake reliability | Codex × 1 | None |
+| Fractal | Seat mission work | Codex × 1 | None |
+| Fractal | Seat queue | Claude Sonnet × 1, or Codex × 1 or OMP × 1 chosen by its runner | None |
+| Fractal | Planning Mode | Codex × 1, created by the launch API | None |
+| Fractal | Run Generation Revision | Codex × 1, created by the launch API | None |
+| Fractal | Continuous Stewardship | Codex × 1 | None |
+| Fractal | Agent Migration Rehearsal | Codex × 1 | None |
+| Fractal | Automatic GitHub Intake | Codex × 1 | None |
+| Fractal | Codex compaction message delivery | Codex × 1 | None |
+| Fractal | Native session import | Claude × 1, Codex × 1, Pi × 1, OMP × 1, OpenCode × 1 (raw, then imported) | None |
+| Fractal | Graceful messaging | One seat for each harness its runner names: Claude, Codex, OMP, Pi, OpenCode | None |
 
 The paired and st3-only corpus has 14 Claude seats, 43 Codex seats, two Pi seats, two OMP seats,
 and one OpenCode seat. It also has three Codex LLM judges.
@@ -115,7 +115,7 @@ Seat queue is counted with its default Claude seat. `scripts/st3-seat-queue-eval
 `gpt-6-luna` or omp `openai-codex/gpt-5.6-luna` in that seat instead. Its chief agent is a
 model-free command, not a native agent seat.
 
-The twenty-three model-free st3 evals add no model seats and no LLM judges.
+The twenty-three model-free Fractal evals add no model seats and no LLM judges.
 Messaging faults runs real native drivers and embedded extensions with a token-free provider API
 stand-in across two isolated nodes; it adds no native model seats.
 
@@ -139,13 +139,13 @@ An eval can use a Claude judge for a specific reason. Record the choice in this 
 
 The graph owns planned work, assignment, dependencies, progress, products, and judgement state.
 
-An eval does not author a harness prompt; st refuses one. A seat starts idle, and its work arrives as the message st posts when an assigned step is ready.
+An eval does not author a harness prompt; Fractal refuses one. A seat starts idle, and its work arrives as the message Fractal posts when an assigned step is ready.
 
 Put mission work in goals and steps. Keep only stable repository facts in `AGENTS.md`, `CLAUDE.md`, or a persona file.
 
 Do not disable harness features or reveal held-out gate criteria in agent instructions.
 
-st3 sends one durable Fractal message when an assigned parent becomes ready.
+Fractal sends one durable Fractal message when an assigned parent becomes ready.
 
 Inherited nested steps use the parent message. A nested step sends a new message only when its assignee changes,
 or when its agent submitted the parent while that nested step was still ready.
@@ -178,7 +178,7 @@ st2 eval ./evals/st2/network-smoke
 cargo test -p fractal --test integration examples::
 ```
 
-st3 eval orchestration is exercised through repository integration controllers and is deliberately
-not a public CLI command. The Rust test validates every st3 fixture against the normative grammar
+Fractal eval orchestration is exercised through repository integration controllers and is deliberately
+not a public CLI command. The Rust test validates every Fractal fixture against the normative grammar
 and its structural contracts. Paid live runs must use an explicit development controller so the
 public product CLI does not acquire an unfenced raw-fixture launcher.

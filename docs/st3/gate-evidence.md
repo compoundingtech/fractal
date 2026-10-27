@@ -2,7 +2,7 @@
 
 `st evidence put`, `show`, and `verify` run offline. They require Git with SSH
 signing support, OpenSSH, repository objects, and an operator-supplied allowed
-signers file. They do not load daemon configuration or contact an st instance.
+signers file. They do not load daemon configuration or contact a Fractal instance.
 
 One immutable record represents one observation; its trust tier is explicit. The first kinds are `tests` and
 `review`. `produced-by` is reserved as a name for a future trusted observer's
@@ -162,7 +162,7 @@ user unit on a host we hold, never a GitHub workflow. Both are installed in `~/.
 `scripts/evidence-gc-timer` in `~/.local/bin/`. The wrapper keeps a bare repository under
 `~/.local/state/evidence-gc/`, reads `scripts/evidence-gc` and `scripts/evidence-verify` from `origin/main` (a branch
 cannot change what deletes), runs it with `--fetch --apply` and the lock config in `~/.config/evidence-gc/lock.json`
-when present, keeps 30 days of summaries and plans, and stores each summary as a new version of the st document
+when present, keeps 30 days of summaries and plans, and stores each summary as a new version of the Fractal document
 `doc/fleet/factory/evidence-gc/runs`. The unit's `ExecStopPost` runs `--relock-only` after every stop, so even a run
 killed inside its window leaves the protection on. On a host that also runs the evidence log (`~/.local/bin/evidence-log-timer`
 and `~/.config/evidence-log/signer.json` present), the wrapper passes `--before-delete`, so `evidence-log gc --publish`
@@ -979,7 +979,7 @@ the head, so a retry behaves the same; the gate prints `decision=run` with a rea
 members of the aggregate read: the whole of `.github` (workflows, the clippy and fleet-compat baselines) and `scripts` (the stage
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
 `docs/st2`, `docs/st3` and `docs/vrs`, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
-on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the st3 crate), `evals` (the example and graph tests read `evals/fractal`),
+on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the Fractal crate), `evals` (the example and graph tests read `evals/fractal`),
 `claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st2` (`tests/invariants.rs` includes
 `docs/st2/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
 `include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an
@@ -1566,12 +1566,17 @@ push a shared host's load high enough to starve its daemons. Whoever runs the ho
 **The tree it signs is the tree the CI gate will judge.** Usually that is the pushed head. But when protected files moved on main since the branch
 point (or the branch is more than `HEAD_TREE_MAX_BEHIND` commits behind), the gate falls back to the MERGE tree (`head_tree=fallback:...` in its
 output), which a signature on the head does not cover. `fractal-test` asks the base's own `scripts/ci-evidence-gate` (`branch_point_verdict`, the function
-`choose_tree` calls: one rule, not a copy). When it says fallback, `fractal-test` makes the merge of the head with the base as a commit (`git merge-tree`,
-nothing is checked out in your clone), signs and tests THAT tree in its pool tree, and says so; if the branch does not merge cleanly it refuses and tells
-you to merge the base into the branch first. `fractal-test --status`, which the pre-push hook asks, judges the same tree, so a push is refused when the tree CI
-will judge is not covered even if the head tree is. A run that waits for a pool tree fetches the base again once it has one and chooses the commit to sign
-at the base's tip then, so the merge it signs is only as old as the run itself, not the run plus its wait (a branch that does not merge with the base
-is still refused before the wait).
+`choose_tree` calls: one rule, not a copy). When a signing run hears fallback, for either reason, it **merges the base into the branch** in your checkout
+first (`git merge --no-ff`, with your git identity: a new head commit), then signs and tests that head's own tree. It prints the reason and the merge
+commit (`fractal-test: the branch is 37 commits behind main, more than 24: merged origin/main (...) into my-branch as <sha>; the head tree is what is signed`).
+A signed merge tree is void at main's next commit, but the merged head's tree stays the one CI judges for `HEAD_TREE_MAX_BEHIND` more commits of main
+(as long as no protected file moves), so a run that waited hours for a pool tree is not lost to what landed meanwhile. A conflict stops the run at once,
+with the branch as it was (`git merge --abort`); so does a checkout that gained uncommitted changes to tracked files during the wait. With `--push`, a run
+that merged and exits 0 also pushes the branch at that merge to the branch of the same name on REMOTE (never forced, through the pre-push hook as any
+push). It refuses, and pushes nothing, when the remote branch has commits the local one lacks. A detached HEAD, or a branch named as the base's, is not
+pushed: the command is printed. `--status` changes nothing: it asks about the tree CI would judge now, the merge tree (`git merge-tree`, nothing
+checked out), so the pre-push hook refuses a push when that tree is not covered even if the head tree is. A run that waits for a pool tree fetches
+the base again once it has one and decides at the base's tip then (a branch that does not merge with the base is still refused before the wait).
 A check whose base policy compares a note's input with the run's own value (`input_order`: `fractal-web`'s `kit_inputs`) is judged the way the CI gate
 judges it: `fractal-test` passes the verifier `--run-input kit_inputs=...`, computed by the base's `scripts/ci-fractal-web-changes` (`kit_paths` of the diff
 from the merge base; `true` when that cannot be told) in `--status`, in the pre-push hook (which only asks `--status`) and in the skip of an
@@ -1714,8 +1719,8 @@ carry; run by hand, `ci-local` fetches main itself and never trusts a local ref,
 installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
 and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
 since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST2_OTELITE_BIN`, `ST3_OTELITE_BIN` and
-`FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's st state, harness
-configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
+`FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's Fractal state, harness
+configuration or credentials, and no PATH entry inside the account's Fractal state stays. Kept from the account: the cargo and
 rustup homes (the dependency cache), `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues, and the
 host's admission itself: the shims and the `build-admission` program look for their program, limits, priorities and queue state
 under the account's home, which the stages' `HOME` would hide (every build then took the shims' fallback cap under a lock of its own),
