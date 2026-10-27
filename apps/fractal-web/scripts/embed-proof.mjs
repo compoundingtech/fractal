@@ -83,16 +83,15 @@ try {
       await snapshot.locator(`html[data-scheme="${theme}"]`).waitFor()
       if (fragment.startsWith('web')) await snapshot.getByText('Let me find where groups close.', { exact: true }).waitFor()
       else {
-        assert.equal(await snapshot.getByRole('main').count(), 1)
-        await snapshot.getByRole('main').getByRole('status').waitFor()
-        assert.equal(await snapshot.getByRole('main').getAttribute('role'), null)
+        assert.equal(await snapshot.getByRole('main').count(), 0)
+        await snapshot.getByRole('region', { name: fragment === 'codex' ? 'Codex' : 'Claude Code', exact: true }).getByRole('status').waitFor()
       }
       assert.deepEqual(await snapshot.evaluate(() => window.__embedNetworkCalls), [])
       if (process.env.EMBED_SCREENSHOT_DIR) await snapshot.screenshot({ path: `${process.env.EMBED_SCREENSHOT_DIR}/${fragment}-${theme}.png` })
     } finally { await snapshot.close() }
   }
   assert.deepEqual(errors, [])
-  console.log('PASS: eight fragment/theme entries, main landmarks, and zero fetch/WebSocket/XMLHttpRequest/EventSource/sendBeacon calls')
+  console.log('PASS: eight fragment/theme entries, host-owned main landmarks, and zero fetch/WebSocket/XMLHttpRequest/EventSource/sendBeacon calls')
 } finally {
   await browser?.close()
   await new Promise(resolve => server.httpServer.close(resolve))

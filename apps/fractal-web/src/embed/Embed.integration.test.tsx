@@ -47,8 +47,10 @@ it('mounts the production entry in every fragment/theme without transport or rea
         expect(host.textContent).not.toBe('')
         expect(document.documentElement.dataset.scheme).toBe(scheme)
         if (fragment === 'codex' || fragment === 'claude-code') {
-          expect(host.querySelector('main')?.getAttribute('role')).toBeNull()
-          expect(host.querySelector('main [role="status"]')?.textContent).toContain('Capture pending')
+          expect(host.querySelector('main')).toBeNull()
+          const section = host.querySelector('section.capture-pending')
+          expect(section?.getAttribute('aria-labelledby')).toBe(section?.querySelector('h2')?.id)
+          expect(section?.querySelector('[role="status"]')?.textContent).toContain('Capture pending')
         }
         const entry = (value: unknown) => ({ version: 1, value, clock: Number.MAX_SAFE_INTEGER, writer: 'other-frame' })
         window.dispatchEvent(new StorageEvent('storage', { key: 'wf.ui@1', newValue: JSON.stringify({ version: 1, entries: { 'round2.scheme': entry(scheme === 'dark' ? 'light' : 'dark') } }) }))

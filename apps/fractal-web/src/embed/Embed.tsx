@@ -26,6 +26,7 @@ export const terminalCapture = (fragment: 'claude-code' | 'codex'): TerminalScre
   return frame === undefined ? undefined : decodeUnknownSync(TerminalScreen)(frame)
 }
 export const Embed = ({ fragment, scheme = 'dark' }: { readonly fragment: EmbedFragment; readonly scheme?: 'light' | 'dark' }) => {
+  const headingId = React.useId()
   const [registry] = React.useState(() => {
     const value = AtomRegistry.make()
     value.set(persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['dark', 'light']), defaultValue: 'dark' }), scheme)
@@ -56,8 +57,8 @@ export const Embed = ({ fragment, scheme = 'dark' }: { readonly fragment: EmbedF
   if (fragment === 'claude-code' || fragment === 'codex') {
     const screen = terminalCapture(fragment)
     return screen === undefined
-      ? <main className="capture-pending"><h1>{fragment === 'codex' ? 'Codex' : 'Claude Code'}</h1><p role="status">Capture pending — a real authenticated CLI frame has not been recorded.</p></main>
+      ? <section className="capture-pending" aria-labelledby={headingId}><h2 id={headingId}>{fragment === 'codex' ? 'Codex' : 'Claude Code'}</h2><p role="status">Capture pending — a real authenticated CLI frame has not been recorded.</p></section>
       : <DomTerminal screen={screen} palette={defaultTerminalPalette} />
   }
-  return <div ref={container} className={fragment === 'web-narrow' ? 'embed-narrow' : 'embed-wide'}><DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace dimensions={dimensions} navigation={navigation} persistGeometry={false} /></DataSourceProvider></div>
+  return <div ref={container} className={fragment === 'web-narrow' ? 'embed-narrow' : 'embed-wide'}><DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace dimensions={dimensions} navigation={navigation} persistGeometry={false} workspaceLabel={fragment === 'web-narrow' ? 'Fractal narrow client workspace' : 'Fractal web client workspace'} /></DataSourceProvider></div>
 }
