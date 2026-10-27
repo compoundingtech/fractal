@@ -19,6 +19,11 @@ declaration.
 
 ## When a seat can suspend
 
+Suspend first checks the declaration's native session arguments. An authored selector such as
+`--resume`, `--session`, or `-c` refuses with `suspend-authored-session-selection`, naming the
+selector in `details.selector`. Native resume would refuse that selector even if its transcript
+exists. This check reads no transcript, appends no claims, and leaves the seat running.
+
 A seat suspends only at a clean boundary. Core does not read harness state. Each driver adds
 `quiescent` and `blocking` to the `harness.observed` claims it already publishes, and core reads
 those two fields. Core adds its own blockers, so st refuses a suspend with a typed list of
@@ -46,6 +51,17 @@ stops the runtime, and freezes portable transcript files after the process ends.
 stays declared. Its restart policy does not restart it, `st agents restart` refuses it, and mail
 sent to it waits until it resumes.
 
+An incarnation-bearing report is accepted only while the latest runtime observation records
+that incarnation as running. The writer checks this authority before replaying or deduplicating
+a report, so retries from an ended or superseded incarnation cannot replace its successor's
+binding. During a rollout, verification records the observed replacement's runtime authority
+before waiting for its native binding.
+
+Consecutive identical native-session reports reuse the current binding claim. Switching to
+another session and then returning appends a fresh binding for the revisited session, so the
+latest claim continues to identify the active native session. Todo observations from another
+session or incarnation remain visible with stale provenance rather than appearing current.
+
 Resume launches the driver with the session in `ST3_NATIVE_RESUME_SESSION`. Each driver
 relaunches its harness on exactly that session:
 
@@ -54,7 +70,7 @@ relaunches its harness on exactly that session:
 | Claude | `claude --resume ID` | the transcript is in the workspace's Claude project directory |
 | Codex | `codex --remote … resume THREAD`, then the control connection's `thread/resume` | the app-server accepts the thread |
 | pi | `pi --session TRANSCRIPT` | the seat's transcript has the session's header |
-| omp | `omp --resume ID` | the seat's transcript has the session's header |
+| omp | `omp --resume TRANSCRIPT` | the seat's transcript has the session's header |
 | OpenCode | `opencode --session ID`, with delivery held to that session | the session is in `opencode.db`, and the server returns it |
 
 A driver that cannot resume ends the launch before the harness picks another session. It records
@@ -64,6 +80,33 @@ a `native-resume-unavailable` diagnostic whose status is the reason: `transcript
 native session. A different session (`native-session-mismatch`), no session within three minutes
 (`native-session-unbound`), or an exit before binding fails the resume. After a failed resume the
 seat stays suspended on the same snapshot, with the code and reason.
+
+## Leaving an existing suspension when resume refuses
+
+Older daemons accepted suspends whose declaration already selects a session. For omp and pi, resume
+accepts such a declaration when its one selector (omp `--resume TRANSCRIPT`, `--resume=TRANSCRIPT`
+or `-r TRANSCRIPT`; pi `--session TRANSCRIPT` or `--session=TRANSCRIPT`) is an absolute path of
+the suspended session's own transcript: the file name and the header both name that session, and
+the seat's transcript inventory resolves to the same file. st then replaces the authored selector
+with its single selector for the checked path. A selector that names another session, a relative
+path, a missing, unreadable or mismatched transcript, an inventory entry that is a different file
+(`transcript-ambiguous`), a second or conflicting selection flag, or any other harness is refused
+before the harness starts, as `authored-session-selection`, `resume-path-relative`,
+`transcript-missing`, `transcript-unreadable`, `authored-session-mismatch` or
+`transcript-ambiguous`. Suspend itself still refuses a declaration that selects a session.
+
+If resume reports `authored-session-selection`, the exit is to stop the seat and then start it:
+
+```sh
+st agents stop agent/example/worker --as person/ada
+st agents start agent/example/worker --as person/ada
+```
+
+Stop ends the suspension. Start launches the declaration with its authored selector, such as
+`--resume TRANSCRIPT`. The session kept by suspend is no longer guaranteed: the authored selector
+chooses the conversation, which may differ from the suspended session. This exit does not delete
+the saved transcript, but it gives up suspend's promise to resume that exact session. A start
+without a stop leaves the suspension in place; restart refuses while it holds the seat.
 
 ## Phases
 
@@ -76,9 +119,18 @@ resume:  restoring -> verifying   -> resumed
 move:    fencing-source -> transferring -> restoring -> verifying -> resumed        (failed: back to suspended, with a code)
 ```
 
-A suspension belongs to the launch it was taken under. Stopping the seat, or applying a
-declaration that changes how it launches, ends the suspension, and the next start follows the
-usual rules. A label change does not end it.
+A suspension belongs to the launch it was taken under. Stopping the seat or immediately applying
+a non-manual declaration that changes its launch ends the suspension. A label change does not end it.
+
+Publishing a changed launch for an owned seat with `rollout "manual"` keeps the suspension,
+including a suspend that is still in flight. Publication does not start the seat or replace its
+saved native session. Same-host resume runs the incumbent declaration on that exact session;
+the new declaration stays pending. An explicit rollout while the suspension holds the seat
+refuses with `rollout-suspended`. Resume first, then request the rollout to apply the pending
+declaration through strict native resume. See [owned-seat rollout](owned-seat-cutover.md).
+
+While the manual launch change is pending, resume on the current host. Apply the rollout
+before requesting a cross-host move. This keeps resume from applying part of the pending launch.
 
 ## Cross-host continuation
 

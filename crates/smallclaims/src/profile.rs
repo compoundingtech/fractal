@@ -5,7 +5,14 @@
 //! the store's writer and read connections and which operation held the writer meanwhile, how
 //! long its SQLite statements ran and which ones, and how much CPU its threads used. Every minute
 //! it appends one line to `minutes.jsonl`; each operation slower than `ST3_PROFILE_SLOW_MS`
-//! (default 250) appends one line to `slow.jsonl`. Unset, every hook is one relaxed atomic load.
+//! (default 250) appends one line to `slow.jsonl`. Every ten seconds, `in-flight.jsonl` records
+//! the oldest 32 unfinished operation labels/callers and ages, including queue wait. At most
+//! 4096 weak registrations are retained; overflow starts are counted cumulatively, not kept.
+//! Samples are skipped when all tracked work is younger than one second. Each JSONL output
+//! retains an active file and one predecessor, each capped at `ST3_PROFILE_FILE_BYTES`
+//! (default 8 MiB). Labels and callers in in-flight samples are capped at 256 UTF-8 bytes.
+//! Already recorded operations can remain live in workers; this is marked explicitly. Unset,
+//! every hook is one relaxed atomic load.
 //!
 //! SQLite reports a statement's time from its first step to its reset, so a query whose rows the
 //! caller processes one by one includes that processing. Statement time is an upper bound on time
@@ -13,14 +20,21 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use parking_lot::Mutex as OutputMutex;
 use serde_json::{Value, json};
+
+mod cost_counters;
+pub use cost_counters::snapshot as cost_snapshot;
+pub(crate) use cost_counters::managed_commit_succeeded;
+#[cfg(test)]
+pub(crate) use cost_counters::managed_commit_count;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static STATE: OnceLock<State> = OnceLock::new();
@@ -31,6 +45,90 @@ const WALL_BUCKETS_MS: [u64; 8] = [10, 50, 100, 250, 1_000, 5_000, 15_000, u64::
 const STATEMENT_LIMIT: usize = 400;
 /// Wall-time samples kept per label per minute for percentiles.
 const MINUTE_SAMPLES: usize = 4096;
+/// Keep weak registrations only: profiling must not prolong unfinished work.
+const IN_FLIGHT_LIMIT: usize = 4096;
+const IN_FLIGHT_LINES: usize = 32;
+const IN_FLIGHT_INTERVAL: Duration = Duration::from_secs(10);
+const IN_FLIGHT_MIN_AGE: Duration = Duration::from_secs(1);
+const IN_FLIGHT_FIELD_BYTES: usize = 256;
+const PROFILE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn in_flight_field(value: &str) -> (&str, bool) {
+    let mut end = value.len().min(IN_FLIGHT_FIELD_BYTES);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&value[..end], end < value.len())
+}
+
+#[derive(Default)]
+struct InFlight {
+    operations: HashMap<usize, Weak<OpInner>>,
+    untracked_starts: u64,
+}
+
+impl InFlight {
+    fn insert(&mut self, op: &Arc<OpInner>) {
+        if self.operations.len() < IN_FLIGHT_LIMIT {
+            self.operations
+                .insert(Arc::as_ptr(op) as usize, Arc::downgrade(op));
+        } else {
+            self.untracked_starts = self.untracked_starts.saturating_add(1);
+        }
+    }
+
+    fn remove(&mut self, op: &OpInner) {
+        self.operations.remove(&(op as *const OpInner as usize));
+    }
+}
+
+/// Snapshot metadata without borrowing operation accumulators or keeping their work alive.
+/// Ages are wall time since start, including queue wait; no current CPU is inferred.
+fn in_flight_snapshot(registry: &Mutex<InFlight>, now: Instant) -> Value {
+    let (operations, untracked_starts) = {
+        let registry = registry.lock().unwrap_or_else(PoisonError::into_inner);
+        (
+            registry.operations.values().cloned().collect::<Vec<_>>(),
+            registry.untracked_starts,
+        )
+    };
+    // Release the registry before upgrading/dropping an Arc: its last drop removes itself.
+    let mut entries = operations
+        .into_iter()
+        .filter_map(|op| {
+            let op = op.upgrade()?;
+            Some((
+                now.saturating_duration_since(op.started),
+                op.label.clone(),
+                op.caller.clone(),
+                op.recorded.load(Ordering::Relaxed),
+            ))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let tracked_live = entries.len();
+    let over_15s = entries
+        .iter()
+        .filter(|entry| entry.0 >= Duration::from_secs(15))
+        .count();
+    entries.truncate(IN_FLIGHT_LINES);
+    json!({
+        "at_unix_ms": unix_ms(), "pid": std::process::id(),
+        "tracked_live": tracked_live, "tracked_over_15s": over_15s,
+        "omitted_live": tracked_live.saturating_sub(entries.len()),
+        "untracked_starts": untracked_starts,
+        "operations": entries.into_iter().map(|(age, label, caller, recorded)| {
+            let (label, label_truncated) = in_flight_field(&label);
+            let (caller, caller_truncated) = caller.as_deref()
+                .map(in_flight_field).map_or((None, false), |(text, truncated)| (Some(text), truncated));
+            json!({
+                "label": label, "label_truncated": label_truncated,
+                "caller": caller, "caller_truncated": caller_truncated,
+                "age_ms": ms(nanos(age)), "completion_recorded": recorded,
+            })
+        }).collect::<Vec<_>>()
+    })
+}
 
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
@@ -50,20 +148,27 @@ pub fn init_from_env() {
         .and_then(|value| value.parse().ok())
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_millis(250));
-    let slow = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("slow.jsonl"))
-        .ok();
+    let file_bytes = std::env::var("ST3_PROFILE_FILE_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(PROFILE_FILE_BYTES);
+    let slow = OutputMutex::new(ProfileLog::new(&dir, "slow.jsonl", file_bytes));
+    let minutes = OutputMutex::new(ProfileLog::new(&dir, "minutes.jsonl", file_bytes));
+    let in_flight_log = OutputMutex::new(ProfileLog::new(&dir, "in-flight.jsonl", file_bytes));
     let state = State {
         dir,
         slow_after,
         minute: Mutex::new(Minute::default()),
+        cost_window: Mutex::new(cost_counters::Window::new()),
         total: Mutex::new(BTreeMap::new()),
         unlabeled: Mutex::new(HashMap::new()),
         writer_holder: Mutex::new(None),
         thread_labels: Mutex::new(HashMap::new()),
-        slow: Mutex::new(slow),
+        in_flight: Mutex::new(InFlight::default()),
+        slow,
+        minutes,
+        in_flight_log,
     };
     if STATE.set(state).is_err() {
         return;
@@ -107,6 +212,7 @@ struct State {
     dir: PathBuf,
     slow_after: Duration,
     minute: Mutex<Minute>,
+    cost_window: Mutex<cost_counters::Window>,
     total: Mutex<BTreeMap<Arc<str>, Totals>>,
     /// Work on a thread that runs no labelled operation, by thread name.
     unlabeled: Mutex<HashMap<String, Acc>>,
@@ -114,7 +220,10 @@ struct State {
     writer_holder: Mutex<Option<Arc<str>>>,
     /// The label each thread runs now, for attributing sampled thread CPU.
     thread_labels: Mutex<HashMap<i32, Arc<str>>>,
-    slow: Mutex<Option<File>>,
+    in_flight: Mutex<InFlight>,
+    slow: OutputMutex<ProfileLog>,
+    minutes: OutputMutex<ProfileLog>,
+    in_flight_log: OutputMutex<ProfileLog>,
 }
 
 #[derive(Default)]
@@ -259,6 +368,7 @@ struct SpanStat {
     max_wall_ns: u64,
     cpu_ns: u64,
     sql_ns: u64,
+    sql_count: u64,
 }
 
 impl Acc {
@@ -324,6 +434,7 @@ impl Totals {
             into.max_wall_ns = into.max_wall_ns.max(span.max_wall_ns);
             into.cpu_ns += span.cpu_ns;
             into.sql_ns += span.sql_ns;
+            into.sql_count += span.sql_count;
         }
         for (note, count) in &acc.notes {
             *into.notes.entry(note.clone()).or_default() += count;
@@ -400,6 +511,13 @@ impl Drop for OpInner {
         // Canceling an HTTP future does not stop its spawn_blocking workers. Their Op and
         // Entered guards keep this inner alive until their SQL, spans, writer holds and CPU/I/O
         // have been recorded. If the request never called finish, retain that work on last drop.
+        if let Some(state) = STATE.get() {
+            state
+                .in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(self);
+        }
         self.record("dropped");
     }
 }
@@ -493,13 +611,21 @@ impl Op {
     /// Start an operation, or nothing when profiling is off.
     pub fn start(label: impl Into<Arc<str>>, caller: Option<Arc<str>>) -> Option<Op> {
         enabled().then(|| {
-            Op(Arc::new(OpInner {
+            let op = Arc::new(OpInner {
                 label: label.into(),
                 caller,
                 started: Instant::now(),
                 acc: Mutex::new(Acc::default()),
                 recorded: AtomicBool::new(false),
-            }))
+            });
+            if let Some(state) = STATE.get() {
+                state
+                    .in_flight
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(&op);
+            }
+            Op(op)
         })
     }
 
@@ -583,10 +709,45 @@ pub fn enter(op: Option<&Op>) -> Option<Entered> {
 
 /// Run `work` as its own operation, unless this thread already works for one.
 pub fn task<T>(label: &'static str, work: impl FnOnce() -> T) -> T {
-    crate::performance::task(label, || profiled_task(label, work))
+    let _scope = task_scope(label);
+    work()
 }
 
-fn profiled_task<T>(label: &'static str, work: impl FnOnce() -> T) -> T {
+/// A synchronous task scope. Field order leaves profiling before performance/origin.
+pub(crate) struct TaskScope {
+    entered: Option<Entered>,
+    op: Option<Op>,
+    panicking_on_entry: bool,
+    _performance: crate::performance::TaskScope,
+    _origin: Option<crate::sqlite::telemetry::OriginScope>,
+}
+
+pub(crate) fn task_scope(label: &'static str) -> TaskScope {
+    let origin = crate::sqlite::telemetry::enter_task_origin(label);
+    let performance = crate::performance::task_scope(label);
+    let op = if enabled() && CURRENT.with(|current| current.borrow().is_none()) {
+        Op::start(label, None)
+    } else {
+        None
+    };
+    let entered = enter(op.as_ref());
+    TaskScope { entered, op, panicking_on_entry: std::thread::panicking(),
+        _performance: performance, _origin: origin }
+}
+
+impl Drop for TaskScope {
+    fn drop(&mut self) {
+        drop(self.entered.take());
+        if let Some(op) = self.op.take() {
+            // Preserve profiled_task's completion versus unwound/abandoned outcome.
+            if !std::thread::panicking() || self.panicking_on_entry {
+                op.finish();
+            }
+        }
+    }
+}
+
+pub(crate) fn profiled_task<T>(label: &'static str, work: impl FnOnce() -> T) -> T {
     if !enabled() || CURRENT.with(|current| current.borrow().is_some()) {
         return work();
     }
@@ -675,15 +836,17 @@ pub struct Span {
     started: Instant,
     cpu_started: u64,
     sql_started: u64,
+    sql_count_started: u64,
 }
 
 pub fn span(name: &str) -> Option<Span> {
     if !enabled() || CURRENT.with(|current| current.borrow().is_none()) {
         return None;
     }
-    let sql_started = CURRENT.with(|current| {
-        current.borrow().as_ref().map_or(0, |op| {
-            op.acc.lock().unwrap_or_else(PoisonError::into_inner).sql.ns
+    let (sql_started, sql_count_started) = CURRENT.with(|current| {
+        current.borrow().as_ref().map_or((0, 0), |op| {
+            let acc = op.acc.lock().unwrap_or_else(PoisonError::into_inner);
+            (acc.sql.ns, acc.sql.count)
         })
     });
     Some(Span {
@@ -691,6 +854,7 @@ pub fn span(name: &str) -> Option<Span> {
         started: Instant::now(),
         cpu_started: thread_cpu_ns(),
         sql_started,
+        sql_count_started,
     })
 }
 
@@ -705,12 +869,14 @@ impl Drop for Span {
             };
             let mut acc = op.acc.lock().unwrap_or_else(PoisonError::into_inner);
             let sql = acc.sql.ns.saturating_sub(self.sql_started);
+            let sql_count = acc.sql.count.saturating_sub(self.sql_count_started);
             let span = acc.spans.entry(self.name.clone()).or_default();
             span.count += 1;
             span.wall_ns += wall;
             span.max_wall_ns = span.max_wall_ns.max(wall);
             span.cpu_ns += cpu;
             span.sql_ns += sql;
+            span.sql_count += sql_count;
         });
     }
 }
@@ -728,6 +894,13 @@ pub fn sql(statement: &str, duration: Duration) {
 pub struct WriterWait {
     started: Instant,
     holder: Option<Arc<str>>,
+    // Keep queued jobs small beside always-on holders; allocate only for opt-in phase traces.
+    trace: Option<Box<WriterTrace>>,
+}
+
+struct WriterTrace {
+    holder: Option<crate::sqlite::telemetry::Origin>,
+    origin: crate::sqlite::telemetry::Origin,
 }
 
 pub fn writer_waiting() -> Option<WriterWait> {
@@ -739,7 +912,34 @@ pub fn writer_waiting() -> Option<WriterWait> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone(),
+        trace: None,
     })
+}
+
+pub(crate) fn writer_waiting_for(
+    wait: Option<WriterWait>,
+    trace_holder: Option<crate::sqlite::telemetry::Origin>,
+    trace_origin: crate::sqlite::telemetry::Origin,
+) -> WriterWait {
+    let mut wait = wait.unwrap_or_else(|| WriterWait {
+        started: Instant::now(), holder: None, trace: None,
+    });
+    wait.trace = Some(Box::new(WriterTrace { holder: trace_holder, origin: trace_origin }));
+    wait
+}
+
+impl WriterWait {
+    pub(crate) fn trace_holder(&self) -> Option<crate::sqlite::telemetry::Origin> {
+        self.trace.as_ref().and_then(|trace| trace.holder.clone())
+    }
+
+    pub(crate) fn trace_origin(&self) -> Option<&crate::sqlite::telemetry::Origin> {
+        self.trace.as_ref().map(|trace| &trace.origin)
+    }
+
+    pub(crate) fn take_trace_origin(&mut self) -> crate::sqlite::telemetry::Origin {
+        self.trace.take().map_or_else(crate::sqlite::telemetry::Origin::other, |trace| trace.origin)
+    }
 }
 
 /// The writer is this thread's now. Returns when it was taken, for `writer_released`.
@@ -874,6 +1074,7 @@ fn spans_json(acc: &Acc) -> Vec<Value> {
                 "max_ms": ms(span.max_wall_ns),
                 "cpu_ms": ms(span.cpu_ns),
                 "sql_ms": ms(span.sql_ns),
+                "sql_count": span.sql_count,
             })
         })
         .collect()
@@ -935,10 +1136,8 @@ fn write_slow(
     if let (Value::Object(line), Value::Object(detail)) = (&mut line, acc_json(acc, 6)) {
         line.extend(detail);
     }
-    let mut slow = state.slow.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(file) = slow.as_mut() {
-        let _ = writeln!(file, "{line}");
-    }
+    let mut slow = state.slow.lock();
+    let _ = slow.append(&line);
 }
 
 fn percentile(sorted: &[u64], percent: usize) -> u64 {
@@ -1031,6 +1230,7 @@ fn process_status() -> Value {
     };
     json!({
         "cpu_ticks": field(11) + field(12),
+        "start_time_ticks": field(19),
         "threads": field(17),
         "rss_pages": field(21),
         "rchar": io_field("rchar:"),
@@ -1046,6 +1246,7 @@ fn flush_loop() {
     };
     let mut previous_ticks = thread_ticks();
     let mut last_flush = Instant::now();
+    let mut last_in_flight = Instant::now();
     loop {
         std::thread::sleep(Duration::from_secs(1));
         // Sample each thread's CPU and charge it to what that thread runs now.
@@ -1078,6 +1279,10 @@ fn flush_loop() {
                 minute.ops.entry(label).or_default().sampled_cpu_ns += ns;
             }
         }
+        if last_in_flight.elapsed() >= IN_FLIGHT_INTERVAL {
+            last_in_flight = Instant::now();
+            flush_in_flight(state, last_in_flight);
+        }
         if last_flush.elapsed() < Duration::from_secs(60) {
             continue;
         }
@@ -1086,9 +1291,105 @@ fn flush_loop() {
     }
 }
 
+fn flush_in_flight(state: &State, now: Instant) {
+    let snapshot = in_flight_snapshot(&state.in_flight, now);
+    let oldest_ms = snapshot["operations"]
+        .as_array()
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry["age_ms"].as_f64())
+        .unwrap_or(0.0);
+    if oldest_ms < IN_FLIGHT_MIN_AGE.as_secs_f64() * 1_000.0 {
+        return;
+    }
+    let mut log = state.in_flight_log.lock();
+    let _ = log.append(&snapshot);
+}
+
+/// Each output owns its serialization lock. Open only after rotation, and close after each
+/// append, so no writer can retain a handle into a renamed predecessor.
+struct ProfileLog {
+    path: PathBuf,
+    previous: PathBuf,
+    limit: u64,
+}
+
+impl ProfileLog {
+    fn new(dir: &std::path::Path, name: &str, limit: u64) -> Self {
+        Self {
+            path: dir.join(name),
+            previous: dir.join(format!("{name}.1")),
+            limit,
+        }
+    }
+
+    fn size(path: &std::path::Path) -> std::io::Result<u64> {
+        match fs::metadata(path) {
+            Ok(file) => Ok(file.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn discard(path: &std::path::Path, bytes: u64) -> std::io::Result<()> {
+        match fs::remove_file(path) {
+            Ok(()) => {
+                eprintln!(
+                    "st3: profile retention dropped {bytes} bytes from {}",
+                    path.display()
+                );
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn append(&mut self, sample: &Value) -> std::io::Result<()> {
+        // Enforce a reduced limit and remove unbounded legacy files even if this sample
+        // itself is oversized. Never preserve an oversized file as a predecessor.
+        let mut size = Self::size(&self.path)?;
+        if size > self.limit {
+            Self::discard(&self.path, size)?;
+            size = 0;
+        }
+        let previous_size = Self::size(&self.previous)?;
+        if previous_size > self.limit {
+            Self::discard(&self.previous, previous_size)?;
+        }
+        let mut line = serde_json::to_vec(sample)?;
+        line.push(b'\n');
+        let bytes = line.len() as u64;
+        if bytes > self.limit {
+            eprintln!(
+                "st3: profile retention dropped oversized record ({bytes} bytes, limit {}) for {}",
+                self.limit,
+                self.path.display()
+            );
+            return Ok(());
+        }
+        if size.saturating_add(bytes) > self.limit {
+            Self::discard(&self.previous, Self::size(&self.previous)?)?;
+            fs::rename(&self.path, &self.previous)?;
+        }
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?
+            .write_all(&line)
+    }
+}
+
 fn flush_minute(state: &State) {
-    let mut minute =
-        std::mem::take(&mut *state.minute.lock().unwrap_or_else(PoisonError::into_inner));
+    let (mut minute, boundary) = {
+        let mut minute = state.minute.lock().unwrap_or_else(PoisonError::into_inner);
+        let boundary = cost_counters::Boundary::now();
+        (std::mem::take(&mut *minute), boundary)
+    };
+    // Reuse the existing process-status read; the endpoint reads only the cached snapshot.
+    let process = process_status();
+    state.cost_window.lock().unwrap_or_else(PoisonError::into_inner).complete(
+        &minute, boundary, process["start_time_ticks"].as_u64().filter(|value| *value > 0),
+    );
     let unlabeled = std::mem::take(
         &mut *state
             .unlabeled
@@ -1142,7 +1443,7 @@ fn flush_minute(state: &State) {
     let lag = &minute.lag;
     let line = json!({
         "at_unix_ms": unix_ms(),
-        "process": process_status(),
+        "process": process,
         "runtime_lag": {
             "ticks": lag.ticks,
             "over_10ms": lag.over_10ms,
@@ -1154,13 +1455,9 @@ fn flush_minute(state: &State) {
         "ops": ops,
         "callers": callers,
     });
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(state.dir.join("minutes.jsonl"))
-    {
-        let _ = writeln!(file, "{line}");
-    }
+    let mut minutes = state.minutes.lock();
+    let _ = minutes.append(&line);
+    drop(minutes);
     let mut total = state.total.lock().unwrap_or_else(PoisonError::into_inner);
     let totals = total
         .iter_mut()
@@ -1209,6 +1506,7 @@ mod tests {
         let state = STATE.get().unwrap();
         let label = "POST /invented/receive";
         let request = Op::start(label, None).unwrap();
+        let started = request.0.started;
         let worker = request.clone();
         let (acquired, took_writer) = std::sync::mpsc::sync_channel(0);
         let (release, released) = std::sync::mpsc::sync_channel(0);
@@ -1218,9 +1516,9 @@ mod tests {
             acquired.send(()).unwrap();
             released.recv().unwrap();
             {
-                let _replay = span("projection/heal-replay");
+                let _replay = span("projection/full-replay");
                 sql("SELECT invented", Duration::from_millis(3));
-                note("projection: full replay for a heal");
+                note("projection: full replay");
             }
             writer_released(writer);
             // The entered guard must account for CPU/I/O before the worker's last Op drops.
@@ -1228,15 +1526,31 @@ mod tests {
         took_writer.recv().unwrap();
         drop(request); // The HTTP future was canceled; its blocking worker continues.
         assert!(!state.total.lock().unwrap().contains_key(label));
+        flush_in_flight(state, started);
+        assert!(
+            !state.dir.join("in-flight.jsonl").exists(),
+            "subsecond work should not append a sample"
+        );
+        flush_in_flight(state, started + IN_FLIGHT_MIN_AGE);
+        let live = fs::read_to_string(state.dir.join("in-flight.jsonl")).unwrap();
+        let live: Value = serde_json::from_str(live.lines().next().unwrap()).unwrap();
+        assert_eq!(live["tracked_live"], 1);
+        assert_eq!(live["operations"][0]["label"], label);
+        assert_eq!(live["operations"][0]["completion_recorded"], false);
         release.send(()).unwrap();
         thread.join().unwrap();
+        assert_eq!(
+            in_flight_snapshot(&state.in_flight, Instant::now())["tracked_live"],
+            0
+        );
         {
             let totals = state.total.lock().unwrap();
             let recorded = totals.get(label).expect("canceled blocking work was lost");
             assert_eq!(recorded.count, 1);
             assert_eq!(recorded.acc.writer_hold.count, 1);
             assert_eq!(recorded.acc.sql.count, 1);
-            assert_eq!(recorded.acc.spans["projection/heal-replay"].count, 1);
+            assert_eq!(recorded.acc.spans["projection/full-replay"].count, 1);
+            assert_eq!(recorded.acc.spans["projection/full-replay"].sql_count, 1);
             assert!(recorded.acc.cpu_ns > 0);
         }
         let lines = fs::read_to_string(state.dir.join("slow.jsonl")).unwrap();
@@ -1246,6 +1560,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0]["completion"], "dropped");
+        let replay = records[0]["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|span| span["name"] == "projection/full-replay")
+            .unwrap();
+        assert_eq!(replay["sql_count"], 1);
 
         let completed = Op::start("GET /invented/completed", None).unwrap();
         let another_owner = completed.clone();
@@ -1255,6 +1576,172 @@ mod tests {
             state.total.lock().unwrap()["GET /invented/completed"].count,
             1
         );
+    }
+
+    fn unfinished_op(label: &str, age: Duration) -> Arc<OpInner> {
+        Arc::new(OpInner {
+            label: label.into(),
+            caller: Some("test caller".into()),
+            started: Instant::now() - age,
+            acc: Mutex::new(Acc::default()),
+            recorded: AtomicBool::new(false),
+        })
+    }
+
+    #[test]
+    fn in_flight_snapshot_reports_unfinished_work_without_retaining_it() {
+        let registry = Mutex::new(InFlight::default());
+        let op = unfinished_op("queued read", Duration::from_secs(20));
+        registry.lock().unwrap().insert(&op);
+        let sample = in_flight_snapshot(&registry, Instant::now());
+        assert_eq!(sample["tracked_live"], 1);
+        assert_eq!(sample["tracked_over_15s"], 1);
+        assert_eq!(sample["operations"][0]["label"], "queued read");
+        assert_eq!(sample["operations"][0]["caller"], "test caller");
+        assert_eq!(sample["operations"][0]["completion_recorded"], false);
+        assert!(sample["operations"][0]["age_ms"].as_f64().unwrap() >= 20_000.0);
+        assert_eq!(Arc::strong_count(&op), 1);
+        drop(op);
+        assert_eq!(
+            in_flight_snapshot(&registry, Instant::now())["tracked_live"],
+            0
+        );
+    }
+
+    #[test]
+    fn in_flight_registry_and_output_are_bounded_and_keep_oldest_work() {
+        let mut registry = InFlight::default();
+        let ops = (0..IN_FLIGHT_LIMIT + 3)
+            .map(|index| {
+                unfinished_op(
+                    &format!("read {index}"),
+                    Duration::from_millis(index as u64),
+                )
+            })
+            .collect::<Vec<_>>();
+        for op in &ops {
+            registry.insert(op);
+        }
+        let registry = Mutex::new(registry);
+        let sample = in_flight_snapshot(&registry, Instant::now());
+        assert_eq!(sample["tracked_live"], IN_FLIGHT_LIMIT);
+        assert_eq!(sample["untracked_starts"], 3);
+        assert_eq!(
+            sample["operations"].as_array().unwrap().len(),
+            IN_FLIGHT_LINES
+        );
+        assert_eq!(sample["omitted_live"], IN_FLIGHT_LIMIT - IN_FLIGHT_LINES);
+        assert_eq!(
+            sample["operations"][0]["label"],
+            format!("read {}", IN_FLIGHT_LIMIT - 1)
+        );
+        registry.lock().unwrap().remove(&ops[0]);
+        assert_eq!(
+            in_flight_snapshot(&registry, Instant::now())["tracked_live"],
+            IN_FLIGHT_LIMIT - 1
+        );
+        registry.lock().unwrap().untracked_starts = u64::MAX;
+        registry.lock().unwrap().insert(&ops[IN_FLIGHT_LIMIT]);
+        registry.lock().unwrap().insert(&ops[IN_FLIGHT_LIMIT + 1]);
+        assert_eq!(registry.lock().unwrap().untracked_starts, u64::MAX);
+    }
+
+    #[test]
+    fn in_flight_text_is_bounded_and_preserves_utf8_with_visible_truncation() {
+        let registry = Mutex::new(InFlight::default());
+        let mut op = unfinished_op(&"☃".repeat(100), Duration::from_secs(2));
+        Arc::get_mut(&mut op).unwrap().caller = Some("🧬".repeat(100).into());
+        registry.lock().unwrap().insert(&op);
+        let sample = in_flight_snapshot(&registry, Instant::now());
+        let label = sample["operations"][0]["label"].as_str().unwrap();
+        assert_eq!(label.len(), 255);
+        assert_eq!(sample["operations"][0]["label_truncated"], true);
+        assert_eq!(
+            sample["operations"][0]["caller"].as_str().unwrap().len(),
+            256
+        );
+        assert_eq!(sample["operations"][0]["caller_truncated"], true);
+    }
+
+    #[test]
+    fn profile_logs_rotate_and_keep_the_newest_complete_records() {
+        for name in ["slow.jsonl", "minutes.jsonl", "in-flight.jsonl"] {
+            let dir = tempfile::tempdir().unwrap();
+            let limit = 27; // Three nine-byte records per file.
+            let mut log = ProfileLog::new(dir.path(), name, limit);
+            for at in 0..10 {
+                log.append(&json!({"at": at})).unwrap();
+                let retained = ProfileLog::size(&log.path).unwrap()
+                    + ProfileLog::size(&log.previous).unwrap();
+                assert!(retained <= 2 * limit);
+            }
+            let mut retained = Vec::new();
+            for path in [&log.previous, &log.path] {
+                let text = fs::read_to_string(path).unwrap();
+                assert!(text.ends_with('\n'));
+                assert!(text.len() as u64 <= limit);
+                retained.extend(text.lines().map(|line| {
+                    serde_json::from_str::<Value>(line).unwrap()["at"]
+                        .as_u64()
+                        .unwrap()
+                }));
+            }
+            assert_eq!(retained, [6, 7, 8, 9]);
+            assert_eq!(fs::read_to_string(&log.path).unwrap(), "{\"at\":9}\n");
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn profile_logs_bound_legacy_files_and_oversized_records_after_restart() {
+        for name in ["slow.jsonl", "minutes.jsonl", "in-flight.jsonl"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = ProfileLog::new(dir.path(), name, 27);
+            fs::write(&log.path, [b'x'; 28]).unwrap();
+            fs::write(&log.previous, [b'x'; 28]).unwrap();
+            log.append(&json!({"oversized": "x".repeat(100)})).unwrap();
+            assert!(!log.path.exists());
+            assert!(!log.previous.exists());
+            log.append(&json!({"at": 1})).unwrap();
+            drop(log);
+            let mut log = ProfileLog::new(dir.path(), name, 9);
+            log.append(&json!({"at": 2})).unwrap();
+            let previous = fs::read(&log.previous).unwrap();
+            let current = fs::read(&log.path).unwrap();
+            log.append(&json!({"oversized": "x".repeat(100)})).unwrap();
+            assert_eq!(fs::read(&log.previous).unwrap(), previous);
+            assert_eq!(fs::read(&log.path).unwrap(), current);
+            assert_eq!(current, b"{\"at\":2}\n");
+            assert!(previous.len() + current.len() <= 18);
+        }
+    }
+
+    #[test]
+    fn concurrent_slow_writers_rotate_under_one_output_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(OutputMutex::new(ProfileLog::new(dir.path(), "slow.jsonl", 27)));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let log = Arc::clone(&log);
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        log.lock().append(&json!({"at": 0})).unwrap();
+                    }
+                });
+            }
+        });
+        let mut log = log.lock();
+        log.append(&json!({"at": 9})).unwrap();
+        for path in [&log.previous, &log.path] {
+            let text = fs::read_to_string(path).unwrap();
+            assert!(text.len() <= 27);
+            assert!(text.ends_with('\n'));
+            for line in text.lines() {
+                serde_json::from_str::<Value>(line).unwrap();
+            }
+        }
+        let current = fs::read_to_string(&log.path).unwrap();
+        assert_eq!(current.lines().last(), Some("{\"at\":9}"));
     }
 
     #[test]

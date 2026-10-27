@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
-run="mission-run/$ST_MISSION_RUN"
-mission="$(env -u ST_AGENT st3 --json mission show "$run")"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+run="mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
+mission="$(env -u FRACTAL_AGENT -u ST_AGENT st3 --json missions show "$run")"
 
 completed_steps=(
   start-team
@@ -26,7 +29,8 @@ for step in "${completed_steps[@]}"; do
 done
 
 for name in reviewer-report final-verdict; do
-  subject="resource/mission-run/$ST_MISSION_RUN/$name"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  subject="resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/$name"
   status="$(st3 subject show "$subject" --json)"
   jq -e '
     .status.subjects[0].actual | (.fields // .)

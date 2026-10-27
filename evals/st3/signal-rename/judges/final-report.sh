@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
 
-messages="$("$ST3_BIN" message ls "agent/$ST_MISSION_RUN/sig.base" --archive --from "agent/$ST_MISSION_RUN/sig.sup" --json)"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+messages="$("${FRACTAL_BIN-${ST3_BIN-}}" message ls "agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/sig.base" --archive --from "agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/sig.sup" --json)"
 matching="$(
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   jq \
-    --arg tag "mission-run:$ST_MISSION_RUN" \
+    --arg tag "mission-run:${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" \
     '[.[] | select(.tags | index($tag))]' \
     <<<"$messages"
 )"
 
 count="$(jq 'length' <<<"$matching")"
 [ "$count" -eq 1 ] || {
-  echo "FAIL: expected one final report for mission run $ST_MISSION_RUN, found $count"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  echo "FAIL: expected one final report for mission run ${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}, found $count"
   exit 1
 }
 

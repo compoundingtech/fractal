@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use st2::resource_observe::{ObserveReceipt, ObserveReceiptStatus, ObserveRequest, submit_request};
-use st2::resource_profile_supervisor::ResourceProfileSupervisor;
+use fractal_legacy_runner::resource_observe::{ObserveReceipt, ObserveReceiptStatus, ObserveRequest, submit_request};
+use fractal_legacy_runner::resource_profile_supervisor::ResourceProfileSupervisor;
 
 static STATE_ENV: Mutex<()> = Mutex::new(());
 const WAIT: Duration = Duration::from_secs(30);
@@ -75,7 +75,7 @@ fn supervisor_compatibility_contract_uses_the_production_pty_component() {
             .health()
             .iter()
             .any(|health| health.binding.as_deref() == Some("observed")
-                && health.state == st2::resource_profile::RuntimeHealthState::Degraded)
+                && health.state == fractal_legacy_runner::resource_profile::RuntimeHealthState::Degraded)
     );
 
     write_executable(
@@ -89,7 +89,7 @@ fn supervisor_compatibility_contract_uses_the_production_pty_component() {
             .health()
             .iter()
             .any(|health| health.binding.as_deref() == Some("observed")
-                && health.state == st2::resource_profile::RuntimeHealthState::Ready)
+                && health.state == fractal_legacy_runner::resource_profile::RuntimeHealthState::Ready)
     );
     let recovered_bytes = fs::read(pty.snapshot()).unwrap();
     drop(pty);
@@ -273,7 +273,7 @@ fn production_component_preserves_resync_filter_catch_up_and_scope_isolation() {
         .unwrap();
     assert_eq!(pending.status, ObserveReceiptStatus::SettledChanged);
     assert_eq!(resync_inbox(&primary.agent), first_inbox);
-    st2::event::publish_owner_binding_for_test(&primary.root, &primary.host).unwrap();
+    fractal_legacy_runner::event::publish_owner_binding_for_test(&primary.root, &primary.host).unwrap();
     primary.refresh();
     let caught_up = wait_until("pending resync replay", || {
         let inbox = resync_inbox(&primary.agent);
@@ -425,7 +425,7 @@ fn production_demand_jobs_coalesce_queue_disconnect_and_fence_generation() {
     drop(disconnected_client);
     release_fifo(&fifo);
     let disconnected_receipt = wait_until("receipt after client disconnect", || {
-        st2::resource_observe::read_receipt(&fixture.observe_receipt_dir(), &disconnected_id)
+        fractal_legacy_runner::resource_observe::read_receipt(&fixture.observe_receipt_dir(), &disconnected_id)
             .ok()
             .flatten()
             .filter(|receipt| receipt.status.is_terminal())
@@ -446,7 +446,7 @@ fn production_demand_jobs_coalesce_queue_disconnect_and_fence_generation() {
     fixture.refresh_generation(1);
     assert!(future_path.is_file());
     assert!(
-        st2::resource_observe::read_receipt(&fixture.observe_receipt_dir(), &future.request_id,)
+        fractal_legacy_runner::resource_observe::read_receipt(&fixture.observe_receipt_dir(), &future.request_id,)
             .unwrap()
             .is_none()
     );
@@ -482,7 +482,7 @@ fn production_demand_jobs_coalesce_queue_disconnect_and_fence_generation() {
         ObserveReceiptStatus::StaleGeneration
     );
 
-    let config_path = st2::catalog::config_path(&fixture.root);
+    let config_path = fractal_legacy_runner::catalog::config_path(&fixture.root);
     let without_demand = fs::read_to_string(&config_path)
         .unwrap()
         .replace("    demand #true\n", "    demand #false\n");
@@ -500,14 +500,14 @@ fn production_demand_jobs_coalesce_queue_disconnect_and_fence_generation() {
 
 #[test]
 fn durable_admission_retains_the_256_request_boundary_without_a_runtime() {
-    use st2::resource_observe::{MAX_PENDING_OBSERVE_REQUESTS, ObserveAdmissionBackpressure};
+    use fractal_legacy_runner::resource_observe::{MAX_PENDING_OBSERVE_REQUESTS, ObserveAdmissionBackpressure};
     let _guard = STATE_ENV.lock();
 
     let temporary = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("XDG_STATE_HOME", temporary.path().join("state")) };
     let root = temporary.path();
     let host = "capacity";
-    st2::event::publish_owner_binding_for_test(root, host).unwrap();
+    fractal_legacy_runner::event::publish_owner_binding_for_test(root, host).unwrap();
     let barrier = Arc::new(Barrier::new(MAX_PENDING_OBSERVE_REQUESTS + 1));
     let submissions = (0..=MAX_PENDING_OBSERVE_REQUESTS)
         .map(|index| {
@@ -556,7 +556,7 @@ fn wait_receipt_status(
     status: ObserveReceiptStatus,
 ) -> ObserveReceipt {
     wait_until(status.wire_str(), || {
-        st2::resource_observe::read_receipt(&fixture.observe_receipt_dir(), request_id)
+        fractal_legacy_runner::resource_observe::read_receipt(&fixture.observe_receipt_dir(), request_id)
             .ok()
             .flatten()
             .filter(|receipt| receipt.status == status)
@@ -682,14 +682,14 @@ impl ProviderFixture {
         )
         .unwrap();
         fs::write(
-            st2::catalog::config_path(&root),
+            fractal_legacy_runner::catalog::config_path(&root),
             format!(
                 "profile {scheme:?} {{\n  wasm \"resolver.wasm\"\n  class \"immediate\"\n  runtime {{\n    component \"providers/provider.component.wasm\"\n    demand #true\n    {capability}\n  }}\n}}\n"
             ),
         )
         .unwrap();
         write_agent(&agent, &host, uri, selector);
-        st2::event::publish_owner_binding_for_test(&root, &host).unwrap();
+        fractal_legacy_runner::event::publish_owner_binding_for_test(&root, &host).unwrap();
         let supervisor = ResourceProfileSupervisor::new(root.clone(), host.clone()).unwrap();
         let fixture = Self {
             root,
@@ -708,8 +708,8 @@ impl ProviderFixture {
     }
 
     fn refresh_generation(&self, generation: u64) {
-        let (config, profiles) = st2::catalog::declared_profile_catalog(&self.root).unwrap();
-        let discovery = st2::discover_strict(&self.root);
+        let (config, profiles) = fractal_legacy_runner::catalog::declared_profile_catalog(&self.root).unwrap();
+        let discovery = fractal_legacy_runner::discover_strict(&self.root);
         assert!(discovery.errors.is_empty(), "{:?}", discovery.errors);
         let report =
             self.supervisor
@@ -722,14 +722,14 @@ impl ProviderFixture {
         write_agent(&self.agent, &self.host, &self.uri, selector);
     }
 
-    fn observe(&self, prior: Option<st2::resource_profile::SnapshotDigest>) -> ObserveReceipt {
+    fn observe(&self, prior: Option<fractal_legacy_runner::resource_profile::SnapshotDigest>) -> ObserveReceipt {
         self.observe_generation(1, prior)
     }
 
     fn observe_generation(
         &self,
         generation: u64,
-        prior: Option<st2::resource_profile::SnapshotDigest>,
+        prior: Option<fractal_legacy_runner::resource_profile::SnapshotDigest>,
     ) -> ObserveReceipt {
         let request = ObserveRequest::new(
             format!("{}.worker", self.host),
@@ -749,7 +749,7 @@ impl ProviderFixture {
     fn request(
         &self,
         generation: u64,
-        prior: Option<st2::resource_profile::SnapshotDigest>,
+        prior: Option<fractal_legacy_runner::resource_profile::SnapshotDigest>,
     ) -> ObserveRequest {
         ObserveRequest::new(
             format!("{}.worker", self.host),
@@ -765,7 +765,7 @@ impl ProviderFixture {
     }
 
     fn observe_request_dir(&self) -> PathBuf {
-        st2::park::SupervisorScope::current(&self.root, &self.host)
+        fractal_legacy_runner::park::SupervisorScope::current(&self.root, &self.host)
             .unwrap()
             .park_dir()
             .parent()
@@ -774,7 +774,7 @@ impl ProviderFixture {
     }
 
     fn observe_receipt_dir(&self) -> PathBuf {
-        st2::park::SupervisorScope::current(&self.root, &self.host)
+        fractal_legacy_runner::park::SupervisorScope::current(&self.root, &self.host)
             .unwrap()
             .park_dir()
             .parent()
@@ -783,7 +783,7 @@ impl ProviderFixture {
     }
 
     fn owner_binding_path(&self) -> PathBuf {
-        st2::park::SupervisorScope::current(&self.root, &self.host)
+        fractal_legacy_runner::park::SupervisorScope::current(&self.root, &self.host)
             .unwrap()
             .park_dir()
             .parent()
