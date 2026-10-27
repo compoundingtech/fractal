@@ -362,6 +362,7 @@
   },
   "fractal-tui": {
    "extra": [
+    "clients",
     "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/fixtures/terminal-screen.json",
     "fixtures/clients",
@@ -373,7 +374,9 @@
    "extra": [
     "fixtures/clients/documents-v1.json",
     "fixtures/clients/sidebar-v2.json",
-    "fixtures/clients/words.json"
+    "fixtures/clients/words.json",
+    "fixtures/scenarios",
+    "scripts/ci-test-paths.rs"
    ]
   },
   "fractal-vista-component": {

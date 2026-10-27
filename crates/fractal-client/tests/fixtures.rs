@@ -423,6 +423,7 @@ fn generated_resource_union_decodes_all_kinds() {
     assert_eq!(subagent.work_id.as_deref(), Some("step-run/release/build"));
     assert_eq!(subagent.lease_expires_at, "2026-09-20T11:17:10Z");
     assert!(!agent.extra.contains_key("subagents"));
+    assert_eq!(agent.background_jobs, None, "an older card without the field is unknown");
     let machine = resources
         .iter()
         .find_map(|resource| match resource {
@@ -443,6 +444,29 @@ fn generated_resource_union_decodes_all_kinds() {
         .unwrap();
     assert_eq!(device.person_id.as_deref(), Some("person/alex"));
     assert_eq!(device.state, "active");
+}
+
+#[test]
+fn agent_background_jobs_decode_as_known_count_or_unknown() {
+    let resources: Vec<serde_json::Value> =
+        serde_json::from_slice(&fixture("resources.json")).unwrap();
+    let card = resources
+        .into_iter()
+        .find(|resource| resource["kind"] == "agent")
+        .unwrap();
+    for (wire, expected) in [
+        (serde_json::json!(2), Some(2)),
+        (serde_json::json!(0), Some(0)),
+        (serde_json::Value::Null, None),
+    ] {
+        let mut card = card.clone();
+        card["background_jobs"] = wire;
+        let Resource::Agent(agent) = serde_json::from_value(card).unwrap() else {
+            panic!("agent discriminator was not preserved");
+        };
+        assert_eq!(agent.background_jobs, expected);
+        assert!(!agent.extra.contains_key("background_jobs"));
+    }
 }
 
 #[test]
@@ -944,7 +968,7 @@ fn assistant_read_contract_decodes_fixtures_and_rejects_malformed_shapes() {
 }
 
 #[test]
-fn queued_mission_deadlines_decode_for_stui() {
+fn queued_mission_deadlines_decode_for_tui() {
     let mut wire: serde_json::Value =
         serde_json::from_slice(&fixture("person-ask-mission.json")).unwrap();
     wire["run_details"][0]["after"] = serde_json::json!("mission-run/predecessor");

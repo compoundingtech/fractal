@@ -1,6 +1,6 @@
 import { scenarioDomainFixture } from '@fractal/scenarios/domain-fixture'
 import type { WireSlice } from '@fractal/scenarios/react'
-import type { TranscriptHistory, TranscriptTurn } from './assistant-ui/composition/Transcript'
+import { transcriptInitialSourceRowCount, type TranscriptHistory, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 import type { Sender, TextItem, ToolCallItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 
@@ -12,8 +12,40 @@ type Prompt = TextItem & { readonly role: 'user' }
 export interface TranscriptSection { readonly id: string; readonly title: string; readonly turns: readonly TranscriptTurn[]; readonly history?: TranscriptHistory }
 const operator: Sender = { kind: 'human', label: 'Operator' }
 const assistant: Sender = { kind: 'agent', label: 'Assistant' }
-/** Transcript defers turns beyond its tail plus one history batch; sections of at most this many turns mount whole. */
-const sectionTurns = 6
+const sourceRows = (turn: TranscriptTurn) => turn.prompt === undefined ? turn.items.length : turn.items.length + 1
+/**
+ * Bounded sections mount whole: each holds at most Transcript's initial source rows (prompts and items). A turn with
+ * more rows continues in the next section without its prompt, as a host shows history that starts mid-turn; only its
+ * last part carries the run's live, failed or interrupted state.
+ */
+function sourceRowParts(turn: TranscriptTurn): TranscriptTurn[] {
+  if (sourceRows(turn) <= transcriptInitialSourceRowCount) return [turn]
+  const promptRows = turn.prompt === undefined ? 0 : 1
+  const parts = Math.ceil(sourceRows(turn) / transcriptInitialSourceRowCount)
+  return Array.from({ length: parts }, (_, part) => {
+    const items = turn.items.slice(Math.max(0, part * transcriptInitialSourceRowCount - promptRows), (part + 1) * transcriptInitialSourceRowCount - promptRows)
+    const ids = new Set(items.map(item => item.id))
+    const last = part === parts - 1
+    return {
+      ...turn, id: part === 0 ? turn.id : `${turn.id}/part-${part + 1}`, prompt: part === 0 ? turn.prompt : undefined, items,
+      work: { ...turn.work, calls: turn.work.calls.filter(call => ids.has(call.id)), running: last && turn.work.running, failed: last && turn.work.failed, interrupted: last && turn.work.interrupted },
+    }
+  })
+}
+/** Greedily packs whole turn parts into sections of at most Transcript's initial source rows. */
+function boundedGroups(turns: readonly TranscriptTurn[]): TranscriptTurn[][] {
+  const groups: TranscriptTurn[][] = []
+  let rows = transcriptInitialSourceRowCount
+  for (const part of turns.flatMap(sourceRowParts)) {
+    if (rows + sourceRows(part) > transcriptInitialSourceRowCount) {
+      groups.push([])
+      rows = 0
+    }
+    groups.at(-1)!.push(part)
+    rows += sourceRows(part)
+  }
+  return groups
+}
 /** The scenario factories and recordings currently emit shell/edit; reads remain read operations. */
 const toolKinds: Readonly<Record<'shell' | 'edit' | 'read' | 'read_file', 'run' | 'edit' | 'read'>> = { shell: 'run', edit: 'edit', read: 'read', read_file: 'read' }
 const kindFor = (name: string) => {
@@ -65,8 +97,7 @@ export const scenarioSections = ({ loading, state }: WireSlice<'conversation'>, 
   sections: loading ? [] : state.threads.flatMap(thread => {
     const incomplete = thread.has_more || (thread.history?.committed_from_sequence ?? 1) > 1
     const turns = threadTurns(thread.items, incomplete)
-    const sectionSize = grouping === 'whole-thread' ? Math.max(1, turns.length) : sectionTurns
-    const count = Math.max(1, Math.ceil(turns.length / sectionSize))
-    return Array.from({ length: count }, (_, index): TranscriptSection => ({ id: `${thread.agent}/${index}`, title: count === 1 ? thread.agent : `${thread.agent} · part ${index + 1} of ${count}`, turns: turns.slice(index * sectionSize, (index + 1) * sectionSize), history: index === 0 && incomplete ? { _tag: 'HasOlder' } : { _tag: 'Complete' } }))
+    const groups = grouping === 'whole-thread' || turns.length === 0 ? [turns] : boundedGroups(turns)
+    return groups.map((group, index): TranscriptSection => ({ id: `${thread.agent}/${index}`, title: groups.length === 1 ? thread.agent : `${thread.agent} · part ${index + 1} of ${groups.length}`, turns: group, history: index === 0 && incomplete ? { _tag: 'HasOlder' } : { _tag: 'Complete' } }))
   }),
 })

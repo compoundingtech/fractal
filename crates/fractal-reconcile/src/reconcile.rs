@@ -2552,7 +2552,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             for claim in self
                 .store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))?
+                .harness_diagnostics(&subject.subject)?
+                .iter()
             {
                 let fields = claim.body.get("fields").unwrap_or(&claim.body);
                 if fields.get("code").and_then(Value::as_str) != Some("provider-capacity")
@@ -3939,7 +3940,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_provider_capacity_retry(&self, subject: &DesiredSubject, now: u128) -> Result<()> {
         for claim in self
             .store
-            .claims_for(&subject.subject, Some("harness.diagnostic"))?
+            .harness_diagnostics(&subject.subject)?
+            .iter()
         {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             if fields.get("code").and_then(Value::as_str) != Some("provider-capacity")
@@ -3988,7 +3990,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ),
                         ("status".into(), Value::String("accepted".into())),
                     ]),
-                    evidence: vec![claim.id],
+                    evidence: vec![claim.id.clone()],
                     expected_subject: None,
                     idempotency_key: Some(retry_key),
                 })?;
@@ -4038,7 +4040,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ]),
                     ),
                 ]),
-                evidence: vec![claim.id],
+                evidence: vec![claim.id.clone()],
                 expected_subject: None,
                 idempotency_key: Some(retry_key),
             })?;
@@ -4380,7 +4382,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         current_incarnation: &str,
     ) -> Result<()> {
-        for claim in self.store.claims_for(subject, Some("harness.diagnostic"))? {
+        for claim in self.store.harness_diagnostics(subject)?.iter() {
             if claim.body.pointer("/fields/code").and_then(Value::as_str)
                 != Some("provider-auth-expired")
             {
@@ -4600,7 +4602,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // replayed pass records it once and a later prompt of the same kind is its own.
             let earlier = self
                 .store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))?
+                .harness_diagnostics(&subject.subject)?
                 .iter()
                 .filter(|claim| {
                     claim.body.pointer("/fields/code").and_then(Value::as_str)
@@ -4831,13 +4833,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut key = format!("{prefix}:{}:{incarnation}", subject.subject);
             for claim in self
                 .store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))?
+                .harness_diagnostics(&subject.subject)?
+                .iter()
             {
-                if claim_incarnation(&claim) != Some(incarnation) {
+                if claim_incarnation(claim) != Some(incarnation) {
                     continue;
                 }
                 match claim.body.pointer("/fields/code").and_then(Value::as_str) {
-                    Some(found) if found == code => fence = Some(claim),
+                    Some(found) if found == code => fence = Some(claim.clone()),
                     Some(found) if found == restored => {
                         fence = None;
                         key = format!("{prefix}:{}:{incarnation}:{}", subject.subject, claim.id);
@@ -5368,12 +5371,13 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn claude_trust_prompts(&self, subject: &str) -> Result<Vec<crate::model::ClaimRecord>> {
         Ok(self
             .store
-            .claims_for(subject, Some("harness.diagnostic"))?
-            .into_iter()
+            .harness_diagnostics(subject)?
+            .iter()
             .filter(|claim| {
                 claim.body.pointer("/fields/code").and_then(Value::as_str)
                     == Some("provider-trust-prompt")
             })
+            .cloned()
             .collect())
     }
 
@@ -8021,13 +8025,33 @@ impl<R: RuntimeControl> Reconciler<R> {
                     );
                 };
                 let mut resumed = member.clone();
-                resumed
-                    .environment
-                    .insert(suspended::RESUME_ENV.into(), session);
                 if agent.starts_with("agent/import/omp/") {
-                    // A cold resume names the suspension's session, not the import.
+                    // The authored import path may name an older session; recover the captured
+                    // incarnation's binding below instead of carrying that path into a cold resume.
                     crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
                 }
+                // Recover the suspended incarnation's durable path, not the current launch's
+                // latest binding. The snapshot's existing native ID remains the resume fence.
+                if let (Some(incarnation), Some(harness)) =
+                    (suspension.incarnation_id.as_deref(), suspension.harness.as_deref())
+                {
+                    match suspended::bound_session_path(
+                        &self.store, agent, incarnation, harness, &session,
+                    ) {
+                        Ok(Some(path)) => {
+                            crate::environment::set(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV, path);
+                        }
+                        Ok(None) => {
+                            crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
+                        }
+                        Err(error) => {
+                            return self.fail_suspension(
+                                agent, suspension, "snapshot-binding-changed", format!("{error:#}"), Vec::new(),
+                            );
+                        }
+                    }
+                }
+                crate::environment::set(&mut resumed.environment, suspended::RESUME_ENV, session);
                 if let Err(error) =
                     self.perform_start(subject, &resumed, "a suspended seat was resumed")
                 {
@@ -8793,8 +8817,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let token = self.launch_token(&subject.subject)?;
                     let diagnostic = self
                         .store
-                        .claims_for(&subject.subject, Some("harness.diagnostic"))?
-                        .into_iter()
+                        .harness_diagnostics(&subject.subject)?
+                        .iter()
                         .rev()
                         .find(|claim| {
                             claim.body.pointer("/fields/code").and_then(Value::as_str)

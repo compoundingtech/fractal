@@ -72,6 +72,7 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
         assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let store = state.store.clone();
     let intent = fractal_daemon::graph::parse_intent(SOURCE, "studio").unwrap();
