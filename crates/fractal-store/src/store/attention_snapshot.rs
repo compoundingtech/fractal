@@ -10,9 +10,15 @@ struct OperationalFailures(Mutex<Option<FoldedFailures>>);
 type FoldedFailures = ((u64, u64), Arc<Vec<AttentionRequestView>>);
 
 #[cfg(any(test, feature = "test-support"))]
+pub type FaultIncarnationReadHook = Box<dyn FnMut(&str)>;
+
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// How often this thread folded the operational failure claims.
     pub static OPERATIONAL_FAILURE_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Runs after an incarnation lookup, never after a memo hit.
+    pub static FAULT_INCARNATION_READ_HOOK: std::cell::RefCell<Option<FaultIncarnationReadHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// How long a run whose cleanup failed shows that fault after it finishes.
@@ -1199,14 +1205,16 @@ impl Store {
         Ok(items)
     }
 
-    /// Return this call's history cut for the broken-gate reducer, without caching authority.
-    /// Read it at its original first-use point, after the derived fault families below.
+    /// Revalidate operational failures at one SQLite read cut, including all nested readers.
+    /// The history cut returned for broken gates and the local incarnation memo share that cut.
     pub fn operational_attention_items_with_failures(
         &self,
         person: Option<&str>,
         as_of: u128,
     ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
-        self.operational_attention_items_with_failures_impl::<true>(person, as_of)
+        self.read_snapshot_unindexed(|| {
+            self.operational_attention_items_with_failures_impl::<true>(person, as_of)
+        })
     }
 
     /// The pre-optimization reader, retained only as an exact-output and SQL-work oracle.
@@ -1217,7 +1225,9 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
-        self.operational_attention_items_with_failures_impl::<false>(person, as_of)
+        self.read_snapshot_unindexed(|| {
+            self.operational_attention_items_with_failures_impl::<false>(person, as_of)
+        })
     }
 
     fn operational_attention_items_with_failures_impl<const MEMOIZE: bool>(
@@ -1379,6 +1389,12 @@ impl Store {
                     let current = actual.as_ref().and_then(|v| {
                         v.pointer("/fields/incarnation_id").or_else(|| v.get("incarnation_id"))
                     }).and_then(Value::as_str).map(str::to_owned);
+                    #[cfg(any(test, feature = "test-support"))]
+                    FAULT_INCARNATION_READ_HOOK.with(|hook| {
+                        if let Some(hook) = hook.borrow_mut().as_mut() {
+                            hook(source);
+                        }
+                    });
                     incarnations.insert(source.clone(), current);
                 }
                 if incarnations.get(source.as_str()).and_then(|value| value.as_deref()) != Some(incarnation) {

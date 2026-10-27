@@ -317,7 +317,10 @@ fn append_snapshot_wake(
 }
 
 fn exhausted_snapshot_fixture() -> (Store, MissionRunView, StepRunView) {
-    let store = Store::open_memory("node").unwrap();
+    exhausted_snapshot_fixture_in(Store::open_memory("node").unwrap())
+}
+
+fn exhausted_snapshot_fixture_in(store: Store) -> (Store, MissionRunView, StepRunView) {
     publish_mission(
         &store,
         r#"version 2
@@ -502,4 +505,197 @@ fn fault_snapshot_reference_preserves_effective_readiness_after_person_wait() {
         .collect::<Vec<_>>();
     assert_eq!(wakes.len(), 1);
     assert_eq!(wakes[0].item.title, "exhausted wake person-wait-ended");
+}
+
+struct FaultIncarnationHookReset;
+
+impl Drop for FaultIncarnationHookReset {
+    fn drop(&mut self) {
+        fractal_store::store::attention_snapshot::FAULT_INCARNATION_READ_HOOK.with(|hook| {
+            hook.borrow_mut().take();
+        });
+    }
+}
+
+fn install_fault_incarnation_hook(hook: impl FnMut(&str) + 'static) -> FaultIncarnationHookReset {
+    fractal_store::store::attention_snapshot::FAULT_INCARNATION_READ_HOOK.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    FaultIncarnationHookReset
+}
+
+#[test]
+fn operational_snapshot_pins_incarnations_across_concurrent_commits() {
+    // Exercise both entrypoints: the non-memoizing oracle must also pin its reads.
+    for reference in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("incarnation-cut.sqlite3");
+        let (store, _run, _step) =
+            exhausted_snapshot_fixture_in(Store::open(&path, "node").unwrap());
+        append_snapshot_fixture_claim(
+            &store, "agent/node.other", "runtime.observed",
+            json!({"status": "running", "runtime_id": "node.other", "incarnation_id": "other-current"}),
+            "snapshot-other-runtime",
+        );
+        append_snapshot_fixture_claim(
+            &store, "agent/node.other", "operational.failure",
+            json!({
+                "episode": "snapshot-other", "condition": "observed",
+                "reviewer": "agent/node.ops", "title": "other incarnation",
+                "reason": "second source at the same cut", "severity": "error",
+                "targets": ["agent/node.other"], "incarnation": "other-current",
+            }),
+            "snapshot-other-failure",
+        );
+        let as_of = now_ms();
+        assert_eq!(assert_reference_snapshot_parity(&store, as_of).len(), 6);
+        let read = || {
+            if reference {
+                store.operational_attention_items_with_failures_reference(None, as_of)
+            } else {
+                store.operational_attention_items_with_failures(None, as_of)
+            }
+        };
+        let expected = read().unwrap();
+        let sources = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let observed = sources.clone();
+        let reset = install_fault_incarnation_hook(move |source| {
+            let first = observed.borrow().is_empty();
+            observed.borrow_mut().push(source.to_owned());
+            if first {
+                // Join proves the WAL writer committed before any subsequent lookup.
+                // Opening/writing on this thread would inherit the pinned reader.
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let writer = Store::open(&path, "node").unwrap();
+                    observe_snapshot_incarnation(&writer, "worker-next");
+                    append_snapshot_fixture_claim(
+                        &writer, "agent/node.other", "runtime.observed",
+                        json!({"status": "running", "runtime_id": "node.other", "incarnation_id": "other-next"}),
+                        "snapshot-other-next-runtime",
+                    );
+                }).join().unwrap();
+            }
+        });
+        let actual = read().unwrap();
+        drop(reset);
+        let sources = sources.borrow();
+        assert!(sources.iter().any(|source| source == "agent/node.worker"));
+        assert!(sources.iter().any(|source| source == "agent/node.other"));
+        if !reference {
+            assert_eq!(sources.len(), 2, "one actual lookup per distinct source");
+        }
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap(),
+            "all items and retained failures stay at the original cut (reference={reference})",
+        );
+        assert!(read().unwrap().0.is_empty(), "the next call observes both committed incarnations");
+        assert!(assert_reference_snapshot_parity(&store, as_of).is_empty());
+    }
+}
+
+#[test]
+fn operational_snapshot_caches_repeated_negative_incarnation_lookup() {
+    let (store, _run, _step) = exhausted_snapshot_fixture();
+    // This declared agent has never had a runtime observation.
+    assert!(store.latest_actual_value("agent/node.other").unwrap().is_none());
+    for index in 0..3 {
+        let episode = format!("snapshot-missing-runtime-{index}");
+        append_snapshot_fixture_claim(
+            &store, "agent/node.other", "operational.failure",
+            json!({
+                "episode": episode, "condition": "observed", "reviewer": "agent/node.ops",
+                "title": episode, "reason": "no runtime observation", "severity": "error",
+                "targets": ["agent/node.other"], "incarnation": "never-observed",
+            }),
+            &episode,
+        );
+    }
+    let as_of = now_ms();
+    let expected = store.operational_attention_items_with_failures_reference(None, as_of).unwrap();
+    let lookups = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = lookups.clone();
+    let reset = install_fault_incarnation_hook(move |source| {
+        if source == "agent/node.other" {
+            observed.set(observed.get() + 1);
+        }
+    });
+    let actual = store.operational_attention_items_with_failures(None, as_of).unwrap();
+    drop(reset);
+    assert_eq!(lookups.get(), 1, "None is memoized, not looked up for each failure");
+    assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
+    let faults = assert_reference_snapshot_parity(&store, as_of);
+    assert_eq!(faults.len(), 5);
+    assert!(faults.iter().all(|fault| !fault.item.title.starts_with("snapshot-missing-runtime-")));
+}
+
+#[test]
+fn fault_snapshot_reference_invalidates_exhausted_wake_after_real_reassignment() {
+    let (store, run, step) = exhausted_snapshot_fixture();
+    assert!(assert_reference_snapshot_parity(&store, now_ms())
+        .iter().any(|fault| fault.item.title == "exhausted wake current"));
+    store.work_action(
+        &step.subject, "claim",
+        &WorkRequest {
+            wait_ms: None,
+            actor: Some("agent/node.worker".into()),
+            incarnation: Some("worker-current".into()),
+            summary: None,
+            reason: None,
+            evidence: Vec::new(),
+            idempotency_key: "snapshot-reassignment-claim".into(),
+        },
+    ).unwrap();
+    let reassigned = store.handoff_work(
+        &step.subject,
+        &crate::model::WorkHandoffRequest {
+            actor: "agent/node.worker".into(),
+            incarnation: Some("worker-current".into()),
+            to: "agent/node.other".into(),
+            note: "Continue the ready work on the other seat.".into(),
+            evidence: Vec::new(),
+            idempotency_key: "snapshot-reassignment-handoff".into(),
+        },
+    ).unwrap();
+    assert_eq!(reassigned.assigned_to.as_deref(), Some("agent/node.other"));
+    assert_eq!(reassigned.subject, step.subject);
+    assert_eq!(reassigned.generation, run.generation);
+    assert!(assert_reference_snapshot_parity(&store, now_ms())
+        .iter().all(|fault| !fault.item.title.starts_with("exhausted wake")));
+}
+
+#[test]
+fn fault_snapshot_reference_invalidates_exhausted_wake_after_real_generation_replacement() {
+    let (store, run, step) = exhausted_snapshot_fixture();
+    assert!(assert_reference_snapshot_parity(&store, now_ms())
+        .iter().any(|fault| fault.item.title == "exhausted wake current"));
+    let revised = publish_mission(
+        &store,
+        r#"version 2
+agent "worker" { workspace "/tmp"; command "true" }
+agent "other" { workspace "/tmp"; command "true" }
+agent "ops" { command "true"; handles-faults }
+mission "snapshot-work" state="ready" {
+  goal "Exercise a replacement generation."
+  step "work" { assigned-to "agent/node.worker" }
+}"#,
+        "snapshot-generation-publish",
+    );
+    let adopted = store.adopt_mission_revision(
+        &run.id, &revised, "person/operator", "Replace the generation.", "snapshot-generation",
+    ).unwrap();
+    assert_ne!(adopted.generation, run.generation);
+    let replacement = &adopted.steps[0];
+    assert_ne!(replacement.subject, step.subject);
+    assert_eq!(replacement.assigned_to, step.assigned_to);
+    store.set_step_state(&replacement.subject, "ready", None).unwrap();
+    assert!(assert_reference_snapshot_parity(&store, now_ms())
+        .iter().all(|fault| !fault.item.title.starts_with("exhausted wake")));
+    // A fresh diagnostic for the replacement still surfaces normally.
+    let ready = store.step_run(&replacement.subject).unwrap().unwrap();
+    append_snapshot_wake(&store, &ready, "replacement-generation");
+    assert!(assert_reference_snapshot_parity(&store, now_ms())
+        .iter().any(|fault| fault.item.title == "exhausted wake replacement-generation"));
 }
