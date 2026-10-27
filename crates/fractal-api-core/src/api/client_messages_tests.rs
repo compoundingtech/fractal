@@ -194,6 +194,7 @@ async fn messages_paging_legacy_shape_without_negotiation() {
             ]),
         );
     }
+    publish_selectors(&state);
     let expected = client_message_resources(&state.store, Some("person/alex"), true, None).unwrap();
     assert_eq!(expected.len(), 2, "the paired reader must receive both oversized resources");
     assert!(expected.iter().all(|item| item["title"].as_str().unwrap().len() == 600_000));
@@ -250,6 +251,7 @@ async fn messages_paging_legacy_shape_without_negotiation() {
             ("status".into(), json!("sent")),
         ]),
     );
+    publish_selectors(&state);
     let oversized = "/v1/client/messages?history=true&actor=person%2Frobin&limit=1";
     let (status, page) = paging_request(
         app.clone(), oversized, Some("legacy-reader"), None,
@@ -261,6 +263,14 @@ async fn messages_paging_legacy_shape_without_negotiation() {
     ).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
     assert_eq!(error["code"], "response-too-large");
+}
+
+/// Publish pending message selectors, as the maintenance worker does. A commit folds them
+/// within a 10 ms budget, so on a busy host a large message can still be pending after its
+/// append, and a v2 page reads only through the published frontier, without it.
+fn publish_selectors(state: &AppState) {
+    while state.store.maintain_client_message_selectors().unwrap() {}
+    assert!(!state.store.client_message_selectors_pending().unwrap());
 }
 
 fn append_fixture_claim(
@@ -586,6 +596,7 @@ async fn sql_message_page_counts_attachment_and_envelope_at_exact_boundary() {
     // A supported folded attachment has no inline-body limit. Tune its ASCII
     // name using the real serialized response, not a guessed metadata allowance.
     append_byte_budget_message(&state.store, 0, "body", Some(""));
+    publish_selectors(&state);
     let query = ClientListQuery { history: true, limit: Some(1), ..Default::default() };
     let snapshot = new_client_snapshot(&state);
     let (Extension(returned), Json(page)) = client_messages_sql_page_with_envelope(
@@ -600,6 +611,7 @@ async fn sql_message_page_counts_attachment_and_envelope_at_exact_boundary() {
         let state = super::tests::state(root.path());
         state.store.set_write_clock_at(accepted_at).unwrap();
         append_byte_budget_message(&state.store, 0, "body", Some(&"x".repeat(padding + extra)));
+        publish_selectors(&state);
         let result = client_messages_sql_page_with_envelope(
             &state, new_client_snapshot(&state), &query, now, request_id, None,
         ).await;
@@ -619,6 +631,7 @@ async fn sql_message_page_refuses_oversized_single_item_without_skipping_it() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
     append_byte_budget_message(&state.store, 0, "body", Some(&"x".repeat(CLIENT_MAX_RESPONSE_BYTES)));
+    publish_selectors(&state);
     let snapshot = new_client_snapshot(&state);
     let error = client_messages_sql_page(
         &state, snapshot,
@@ -628,6 +641,7 @@ async fn sql_message_page_refuses_oversized_single_item_without_skipping_it() {
     assert_eq!(error.code, "response-too-large");
     assert!(error.message.contains("cannot omit"));
     append_byte_budget_message(&state.store, 1, "small newer message", None);
+    publish_selectors(&state);
     let snapshot = new_client_snapshot(&state);
     let query = ClientListQuery { history: true, ..Default::default() };
     let (Extension(snapshot), Json(first)) =
