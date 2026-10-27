@@ -50,7 +50,6 @@ import {
   Resource,
   Runtime,
   TerminalScreen,
-  TimelineEntry,
   Snapshot,
 } from '@fractal/client/schema'
 import * as Context from 'effect/Context'
@@ -66,6 +65,8 @@ import type * as Tracer from 'effect/Tracer'
 
 import * as Exit from 'effect/Exit'
 import { makeAdmission, type Admission } from './admission.ts'
+import { decodeConversationEntry, type ConversationEntry } from './conversationBlocks.ts'
+export { decodeConversationEntry, type BlockDegrade, type ConversationEntry } from './conversationBlocks.ts'
 import { makeFirstFrames, type FirstFrameAttempt, type FirstFrameOutcome } from './firstFrame.ts'
 import {
   type FollowFreshness,
@@ -257,6 +258,7 @@ export interface UnrecognizedEntry {
   readonly timestamp?: string
   readonly rawType: string
   readonly raw: unknown
+  readonly issue: string
 }
 
 /** One conversation frame: `replace` resets the timeline, otherwise `entries` revise it. */
@@ -265,9 +267,11 @@ export interface ConversationChunk {
   readonly id?: string
   readonly replace: boolean
   readonly hasMore: boolean
-  readonly entries: readonly (TimelineEntry | UnrecognizedEntry)[]
+  readonly entries: readonly (ConversationEntry | UnrecognizedEntry)[]
   /** Raw page evidence before decoding/filtering; only explicit has_more=false proves emptiness. */
   readonly observation?: { readonly empty: boolean }
+  /** Negotiated header facts retain source/as_of annotations verbatim. */
+  readonly header?: Readonly<Record<string, unknown>>
 }
 
 /** Scoped collection follows and gateway state carried by one shared socket. */
@@ -392,7 +396,6 @@ export interface St3Options {
 }
 
 
-const decodeEntry = decodeUnknownSync(TimelineEntry)
 const decodeScreen = decodeUnknownSync(TerminalScreen)
 const decodeRuntime = decodeUnknownSync(Runtime)
 const decodeCapabilities = decodeUnknownSync(CapabilitiesCodec)
@@ -438,7 +441,7 @@ export const arrangementActions = (client: Pick<FractalClient, 'capabilities' | 
     )),
 })
 
-const unrecognized = (raw: unknown): UnrecognizedEntry | undefined => {
+const unrecognized = (raw: unknown, issue: string): UnrecognizedEntry | undefined => {
   if (typeof raw !== 'object' || raw === null) return undefined
   const fields = raw as Record<string, unknown>
   if (typeof fields['id'] !== 'string' || typeof fields['sequence'] !== 'number') return undefined
@@ -450,25 +453,25 @@ const unrecognized = (raw: unknown): UnrecognizedEntry | undefined => {
     ...(typeof fields['timestamp'] === 'string' ? { timestamp: fields['timestamp'] } : {}),
     rawType: typeof fields['type'] === 'string' ? fields['type'] : 'unknown',
     raw,
+    issue,
   }
 }
 
 /** Decode entries without confusing discarded payloads or omitted pagination with an empty page. */
 export const decodeConversationChunk = (
-  frame: Extract<CollectionFrame, { kind: 'conversation' }>,
+  frame: Omit<Extract<CollectionFrame, { kind: 'conversation' }>, 'items' | 'header'> & { readonly items: readonly unknown[]; readonly header?: unknown },
 ): ConversationChunk => ({
   id: frame.id,
   replace: frame.replace,
   hasMore: frame.has_more ?? false,
+  ...(frame.header !== null && typeof frame.header === 'object' && !Array.isArray(frame.header)
+    ? { header: Object.fromEntries(Object.entries(frame.header)) } : {}),
   ...(frame.replace || frame.items.length > 0
     ? { observation: { empty: frame.replace && frame.items.length === 0 && frame.has_more === false } }
     : {}),
-  entries: frame.items.flatMap<TimelineEntry | UnrecognizedEntry>((raw) => {
-    try {
-      return [decodeEntry(raw)]
-    } catch {
-      return unrecognized(raw) ?? []
-    }
+  entries: frame.items.flatMap<ConversationEntry | UnrecognizedEntry>((raw) => {
+    const decoded = decodeConversationEntry(raw)
+    return decoded._tag === 'Entry' ? [decoded.entry] : unrecognized(raw, decoded.issue) ?? []
   }),
 })
 
