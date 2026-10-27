@@ -252,17 +252,17 @@ def main(argv):
             f'refs/notes/evidence/{head_tree}/{record} {record}\nrefs/tags/evidence/{head_tree}/{record} {record}'
         print('passed: --push sends the record as a tag and a note, the token through the environment, not an argument, and never prints it')
 
-        # The agent's HTTPS remote may be an environment override of an SSH checkout.
-        # Resolve that configuration in git itself, including pushurl and insteadOf.
+        # A caller can suppress its HOME's SSH rewrite and supply an HTTPS transport
+        # mapping through git's environment. Publication must use the same configuration.
         https_sink = tmp / 'https-sink.git'
         git(tmp, 'init', '-q', '--bare', str(https_sink))
-        git(repo, 'remote', 'add', 'https-sink', 'git@invalid.example:owner/repo.git')
         https_url = 'https://evidence.invalid/owner/repo.git'
+        git(repo, 'remote', 'add', 'https-sink', https_url)
+        (home / '.gitconfig').write_text('[url "git@invalid.example:"]\n\tinsteadOf = https://evidence.invalid/\n')
         transport = {
-            'GIT_CONFIG_COUNT': '3',
-            'GIT_CONFIG_KEY_0': 'remote.https-sink.url', 'GIT_CONFIG_VALUE_0': https_url,
-            'GIT_CONFIG_KEY_1': f'url.{https_sink.as_uri()}.insteadOf', 'GIT_CONFIG_VALUE_1': https_url,
-            'GIT_CONFIG_KEY_2': 'protocol.file.allow', 'GIT_CONFIG_VALUE_2': 'always',
+            'GIT_CONFIG_COUNT': '2',
+            'GIT_CONFIG_KEY_0': f'url.{https_sink.as_uri()}.insteadOf', 'GIT_CONFIG_VALUE_0': https_url,
+            'GIT_CONFIG_KEY_1': 'protocol.file.allow', 'GIT_CONFIG_VALUE_1': 'always',
         }
         # Thousands of unrelated cached refs must never enter this publication.
         git(repo, 'update-ref', '--stdin', stdin=''.join(
