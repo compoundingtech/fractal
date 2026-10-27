@@ -7350,6 +7350,7 @@ mod tests {
 
             // Every confirmation mode needs a fresh press, even over a terminal.
             use resource_sidebar::PaletteMode as Mode;
+            ui.resource_sidebar.writable = true;
             for (mode, commit) in [
                 (Mode::ConfirmPlace {
                     subject: "agent/example/atlas/builder".into(), folder: None,
