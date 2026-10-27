@@ -8144,7 +8144,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if self.store.operation_claim(&completion)?.is_some() {
             return Ok(false);
         }
-        let later_control = self.store.claims_for(&subject.subject, Some("runtime.action.requested"))?
+        let later_control = self.store.observations_for(&subject.subject, "runtime.action.requested")?
             .into_iter().rev().take_while(|claim| claim.id != request.id)
             .any(|claim| matches!(
                 claim.body["fields"]["action"].as_str(),
