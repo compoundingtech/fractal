@@ -9688,6 +9688,23 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                 if harnesses.is_empty() { "none" } else { &harnesses },
             );
         }
+        let kept = names("keep");
+        if !kept.is_empty() {
+            let _ = writeln!(
+                output,
+                "KEPT  seats this node never stops at the weekly limit ([limits] keep) · {kept}"
+            );
+            let retired = names("keep_retired");
+            if !retired.is_empty() {
+                let count = report["limits_policy"]["keep_retired"]
+                    .as_array()
+                    .map_or(0, Vec::len);
+                let _ = writeln!(
+                    output,
+                    "KEPT  {count} of those seats are no longer declared and keep nothing; remove them from keep when convenient · {retired}"
+                );
+            }
+        }
     }
     // A harness bound to a declared account reports that account's name beside the provider's
     // label, so usage reads against the accounts a person declared.

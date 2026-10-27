@@ -924,12 +924,20 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
         {"account": "claude/bbbb", "weekly_percent": 50.0, "five_hour_percent": null, "exempt": false,
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
-    ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": []}});
+    ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": [], "keep": ["agent/example/coordinator", "agent/example/lead"], "keep_retired": ["agent/example/lead"]}});
     let output_exempt = render_usage_report(&exempt, 24, None);
     assert!(output_exempt.contains("codex/aaaa  exempt\n"), "{output_exempt}");
     assert!(output_exempt.contains("claude/bbbb\n"), "{output_exempt}");
     assert!(
         output_exempt.contains("EXEMPT  never stopped at 95% · accounts: ada/codex · harnesses: none"),
+        "{output_exempt}"
+    );
+    assert!(
+        output_exempt.contains("KEPT  seats this node never stops at the weekly limit ([limits] keep) · agent/example/coordinator, agent/example/lead\n"),
+        "{output_exempt}"
+    );
+    assert!(
+        output_exempt.contains("KEPT  1 of those seats are no longer declared and keep nothing; remove them from keep when convenient · agent/example/lead\n"),
         "{output_exempt}"
     );
     let by_step = render_usage_report(&report, 24, Some(UsageBy::Step));
