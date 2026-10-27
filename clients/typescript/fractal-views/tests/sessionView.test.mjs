@@ -85,7 +85,8 @@ chronologicalConversation = applyConversation(chronologicalConversation, {
 }, 2);
 assert.deepEqual(chronologicalConversation.entries.map(entry => entry.id), chronologicalIds);
 assert.equal(chronologicalConversation.entries.at(-1), revisedNative);
-assert.equal(chronologicalConversation.newestSequence, 5000, 'presentation does not renumber independent counters');
+assert.equal(chronologicalConversation.newestSequence, 7, 'older history does not advance the live frame high-water');
+assert.equal(chronologicalConversation.entries.find(entry => entry.id === 'graph/zero').sequence, 5000, 'presentation does not renumber independent counters');
 assert.equal(chronologicalConversation.older, frozenOlder, 'deltas preserve the frozen older-page cursor');
 assert.equal(chronologicalConversation.historyVersion, chronologicalRequest.historyVersion);
 const refreshedChronology = applyConversation(chronologicalConversation, {
