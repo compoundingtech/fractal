@@ -3,3 +3,13 @@ record 865f26449a1a5def2a9afd41c225fbeb543f8147 genie-freshness 1 host/forge 202
 record 98d8bc51beebbd4b60a09a80ca9c67d00f3917e7 ci-script-tests 0 host/forge 2026-10-27T02:36:52Z
 gc 2026-10-27T03:43:15+00:00 1015290c469b49f9b8a28f93655c8a0f053877b0e23e5a76dc13b8038f9d38e5
 record e2ca2495986fa5e2327e0300a8d3767c1f57184f fractal-web 0 host/forge 2026-10-27T04:39:45Z
+record 0db4afa1d54a0d4fdc041838c885b66b12e9f89d rust-tests 0 host/forge 2026-10-27T07:50:17Z
+record 2c39d2c285abe6dae8dc87a6481b561017a6efe9 rust-tests 0 host/forge 2026-10-27T07:50:17Z
+record 2dfe5a8f93c414ed0baffae2c12a9d28756b2272 rust-tests 0 host/forge 2026-10-27T07:50:17Z
+record 3cb14a2bd24c7c3e2ff62702de599078245881ed rust-tests 0 host/forge 2026-10-27T07:50:17Z
+record 622289a5751c9ad2dc17f56252cc92f00ed55bdf rust-tests 0 host/forge 2026-10-27T07:50:17Z
+record 64c76aeb780d7485c928b718aa7493c193ebdce6 rust-tests 0 host/forge 2026-10-27T07:50:17Z
+record 7f5d3025db0b49a5d40630363ccee32714bc87f6 rust-tests 0 host/forge 2026-10-27T07:50:06Z
+record 89bbb8173bf923bf618e2e3aca9128d0daa6b557 rust-tests 0 host/forge 2026-10-27T07:50:17Z
+record d99a22519934fd0036a5c97fe22927e15dd324df rust-tests 0 host/forge 2026-10-27T07:50:17Z
+record e5c581a4715e54f115d9bebf463b3d3b7cb7c8fc rust-tests 0 host/forge 2026-10-27T07:50:32Z
