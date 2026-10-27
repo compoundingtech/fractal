@@ -460,4 +460,18 @@ fn scenarios_model_width_limit_fails_with_typed_error_without_truncating() {
     let error = slice.decode().expect_err("a wider-than-model version must fail closed");
     assert!(error.downcast_ref::<serde_json::Error>().is_some(), "{error:#}");
     assert_eq!(slice.state["capabilities"]["capabilities"][0]["version"], 4_294_967_296_u64);
+    let screen = client_fixture("terminal-screen.json")["value"].clone();
+    let mut terminal = scenarios::load_slice(fixtures().join("empty/terminal.json")).unwrap();
+    terminal.timeline = vec![serde_json::json!({"_tag": "screen", "at_ms": 0, "screen": screen})];
+    terminal.decode().expect("the ordinary terminal fixture must decode");
+    terminal.timeline[0]["screen"]["cursor"]["row"] = (-1).into();
+    let error = terminal.decode().expect_err("schema-valid negative cursor cannot fit usize");
+    assert!(error.downcast_ref::<serde_json::Error>().is_some(), "{error:#}");
+    terminal.timeline[0]["screen"]["cursor"]["row"] = 0.into();
+    for exit_code in [-2_147_483_649_i64, 2_147_483_648_i64] {
+        terminal.timeline[0]["screen"]["facts"]["process"]["exit_code"] = exit_code.into();
+        let error = terminal.decode().expect_err("schema-valid exit code cannot fit i32");
+        assert!(error.downcast_ref::<serde_json::Error>().is_some(), "{error:#}");
+        assert_eq!(terminal.timeline[0]["screen"]["facts"]["process"]["exit_code"], exit_code);
+    }
 }
