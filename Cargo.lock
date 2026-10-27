@@ -1500,6 +1500,7 @@ dependencies = [
  "fractal-drivers",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-store",
  "fractal-terminal-direct",
  "fractal-tui",
  "fractal-ui-model",
