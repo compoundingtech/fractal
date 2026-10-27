@@ -8,7 +8,7 @@ export type SubagentDriver =
   | { readonly _tag: 'Unknown'; readonly name?: string }
 
 export const classifySubagentDriver = (name: string | undefined): SubagentDriver => {
-  if (name !== undefined && Object.hasOwn(SUBAGENT_OBSERVING_DRIVERS, name)) return { _tag: 'Observing', name }
+  if (name !== undefined && Object.prototype.hasOwnProperty.call(SUBAGENT_OBSERVING_DRIVERS, name)) return { _tag: 'Observing', name }
   if (name === 'opencode' || name === 'pi') return { _tag: 'NonObserving', name }
   return name === undefined ? { _tag: 'Unknown' } : { _tag: 'Unknown', name }
 }
