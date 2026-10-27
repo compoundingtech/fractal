@@ -4,13 +4,14 @@
 import { createHash, generateKeyPairSync, randomBytes, sign as ed25519Sign } from 'node:crypto';
 import http from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { loadWorld } from '../../clients/typescript/fractal-scenarios/src/index.ts';
-import { createReplay, realClock } from '../../clients/typescript/fractal-scenarios/src/replay/index.ts';
+import { ANCHOR_MS, loadWorld } from '../../clients/typescript/fractal-scenarios/src/index.ts';
+import { createReplay, manualClock, realClock } from '../../clients/typescript/fractal-scenarios/src/replay/index.ts';
 
 const port = Number(process.argv[2] ?? 8791);
 const API_VERSION = 'st3.client.v0';
-const world = loadWorld('fleet-mid-refactor');
-const replay = createReplay(world, { clock: realClock({ start: world.now }) });
+const capture = process.env.EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE === '1';
+const world = loadWorld('fleet-mid-refactor', { now: capture ? ANCHOR_MS : Date.now() });
+const replay = createReplay(world, { clock: capture ? manualClock(world.now) : realClock({ start: world.now }) });
 const person = world.cast.people[0].id;
 const b64url = bytes => Buffer.from(bytes).toString('base64url');
 const rawPublic = pair => b64url(pair.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32));
@@ -89,6 +90,21 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === '/v1/client/observations') {
       // Phone measurements use the flat observation envelope, not a world projection.
       send({ api_version: API_VERSION, request_id: 'request/demo-observations', value: { accepted: true } });
+      return;
+    }
+    const family = url.pathname.split('/')[3];
+    // These inventories have no wire resources in this world. Do not turn the
+    // replay's unknown-route empty-page default into a successful Fleet read.
+    // Session timeline reads remain supported by the conversation slice.
+    if (['devices', 'launches', 'launch-variants', 'sessions'].includes(family) &&
+        !(family === 'sessions' && url.pathname.endsWith('/timeline'))) {
+      response.writeHead(501, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        api_version: API_VERSION, error_version: 'st3.client.error.v0',
+        request_id: `request/demo-unsupported-${family}`, code: 'unsupported-capability',
+        message: `The ${world.id} demo world does not provide the ${family} inventory; this Fleet view is unavailable.`,
+        retryable: false, details: {},
+      }));
       return;
     }
     const chunks = [];

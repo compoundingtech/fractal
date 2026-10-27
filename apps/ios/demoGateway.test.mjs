@@ -4,13 +4,17 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import WebSocket from 'ws';
-import { FractalClient } from '../../clients/typescript/fractal-client/index.ts';
-import { CollectionFrame, Envelope, decodeUnknownSync } from '../../clients/typescript/fractal-client/Schema.generated.ts';
+import { ClientError, FractalClient } from '../../clients/typescript/fractal-client/index.ts';
+import { CollectionFrame, Envelope, ErrorEnvelope, decodeUnknownSync } from '../../clients/typescript/fractal-client/Schema.generated.ts';
+import { ANCHOR_MS } from '../../clients/typescript/fractal-scenarios/src/index.ts';
 import { Feed } from './feed.ts';
 import { ForegroundGate } from './foreground.ts';
 
-const startGateway = async t => {
-  const gateway = spawn(process.execPath, ['--experimental-transform-types', new URL('./demoGateway.mjs', import.meta.url).pathname, '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
+const startGateway = async (t, { capture = false } = {}) => {
+  const gateway = spawn(process.execPath, ['--experimental-transform-types', new URL('./demoGateway.mjs', import.meta.url).pathname, '0'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE: capture ? '1' : '0' },
+  });
   t.after(async () => {
     if (gateway.exitCode !== null || gateway.signalCode !== null) return;
     const stopped = once(gateway, 'exit');
@@ -98,6 +102,51 @@ test('fleet-mid-refactor HTTP and collections decode for iOS Now and conversatio
   assert.ok(decodedFrames.some(frame => frame.kind === 'conversation'));
   assert.deepEqual(decodeErrors, [], 'every received frame passes the strict client schema decoder');
   assert.deepEqual(issues, [], 'the iOS feed accepts the scenario without reconnects or refused windows');
+});
+
+test('unsupported Fleet inventories reject through their actual client callers', { timeout: 15000 }, async t => {
+  const baseUrl = await startGateway(t);
+  const client = new FractalClient({
+    baseUrl, credential: async () => 'demo-credential',
+    fetchImpl: async (...args) => {
+      const response = await fetch(...args);
+      decodeUnknownSync(ErrorEnvelope, 'strict')(await response.clone().json());
+      return response;
+    },
+  });
+  for (const read of [
+    () => client.sessionsList(),
+    () => client.devicesList(),
+    () => client.launchesList(),
+    () => client.launchVariantsList('launch/example'),
+  ]) {
+    await assert.rejects(read, error =>
+      error instanceof ClientError && error.status === 501 &&
+      error.response.code === 'unsupported-capability' &&
+      /fleet-mid-refactor.*inventory.*unavailable/.test(error.message));
+  }
+});
+
+test('capture mode freezes world timestamps and updates at the kit anchor', { timeout: 15000 }, async t => {
+  const first = await startGateway(t, { capture: true });
+  const read = async (base, route) => {
+    const response = await fetch(`${base}/v1/client/${route}`, { headers: { authorization: 'Bearer demo-credential' } });
+    assert.equal(response.status, 200);
+    return decodeUnknownSync(Envelope, 'strict')(await response.json());
+  };
+  const initial = await read(first, 'agents');
+  assert.equal(initial.snapshot.created_at, new Date(ANCHOR_MS).toISOString());
+  await delay(100);
+  const later = await read(first, 'agents');
+  assert.deepEqual(later.value, initial.value);
+  assert.deepEqual(later.snapshot, initial.snapshot);
+  const second = await startGateway(t, { capture: true });
+  const restarted = await read(second, 'agents');
+  assert.deepEqual(restarted.value, initial.value);
+  assert.deepEqual(restarted.snapshot, initial.snapshot);
+  const session = initial.value.items.find(item => item.kind === 'agent' && item.current_session_id).current_session_id;
+  const route = `sessions/${encodeURIComponent(session)}/timeline`;
+  assert.deepEqual((await read(first, route)).value, (await read(second, route)).value);
 });
 
 test('demo gateway keeps an idle collections stream alive with protocol pings', { timeout: 35000 }, async t => {
