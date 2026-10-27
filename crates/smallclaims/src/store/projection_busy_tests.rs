@@ -256,7 +256,7 @@ fn sqlite_contention_rolls_back_without_replay_or_health_change_and_next_pass_co
             assert!(
                 !lines
                     .iter()
-                    .any(|line| line.starts_with("st: projection full replay "))
+                    .any(|line| line.starts_with("fractal: projection full replay "))
             );
             assert!(store.project_replication_backlog().unwrap());
             assert_eq!(health(&store), ("healthy".into(), target));

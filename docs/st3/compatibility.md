@@ -4,7 +4,11 @@ For your own fleet, install the **same verified release source on every member**
 release's **Upgrade impact** before restart. A patch tag is a publication label, not a promise
 of compatible databases, mixed builds or safe rollback. Check exact sources using `BUILD.json`,
 `RELEASE.json`, `st --version --json` and the daemon's `machine_version` in `st doctor --json`.
-Downloading or installing an archive does not replace a running daemon.
+Downloading or installing an archive does not restart or replace the running daemon **process**.
+It does replace the installed command files and, on macOS, the app bundle. Until an explicit
+restart, the daemon keeps its current build while new CLI invocations use the installed build.
+Follow the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
+alone as a daemon upgrade.
 
 ## Upgrade starting points and limits
 
@@ -16,7 +20,7 @@ starting source is older than the previous published release.
 | --- | --- |
 | New empty installation | Use [getting started](../getting-started.md). Initial distribution scope is Linux x86_64 and macOS Apple Silicon, one fleet per person. Archive CI checks packaging and CLI/TUI startup; a clean machine with a real harness login needs a separate onboarding rehearsal. |
 | v0.3.16, source `5c0a151e` → v0.3.17, source `f4cec96e` | The [v0.3.17 report](https://github.com/compoundingtech/fractal/releases/tag/v0.3.17) classifies the full source interval. Schema identity remains 16 and checkpoint rules remain 11, but the interval adds local tables and an index, narrows the mission-root tree response, and lists manual steps for integrations. This establishes classified upgrade guidance, not a completed isolated populated-fleet rehearsal or a guaranteed interruption time. |
-| Earlier st3 source | Read all intervening notes, including intermediate migrations and manual repairs. Rehearse a populated copy before rollout; no blanket upgrade or downgrade guarantee covers every earlier 0.x source. |
+| Earlier Fractal source | Read all intervening notes, including intermediate migrations and manual repairs. Rehearse a populated copy before rollout; no blanket upgrade or downgrade guarantee covers every earlier 0.x source. |
 | Populated v0.3.4 with possible unsigned delegation grants | Preserve raw SQLite state and keys **before doctor, restart or export**. A bounded candidate rehearsal proved recovery of preserved unsealed work; already-sealed unsigned history remains affected. It is not exact v0.3.5 archive acceptance. |
 
 Prefer roll-forward when the old binary cannot read the current database, claim vocabulary or
@@ -63,7 +67,7 @@ v0.3.17. The rows below describe tested native contracts, not acceptance of ever
 | pi and omp | Managed extension, mailbox and resume contracts have boot/delivery regressions. An unseen omp build is measured in a disposable native admission probe before launch; a failed probe refuses launch and reports the boundary. |
 | OpenCode | Loopback API, mailbox and resume contracts have boot/delivery regressions. An unseen build is measured before launch; a failed native contract disables delivery and retains queued mail. |
 
-The [boot canaries](../../scripts/st3-boot-canaries/README.md) use real Fractal processes with
+The [boot canaries](../../scripts/fractal-boot-canaries/README.md) use real Fractal processes with
 stand-in providers; they do not prove real vendor login, model turns or every installed vendor
 version. Native admission probes identify the exact installed build, and their exceptions expire
 when the build identity changes. Follow [admission diagnosis](seat-deploys.md#harness-admission-at-the-next-launch)

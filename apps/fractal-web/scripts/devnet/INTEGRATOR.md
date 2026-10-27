@@ -48,6 +48,8 @@ deployment-owned resources; scripts do not provision deployments or credentials.
 | `FRACTAL_INTEGRATOR_TRUST_MODE` | Required: `authors` or `collaborator-permission`; no default |
 | `FRACTAL_INTEGRATOR_TRUSTED_AUTHORS` | Conditional: explicit JSON array of trusted GitHub logins, required in `authors` mode; no built-in authors |
 | `FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS` | Optional positive finite seconds for the entire selection phase, including permission checks and required-PR queries; defaults to `60` |
+| `FRACTAL_INTEGRATOR_GIT_USER_NAME` | Optional launcher-owned local commit name; defaults to `Fractal live-r3 integrator` |
+| `FRACTAL_INTEGRATOR_GIT_USER_EMAIL` | Optional launcher-owned local commit email; defaults to `live-r3@fractal-integrator.invalid` |
 | `FRACTAL_INTEGRATOR_SANDBOX` | Required: `bwrap`; no default or unsandboxed fallback |
 | `FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT` | Absolute, deployment-owned bootstrap scratch directory outside candidate clones and snapshots |
 | `FRACTAL_INTEGRATOR_PNPM_STORE` | Absolute, dedicated writable pnpm package cache outside candidate clones; must contain no credentials |
@@ -405,6 +407,20 @@ repository-format/shape flags, origin URL/fetch, branch remote/merge, user ident
 object-format/worktree-config flags, and the integrator's rerere/GC bookkeeping.
 Unknown keys fail closed, including executable helpers, URL rewrites, aliases and
 protocol/proxy settings. Both common and per-worktree configuration are checked.
+
+Clone preparation preflights both configuration files through that same host-Git
+allowlist before resetting the clone or writing launcher settings. All rejected
+keys are named together in the tick's `detail` and log; values are not reported.
+URL-bearing key subsections are replaced with `<redacted-subsection>` so embedded
+userinfo and query credentials cannot enter diagnostics.
+No unknown keys are removed, including stale inert GC expiry keys such as
+`gc.rerereunresolved`: the operator must reconcile them before retrying.
+Failed host-Git commands retain stderr in tick detail even without output capture.
+Preparation sets repository-local `user.name` and `user.email` from the launcher
+inputs above on every tick. Global Git configuration is never consulted for
+commit identity; the reserved-domain default identifies local integration commits.
+Identity keys in `config.worktree` are refused even when worktree config is
+enabled: their higher precedence must not override the launcher's common identity.
 
 The clone's entire `.git` directory is read-only inside bubblewrap. Linked
 snapshots additionally bind their `.git` pointer read-only; the clone mount covers

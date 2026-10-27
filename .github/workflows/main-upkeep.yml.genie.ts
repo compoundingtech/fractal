@@ -137,7 +137,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
           name: 'Cache locked TypeScript dependencies', id: 'typescript-cache', uses: 'actions/cache@v5',
           with: {
             path: pnpmStoreEnv.pnpm_config_store_dir,
-            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}',
+            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}',
           },
         },
         {

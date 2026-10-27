@@ -74,6 +74,10 @@ struct State {
     execs: HashMap<String, Option<String>>,
     /// When each section's last full pass ran.
     last_full: HashMap<&'static str, u128>,
+    /// The wall time of the last pass that evaluated a section in full, which spaces the next.
+    full_pass_ms: u128,
+    /// Whether the pass now running took a full pass of some section.
+    full_pass_taken: bool,
     /// The last PTY snapshot, by runtime: `None` before the first, or while it was unavailable.
     ptys: Option<HashMap<String, String>>,
     /// The last value seen for each key observed by value, such as `live-workspaces`.
@@ -84,6 +88,21 @@ struct State {
 
 /// How often a pass evaluates every item even when nothing marked them, counting what it corrects.
 pub const FULL_PASS_INTERVAL_MS: u128 = 60_000;
+/// A full pass waits at least this many times its own last wall time, so a fleet whose full pass
+/// is slow spends at most a tenth of its time in them. Below six seconds the interval is the
+/// minute above.
+pub const FULL_PASS_COST_MULTIPLE: u128 = 10;
+/// However slow a full pass, one still runs every half hour.
+pub const FULL_PASS_INTERVAL_MAX_MS: u128 = 30 * 60_000;
+
+/// The interval for periodic work that costs `cost_ms` each time: at least `base_ms`, at least
+/// [`FULL_PASS_COST_MULTIPLE`] times its cost, at most `max_ms`.
+pub fn cost_scaled_interval(base_ms: u128, cost_ms: u128, max_ms: u128) -> u128 {
+    cost_ms
+        .saturating_mul(FULL_PASS_COST_MULTIPLE)
+        .min(max_ms)
+        .max(base_ms)
+}
 
 struct Item {
     reads: BTreeSet<String>,
@@ -195,20 +214,39 @@ impl Incremental {
     }
 
     /// Whether this pass must evaluate every item of `section`: the first since a start, or the
-    /// first after [`FULL_PASS_INTERVAL_MS`]. Records it as the section's last full pass.
+    /// first after [`cost_scaled_interval`] of the last full pass's wall time. Records it as the
+    /// section's last full pass.
     pub fn take_full_pass(&self, section: &'static str, now: u128) -> bool {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let interval = cost_scaled_interval(
+            FULL_PASS_INTERVAL_MS,
+            state.full_pass_ms,
+            FULL_PASS_INTERVAL_MAX_MS,
+        );
         let due = state
             .last_full
             .get(section)
-            .is_none_or(|last| now.saturating_sub(*last) >= FULL_PASS_INTERVAL_MS);
+            .is_none_or(|last| now.saturating_sub(*last) >= interval);
         if due {
             state.last_full.insert(section, now);
+            state.full_pass_taken = true;
         }
         due
+    }
+
+    /// Record a finished pass's wall time. A pass that took a full pass of any section sets the
+    /// spacing of the next one; an incremental pass leaves it.
+    pub fn finish_pass(&self, wall_ms: u128) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if std::mem::take(&mut state.full_pass_taken) {
+            state.full_pass_ms = wall_ms;
+        }
     }
 
     /// Compare this pass's PTY snapshot (each runtime's state, as text) with the last one, and mark
@@ -510,6 +548,33 @@ pub fn step_due(step: &fractal_kernel::model::StepRunView, now: u128) -> Option<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_slow_full_pass_spaces_the_next_by_ten_times_its_wall_time() {
+        use super::*;
+        let incremental = Incremental::default();
+        // The first pass is full; a fast fleet keeps the one-minute interval.
+        assert!(incremental.take_full_pass("member", 0));
+        incremental.finish_pass(2_000);
+        assert!(!incremental.take_full_pass("member", 59_999));
+        assert!(incremental.take_full_pass("member", 60_000));
+        // A full pass that takes five minutes of wall time used to be due
+        // again as soon as it finished, so every pass was full. Now the next waits 50 minutes,
+        // capped at 30, and the incremental passes between run.
+        incremental.finish_pass(300_000);
+        for now in [360_000, 600_000, 60_000 + FULL_PASS_INTERVAL_MAX_MS - 1] {
+            assert!(!incremental.take_full_pass("member", now), "full again at {now}");
+            incremental.finish_pass(1_000);
+        }
+        assert!(incremental.take_full_pass("member", 60_000 + FULL_PASS_INTERVAL_MAX_MS));
+        // An incremental pass's short wall time does not shorten the spacing; the next full
+        // pass's does.
+        incremental.finish_pass(4_000);
+        assert!(incremental.take_full_pass("member", 60_000 + FULL_PASS_INTERVAL_MAX_MS + 60_000));
+        assert_eq!(cost_scaled_interval(30_000, 0, 600_000), 30_000);
+        assert_eq!(cost_scaled_interval(30_000, 25_000, 600_000), 250_000);
+        assert_eq!(cost_scaled_interval(30_000, u128::MAX, 600_000), 600_000);
+    }
+
     #[test]
     fn agent_collection_keys_ignore_message_declarations_and_cover_owned_set_members() {
         assert!(

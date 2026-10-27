@@ -10,7 +10,7 @@ import { ConversationImageViewport, VisibleConversationImage, type VisibleImageS
 import type { MailImage } from '@fractal/views';
 import { useStore } from './store';
 import { theme } from './theme';
-import { T } from './ui';
+import { T, useTextAppearance } from './ui';
 
 type Props = { facts: ImageFacts; viewport: ConversationImageViewport; load: (current: () => boolean) => Promise<string> };
 
@@ -44,6 +44,7 @@ export class ImageBox extends Component<Props, VisibleImageState<string> & { zoo
       <Pressable ref={this.box} collapsable={false} style={styles.box} onLayout={() => this.props.viewport.refresh()}
         accessibilityRole={state.kind === 'image' ? 'imagebutton' : undefined} accessibilityLabel={state.kind === 'image' ? `${label}, open` : words.text}
         disabled={state.kind !== 'image'} onPress={() => this.zoom(true)}>
+        <BoxFill />
         {state.kind === 'image'
           // React Native's iOS loader decodes the image at this box's size, not the file's.
           ? <Image source={{ uri: state.image }} style={StyleSheet.absoluteFill} resizeMode="contain" onError={() => this.image.fail('The image could not be displayed. Try again.')} />
@@ -56,14 +57,21 @@ export class ImageBox extends Component<Props, VisibleImageState<string> & { zoo
   }
 }
 
+// The box's fill, in the palette of the screen it is drawn on.
+function BoxFill() {
+  const { palette } = useTextAppearance();
+  return <View style={[StyleSheet.absoluteFill, { backgroundColor: palette.surface0 }]} />;
+}
+
 /** The image on the whole screen: pinch to zoom, Close, and Share to open or save it elsewhere. */
 export function ImageZoom({ uri, label, onClose }: { uri: string; label: string; onClose: () => void }) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [shareFailed, setShareFailed] = useState('');
+  const { palette } = useTextAppearance();
   return <Modal visible animationType="fade" presentationStyle="fullScreen" onRequestClose={onClose}>
-    <View style={{ flex: 1, backgroundColor: theme.crust }}>
-      <View style={[styles.bar, { paddingTop: insets.top + 6 }]}>
+    <View style={{ flex: 1, backgroundColor: palette.crust }}>
+      <View style={[styles.bar, { paddingTop: insets.top + 6, backgroundColor: palette.mantle }]}>
         <Pressable accessibilityRole="button" onPress={onClose} hitSlop={10}><T bold color={theme.accent}>Close</T></Pressable>
         <T dim numberOfLines={1} style={{ flex: 1, textAlign: 'center' }}>{label}</T>
         {/* The share sheet offers Save Image and the person's own apps; nothing is saved here. */}
@@ -78,7 +86,7 @@ export function ImageZoom({ uri, label, onClose }: { uri: string; label: string;
   </Modal>;
 }
 
-// An image a message carries, read from st (from the owner of the message, through st) only while
+// An image a message carries, read from Fractal (from the owner of the message, through Fractal) only while
 // it is on screen; its box keeps one size while it loads, so the conversation does not move.
 export function MailImageView({ image, viewport }: { image: MailImage; viewport: ConversationImageViewport }) {
   const { actions } = useStore();
@@ -95,6 +103,6 @@ export function useWindowViewport(): ConversationImageViewport {
 }
 
 const styles = StyleSheet.create({
-  box: { width: 200, height: 150, borderRadius: 6, overflow: 'hidden', backgroundColor: theme.surface0 },
-  bar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingBottom: 8, backgroundColor: theme.mantle },
+  box: { width: 200, height: 150, borderRadius: 6, overflow: 'hidden' },
+  bar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingBottom: 8 },
 });

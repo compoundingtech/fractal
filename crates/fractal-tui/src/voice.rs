@@ -1,5 +1,5 @@
-//! Voice mode: the speech helper (`st-listen`, inside SmallTalk.app on a Mac) run as a child,
-//! its JSON lines read into events. The helper owns the microphone and the transcription; Fractal TUI
+//! Voice mode: the Fractal speech helper (`st-listen` on a Mac) run as a child,
+//! its JSON lines read into events. The helper owns the microphone and the transcription; the Fractal terminal UI
 //! only shows what it hears and decides what happens to the words.
 
 use std::io::{BufRead, BufReader, Write};
@@ -27,7 +27,7 @@ pub enum Event {
 }
 
 /// The helper to run: `ST_LISTEN` when set (any machine, so a stand-in can be tested), else the
-/// one inside the SmallTalk.app this Fractal TUI runs from, else the try-out copy beside it.
+/// one inside the app this Fractal terminal UI runs from, else the try-out copy beside it.
 pub fn helper() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("ST_LISTEN").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
@@ -47,13 +47,13 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Whether this Fractal TUI can listen, looked up once.
+/// Whether the Fractal terminal UI can listen, looked up once.
 pub fn available() -> bool {
     static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FOUND.get_or_init(|| helper().is_some())
 }
 
-/// Where a helper may be, for a Fractal TUI at `exe`: in its app's Helpers, then in the try-out folder.
+/// Where a helper may be, for the Fractal terminal UI at `exe`: in its app's Helpers, then in the try-out folder.
 fn candidates(exe: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     const INNER: &str = "StListen.app/Contents/MacOS/st-listen";
     let mut found = Vec::new();
@@ -73,7 +73,7 @@ fn candidates(exe: &Path, home: Option<&Path>) -> Vec<PathBuf> {
 /// Why voice is not offered here, in words.
 pub fn unavailable() -> &'static str {
     if cfg!(target_os = "macos") {
-        "voice needs SmallTalk.app's speech helper, which this install does not have yet"
+        "voice needs the Fractal speech helper, which this install does not have yet"
     } else {
         "voice works on a Mac for now (macOS 26 and later)"
     }

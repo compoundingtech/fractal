@@ -1,6 +1,7 @@
 //! Person asks are runtime steps. The immutable asking claim supplies their ownership fence;
 //! step_runs supplies their state. No separate attention record is created.
 use super::*;
+use crate::model::PersonRenameRequest;
 
 use crate::person_request::StructuredRequest;
 
@@ -404,6 +405,49 @@ pub fn enrich_responses(
     Ok(())
 }
 
+
+/// Reassignment captures only the current open episode. The original ask remains immutable,
+/// including its requester and originally addressed person.
+pub(super) fn reassign_person_steps_tx(
+    tx: &Transaction<'_>,
+    origin: &str,
+    input: &PersonRenameRequest,
+) -> Result<Vec<String>, St3Error> {
+    let as_of = now_ms();
+    let mut query = tx.prepare(
+        "SELECT subject FROM step_runs WHERE assignee=?1 AND status IN ('ready','pending') ORDER BY subject",
+    ).map_err(internal)?;
+    let subjects = query.query_map([&input.old_person], |row| row.get::<_, String>(0))
+        .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+    let mut reassigned = Vec::new();
+    for subject in subjects {
+        let Some(mut view) = step(tx, &subject).map_err(internal)? else { continue };
+        apply_effective_step_state(tx, &mut view, as_of).map_err(internal)?;
+        if !matches!(view.status.as_str(), "ready" | "pending")
+            || !run_live(tx, &view.run, Some(&view.generation), false).map_err(internal)?
+        {
+            continue;
+        }
+        let ask = request(tx, &subject).map_err(internal)?;
+        if let Some(ask) = &ask
+            && !current(tx, ask, as_of).map_err(internal)?
+        {
+            continue;
+        }
+        let episode = ask.as_ref().map(|ask| ask.id.clone()).unwrap_or_else(|| {
+            format!("{}:{}:{}", view.generation, view.attempt, view.readiness_epoch)
+        });
+        let evidence = ask.map(|ask| vec![ask.id]).unwrap_or_default();
+        let claim = append_claim_tx(tx, origin, &subject, "work.person-reassigned", Some(&input.actor),
+            &json!({"fields": {"previous_person": input.old_person, "person": input.new_person,
+                "run": view.run, "generation": view.generation, "attempt": view.attempt, "episode": episode}}),
+            &evidence, None).map_err(claim_append_error)?;
+        project(tx, &claim)?;
+        reassigned.push(subject);
+    }
+    Ok(reassigned)
+}
+
 /// Shared projection for a one-step runtime run, used by asks and spontaneous work.
 pub fn project_minimal_run(
     tx: &Transaction<'_>,
@@ -476,6 +520,36 @@ pub fn project_minimal_run(
 
 pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Error> {
     let fields = &claim.body["fields"];
+    if claim.kind == "work.person-reassigned" {
+        let accepted: bool = tx.query_row(
+            /* sqlite-large-value: allow-for-now lv-hfbb687ae03ed owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */
+            &format!("SELECT {} FROM claims reassignment WHERE reassignment.id=?1",
+                person_rename::accepted_reassignment_sql("reassignment", "previous_person", "person")),
+            [&claim.id], |row| row.get(0)).map_err(internal)?;
+        if !accepted { return Ok(true); }
+        let Some(view) = step(tx, &claim.subject).map_err(internal)? else {
+            return Ok(true);
+        };
+        let ask = request(tx, &claim.subject).map_err(internal)?;
+        let episode = ask.map(|ask| ask.id).unwrap_or_else(|| {
+            format!("{}:{}:{}", view.generation, view.attempt, view.readiness_epoch)
+        });
+        if fields["run"].as_str() != Some(view.run.as_str())
+            || fields["generation"].as_str() != Some(view.generation.as_str())
+            || fields["attempt"].as_u64() != Some(u64::from(view.attempt))
+            || fields["episode"].as_str() != Some(episode.as_str())
+        {
+            return Ok(true);
+        }
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-hf6f5b79d7be9 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */
+            "UPDATE step_runs SET assignee=?2,updated_at_unix_ms=?3
+             WHERE subject=?1 AND assignee=?4 AND status IN ('ready','pending')",
+            params![claim.subject, fields["person"].as_str(), claim.accepted_at_unix_ms.to_string(),
+                fields["previous_person"].as_str()],
+        ).map_err(internal)?;
+        return Ok(true);
+    }
     if claim.kind == "work.person-asked" {
         let run = fields["run"]
             .as_str()
@@ -568,6 +642,7 @@ use super::*;
             .unwrap();
         receive_exchange(target, &exchange);
     }
+
 
 }
 

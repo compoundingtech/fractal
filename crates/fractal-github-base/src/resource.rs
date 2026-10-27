@@ -41,7 +41,7 @@ pub struct ProviderObservation {
 /// not finish in one poll, so an observer's declared interval does not delay it.
 pub const PROVIDER_CONTINUE_MS: u128 = 1_000;
 
-pub use crate::github_admission::ProviderRateLimit;
+pub use crate::github_admission::{LocalObserverBudget, ProviderRateLimit};
 
 /// The resource a GitHub repository's observations land on: `resource/github/OWNER/REPO`.
 pub fn default_resource(locator: &str) -> String {
@@ -125,6 +125,7 @@ fn github_retry_at(headers: &reqwest::header::HeaderMap, now: u128) -> u128 {
     retry_after
         .into_iter()
         .chain(rate_reset)
+        .filter(|deadline| *deadline > now)
         .max()
         .unwrap_or_else(|| now.saturating_add(15 * 60_000))
 }
@@ -237,6 +238,9 @@ fn github_client() -> reqwest::Client {
     CLIENT
         .get_or_init(|| {
             reqwest::Client::builder()
+                // Follow REST redirects explicitly so every HTTP hop is admitted.
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .user_agent("st3-resource-observer/0.1")
                 .connect_timeout(GITHUB_CONNECT_TIMEOUT)
                 .timeout(GITHUB_REQUEST_TIMEOUT)
@@ -706,7 +710,7 @@ pub fn github_usage_report() -> GithubUsageReport {
         .report(now)
 }
 
-fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+pub(crate) fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -729,7 +733,12 @@ fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header
 
 /// Drop `url`'s cached answer: for a URL read once, whose answer would never be revalidated.
 async fn github_forget(url: &str) {
-    github_cache().lock().await.remove(url);
+    // Cache keys qualify the URL with a non-secret authorization principal.
+    // Forget every scope: an immutable artifact URL must not survive invalidation
+    // merely because it was fetched with another installation or the PAT.
+    github_cache().lock().await.retain(|key, _| {
+        key.strip_suffix(url).is_none_or(|prefix| !prefix.ends_with(' '))
+    });
 }
 
 /// A URL is fetched at most once per cache interval on this host. A stale entry is revalidated
@@ -740,13 +749,15 @@ async fn github_json(
     token: &GithubAuth,
     cache_for: Duration,
 ) -> Result<GithubPayload> {
+    let selected = crate::github_http::read_auth_for_url(&url, token);
+    let token = &selected;
     let entry = {
         let mut cache = github_cache().lock().await;
         if cache.len() > 4_096 {
             cache.clear();
         }
         cache
-            .entry(url.clone())
+            .entry(format!("{} {url}", token.cache_principal()))
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
             .clone()
     };
@@ -763,9 +774,9 @@ async fn github_json(
     if let Some(etag) = cached.as_ref().and_then(|payload| payload.etag.as_deref()) {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
-    let response = crate::github_http::send(request, token).await?;
-    record_github_response(response.status(), response.headers());
+    let response = crate::github_http::send_read(request, token).await?;
     let response = github_response(response).await?;
+    let cacheable = crate::github_http::read_response_cacheable(&response);
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
         let payload = cached
             .as_mut()
@@ -785,7 +796,11 @@ async fn github_json(
         next,
         checked_at: Instant::now(),
     };
-    *cached = Some(payload.clone());
+    if !cacheable {
+        *cached = None;
+    } else {
+        *cached = Some(payload.clone());
+    }
     Ok(payload)
 }
 
@@ -884,20 +899,20 @@ async fn github_listing_at_field(
 
 /// Ask GitHub's GraphQL API one query. GraphQL has its own hourly budget, reports a refusal in a
 /// successful response, and has no conditional request.
-async fn github_graphql(
+async fn github_graphql_with_cache_eligibility(
     client: &reqwest::Client,
     api_base: &str,
     token: &GithubAuth,
     query: &str,
     variables: Value,
-) -> Result<Value> {
+) -> Result<(Value, bool)> {
     let request = client
         .post(format!("{api_base}/graphql"))
         .header("Accept", "application/vnd.github+json")
         .json(&json!({"query": query, "variables": variables}));
-    let response = crate::github_http::send(request, token).await?;
-    record_github_response(response.status(), response.headers());
+    let response = crate::github_http::send_read(request, token).await?;
     let response = github_response(response).await?;
+    let cacheable = crate::github_http::read_response_cacheable(&response);
     let headers = response.headers().clone();
     let body = response.json::<Value>().await?;
     if let Some(errors) = body
@@ -924,10 +939,11 @@ async fn github_graphql(
             .unwrap_or("an unnamed error");
         bail!("GitHub GraphQL refused the query: {message}");
     }
-    body.get("data")
+    let data = body.get("data")
         .filter(|data| !data.is_null())
         .cloned()
-        .context("the GitHub GraphQL response has no data")
+        .context("the GitHub GraphQL response has no data")?;
+    Ok((data, cacheable))
 }
 
 pub use crate::github_http::GITHUB_AUTH_REMEDY;
@@ -1212,6 +1228,167 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[tokio::test]
+    async fn forgetting_artifact_url_invalidates_every_principal_without_double_counting_responses() {
+        use crate::github_http::app_read::{select, tests::{install, server}};
+        let root = tempfile::tempdir().unwrap();
+        let owner = "invalidation-fixture";
+        install(root.path(), owner, "gh-ci", "fixture-ci",
+            chrono::Utc::now() + chrono::Duration::minutes(60));
+        let pat = GithubAuth::test("fixture-pat");
+        let app = select(Some(root.path()), owner, "gh-ci", &pat);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = calls.clone();
+        let fixture = server(move |auth, _, _| {
+            recorded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (reqwest::StatusCode::OK, json!({"authorization_fixture": auth}))
+        }).await;
+        let url = format!("{}/repos/{owner}/repo/actions/artifacts/1", fixture.base);
+        let unrelated = format!("{}/repos/{owner}/repo/actions/artifacts/2", fixture.base);
+        let client = github_client();
+        let cache_for = Duration::from_secs(3600);
+        spend_as("fixture/principal-invalidation-accounting".into(), async {
+            let ci = github_json(&client, url.clone(), &app, cache_for).await.unwrap();
+            let personal = github_json(&client, url.clone(), &pat, cache_for).await.unwrap();
+            assert_ne!(ci.value, personal.value);
+            github_json(&client, unrelated.clone(), &app, cache_for).await.unwrap();
+            github_forget(&url).await;
+            github_json(&client, url.clone(), &app, cache_for).await.unwrap();
+            github_json(&client, url.clone(), &pat, cache_for).await.unwrap();
+            github_json(&client, unrelated.clone(), &app, cache_for).await.unwrap();
+        }).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 5,
+            "both invalidated principals refetch; the unrelated URL stays cached");
+        let report = github_usage_report();
+        let usage = report.spenders.iter().find(|usage| usage.spender == "fixture/principal-invalidation-accounting").unwrap();
+        assert_eq!(usage.sent, 5, "resource wrappers must not recount transport responses");
+    }
+
+    #[tokio::test]
+    async fn github_rest_redirects_send_each_hop_explicitly() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in [
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: /repositories/123\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}".to_owned(),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..size]);
+                    if size == 0 || request.windows(4).any(|bytes| bytes == b"\r\n\r\n") { break; }
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        // SOURCE is process-global: isolate configuration from other provider tests.
+        let root = tempfile::tempdir().unwrap();
+        crate::github_http::app_read::tests::install(
+            root.path(), "redirect-fixture", "gh-ci", "fixture-installation",
+            chrono::Utc::now() + chrono::Duration::minutes(60),
+        );
+        let state_dir = root.path().to_owned();
+        let child = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "resource::tests::github_redirect_admission_child", "--ignored", "--nocapture"])
+                .env("OBSERVER_REDIRECT_TEST_URL", format!("{base}/repos/redirect-fixture/repo"))
+                .env("OBSERVER_REDIRECT_TEST_STATE", state_dir)
+                .output().unwrap()
+        }).await.unwrap();
+        assert!(child.status.success(), "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET /repos/redirect-fixture/repo "));
+        assert!(requests[1].starts_with("GET /repositories/123 "));
+        assert!(requests.iter().all(|request| request.to_ascii_lowercase()
+            .contains("authorization: bearer fixture-installation\r\n")));
+        let rows: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("github-admission.json")).unwrap()
+        ).unwrap();
+        assert_eq!(rows.as_array().unwrap().iter()
+            .filter(|row| row["observer"] == true)
+            .map(|row| row["count"].as_u64().unwrap()).sum::<u64>(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "subprocess fixture for github_rest_redirects_send_each_hop_explicitly"]
+    async fn github_redirect_admission_child() {
+        let config = crate::config::Config {
+            state_dir: std::env::var_os("OBSERVER_REDIRECT_TEST_STATE").unwrap().into(),
+            ..Default::default()
+        };
+        let auth = crate::github_http::app_read::select(
+            Some(&config.state_dir), "redirect-fixture", "gh-ci", &GithubAuth::test("fixture"),
+        );
+        crate::github_http::configure(&config).unwrap();
+        let payload = spend_as("observer/redirect-test".into(), github_json(
+            &github_client(), std::env::var("OBSERVER_REDIRECT_TEST_URL").unwrap(),
+            &auth, Duration::ZERO,
+        )).await.unwrap();
+        assert_eq!(payload.value["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn redirected_app_fallback_never_caches_pat_under_original_principal() {
+        use crate::github_http::app_read::tests::install;
+        let root = tempfile::tempdir().unwrap();
+        let expires = chrono::Utc::now() + chrono::Duration::minutes(60);
+        install(root.path(), "redirect-a", "gh-ci", "fixture-a", expires);
+        install(root.path(), "redirect-b", "gh-ci", "fixture-b", expires);
+        let auth = crate::github_http::app_read::select(
+            Some(root.path()), "redirect-a", "gh-ci", &GithubAuth::test("fixture-pat"),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/repos/redirect-a/repo", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in [
+                "HTTP/1.1 200 OK\r\nETag: \"app-a\"\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+                "HTTP/1.1 302 Found\r\nLocation: /repos/redirect-b/repo\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nETag: \"pat-b\"\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+                "HTTP/1.1 200 OK\r\nETag: \"unrelated-app\"\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..size]);
+                    if size == 0 || request.windows(4).any(|bytes| bytes == b"\r\n\r\n") { break; }
+                }
+                requests.push(String::from_utf8(request).unwrap().to_ascii_lowercase());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let client = github_client();
+        github_json(&client, url.clone(), &auth, Duration::ZERO).await.unwrap();
+        github_json(&client, url.clone(), &auth, Duration::ZERO).await.unwrap();
+        let unrelated = format!("{url}/pulls");
+        github_json(&client, unrelated.clone(), &auth, Duration::from_secs(60)).await.unwrap();
+        github_json(&client, unrelated.clone(), &auth, Duration::from_secs(60)).await.unwrap();
+        let requests = server.await.unwrap();
+        assert!(requests[1].contains("if-none-match: \"app-a\""));
+        assert!(requests[2..].iter().all(|request| !request.contains("if-none-match:")));
+        assert!(requests[2..4].iter().all(|request| request.contains("authorization: bearer fixture-b")));
+        assert!(requests[4].contains("authorization: bearer fixture-pat"));
+        assert!(!auth.used_fallback(), "fallback state belongs to the request, not its enclosing batch");
+        let entry = github_cache().lock().await.get(&format!("{} {url}", auth.cache_principal())).unwrap().clone();
+        assert!(entry.lock().await.is_none(), "PAT response must not populate A's installation cache");
+        let entry = github_cache().lock().await.get(&format!("{} {unrelated}", auth.cache_principal())).unwrap().clone();
+        assert!(entry.lock().await.is_some(), "one request's fallback must not disable another request's cache");
+        assert_eq!(requests.len(), 6);
+        assert!(requests[5].contains("authorization: bearer fixture-a"));
+    }
+
+    #[tokio::test]
     async fn credentials_recover_after_a_missing_token_and_rotate() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
@@ -1392,6 +1569,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(observation.facts["status"], "missing");
+    }
+
+    #[test]
+    fn github_rate_limit_stale_reset_uses_real_cooldown() {
+        let now = 2_000_000;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset", "1000".parse().unwrap());
+        for status in [reqwest::StatusCode::TOO_MANY_REQUESTS, reqwest::StatusCode::FORBIDDEN] {
+            assert!(matches!(
+                github_refusal(status, &headers, r#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#),
+                Some(GithubRefusal::RateLimit)
+            ));
+        }
+        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
+        headers.insert("x-ratelimit-reset", "2000".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
+    }
+
+    #[test]
+    fn github_rate_limit_honours_retry_after_without_reset() {
+        let now = 2_000_000;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 120_000);
+        headers.insert("x-ratelimit-reset", "1000".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 120_000);
+        headers.insert(reqwest::header::RETRY_AFTER, "Thu, 01 Jan 1970 00:35:00 GMT".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), 2_100_000);
+        headers.insert(reqwest::header::RETRY_AFTER, "0".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
     }
 
     /// A provider that accepts the connection and never answers must not hold its observer forever.

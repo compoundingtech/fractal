@@ -784,3 +784,16 @@ test('schedule schema tolerates future state strings and retains raw declaration
     // PageInfo.omitted_items is optional on the wire and encodes as null when the daemon leaves it out.
     assert.deepEqual(Schema.encodeSync(Rich.SchedulesPage)(decoded), { ...wire, page: { omitted_items: null, ...wire.page } });
 });
+
+test('optional author and recipients retain closed legacy scalar types', async () => {
+    const [{Schema},Rich] = await modules;
+    const items = require('../../../docs/st3/client-v0/fixtures/timeline-message-participants.json').value.items;
+    const decode = Rich.decodeUnknownSync(Rich.TimelineEntry,'strict');
+    for (const entry of items) assert.deepEqual(Schema.encodeSync(Rich.TimelineEntry)(decode(entry)), {
+        ...entry,timestamp:new Date(entry.timestamp).toISOString(),
+    });
+    for (const patch of [ {from:'daemon/runtime'}, {to:['agent/worker']}, {author:'step/fixture'},
+        {recipients:['daemon/runtime']}, {author:null}, {recipients:null} ]) {
+        assert.throws(()=>decode({...items[0],body:{...items[0].body,...patch}}));
+    }
+});

@@ -1,4 +1,4 @@
-// The paired gateway sits behind a proxy (Tailscale Serve). When the proxy cannot reach st it
+// The paired gateway sits behind a proxy (Tailscale Serve). When the proxy cannot reach Fractal it
 // answers with its own non-JSON body, often an empty 502, which the client would otherwise
 // report as a JSON parse error. Name the gateway failure instead.
 export function gatewayFetch(inner: typeof fetch = fetch): typeof fetch {

@@ -12,7 +12,7 @@ import { DiffPanel, type DiffRevealRequest } from '../../assistant-ui/compositio
 import { ResourceChipV1 } from '../../assistant-ui/resources/ResourceCardV1'
 import type { TranscriptTurn } from '../../assistant-ui/composition/Transcript'
 import type { WorkLogCall } from '../../assistant-ui/taste/work-log'
-import type { SyncStatus } from '../../assistant-ui/st3-views/sync-status'
+import type { SyncStatus } from '../../assistant-ui/sync-presentation/sync-status'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { baselineTheme } from '../../assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from '../../assistant-ui/composition-theme'
