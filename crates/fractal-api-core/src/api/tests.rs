@@ -11407,6 +11407,67 @@ version 2
         json!(mission_request.accepted_at_unix_ms)
     );
 
+    let index_before_refusals = store.index().unwrap();
+    for actor in ["agent/test.operator", "person/intruder"] {
+        let (status, error) = json_request(app.clone(), "/v1/persons/rename", json!({
+            "old_person": "person/alex",
+            "new_person": "person/robin",
+            "actor": actor,
+            "idempotency_key": format!("review-api-refused-{actor}"),
+        })).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+        assert_eq!(store.index().unwrap(), index_before_refusals);
+    }
+    let (status, error) = json_request(app.clone(), "/v1/persons/rename", json!({
+        "old_person": "person/alex",
+        "new_person": "person/robin",
+        "actor": "person/alex",
+        "idempotency_key": "review-api-unknown-person",
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(store.index().unwrap(), index_before_refusals);
+    store.append_claim(&ClaimInput {
+        subject: "message/review-api-known-robin".into(),
+        kind: "message.sent".into(),
+        actor: Some("person/robin".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("person/robin")),
+            ("to".into(), json!("person/alex")),
+            ("content".into(), json!("The new person already participates in the graph.")),
+            ("status".into(), json!("sent")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("review-api-known-robin".into()),
+    }).unwrap();
+    let repair = json!({
+        "old_person": "person/alex",
+        "new_person": "person/robin",
+        "actor": "person/alex",
+        "idempotency_key": "review-api-person-rename",
+    });
+    let (status, renamed) =
+        json_request(app.clone(), "/v1/persons/rename", repair.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["reassigned_reviews"], json!([run.subject, step.subject]));
+    for request in [&mission_again, &step_request] {
+        assert!(
+            store
+                .human_gate_requests()
+                .unwrap()
+                .iter()
+                .any(|(id, _, reviewer)| id == &request.id && reviewer == "person/robin")
+        );
+    }
+    let (status, repeated) =
+        json_request(app.clone(), "/v1/persons/rename", repair).await;
+    assert_eq!(status, StatusCode::OK, "{repeated}");
+    assert_eq!(renamed, repeated);
+    assert_eq!(
+        store.claim_by_id(&mission_again.id).unwrap().unwrap().body["fields"]["reviewer"],
+        "person/alex"
+    );
+
     let body = |actor: &str| {
         serde_json::to_value(ReviewRequest {
             delegation: None,
@@ -11420,7 +11481,7 @@ version 2
     let (status, rejected) = json_request(
         app.clone(),
         &format!("/v1/reviews/{}", run.subject),
-        body("person/someone-else"),
+        body("person/alex"),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
@@ -11429,7 +11490,7 @@ version 2
     let (status, accepted_mission) = json_request(
         app.clone(),
         &format!("/v1/reviews/{}", run.subject),
-        body("person/alex"),
+        body("person/robin"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{accepted_mission}");
@@ -11444,7 +11505,7 @@ version 2
         delegation: None,
         decision: "rejected".into(),
         reason: None,
-        actor: Some("person/alex".into()),
+        actor: Some("person/robin".into()),
         expected_subject: None,
     })
     .unwrap();
@@ -11461,7 +11522,7 @@ version 2
         delegation: None,
         decision: "rejected".into(),
         reason: Some("the evidence is incomplete".into()),
-        actor: Some("person/alex".into()),
+        actor: Some("person/robin".into()),
         expected_subject: None,
     })
     .unwrap();

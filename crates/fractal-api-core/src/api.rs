@@ -61,10 +61,34 @@ pub use crate::store::agent_queue_values::{
     AGENT_QUEUE_FIELDS, agent_queue_fields, agent_queue_metadata,
 };
 use crate::model::ClientReplicated;
-use crate::model::{ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput, ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer, ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest, DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord, GateResultRequest, HumanReviewView, LaunchApproveAndStartRequest, LaunchApproveAndStartView, LaunchDecisionAnswerRequest, LaunchDecisionOption, LaunchDecisionRequest, LaunchDecisionResponse, LaunchDecisionType, LaunchStartRequest, LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt, MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest, MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest, MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView, OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec, PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest, PlanningProposalRequest, PlanningRevisionRequest, PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse, ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse, ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest, SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView, WorkRequest, WorkRetryRequest, WorkWakeRequest};
+use crate::model::{
+    ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView,
+    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput,
+    ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer,
+    ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest,
+    DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord,
+    GateResultRequest, HumanReviewView, LaunchApproveAndStartRequest,
+    LaunchApproveAndStartView, LaunchDecisionAnswerRequest, LaunchDecisionOption,
+    LaunchDecisionRequest, LaunchDecisionResponse, LaunchDecisionType, LaunchStartRequest,
+    LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt,
+    MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest,
+    MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest,
+    MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView,
+    OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec,
+    PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest,
+    PlanningProposalRequest, PlanningRevisionRequest,
+    PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse,
+    ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse,
+    ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
+    ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
+    RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
+    RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
+    SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
+    WorkRequest, WorkRetryRequest, WorkWakeRequest,
+};
+use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
-use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
 pub mod wire_names;
@@ -421,10 +445,12 @@ impl ApiError {
             | "stale-launch-preview"
             | "fleet-leaving"
             | "glass-deleted"
+            | "person-rename-conflict"
             | "glass-limit" => StatusCode::CONFLICT,
             "launch-review-not-authorized"
             | "wrong-message-recipient"
             | "lane-approval-denied"
+            | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
@@ -626,6 +652,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/sets/apply", post(owned_sets::apply))
         .route("/v1/intent/apply", post(launches::apply_with_bound))
         .route("/v1/agents/rename", post(agents::rename_agent))
+        .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
         .route("/v1/agents/restart", post(agents::restart_agent))
@@ -1879,12 +1906,15 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "wrong-message-recipient"
         | "lane-approval-denied"
         | "glass-owner-forbidden"
+        | "person-rename-forbidden"
         | "foreign-agent-actor" => "forbidden".into(),
         "lane-not-found" => "not-found".into(),
         "invalid-person-ask"
         | "invalid-person-response"
         | "invalid-person-request"
         | "invalid-person-answer"
+        | "invalid-person-rename"
+        | "unknown-person"
         | "answer-required"
         | "unsupported-person-request"
         | "missing-ask-owner"
@@ -1898,6 +1928,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-review-decision"
         | "feedback-gate-needs-step" => "validation-failed".into(),
         "wrong-reviewer" => "forbidden".into(),
+        "person-rename-conflict" => "conflict".into(),
         "stale-work-ask"
         | "stale-subject"
         | "missing-subject-token"
@@ -6761,6 +6792,7 @@ pub async fn guard_bound_request(
         "/v1/sets/",
         "/v1/agent-queue-moves",
         "/v1/agents/rename",
+        "/v1/persons/rename",
         "/v1/agents/restart",
         "/v1/agents/rollout",
         "/v1/agents/start",

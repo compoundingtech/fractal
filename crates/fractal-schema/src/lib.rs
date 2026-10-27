@@ -1723,6 +1723,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.person-reassigned",
+            &["step-run"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            Some("work"),
+            true,
+            &[],
+        ),
+        (
             "work.person-done",
             &["step-run"],
             WritePolicy::AuthorizedParticipant,
@@ -1830,6 +1839,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("gates"),
             true,
             &["gate"],
+        ),
+        (
+            "gate.reviewer-reassigned",
+            &["gate-operation"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            Some("gates"),
+            true,
+            &["gate"],
+        ),
+        (
+            "person.rename.completed",
+            &["person"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
         ),
         (
             "gate.result",
@@ -3169,6 +3196,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("episode", string()),
             ("answer", object()),
         ],
+        "work.person-reassigned" => &[
+            ("previous_person", reference()),
+            ("person", reference()),
+            ("run", reference()),
+            ("generation", reference()),
+            ("attempt", integer()),
+            ("episode", string()),
+        ],
         "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
         | "work.released" | "work.extended" => &[
             ("attempt", integer()),
@@ -3293,6 +3328,17 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("attempt_receipt", required_string()),
             ("finding_refs", required_array()),
             ("evidence", required_array()),
+        ],
+        "gate.reviewer-reassigned" => &[
+            ("request", string()),
+            ("owner", reference()),
+            ("previous_reviewer", reference()),
+            ("reviewer", reference()),
+        ],
+        "person.rename.completed" => &[
+            ("old_person", reference()),
+            ("new_person", reference()),
+            ("report", object()),
         ],
         "gate.result" => &[
             (
