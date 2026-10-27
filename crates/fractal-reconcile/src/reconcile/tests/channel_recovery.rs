@@ -194,11 +194,11 @@ fn quoted_channel_policy_banner_is_not_a_provider_refusal() {
 }
 
 // The quotation in #3999 is one line and includes a period after "dropped".
-const GEOFFREY_POLICY_BANNER: &str = include_str!("../../../../fractal-drivers/tests/fixtures/blocking-screens/claude-channel-policy-geoffrey.txt");
+const REPORTED_POLICY_BANNER: &str = /* sqlite-large-value: allow-for-now lv-h72967be8c2d9 owner=fractal_reconcile::reconcile::tests::channel_recovery TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-drivers/tests/fixtures/blocking-screens/claude-channel-policy-reported.txt");
 
 #[test]
 fn verbatim_and_wrapped_policy_banners_stop_only_in_provider_startup_chrome() {
-    for source in [POLICY_BANNER, GEOFFREY_POLICY_BANNER] {
+    for source in [POLICY_BANNER, REPORTED_POLICY_BANNER] {
         for width in [usize::MAX, 80, 60, 40, 20] {
             // Both fixture sources are ASCII. A PTY soft-wrap may split a word at
             // the right edge, whereas Claude can also wrap at a space.
