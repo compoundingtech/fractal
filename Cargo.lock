@@ -2514,6 +2514,7 @@ dependencies = [
  "notify",
  "opentelemetry",
  "opentelemetry_sdk",
+ "parking_lot",
  "proptest",
  "pty-client",
  "pty-core",

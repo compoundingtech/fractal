@@ -67,6 +67,10 @@ pub struct FractalRuntime {
     /// When the oldest refresh request no refresh has answered yet was made, in Unix ms; 0
     /// when none waits. A refresh clears it only once it publishes.
     pub agent_roster_requested_at: std::sync::atomic::AtomicU64,
+    /// Serializes request capture/restoration with projection-generation reset.
+    pub agent_roster_request_generation: parking_lot::Mutex<()>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub agent_roster_restore_checked: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Bit 0: a refresh is in flight. Bit 1: the last attempt failed.
     pub agent_roster_attempt: std::sync::atomic::AtomicU8,
     /// Fault retries due in this fold, and deadlines deferred to the next refresh.
@@ -516,8 +520,11 @@ impl Runtime for FractalRuntime {
     fn forget_views(&self) {
         // Pending work names the discarded projection generation. A recent reader or a
         // live subscriber below can request a new-generation publication after invalidation.
-        self.agent_roster_requested_at.store(0, std::sync::atomic::Ordering::Release);
-        self.presented_agents.forget();
+        {
+            let _generation = self.agent_roster_request_generation.lock();
+            self.agent_roster_requested_at.store(0, std::sync::atomic::Ordering::Release);
+            self.presented_agents.forget();
+        }
         self.forget_reductions();
         *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
@@ -725,6 +732,7 @@ impl FractalRuntime {
     /// A queued startup, explicit-read or local-activity request remains demand until answered.
     pub fn request_roster_refresh(&self) {
         if let Some(wake) = self.agent_roster_refresh.get() {
+            let _generation = self.agent_roster_request_generation.lock();
             let _ = self.agent_roster_requested_at.compare_exchange(
                 0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed,

@@ -2567,6 +2567,8 @@ Startup queues one complete publication after its bounded head, even before any 
 An explicit or local-activity refresh request remains demand until that attempt answers it,
 including across admission and blocking-worker queues. A subscription wake alone is not such
 a request: dropping its last receiver can still cancel an otherwise unrequested refresh.
+Request capture and failed-fold restoration are serialized with projection reset, so a reset
+cannot resurrect a pending request belonging to the discarded generation.
 
 `AgentsPublicationMetadata` identifies the publication with an opaque UUID `node_epoch` and
 an increasing epoch-local `revision`. Restart, full projection reset or revision exhaustion starts a new epoch;
