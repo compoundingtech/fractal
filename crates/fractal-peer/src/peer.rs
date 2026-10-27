@@ -955,6 +955,12 @@ impl ClientRelay {
                     "the peer client read protocol differs"
                 );
                 Ok(envelope)
+            }).map_err(|error| {
+                if inspect_capabilities && status.is_success() {
+                    client_read_unsupported(&request.request).into()
+                } else {
+                    error
+                }
             })?;
         if !status.is_success() {
             return Err(ClientReadRejected {

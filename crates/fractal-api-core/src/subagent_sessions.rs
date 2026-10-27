@@ -38,22 +38,34 @@ pub struct ChildParts {
 /// Decode a child link at the boundary, normalizing legacy two-field links to a root routing
 /// key. A routing parent is native or managed, never another child.
 pub fn child_parts(session_id: &str) -> Option<ChildParts> {
+    child_parts_at_depth(session_id, 32)
+}
+
+fn child_parts_at_depth(session_id: &str, remaining: usize) -> Option<ChildParts> {
+    if remaining == 0 {
+        return None;
+    }
     let encoded = session_id.strip_prefix(CHILD_PREFIX)?;
     let decoded = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     let fields = serde_json::from_slice::<Vec<String>>(&decoded).ok()?;
     let (parent, task, routing_parent) = match fields.len() {
         3 => {
             let [parent, task, routing_parent]: [String; 3] = fields.try_into().ok()?;
-            (parent, task, routing_parent)
+            (parent, task, Some(routing_parent))
         }
         2 => {
             let [parent, task]: [String; 2] = fields.try_into().ok()?;
-            let routing_parent = child_parts(&parent)
-                .map_or_else(|| parent.clone(), |parts| parts.routing_parent_session_id);
-            (parent, task, routing_parent)
+            (parent, task, None)
         }
         _ => return None,
     };
+    let parent_parts = child_parts_at_depth(&parent, remaining - 1);
+    let routing_parent = routing_parent.unwrap_or_else(|| {
+        parent_parts.as_ref().map_or_else(
+            || parent.clone(),
+            |parts| parts.routing_parent_session_id.clone(),
+        )
+    });
     let external = |id: &str| {
         id.strip_prefix("session/external-")
             .is_some_and(|hash| hash.len() == 24 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -61,7 +73,6 @@ pub fn child_parts(session_id: &str) -> Option<ChildParts> {
     let managed = routing_parent.strip_prefix("session/").is_some_and(|hash| {
         hash.len() == 24 && hash.bytes().all(|b| b.is_ascii_hexdigit())
     });
-    let parent_parts = child_parts(&parent);
     if !(external(&parent) || parent_parts.is_some())
         || !valid_task_id(&task)
         || !(external(&routing_parent) || managed)
@@ -363,5 +374,18 @@ mod tests {
             let id = format!("{CHILD_PREFIX}{}", URL_SAFE_NO_PAD.encode(payload.to_string()));
             assert!(child_parts(&id).is_none(), "{payload}");
         }
+    }
+
+    #[test]
+    fn deeply_nested_legacy_links_decode_each_parent_once_and_have_a_depth_bound() {
+        let root = "session/external-0123456789abcdef01234567";
+        let mut descendant = root.to_owned();
+        for _ in 0..24 {
+            descendant = format!("{CHILD_PREFIX}{}", URL_SAFE_NO_PAD.encode(
+                json!([descendant, "task"]).to_string(),
+            ));
+        }
+        assert_eq!(child_parts(&descendant).unwrap().routing_parent_session_id, root);
+        assert!(child_parts_at_depth(&descendant, 23).is_none());
     }
 }
