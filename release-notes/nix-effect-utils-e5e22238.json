@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Align effect-utils to ac338ff0249e191ce4af54f050f1ef55a408505d, pnpm 12.15.0 and regenerated workspace artifacts and dependency installation hashes; align Effect consumers to the producer's required 4.0.3 cohort.",
+  "summary": "Align effect-utils to e5e22238a4586676e4f762b078da50ada9838074, pnpm 12.15.0 and regenerated workspace artifacts and dependency installation hashes; align Effect consumers to the producer's required 4.0.3 cohort.",
   "replay": {"status": "none", "detail": "No claim or replay behavior change."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No checkpoint or fleet coordination change; CI runners are unchanged."},
