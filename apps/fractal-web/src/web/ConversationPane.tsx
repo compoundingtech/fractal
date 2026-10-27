@@ -20,6 +20,9 @@ import type { UxTelemetry } from '../telemetry/ux.ts'
 import { inputPaintRegionMounted, registerInputPaintRegions, type InputPaintRegion } from '../telemetry/inputPaint.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
+import type { ToolCallItem } from '../conversation/model.ts'
+import { semanticToolDetail } from './semanticTool.tsx'
+import { TypedToolPreview } from './TypedToolPreview.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { AgentThreadTabs, type AgentThreadTabsHandle } from '../../../../packages/fractal-ui/src/assistant-ui/composition/AgentThreadTabs.tsx'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
@@ -216,6 +219,11 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     event.stopPropagation()
     onOpenDocument(href)
   }
+  // Recorded semantic evidence replaces the kit preview only where the app has a typed reading; other rows keep the kit detail.
+  const renderSemanticDetail = React.useCallback((item: ToolCallItem, call: WorkLogCall) => {
+    if (!call.skipped && (call.kind === 'subagent' || call.kind === 'search' || call.kind === 'web')) return <TypedToolPreview call={call} onOpen={() => onOpenTool(call)} />
+    return semanticToolDetail(item, () => onOpenTool(call))
+  }, [onOpenTool])
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
@@ -230,6 +238,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       title={agentName}
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}
+      renderToolDetail={renderSemanticDetail}
       renderTurnFooter={nativeTurnFooter}
       onRetrySync={retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
       attachmentImages={{ state: images.state, load: (attachment, messageId) => { void images.load(attachment, messageId) } }}

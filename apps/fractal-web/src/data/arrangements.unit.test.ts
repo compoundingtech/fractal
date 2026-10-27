@@ -9,7 +9,7 @@ import {
   reservedSidebarSubject,
   sidebarCandidates,
   sidebarWinner,
-  fractalInventoryGateway,
+  st3InventoryGateway,
   type ArrangementInventoryGateway,
   type InventoryEvent,
 } from './arrangements.ts'
@@ -288,7 +288,7 @@ describe('owner-wide arrangement inventory', () => {
 
   it('binds the generated client request to the read signal', async () => {
     const requests: { url: string; signal: AbortSignal | null | undefined }[] = []
-    const gateway = fractalInventoryGateway({
+    const gateway = st3InventoryGateway({
       baseUrl: 'http://sidebar.test',
       fetchImpl: async (input, init) => {
         requests.push({ url: String(input), signal: init?.signal })

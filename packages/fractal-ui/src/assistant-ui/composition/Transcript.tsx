@@ -64,6 +64,8 @@ export interface TranscriptProps {
   readonly tailRef?: React.Ref<HTMLElement>
   /** Open output in the host's detail surface. No split/controller is hidden in the kit. */
   readonly onOpenTool?: (call: WorkLogCall) => void
+  /** Host-owned detail for one recorded tool call, given the source item and its projected call; `undefined` keeps the kit preview. */
+  readonly renderToolDetail?: (item: Extract<ConversationItem, { _tag: 'ToolCall' }>, call: WorkLogCall) => React.ReactNode | undefined
   readonly onRetrySync?: () => void
   readonly onRetryRun?: () => void
   readonly onRetrySend?: (itemId: string) => void
@@ -101,6 +103,7 @@ const RunContinuation = React.createContext(false)
 const RunCopyText = React.createContext<string | undefined>(undefined)
 const RetrySend = React.createContext<TranscriptProps['onRetrySend']>(undefined)
 const TurnFooterRenderer = React.createContext<TranscriptProps['renderTurnFooter']>(undefined)
+const ToolDetailRenderer = React.createContext<TranscriptProps['renderToolDetail']>(undefined)
 function TranscriptMessage() {
   const item = useAuiState(state => state.message.metadata.custom.item) as ConversationItem | undefined
   const summary = useAuiState(state => state.message.content.find(part => part.type === 'text')?.text ?? '')
@@ -284,7 +287,11 @@ const workMembers = (turn: TranscriptTurn): readonly string[] => {
 const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef }: { turn: TranscriptTurn; summaryMemberIds?: readonly string[]; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement> }) {
   const renderFooter = React.useContext(TurnFooterRenderer)
 
-  const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
+  const renderToolDetail = React.useContext(ToolDetailRenderer)
+  const detail = React.useCallback((call: WorkLogCall) => {
+    const item = renderToolDetail === undefined ? undefined : turn.items.find((item): item is Extract<ConversationItem, { _tag: 'ToolCall' }> => item._tag === 'ToolCall' && item.id === call.id)
+    return (item === undefined ? undefined : renderToolDetail?.(item, call)) ?? <ToolDetailPreview call={call} onOpen={onOpenTool} />
+  }, [turn.items, renderToolDetail, onOpenTool])
   // The work log lists tool calls separately, so every thought of the turn is visually adjacent: one disclosure.
   const reasoning = turn.items.filter((item): item is Extract<ConversationItem, { _tag: 'Reasoning' }> => item._tag === 'Reasoning' && item.text.trim().length > 0)
   const shown = turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning')
@@ -360,7 +367,7 @@ function HistoryRange({ total, startIndex, materializing, earlierId, firstId, re
   </div>
 }
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef }: TranscriptProps) {
+export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef }: TranscriptProps) {
   const scrollId = React.useId()
   const narrow = React.useContext(NarrowLayoutContext)
   const messages = useAuiState(state => state.thread.messages)
@@ -447,7 +454,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
     {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} inline={!showHeader} />}
     {running !== undefined && <>{!narrow && <div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div>}<RunElapsed startedAt={running.work.startedAt} now={now} /></>}
   </>
-  return <TurnFooterRenderer.Provider value={renderTurnFooter}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
+  return <TurnFooterRenderer.Provider value={renderTurnFooter}><ToolDetailRenderer.Provider value={renderToolDetail}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
     {!showHeader && headerActionsHost != null && active ? createPortal(<div data-testid="transcript-header-status" {...stylex.props(styles.headerStatus, progress !== undefined && styles.headerProgress)}>{headerStatus}</div>, headerActionsHost) : null}
     <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} anchorHistory={anchorHistory} stateKey={viewportKey} initialTailCount={transcriptInitialTailCount} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
@@ -458,7 +465,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
         {committed.slice(startIndex).map(turn => <PreparedTurn key={turn.id} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn === committed[committed.length - 1] ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}
       </TranscriptSearch>}</>}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
-  </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider></TurnFooterRenderer.Provider>
+  </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider></ToolDetailRenderer.Provider></TurnFooterRenderer.Provider>
 }
 const runSweep = stylex.keyframes({ from: { transform: 'translateX(0%)' }, to: { transform: 'translateX(300%)' } })
 const liveSpin = stylex.keyframes({ from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } })

@@ -34,7 +34,7 @@ const EarlyCommand = Schema.Struct({
   id: Schema.String,
   collection: Schema.Literal('agents'),
   limit: Schema.Literal(100),
-}).annotate({ identifier: 'Fractal.EarlyCollections.Command' })
+}).annotate({ identifier: 'St3.EarlyCollections.Command' })
 
 /** The data a taken handle carries; the socket itself is checked separately. */
 const EarlyTaken = Schema.Struct({
@@ -46,13 +46,13 @@ const EarlyTaken = Schema.Struct({
   /** `performance.now()` when the early subscribe was handed to the socket, if it was. */
   subscribeSentAt: Schema.optional(Millis),
   frames: Schema.Array(Schema.String).check(Schema.isMaxLength(EARLY_MAX_FRAMES)),
-}).annotate({ identifier: 'Fractal.EarlyCollections.Taken' })
+}).annotate({ identifier: 'St3.EarlyCollections.Taken' })
 type EarlyTaken = typeof EarlyTaken.Type
 
 const EarlyBootstrap = Schema.Struct({
   traceparent: EarlyTaken.fields.traceparent,
   startedAt: Millis,
-}).annotate({ identifier: 'Fractal.EarlyCollections.Bootstrap' })
+}).annotate({ identifier: 'St3.EarlyCollections.Bootstrap' })
 
 /** The browser socket surface the early script hands over. */
 interface RawSocket {
