@@ -12,6 +12,8 @@ loader = importlib.machinery.SourceFileLoader("web_check", str(Path(__file__).wi
 spec = importlib.util.spec_from_loader(loader.name, loader)
 web = importlib.util.module_from_spec(spec)
 loader.exec_module(web)
+SCRATCH = Path(__file__).resolve().parent.parent / "tmp/web-check-test"
+SCRATCH.mkdir(parents=True, exist_ok=True)
 
 
 class WebCheckTest(unittest.TestCase):
@@ -24,7 +26,7 @@ class WebCheckTest(unittest.TestCase):
         self.assertNotIn(".#web", command)
 
     def test_digest_is_path_sensitive_and_worktree_independent(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             root = Path(temporary)
             values = []
             for tree in ("a", "b"):
@@ -39,7 +41,7 @@ class WebCheckTest(unittest.TestCase):
                 self.assertNotEqual(values[0], web.digest([root / "b/flake.lock"]))
 
     def test_prepare_seeds_same_relative_location(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             root = Path(temporary)
             directory = root / "shared-shell"
             directory.mkdir()
@@ -62,7 +64,7 @@ class WebCheckTest(unittest.TestCase):
                 self.assertEqual((root / ".devenv/gc/devshell").resolve(), (directory / "profile").resolve())
 
     def test_failed_batch_does_not_publish_seed(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             root = Path(temporary)
             (root / "profile").touch()
             (root / "node_modules").mkdir()
