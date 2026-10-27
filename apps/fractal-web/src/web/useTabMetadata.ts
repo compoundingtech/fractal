@@ -73,17 +73,33 @@ export const useTabMetadata = ({ title, faviconState }: {
   readonly title: string
   readonly faviconState: FaviconState
 }): void => {
-  const lastFavicon = React.useRef<FaviconState | undefined>(undefined)
+  const lastFavicon = React.useRef<{ state: FaviconState; href: string } | undefined>(undefined)
+  React.useLayoutEffect(() => {
+    const originalTitle = document.title
+    const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
+    const originalHref = icon?.getAttribute('href') ?? null
+    const originalType = icon?.getAttribute('type') ?? null
+    return () => {
+      document.title = originalTitle
+      if (icon !== null) {
+        if (originalHref === null) icon.removeAttribute('href')
+        else icon.setAttribute('href', originalHref)
+        if (originalType === null) icon.removeAttribute('type')
+        else icon.setAttribute('type', originalType)
+      }
+    }
+  }, [])
   React.useLayoutEffect(() => {
     if (document.title !== title) document.title = title
   }, [title])
   React.useLayoutEffect(() => {
-    if (lastFavicon.current === faviconState) return
     const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
     if (icon === null) return
-    const themeRoot = document.querySelector<HTMLElement>('[data-testid="live-agent-workspace"]') ?? document.documentElement
+    if (lastFavicon.current?.state !== faviconState) {
+      const themeRoot = document.querySelector<HTMLElement>('[data-testid="live-agent-workspace"]') ?? document.documentElement
+      lastFavicon.current = { state: faviconState, href: drawFavicon(faviconDotColor({ state: faviconState, themeRoot })) }
+    }
     icon.type = 'image/png'
-    icon.href = drawFavicon(faviconDotColor({ state: faviconState, themeRoot }))
-    lastFavicon.current = faviconState
+    icon.href = lastFavicon.current.href
   }, [faviconState])
 }

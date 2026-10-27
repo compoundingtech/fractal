@@ -68,17 +68,34 @@ describe('reactive Fractal tab', () => {
     expect(renders).toEqual({ pane: 2, sidebar: 2 })
     expect(paints).toHaveLength(1)
   })
-  it('does not write or redraw unchanged values, including StrictMode effect replay', async () => {
+  it('reapplies active metadata after StrictMode cleanup without redrawing unchanged values', async () => {
     const writes = vi.spyOn(document, 'title', 'set')
-    await act(async () => root.render(<React.StrictMode><Metadata title="Example · Fractal" faviconState="working" /></React.StrictMode>))
+    const strictRender = async () => {
+      await act(async () => root.render(<React.StrictMode><Metadata title="Example · Fractal" faviconState="working" /></React.StrictMode>))
+    }
+    await strictRender()
+    expect(document.title).toBe('Example · Fractal')
+    expect(icon.type).toBe('image/png')
+    expect(icon.href).toBe('data:image/png;base64,1')
+    expect(writes.mock.calls.map(([title]) => title)).toEqual(['Example · Fractal', 'Fractal', 'Example · Fractal'])
     expect(paints).toHaveLength(1)
+    await strictRender()
+    expect(writes).toHaveBeenCalledTimes(3)
+    expect(paints).toHaveLength(1)
+  })
+  it.each([
+    { href: '/original.svg', type: 'image/svg+xml' },
+    { href: null, type: null },
+  ])('restores original metadata attributes on unmount: %o', async ({ href, type }) => {
+    document.title = 'Original title'
+    if (href !== null) icon.setAttribute('href', href)
+    if (type !== null) icon.setAttribute('type', type)
     await render('Example · Fractal', 'working')
-    // Removing StrictMode remounts; the same title still must not be written again.
-    expect(writes).toHaveBeenCalledTimes(1)
-    const drawCount = paints.length
-    await render('Example · Fractal', 'working')
-    expect(writes).toHaveBeenCalledTimes(1)
-    expect(paints).toHaveLength(drawCount)
+    await render('Other · Fractal', 'error')
+    await act(async () => root.render(null))
+    expect(document.title).toBe('Original title')
+    expect(icon.getAttribute('href')).toBe(href)
+    expect(icon.getAttribute('type')).toBe(type)
   })
   it.each([
     ['working', 'rgb(34, 197, 94)'], ['needs-you', 'rgb(254, 154, 0)'], ['error', 'rgb(251, 65, 74)'], ['none', undefined],
