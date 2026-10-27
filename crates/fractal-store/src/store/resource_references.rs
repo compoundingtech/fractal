@@ -67,15 +67,23 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
 
 /// Bring the edge projection up to date as the store opens. A shared-memory store holds a
 /// test's or a tool's handful of declarations, so it converges here, inside the open
-/// transaction. A durable store never waits at open: this only seeds the resume cursor, the
-/// thread [`spawn_backfill`] starts finishes the work in [`BACKFILL_BATCH`]-sized writer
-/// transactions, and reads answer from the declarations
+/// transaction. An empty durable store also completes here. For a preexisting durable store,
+/// open only seeds the resume cursor; the thread [`spawn_backfill`] starts finishes the work
+/// in [`BACKFILL_BATCH`]-sized writer transactions, and reads answer from the declarations
 /// ([`referrers_from_declarations`]) until it does.
 pub(super) fn open(transaction: &Transaction<'_>, shared_memory: bool) -> Result<()> {
     if complete_tx(transaction)? {
         return Ok(());
     }
-    if shared_memory {
+    // A new durable store has nothing to migrate. Complete inside the open transaction
+    // rather than scheduling empty background commits that invalidate collection snapshots.
+    let empty = !transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM desired WHERE kind='agent')
+             OR EXISTS(SELECT 1 FROM mission_definitions)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if shared_memory || empty {
         while !backfill_step_tx(transaction, BACKFILL_BATCH)?.complete {}
         return Ok(());
     }
@@ -255,9 +263,14 @@ pub(super) struct BackfillWorker {
 
 /// Finish the edge backfill off the open path, releasing queue ownership between committed
 /// batches. Tests inject the same worker explicitly so they can pause at a committed cursor.
-#[cfg(not(test))]
-pub(super) fn spawn_backfill(connection: &WriterConnection) -> Option<BackfillWorker> {
-    spawn_backfill_with(connection, |_| {})
+pub(super) fn spawn_backfill(
+    connection: &WriterConnection,
+    reader: &Connection,
+) -> Result<Option<BackfillWorker>> {
+    if !backfilling(reader)? {
+        return Ok(None);
+    }
+    Ok(spawn_backfill_with(connection, |_| {}))
 }
 
 fn spawn_backfill_with(
@@ -415,6 +428,23 @@ mod tests {
             )
             .unwrap();
         transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn completed_projection_does_not_schedule_background_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.sqlite3");
+        for reopen in [false, true] {
+            let store = Store::open(&path, "node").unwrap();
+            assert!(!backfilling(&store.readers.get()).unwrap(), "{reopen}");
+            assert!(
+                spawn_backfill(&store.connection, &store.readers.get())
+                    .unwrap()
+                    .is_none(),
+                "{reopen}"
+            );
+            publish_many(&store, 1);
+        }
     }
 
     #[test]

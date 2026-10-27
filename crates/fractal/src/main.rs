@@ -2200,7 +2200,7 @@ struct SubjectShowArgs {
     /// Print the current managed agent declaration as canonical KDL v2.
     #[arg(long)]
     kdl: bool,
-    /// Show the seats and missions that name this resource.
+    /// Show the agents and missions that name this resource.
     #[arg(long, conflicts_with = "kdl")]
     references: bool,
     /// Include literal environment values in the KDL output.
