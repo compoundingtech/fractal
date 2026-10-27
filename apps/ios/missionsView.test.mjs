@@ -3,7 +3,7 @@ import { actorName, filterMissionRows, missionLabel, missionRows, missionSection
 
 const step = (id, state, extra = {}) => ({ id: `step-run/${id}`, path: id, state, attempt: 1, since: '2026-09-30T11:00:00Z', ...extra });
 const mission = (id, state, steps = [], extra = {}) => ({ id: `mission/${id}`, kind: 'mission', title: id, state, runs: ['r'], run_details: [{ id: 'mission-run/r', status: state, steps }], updated_at: '2026-09-30T11:00:00Z', ...extra });
-// A mission row as st serves it, with its presentation (docs/clients/ui-contract.md, Mission).
+// A mission row as Fractal serves it, with its presentation (docs/clients/ui-contract.md, Mission).
 const served = (row, word, presentation = {}) => ({
   ...row,
   presentation: {
@@ -12,13 +12,13 @@ const served = (row, word, presentation = {}) => ({
   },
 });
 
-// The phone reads the word st serves and derives none.
+// The phone reads the word Fractal serves and derives none.
 for (const word of ['decision', 'stalled', 'unstaffed', 'unclaimed', 'queued', 'working', 'watching', 'held', 'idle', 'done', 'failed', 'cancelled', 'not_started']) {
   assert.equal(missionWord(served(mission('a', 'running'), word)), word);
 }
-// The word st serves wins over anything the row's steps suggest.
+// The word Fractal serves wins over anything the row's steps suggest.
 assert.equal(missionWord(served(mission('a', 'running', [step('s', 'blocked')]), 'queued')), 'queued');
-// An older st serves none, and a word this phone does not know is not guessed at.
+// An older Fractal serves none, and a word this phone does not know is not guessed at.
 assert.equal(missionWord(mission('a', 'running', [step('s', 'running')])), 'unknown');
 assert.equal(missionWord(served(mission('a', 'running'), 'becalmed')), 'unknown');
 assert.equal(missionLabel(mission('a', 'running')), 'running · Fractal does not say');
@@ -39,6 +39,10 @@ assert.equal(actorName({ kind: 'st' }), 'Fractal');
 assert.equal(actorName({ kind: 'nobody' }), undefined);
 
 assert.equal(missionTitle({ id: 'mission/fleet/stui/client-api', title: 'fleet/stui/client-api' }), 'fleet/stui · Client API');
+// Product slugs have a canonical label; stored legacy slugs retain their own label.
+assert.equal(missionTitle({ id: 'mission/fleet/st3', title: 'fleet/st3' }), 'fleet · ST');
+assert.equal(missionTitle({ id: 'mission/fleet/FRACTAL', title: 'fleet/FRACTAL' }), 'fleet · Fractal');
+assert.equal(missionTitle({ id: 'mission/fleet/fractal-tui', title: 'fleet/fractal-tui' }), 'fleet · Fractal TUI');
 
 const missions = [
   served(mission('fleet/b/idle', 'standing'), 'idle'),
@@ -50,7 +54,7 @@ assert.deepEqual(rows.map(row => [row.word, row.title, row.done, row.total]), [[
 assert.equal(hidden, 1);
 assert.deepEqual(missionSections(rows).map(section => section.title), ['working', 'idle']);
 assert.equal(missionRows(missions, true).rows.length, 3);
-// Rows from an older st list last, under "st does not say", with their raw state.
+// Rows from an older Fractal list last, under "Fractal does not say", with their raw state.
 {
   const { rows } = missionRows([mission('fleet/c/old', 'running'), ...missions], true);
   assert.equal(rows.at(-1).label, 'running · Fractal does not say');
@@ -69,7 +73,7 @@ assert.equal(missionRows(missions, true).rows.length, 3);
   assert.equal(missionRows([yesterday, today], true, now).rows.length, 2);
 }
 
-// A run in progress shows what its step last reported (Nathan, 2026-10-06), as st serves it.
+// A run in progress shows what its step last reported (Nathan, 2026-10-06), as Fractal serves it.
 {
   const busy = served(mission('busy', 'running'), 'working', { last_progress: ' Tests pass;\n opening the PR ' });
   const quiet = served(mission('quiet', 'running'), 'working');

@@ -228,6 +228,7 @@ pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
     pub store: Arc<Store>,
+    pub private_notes: Arc<crate::private_notes::Authority>,
     pub notify: Arc<Notify>,
     pub event_notify: watch::Sender<u64>,
     pub node: String,
@@ -436,6 +437,9 @@ impl ApiError {
             | "retirement-upgrade-required"
             | "custody-pending"
             | "stale-subject"
+            | "stale-fence"
+            | "idempotency-conflict"
+            | "private-notes-carrier-conflict"
             | "owned-set-refused"
             | "set-managed-subject"
             | "missing-subject-token"
@@ -449,10 +453,12 @@ impl ApiError {
             | "glass-limit" => StatusCode::CONFLICT,
             "launch-review-not-authorized"
             | "wrong-message-recipient"
+            | "forbidden"
             | "lane-approval-denied"
             | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
@@ -1883,6 +1889,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "runtime-list-ended"
         | "remote-unavailable"
         | "terminal-unavailable"
+        | "private-notes-unreachable"
+        | "private-notes-carrier-conflict"
+        | "private-notes-indeterminate"
         | "inventory-unavailable"
         | "conversation-content-invalidated"
         | "transcript-unavailable"
@@ -3785,6 +3794,7 @@ fn client_agent_cards_presented(
                 "owner_run_id": subject.owner_run,
                 "driver": driver,
                 "harness_state": harness_state.as_deref().map(|state| if state == "needs-login" { "unauthenticated" } else { state }),
+                "background_jobs": subject.harness.as_ref().and_then(|harness| harness.background_jobs),
                 "end_reason": end_reason,
                 "harness_error_state": (harness_state.as_deref() == Some("needs-login")).then_some("needs-login"),
                 "since": subject.harness.as_ref().map(|harness| client_timestamp(harness.since_unix_ms)),
@@ -5980,6 +5990,7 @@ pub fn remote_read_error(host: &str, error: anyhow::Error) -> ApiError {
             | "stale-fence"
             | "validation-failed"
             | "forbidden"
+            | "peer-too-old"
             | "idempotency-conflict"
     ) {
         return remote_unavailable(host);
@@ -8209,6 +8220,12 @@ fn doctor_report_with_operation_drift(
         }),
     }
     checks.push(first_readiness_scheduler_check(&state.store, &state.node));
+    if state.fleet_id.is_some() {
+        checks.push(crate::replication_worker_build::check(
+            &state.state_dir,
+            fractal_drivers::version::build_commit(),
+        ));
+    }
     match state.store.idempotency_conflicts(5) {
         Ok((0, _)) => checks.push(DoctorCheck {
             name: "idempotency-keys".into(),

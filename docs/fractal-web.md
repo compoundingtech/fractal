@@ -374,13 +374,20 @@ React would otherwise walk every retained fiber looking for consumers.
 Reading position is independent of that three-pane DOM cache. `WorkspaceBody` owns one
 memory-only kit `ViewportStore` for its surface lifetime, above the keyed panes, and each
 transcript uses its stable agent conversation ref as `viewportKey`. A detached reading line
-survives switching away and back, even after its pane is evicted and remounted. Memory is
+survives switching away and back, even after its pane is evicted and remounted. The line is
+saved by source row identity as well as offset: a remount after earlier history or a turn split
+loaded above it restores the same row, and a work summary whose turn id changed is found through
+a tool call or thought it still owns. A row missing from partial or waiting history stays pending
+until it mounts; once complete source history no longer contains it, the saved top applies. Memory is
 limited to the 32 most recently visited conversations still in the current agent roster;
 layout-phase pruning drops departed agents and older visits after viewport cleanup saves.
 Returning to a dropped key opens at the end. Remounting
 the whole surface (including a reload) discards the store and opens at the live end.
 The existing `lastSendId` command still re-attaches on a new own send; no clock tick drives
-running-turn motion. The composition integration test exercises A → B → A, eviction through
+running-turn motion. Returning to the end from history (that command or **New messages ↓**)
+eases over the standard motion duration and re-reads the live end each frame; wheel, touch,
+navigation keys or a reader scroll stop it where it is, and reduced motion returns at once.
+The composition integration test exercises A → B → A, eviction through
 C and D, a fresh surface, roster departure, and the 32-conversation bound, using the real
 kit controller with deterministic jsdom sizing.
 The surface imports viewport ownership from the lightweight scroll module rather than the

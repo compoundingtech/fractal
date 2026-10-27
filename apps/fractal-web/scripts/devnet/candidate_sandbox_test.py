@@ -558,7 +558,7 @@ print(json.dumps(results))
             self.assertTrue(cached.samefile(dependency))
             self.assertFalse((store / 'new-entry').exists())
             self.assertEqual((worktree / 'sandbox-write').read_text(), 'allowed')
-            print('real sandbox: HOME/SSH/st3/daemon hidden; agent prefixes absent; nested dependencies and pnpm hardlink aliases readonly')
+            print('real sandbox: HOME/SSH/Fractal/daemon hidden; agent prefixes absent; nested dependencies and pnpm hardlink aliases readonly')
             sandbox.tools.cache_clear()
 
 

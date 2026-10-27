@@ -10,6 +10,7 @@ license = "MIT"
 test-support = ["fractal-telemetry/test-support", "fractal-secrets/test-support", "fractal-seats-base/test-support", "fractal-delivery-base/test-support", "fractal-missions-base/test-support", "fractal-github-base/test-support", "smallclaims/test-support"]
 
 [dependencies]
+agent-spec = { path = "../agent-spec" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
