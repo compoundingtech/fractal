@@ -292,6 +292,31 @@ a shared derived column and is digested with the document row. The fleet-size re
 260,000 claims and 10,000 document versions, then requires latest listings, history pages,
 lookup and cursor reads to finish within two seconds and verifies the indexed latest query plan.
 
+## Peer protocol capability negotiation
+
+Hosts roll out independently. A new peer operation, or a changed ID or wire format, MUST
+be gated on an explicit versioned capability before dispatch. Each forwarding hop checks
+its next hop independently. Missing capability data (including an older endpoint without
+discovery) means unsupported, not permission to probe the older closed-enum decoder.
+The caller MUST either use a genuinely compatible operation or return a typed refusal
+with actionable upgrade guidance; mixed versions are not globally unsupported, and an
+older peer must not become a generic “conversation unavailable” error.
+
+Owner-read relays discover capabilities through the existing authenticated, signed
+`GET /v1/peer/client-read` response's `capabilities` set (`id`, `version`, `state`).
+`session-detail-child-id` version 1, `state: granted`, binds the `session-detail`
+operation to three-field subagent child IDs: native parent, task ID, and root routing
+session. Relays require it for session detail and child conversation reads; absent or
+incompatible advertisements, and discovery HTTP 404/405, return HTTP 422 `peer-too-old`
+with “This host runs an older Fractal version; update it to open subagent conversations.”
+No session-detail POST or changed child ID is sent to that peer.
+
+Writers emit only three-field child IDs. At the link boundary, readers still accept
+two-field native-parent/task links because open or bookmarked links can outlive the
+gateway version that generated them. The reader derives the root routing session from
+the native parent (recursively for descendants), then uses the current internal shape.
+This does not add a legacy writer or relax transcript ownership and path validation.
+
 ## Rolling upgrades and waiting claims
 
 A registry difference never refuses an exchange. Admission checks the envelope signature,
@@ -620,6 +645,24 @@ The main daemon owns the local API, projections, reconciliation, and runtime cha
 The `replication-worker` process owns peer HTTP, authentication, exchange, and admission.
 
 The service installer creates a separate systemd user service or launchd agent for the worker. A worker crash cannot stop the main daemon.
+
+Deploy the same build to the daemon and its **same-host worker**. Updating only
+the daemon does not upgrade the worker's exchange algorithm: an old initiating worker can
+still stall behind checkpoint-only ranges even when the daemon includes the recovery fix.
+Different fleet members may continue running different compatible builds.
+
+`/v1/health` exposes the daemon's existing `build.commit`. At startup the worker compares that
+identity and logs a warning on mismatch, or when an older daemon cannot report it;
+replication continues rather than introducing an outage during a coordinated rollout.
+The worker atomically records its build, PID and runtime process-start token in
+`STATE/replication-worker-build.json`, outside the replicated store. A failure to write this
+diagnostic file logs a warning without stopping replication.
+`st doctor`'s `replication-worker-build` check warns on a mismatch, a stale process identity,
+or a missing/unreadable report. Missing, empty and `unknown` build identities cannot be
+compared: neither a match nor skew is claimed unless both commits are known. Older workers
+without reports remain explicitly **unknown**. The runtime's existing start-token fencing
+detects PID reuse on Linux; other platforms retain the runtime's PID-based token limitation.
+The check also detects a daemon-only upgrade while the reporting worker keeps running.
 
 A local graph change writes `replication.wake`. The worker watches only this file, not the SQLite files.
 

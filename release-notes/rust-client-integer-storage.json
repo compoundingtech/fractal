@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve the client-v0 schema's integer domains in Rust client models",
+  "replay": { "status": "none", "detail": "No daemon replay or backfill." },
+  "schema": { "status": "none", "detail": "The committed wire and storage schemas are unchanged." },
+  "rules": { "status": "none", "detail": "No admission or checkpoint rule changes." },
+  "compatibility": { "status": "changed", "detail": "Rust client fields whose schema domain exceeds u32/i32 storage now use u64/i64; schema-signed fields no longer use unsigned storage. Existing wire payloads are unchanged. Rust consumers must adapt typed assignments and use checked conversion at narrower UI or terminal APIs." },
+  "downtime": { "status": "none", "detail": "No service restart required." },
+  "manual": { "status": "none", "detail": "No operator or configuration steps." },
+  "recovery": { "status": "none", "detail": "No persistent state changes; older Rust models may reject the wider wire values they previously could not represent." }
+}

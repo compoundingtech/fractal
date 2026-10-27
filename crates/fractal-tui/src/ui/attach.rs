@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pasted_image_is_kept_in_stuis_own_folder_by_its_bytes() {
+    fn a_pasted_image_is_kept_in_tuis_own_folder_by_its_bytes() {
         let from = tempfile::tempdir().unwrap();
         let keep = tempfile::tempdir().unwrap();
         let shot = from.path().join("Screenshot 2026-10-02 at 22.20.50.png");

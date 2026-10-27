@@ -108,11 +108,12 @@ NOTIFICATION_FIELDS = ("at", "outcome", "commit", "build_version", "exit", "retr
 
 # Environment read by the app's native and bundler configuration, pinned to
 # the daily Release values so an inherited setting can never leak into a
-# build: StFabric.podspec reads ST3_FABRIC_PROOF (Rust fabric module versus
-# the disabled stub), metro.config.js reads ST3_FABRIC_OFFLINE_DEBUG, and the
-# app config selects the daily bundle from APP_VARIANT.
-DAILY_BUILD_ENV = {"APP_VARIANT": "daily", "ST3_FABRIC_PROOF": "0",
-                   "ST3_FABRIC_OFFLINE_DEBUG": "0"}
+# build: FractalFabric.podspec reads the carrier/proof flags (Rust fabric module
+# versus the disabled stub), metro.config.js reads the offline Debug flag, and
+# app config selects the daily bundle from APP_VARIANT. Pin both naming families.
+DAILY_BUILD_ENV = {"APP_VARIANT": "daily", "FRACTAL_FABRIC": "0", "ST3_FABRIC": "0",
+                   "FRACTAL_FABRIC_PROOF": "0", "ST3_FABRIC_PROOF": "0",
+                   "FRACTAL_FABRIC_OFFLINE_DEBUG": "0", "ST3_FABRIC_OFFLINE_DEBUG": "0"}
 
 
 def build_identity(args):

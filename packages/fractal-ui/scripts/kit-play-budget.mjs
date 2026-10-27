@@ -1,5 +1,6 @@
-// Frozen hosted 162-case measurement; lower once after #3982, never raise.
-export const KIT_CPU_ANCHOR_SECONDS = 413.9
+// Frozen after #3982: six hosted 171-case commit samples, runs 40477033419–40482012045,
+// measured 2026-10-27; maximum rounded up to 0.1 seconds. Never raise.
+export const KIT_CPU_ANCHOR_SECONDS = 413.1
 const CPU_HEADROOM = 1.1
 
 function roundSecondsToMilliseconds(seconds) {
