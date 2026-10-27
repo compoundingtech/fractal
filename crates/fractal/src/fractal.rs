@@ -1,24 +1,7 @@
-//! Legacy UI spelling and local browser-session launching.
-use std::ffi::{OsStr, OsString};
+//! Local browser-session launching and installer alias ownership.
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-
-/// Rewrite only the new program's UI spelling. All legacy invocations pass through untouched.
-pub fn dispatch(arguments: &mut [OsString]) {
-    let fractal = arguments
-        .first()
-        .and_then(|program| Path::new(program).file_name())
-        == Some(OsStr::new("fractal"));
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-    // st and st3 retain their bare-program behavior and command spellings.
-    if !fractal {
-        return;
-    }
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
-    if arguments.get(1).and_then(|argument| argument.to_str()) == Some("tui") {
-        arguments[1] = "ui".into();
-    }
-}
 
 /// Only exact installer-created symlinks belong to this installation.
 pub fn owns_alias(path: &Path) -> bool {
@@ -102,17 +85,16 @@ pub fn web(explicit_state: Option<PathBuf>) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
-    fn route(input: &[&str]) -> Vec<OsString> {
-        let mut arguments = input.iter().map(OsString::from).collect::<Vec<_>>();
-        dispatch(arguments.as_mut_slice());
-        arguments
+    fn parse(input: &[&str]) -> crate::Cli {
+        use clap::Parser;
+        crate::Cli::try_parse_from(input).unwrap()
     }
 
     #[test]
     fn fractal_dispatch_no_arguments_keeps_onboarding_and_terminal_guards() {
-        let arguments = route(&["/bin/fractal"]);
-        assert_eq!(arguments, vec![OsString::from("/bin/fractal")]);
+        let arguments = [OsString::from("/bin/fractal")];
         for (stdin, stdout, seat, expected) in [
             (true, true, false, true),
             (false, true, false, false),
@@ -127,26 +109,17 @@ mod tests {
     }
 
     #[test]
-    fn fractal_dispatch_tui_reuses_ui_arguments() {
-        assert_eq!(
-            route(&["fractal", "tui", "--help"]),
-            vec![OsString::from("fractal"), "ui".into(), "--help".into()]
-        );
-    }
-
-    #[test]
-    fn fractal_dispatch_cli_passthrough_and_legacy_are_unchanged() {
-        for input in [
-            &["fractal", "work", "ls"][..],
-            &["fractal", "agents", "ls"],
-            &["st"],
-            &["st3"],
-            &["st3", "tui"],
+    fn tui_alias_reuses_ui_arguments_with_global_endpoint() {
+        for arguments in [
+            &["fractal", "tui", "--demo"][..],
+            &["fractal", "--endpoint", "http://localhost:7410", "tui", "--demo"],
+            &["fractal", "tui", "--endpoint", "http://localhost:7410", "--demo"],
         ] {
-            assert_eq!(
-                route(input),
-                input.iter().map(OsString::from).collect::<Vec<_>>()
-            );
+            let cli = parse(arguments);
+            assert!(matches!(cli.command, crate::Command::Ui(options) if options.demo));
+            if arguments.contains(&"--endpoint") {
+                assert_eq!(cli.endpoint.as_deref(), Some("http://localhost:7410"));
+            }
         }
     }
 
