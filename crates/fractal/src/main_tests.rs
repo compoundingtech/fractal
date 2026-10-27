@@ -1608,6 +1608,18 @@ async fn pi_family_publication_verifies_the_exact_external_frame_path() {
     let store = std::sync::Arc::new(
         Store::open(&root.path().join("graph.db"), "test").unwrap(),
     );
+    store.append_claim(&ClaimInput {
+        subject: "agent/external".into(),
+        kind: "runtime.observed".into(),
+        actor: Some("agent/external".into()),
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("external-incarnation")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
     let graph = store.clone();
     let app = Router::new().route("/v1/agents/native-session", post(move |Json(report): Json<Value>| {
         let store = graph.clone();
@@ -1620,7 +1632,13 @@ async fn pi_family_publication_verifies_the_exact_external_frame_path() {
                 subject: "agent/external".into(),
                 kind: "harness.session-file".into(),
                 actor: Some("agent/external".into()),
-                fields: BTreeMap::from([("path".into(), report["path"].clone())]),
+                fields: BTreeMap::from([
+                    ("harness".into(), json!("omp")),
+                    ("agent".into(), report["subject"].clone()),
+                    ("incarnation_id".into(), report["incarnation_id"].clone()),
+                    ("session_id".into(), report["session_id"].clone()),
+                    ("path".into(), report["path"].clone()),
+                ]),
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: None,

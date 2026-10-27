@@ -478,6 +478,14 @@ mod tests {
         let owner = "agent/suspended-path";
         let bind = |incarnation: &str, session: &str, path: &str| {
             store.append_claim(&crate::model::ClaimInput {
+                subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+                fields: std::collections::BTreeMap::from([
+                    ("status".into(), Value::from("running")),
+                    ("incarnation_id".into(), Value::from(incarnation)),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.append_claim(&crate::model::ClaimInput {
                 subject: owner.into(), kind: "harness.session-file".into(), actor: Some(owner.into()),
                 fields: std::collections::BTreeMap::from([
                     ("agent".into(), Value::from(owner)), ("harness".into(), Value::from("omp")),
