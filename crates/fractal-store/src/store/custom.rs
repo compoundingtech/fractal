@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use fractal_schema::custom::{self as schema, Authority, Basis, Expr, Manifest, Predicate, Select};
 
 // Explicit UPSERTs in triggers keep an outer admission UPSERT from overriding IGNORE.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1d667f8424b8 owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h30131c291680 owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS custom_registrations (
  subject TEXT PRIMARY KEY, kind TEXT NOT NULL, version INTEGER NOT NULL,
  prefix TEXT NOT NULL, hash TEXT NOT NULL, manifest TEXT NOT NULL,
@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS local_custom_dirty (subject TEXT PRIMARY KEY);
 -- Map canonical-order changes to everything flush can consume, not the whole log.
 -- Registry subjects trigger prefix expansion; dependencies and document bindings
 -- must reach their consumers even when the changed claim is not custom/.
+-- Every use names the claim IDs, so each branch must look its claims up by ID. The unary
+-- plus keeps the planner from walking every doc.bound claim through claims_kind_index.
 CREATE VIEW IF NOT EXISTS custom_claim_invalidations AS
  SELECT id,subject FROM claims
  WHERE (subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%')
@@ -41,7 +43,7 @@ CREATE VIEW IF NOT EXISTS custom_claim_invalidations AS
  SELECT binding.id,registration.subject FROM claims AS binding JOIN claims AS registration
  ON registration.kind='custom.st3-kinds.registered'
  AND substr(json_extract(registration.body,'$.fields.document'),1,length(binding.subject)+1)=binding.subject||'@'
- WHERE binding.kind='doc.bound';
+ WHERE +binding.kind='doc.bound';
 CREATE TRIGGER IF NOT EXISTS custom_document_insert AFTER INSERT ON documents BEGIN
  INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency=NEW.name ON CONFLICT(subject) DO NOTHING;
  INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document')=NEW.name||'@'||NEW.hash ON CONFLICT(subject) DO NOTHING;
@@ -132,27 +134,28 @@ pub fn registration(
 }
 pub fn create_schema(connection: &Connection) -> Result<()> {
     // Upgrade installed definitions once without changing the schema cookie on reopen.
-    for name in [
-        "custom_document_update",
-        "custom_claim_insert",
-        "custom_claim_delete",
-        "custom_claim_update",
-        "custom_batch_update",
-        "custom_record_insert",
-        "custom_record_update",
-        "custom_record_delete",
+    for (kind, name, end) in [
+        ("VIEW", "custom_claim_invalidations", ";"),
+        ("TRIGGER", "custom_document_update", "\nEND;"),
+        ("TRIGGER", "custom_claim_insert", "\nEND;"),
+        ("TRIGGER", "custom_claim_delete", "\nEND;"),
+        ("TRIGGER", "custom_claim_update", "\nEND;"),
+        ("TRIGGER", "custom_batch_update", "\nEND;"),
+        ("TRIGGER", "custom_record_insert", "\nEND;"),
+        ("TRIGGER", "custom_record_update", "\nEND;"),
+        ("TRIGGER", "custom_record_delete", "\nEND;"),
     ] {
-        let marker = format!(/* sqlite-large-value: allow-for-now lv-hd7fe9167a5d9 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {name}");
-        let start = SCHEMA.find(&marker).context("missing custom trigger definition")?;
-        let end = SCHEMA[start..].find("\nEND;").context("unterminated custom trigger definition")?;
-        let expected = SCHEMA[start..start + end + 5].replace("IF NOT EXISTS ", "");
+        let marker = format!("CREATE {kind} IF NOT EXISTS {name}");
+        let start = SCHEMA.find(&marker).context("missing custom schema definition")?;
+        let length = SCHEMA[start..].find(end).context("unterminated custom schema definition")?;
+        let expected = SCHEMA[start..start + length + end.len()].replace("IF NOT EXISTS ", "");
         let installed: Option<String> = connection.query_row(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
-            [name], |row| row.get(0),
+            "SELECT sql FROM sqlite_master WHERE type=lower(?1) AND name=?2",
+            [kind, name], |row| row.get(0),
         ).optional()?;
         let tokens = |sql: &str| sql.trim().trim_end_matches(';').split_whitespace().collect::<Vec<_>>().join(" ");
         if installed.as_deref().is_some_and(|sql| tokens(sql) != tokens(&expected)) {
-            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-hd59916c2a014 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER {name}"))?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h50daecb5c0e9 owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ &format!("DROP {kind} {name}"))?;
         }
     }
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3f6849b90a68 owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */ SCHEMA)?;

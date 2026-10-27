@@ -104,6 +104,12 @@ class CiLocal(unittest.TestCase):
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_HEAVY_SLOTS='1', BUILD_ADMISSION_STATE='/elsewhere')
         self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
 
+    def test_the_stages_build_without_debug_info_as_ci_does(self):
+        done, calls = self.run_local('mail-redelivery-canaries', CARGO_PROFILE_TEST_DEBUG='1')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for call in calls:
+            self.assertEqual((call['env'].get('CARGO_PROFILE_DEV_DEBUG'), call['env'].get('CARGO_PROFILE_TEST_DEBUG')), ('0', '0'))
+
     def test_the_stages_run_in_a_home_of_their_own_without_the_account_s_variables(self):
         done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2',
                                      RUSTC_WRAPPER='/nix/store/x-sccache/bin/sccache', CARGO_BUILD_RUSTC_WRAPPER='sccache')
@@ -175,6 +181,23 @@ class CiLocal(unittest.TestCase):
         self.assertGreaterEqual(int(seconds), 2)
         run, = logs.glob('run-*')
         self.assertIn('compiling', (run / 'tests.log').read_text())
+
+    def test_each_wait_for_a_build_slot_is_written_as_it_starts_and_ends_to_the_queue_log(self):
+        events = Path(self.tmp.name) / 'queue-events'
+        # Two waits that end with a slot, then one the stage never leaves (its cargo gave up): the run's end closes it.
+        queue = ('#!/usr/bin/env bash\necho "cargo: waiting in order for a host build slot (all 6 busy)"\nsleep 1.1\n'
+                 'echo "cargo: next in order; waiting for the build admission gate (load/memory), holding no slot"\n'
+                 'echo "cargo: got build slot 0 and a heavy slot"\n'
+                 'echo "cargo: waiting in order for a host build slot (all 6 busy)" >&2\necho "cargo: got build slot 1" >&2\n'
+                 'echo "cargo: waiting in order for a host build slot (all 6 busy)"\nexit 0\n')
+        done, _ = self.run_local('tests', ci_linux=queue, CI_LOCAL_QUEUE_LOG=str(events))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = [line.split(' ') for line in events.read_text().splitlines()]
+        self.assertEqual([(kind, stage) for kind, _, stage in lines],
+                         [('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests')])
+        at = [int(seconds) for _, seconds, _ in lines]
+        self.assertEqual(at, sorted(at))
+        self.assertGreaterEqual(at[1] - at[0], 1)  # the first wait lasted its second
 
     def test_only_the_latest_ten_runs_keep_their_logs(self):
         home_logs = self.home / '.cache/ci-local-logs'

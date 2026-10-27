@@ -61,6 +61,9 @@ pub mod start_jobs;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
+#[cfg(test)]
+mod schedule_admission_tests;
+mod schedule_replication_block;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -131,9 +134,14 @@ const DEADLINE_SOURCE_RETRY_MS: u128 = 5_000;
 // draws no graph change, and a pass used to read every running seat's screen.
 const SCREEN_POLL_EVERY_MS: u128 = 10_000;
 
-/// When a seat's retention was last checked, why the seat is held (if it is), and what the
-/// check read.
-type SeatRetention = (u128, Option<String>, BTreeSet<String>);
+/// Why a seat is held (if it is), and what the retention check read.
+type SeatRetention = (Option<String>, BTreeSet<String>);
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read a seat's retention answer from the store.
+    static SEAT_RETENTION_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 // A seat kept running past its run is checked again this soon for unread mail and other work.
 // Reading a conversation message does not wake the reconciler, so this check is what lets the
@@ -164,7 +172,10 @@ fn schedule_admission_ready(
     host: &str,
     configured: &[String],
     since: u128,
+    schedule: &DesiredSubject,
 ) -> Result<bool> {
+    // Include the due callback: an armed timer cannot bypass a staged or conflicting owner.
+    store.owned_desired_guard(schedule).map_err(anyhow::Error::new)?;
     if store.replication_projection_deferred()
         || store.replication_catching_up()
         || store
@@ -173,29 +184,57 @@ fn schedule_admission_ready(
     {
         return Ok(false);
     }
-    let membership = store.fleet_membership()?;
-    let peers = configured
-        .iter()
-        .cloned()
-        .chain(
-            membership
-                .incarnations()
-                .filter(|member| member.end.is_none())
-                .map(|member| member.name.clone()),
-        )
-        .filter(|peer| peer != host && !matches!(membership.state(peer),
-            crate::fleet::MemberState::Ended(_) | crate::fleet::MemberState::LegacyRemoved(_)))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let peers = schedule_admission_peers(store, host, configured)?;
     if peers.is_empty() {
         return Ok(true);
     }
     let sync = store.replication_peer_sync(&peers);
-    Ok(!sync.values().any(|peer| peer.peer_only_envelopes > 0)
-        && sync
-            .values()
-            .any(|peer| peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0))
+    let strict = sync.values().any(|peer| peer.stale && peer.peer_only_envelopes > 0)
+        && schedule_requires_complete_history(store, schedule)?;
+    Ok(schedule_progress_ready(sync.values(), since, strict))
+}
+
+fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) -> Result<Vec<String>> {
+    let membership = store.fleet_membership()?;
+    Ok(configured.iter().cloned()
+        .chain(membership.incarnations().filter(|member| member.end.is_none())
+            .map(|member| member.name.clone()))
+        .filter(|peer| peer != host && !matches!(membership.state(peer),
+            crate::fleet::MemberState::Ended(_) | crate::fleet::MemberState::LegacyRemoved(_)))
+        .collect::<BTreeSet<_>>().into_iter().collect())
+}
+
+/// Moving a schedule (or removing its standby) must not turn an old missing-history
+/// comparison into permission to run on a second host. Conservatively retain the strict
+/// policy for the entire retained history after any role/owner change, not just a timeout.
+fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) -> Result<bool> {
+    let Some(current) = owned_schedule_spec(store, schedule)? else { return Ok(true) };
+    if current.standby.is_some() { return Ok(true); }
+    for claim in store.claims_for(&schedule.subject, Some("intent.desired"))? {
+        let Some(previous) = crate::graph::schedule_spec(&claim.body["desired"], &claim.origin) else {
+            return Ok(true);
+        };
+        if previous.host != current.host || previous.standby.is_some()
+            || claim.body["owner_run"].as_str() != schedule.owner_run.as_deref()
+            || claim.body["owner_generation"].as_str() != schedule.owner_generation.as_deref()
+            || claim.body["owner_step"].as_str() != schedule.owner_step.as_deref() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn schedule_progress_ready<'a>(
+    sync: impl IntoIterator<Item = &'a smallclaims::replication::ReplicationPeerSync>,
+    since: u128,
+    strict: bool,
+) -> bool {
+    let mut complete = false;
+    for peer in sync {
+        if peer.peer_only_envelopes > 0 && (strict || !peer.stale) { return false; }
+        complete |= peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0;
+    }
+    complete
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -410,6 +449,11 @@ pub trait RuntimeControl: Send + Sync + 'static {
             self.observe_exec(&member.runtime_id)
         }
     }
+    /// Daemon-observed live harness identity for this exact incarnation. Missing evidence
+    /// never falls back to declaration/environment values or a PID parsed from an incarnation.
+    fn start_process_identity(&self, _member: &MemberSpec, _incarnation: &str) -> Result<Option<(u32, u64)>> {
+        Ok(None)
+    }
     fn start(&self, member: &MemberSpec) -> Result<()>;
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         guard()?;
@@ -616,6 +660,28 @@ impl RuntimeControl for NativeRuntime {
 
     fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
         self.snapshot_pty_registry(true)
+    }
+
+    fn start_process_identity(&self, member: &MemberSpec, incarnation: &str) -> Result<Option<(u32, u64)>> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (member, incarnation);
+            Ok(None)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if member.terminal {
+                return self.pty()?.process_identity_if(&member.runtime_id, incarnation);
+            }
+            Ok(match self.exec.observe(&member.runtime_id)? {
+                Some(fractal_runtime::ExecObservation::Running(generation))
+                    if generation.generation_id == incarnation =>
+                {
+                    Some((generation.pid, generation.start_token))
+                }
+                _ => None,
+            })
+        }
     }
 
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
@@ -1081,6 +1147,7 @@ pub struct Reconciler<R = NativeRuntime> {
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
     /// A locally selected future standby tick is not a replicated scheduling claim.
     standby_due_ticks: Mutex<HashMap<String, (String, u64, i64)>>,
+    schedule_replication_blocks: Mutex<HashMap<String, schedule_replication_block::BlockedTick>>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
     /// never enters the replicated graph; durable diagnostic dedupe survives a restart.
@@ -1105,6 +1172,8 @@ pub struct Reconciler<R = NativeRuntime> {
     /// The wake each running step has armed for its timeout or lease expiry, by step subject.
     step_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
+    /// Quiet standing-watch cadence by observer/revision; not part of the provider cache.
+    observer_intervals: Arc<Mutex<HashMap<String, u64>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
     delayed_restarts: Arc<Mutex<HashMap<String, RestartWake>>>,
     stop_observation_retries: Mutex<HashMap<String, StopObservationRetry>>,
@@ -1173,6 +1242,8 @@ pub struct Reconciler<R = NativeRuntime> {
     /// When the fault stage last sent faults to their owning agents.
     fault_delivery: Mutex<Option<u128>>,
     fault_delivery_every_ms: u128,
+    /// The wall time of the last fault snapshot, which spaces the next delivery.
+    fault_snapshot_ms: std::sync::atomic::AtomicU64,
     /// The claim the subagent stage starts its next look from; see `SubagentSweep::low_water`.
     subagent_low_water: Mutex<u64>,
     /// How long run cleanup waits for its runtimes to stop before the run ends without them.
@@ -1262,6 +1333,7 @@ impl Reconciler<NativeRuntime> {
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
+            schedule_replication_blocks: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1275,6 +1347,7 @@ impl Reconciler<NativeRuntime> {
             restart_prepare_deadline_ms: RESTART_PREPARE_DEADLINE_MS,
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
+            observer_intervals: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
@@ -1314,6 +1387,7 @@ impl Reconciler<NativeRuntime> {
             disk_check_every_ms: DISK_CHECK_EVERY_MS,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: FAULT_DELIVERY_EVERY_MS,
+            fault_snapshot_ms: Default::default(),
             screen_poll_every_ms: SCREEN_POLL_EVERY_MS,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
@@ -1422,6 +1496,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
+            schedule_replication_blocks: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1435,6 +1510,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             restart_prepare_deadline_ms: RESTART_PREPARE_DEADLINE_MS,
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
+            observer_intervals: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
@@ -1474,6 +1550,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             disk_check_every_ms: 0,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: 0,
+            fault_snapshot_ms: Default::default(),
             screen_poll_every_ms: 0,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
@@ -1742,6 +1819,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 false
                             }
                         };
+                        this.incremental.finish_pass(now_ms().saturating_sub(started));
                         Some((before != smallclaims::touched::writes(), failed, started))
                     }).await;
                     if let Some(outcome) = outcome { break outcome; }
@@ -2011,19 +2089,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         }
         let now = now_ms();
+        // The snapshot rebuilds every fault in the fleet. Where that is slow, deliver at most
+        // every ten times its wall time (up to ten minutes) rather than every 30 seconds.
+        let every = match self.fault_delivery_every_ms {
+            0 => 0,
+            every => crate::incremental::cost_scaled_interval(
+                every,
+                u128::from(self.fault_snapshot_ms.load(std::sync::atomic::Ordering::Relaxed)),
+                FAULT_DELIVERY_MAX_MS,
+            ),
+        };
         {
             let mut last = self
                 .fault_delivery
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if let Some(at) = *last
-                && now.saturating_sub(at) < self.fault_delivery_every_ms
+                && now.saturating_sub(at) < every
             {
                 // A fault raised since then still reaches its agent without another change.
-                self.arm_restart(
-                    "stage/faults",
-                    at.saturating_add(self.fault_delivery_every_ms),
-                );
+                self.arm_restart("stage/faults", at.saturating_add(every));
                 return Ok(());
             }
             *last = Some(now);
@@ -2034,6 +2119,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             phase.items(faults.len());
             faults
         };
+        self.fault_snapshot_ms.store(
+            u64::try_from(now_ms().saturating_sub(now)).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         for fault in faults {
             let Some(owner) = fault.owner.as_deref() else {
                 continue;
@@ -3159,6 +3248,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                             });
                             self.runtime.observe_exec(&member.runtime_id)?
                         };
+                        if !self.store.helper_launcher_alive(&subject.subject)? {
+                            self.reconcile_runtime_stop(
+                                &subject.subject,
+                                &member.runtime_id,
+                                member.terminal,
+                                observed.as_ref().and_then(|o| o.incarnation_id.as_deref()),
+                                member.shutdown_timeout_ms,
+                                observed.as_ref(),
+                            )?;
+                            return Ok(());
+                        }
                         if member.lifecycle == MemberLifecycle::TerminalBound {
                             if let Some(incarnation) =
                                 self.reconcile_terminal_binding(subject, member, observed.as_ref())?
@@ -3749,6 +3849,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         })
     }
 
+    /// Whether this host may answer `subject`'s member fault: it recorded the fault, or the
+    /// seat's declaration places it here.
+    fn member_fault_is_ours(&self, subject: &str) -> Result<bool> {
+        if self.store.member_reconcile_fault_origin(subject)?.as_deref() == Some(self.host.as_str()) {
+            return Ok(true);
+        }
+        Ok(self
+            .store
+            .desired_subject_with_writer(subject)?
+            .and_then(|(desired, _)| desired.member)
+            .is_some_and(|member| member.host == self.host))
+    }
+
     fn record_member_reconcile_result(&self, subject: &str, result: Result<()>) -> Result<()> {
         let previous = self.store.member_reconcile_fault(subject, None)?;
         let (decision, reason) = match result {
@@ -3760,6 +3873,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 ("member-fault", reason)
             }
+            // A member fault is the word of the host that recorded it, or of the host that runs
+            // the seat now. Another peer's clean pass only retired its own leftover process: it
+            // says nothing about the seat, and answering the fault made the two hosts trade
+            // fault and recovery every few seconds while the seat stayed parked.
+            Ok(()) if previous.is_some() && !self.member_fault_is_ours(subject)? => return Ok(()),
             // A pass that returns Ok may have started nothing: the member loop returns early while a
             // start is pending, while a restart waits, or when nothing is due. Only a member seen
             // alive has recovered; for any other, say what the pass did, so an earlier fault does
@@ -7046,6 +7164,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         );
         self.store.owned_desired_guard(subject)?;
         // A self-restart released at its quiet boundary is as explicit as an immediate one.
+        anyhow::ensure!(
+            self.store.helper_launcher_alive(&subject.subject)?,
+            "the helper's launcher run has ended"
+        );
         let explicit_retry = request.is_some_and(|request| {
             matches!(
                 request.body["fields"]["action"].as_str(),
@@ -7144,6 +7266,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             launch_member.terminal_size = self.launch_geometry()?;
         }
         self.bind_account(subject, member, &mut launch_member)?;
+        if let Some(harness) = crate::accounts::harness_driver(&subject.desired)
+            && let Some(variable) = crate::accounts::login_environment_name(harness)
+        {
+            let directory = self.launch_credential_home(harness, &launch_member)?;
+            launch_member.environment.insert(variable.into(), directory);
+        }
         if let Some(id) = member.environment.get(crate::rollout::OPERATION_ENV) {
             let operation = self
                 .store
@@ -7415,11 +7543,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             ),
             ("reason".into(), Value::String(reason.into())),
         ]);
+        if let Some(harness) = crate::accounts::harness_driver(&subject.desired) {
+            fields.insert("harness".into(), Value::String(harness.into()));
+            if let Some(variable) = crate::accounts::login_environment_name(harness)
+                && let Some(directory) = prepared.launch_member.environment.get(variable)
+            {
+                fields.insert("credential_home".into(), Value::String(directory.clone()));
+            }
+        }
         if let Some(operation) = member.environment.get(crate::rollout::OPERATION_ENV) {
             fields.insert("rollout_operation".into(), serde_json::json!(operation));
         }
         if let Some(incarnation) = &incarnation {
             fields.insert("incarnation_id".into(), Value::String(incarnation.clone()));
+            if subject.kind == "agent"
+                && let Ok(Some((pid, token))) =
+                    self.runtime.start_process_identity(member, incarnation)
+            {
+                fields.insert("runtime_pid".into(), Value::from(pid));
+                fields.insert("runtime_pid_start_token".into(), Value::String(token.to_string()));
+            }
         }
         let succeeded = ClaimInput {
             subject: subject.subject.clone(),
@@ -7430,7 +7573,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        let mut starting = member_fields(member, "starting", incarnation.as_deref(), false);
+        // Native drivers must bind before readiness can be established. Publish running
+        // authority at launch completion only for the physically observed incarnation
+        // owned by this start operation; readiness and restart completion remain separate.
+        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some()) {
+            self.runtime.observe_start(member)?.is_some_and(|observation| {
+                observation.status == "running"
+                    && observation.incarnation_id.as_deref() == Some(incarnation)
+            }) && self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+                .as_deref() == Some(operation_id)
+        } else {
+            false
+        };
+        let mut starting = member_fields(
+            member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
+        );
         if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
             && let Some(from) = actual_field(&previous, "restarting_from")
         {
@@ -7445,10 +7602,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-observed:{operation_id}")),
         };
-        if !self
-            .store
-            .apply_runtime_start_result(operation_id, &[succeeded, observed])?
-        {
+        let applied = if let Some(binding) = self.store.helper_launcher_binding(&subject.subject)? {
+            let mut fields: BTreeMap<String, Value> = serde_json::from_value(binding.attribution())?;
+            fields.insert("operation_id".into(), Value::String(operation_id.into()));
+            if let Some(incarnation) = incarnation {
+                fields.insert("helper_incarnation".into(), Value::String(incarnation));
+            }
+            let receipt = ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "agent.helper-launched".into(),
+                actor: None,
+                fields,
+                evidence: vec![prepared.start_request.clone()],
+                expected_subject: None,
+                idempotency_key: Some(format!("helper-launched:{operation_id}")),
+            };
+            self.store.apply_runtime_start_result(operation_id, &[succeeded, observed, receipt])?
+        } else {
+            self.store.apply_runtime_start_result(operation_id, &[succeeded, observed])?
+        };
+        if !applied {
             return Ok(start_jobs::StartCompletion::Superseded);
         }
         self.signal_changed();
@@ -7479,8 +7652,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             .map(|(rows, columns)| fractal_runtime::TerminalSize { rows, columns }))
     }
 
-    /// The declared account whose login directory an unbound seat's harness is launched with, from
-    /// the seat's own environment or else the one it inherits.
+    /// The declared account an unbound seat's harness runs on: the login directory it is launched
+    /// with, from the seat's own environment or else the one it inherits, or else the harness's
+    /// default login.
     fn declared_login_account(
         &self,
         subject: &DesiredSubject,
@@ -7488,18 +7662,42 @@ impl<R: RuntimeControl> Reconciler<R> {
         launch: &MemberSpec,
     ) -> Option<String> {
         let driver = crate::accounts::harness_driver(&subject.desired)?;
-        let variable = crate::accounts::login_environment_name(driver)?;
-        let directory = launch
-            .environment
-            .get(variable)
-            .cloned()
-            .or_else(|| std::env::var(variable).ok())
-            .filter(|directory| !directory.is_empty())?;
+        let configured = crate::accounts::login_environment_name(driver).and_then(|variable| {
+            launch
+                .environment
+                .get(variable)
+                .cloned()
+                .or_else(|| std::env::var(variable).ok())
+        });
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let directory = crate::accounts::expand_login(&directory, home.as_deref())?;
         let accounts = self.store.declared_accounts().ok()?;
-        crate::accounts::account_by_login(&accounts, driver, &member.host, &directory, home.as_deref())
-            .map(|account| account.name.clone())
+        crate::accounts::unbound_login_account(
+            &accounts,
+            driver,
+            &member.host,
+            configured.as_deref(),
+            home.as_deref(),
+        )
+        .map(|account| account.name.clone())
+    }
+
+
+    /// Resolve only a credential-directory reference, never the files inside it.
+    fn launch_credential_home(&self, harness: &str, launch: &MemberSpec) -> Result<String> {
+        let variable = crate::accounts::login_environment_name(harness)
+            .context("the harness requires a credential-home variable")?;
+        let home = launch.environment.get("HOME").map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+        let inherited = std::env::var(variable).ok();
+        let directory = launch.environment.get(variable).or(inherited.as_ref());
+        let directory = if let Some(directory) = directory {
+            crate::accounts::expand_login(directory, home.as_deref())
+                .context("credential home requires HOME")?
+        } else {
+            home.context("a harness credential home requires HOME")?
+                .join(if harness == "claude" { ".claude" } else { ".codex" })
+        };
+        Ok(directory.to_string_lossy().into_owned())
     }
 
     /// Point a seat whose harness block binds an account (or a pool) at that account's login
@@ -7515,6 +7713,26 @@ impl<R: RuntimeControl> Reconciler<R> {
         if subject.kind != "agent" {
             return Ok(());
         }
+        if let Some(binding) = self.store.helper_launcher_binding(&subject.subject)? {
+            anyhow::ensure!(
+                self.store.helper_launcher_alive(&subject.subject)?,
+                "the helper's credential binding ended with its launcher run"
+            );
+            anyhow::ensure!(
+                crate::accounts::harness_driver(&subject.desired) == Some(binding.harness.as_str()),
+                "a helper cannot change its launcher's bound harness"
+            );
+            if let Some(directory) = binding.credential_home {
+                let variable = crate::accounts::login_environment_name(&binding.harness)
+                    .context("the helper's harness has no credential home")?;
+                launch.environment.insert(variable.into(), directory);
+            }
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !self.store.helper_launcher_has_lifetime_binding(&subject.subject)?,
+            "the helper declaration no longer matches its credential binding; stop and recreate it"
+        );
         let Some(binding) = crate::accounts::harness_binding(&subject.desired) else {
             // No binding: the harness keeps its login, but a login that is a declared account's
             // directory still belongs to that account.
@@ -14246,28 +14464,48 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Why a run-owned stop must wait for `seat`: it holds a message nobody has read, or work in a
     /// run other than the one that is ending. The stop declaration stays, so the seat stops once
-    /// both are gone. Read at most every [`SEAT_RETENTION_CHECK_MS`] per seat.
+    /// both are gone. The answer is read again only when something it read changed: a seat with
+    /// thousands of messages costs a view of each one, so a held seat's 60 s recheck only wakes the
+    /// pass that notices a change.
     fn seat_retention(&self, seat: &str, owner_run: &str) -> Result<Option<String>> {
         if !seat.starts_with("agent/") {
             return Ok(None);
         }
         let now = now_ms();
-        if let Some((at, reason, reads)) = self
+        let item = format!("retain:{seat}");
+        let cached = self
             .seat_retention
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(seat)
-            && now.saturating_sub(*at) < SEAT_RETENTION_CHECK_MS
-        {
-            // The cached answer stands until the next check, and depends on what that check read.
-            for key in reads {
-                smallclaims::touched::note_read(|| key.clone());
+            .filter(|_| !self.incremental.needs(&item, now))
+            .cloned();
+        let reason = match cached {
+            // The cached answer stands while nothing it read changed, and depends on those reads.
+            Some((reason, reads)) => {
+                for key in reads {
+                    smallclaims::touched::note_read(|| key);
+                }
+                reason
             }
-            if reason.is_some() {
-                smallclaims::touched::note_due(at.saturating_add(SEAT_RETENTION_CHECK_MS));
-            }
-            return Ok(reason.clone());
+            None => self.read_seat_retention(seat, owner_run, &item)?,
+        };
+        if reason.is_some() {
+            smallclaims::touched::note_due(now.saturating_add(SEAT_RETENTION_CHECK_MS));
+            self.arm_restart(&item, now.saturating_add(SEAT_RETENTION_CHECK_MS));
         }
+        Ok(reason)
+    }
+
+    /// Read `seat`'s retention answer and remember it, with what it read, as incremental `item`.
+    fn read_seat_retention(
+        &self,
+        seat: &str,
+        owner_run: &str,
+        item: &str,
+    ) -> Result<Option<String>> {
+        #[cfg(test)]
+        SEAT_RETENTION_READS.with(|count| count.set(count.get() + 1));
         let (reason, reads) = smallclaims::touched::record(|| -> Result<Option<String>> {
             let unread = self
                 .store
@@ -14294,16 +14532,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
         });
         let reason = reason?;
+        self.incremental.evaluated(item, reads.clone(), None);
         self.seat_retention
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(seat.to_owned(), (now, reason.clone(), reads));
-        if reason.is_some() {
-            self.arm_restart(
-                &format!("retain:{seat}"),
-                now.saturating_add(SEAT_RETENTION_CHECK_MS),
-            );
-        }
+            .insert(seat.to_owned(), (reason.clone(), reads));
         Ok(reason)
     }
 
@@ -14401,13 +14634,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn schedules_caught_up(&self) -> Result<bool> {
-        schedule_admission_ready(
+    fn schedules_caught_up(&self, schedule: &DesiredSubject) -> Result<bool> {
+        let ready = schedule_admission_ready(
             &self.store,
             &self.host,
             &self.schedule_peers,
             self.started_at_unix_ms,
-        )
+            schedule,
+        )?;
+        self.observe_schedule_replication_gate(schedule, ready, now_ms())?;
+        Ok(ready)
     }
 
     /// A late standby wake cannot turn a past candidate into new catch-up policy.
@@ -14441,12 +14677,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         if spec.stopped || (spec.host != self.host
             && !spec.standby.as_ref().is_some_and(|standby| standby.host == self.host)) {
+            self.clear_schedule_replication_block(schedule)?;
             return Ok(());
         }
         if self.schedule_has_open_work(&schedule.subject)? {
+            if self.store.schedule_has_active_started_run(&schedule.subject)? {
+                self.clear_schedule_replication_block(schedule)?;
+            }
             return Ok(());
         }
-        if !self.schedules_caught_up()? {
+        if !self.schedules_caught_up(schedule)? {
             self.arm_restart("stage/schedule-sync", now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
             return Ok(());
         }
@@ -14699,7 +14939,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     },
                     _ => false,
                 };
-                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at)
+                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at, &schedule_declaration)
                     .unwrap_or(false);
                 let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
                 let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
@@ -14865,6 +15105,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let on_standby = spec.host != self.host
             && spec.standby.as_ref().is_some_and(|standby| standby.host == self.host);
         if spec.host != self.host && !on_standby {
+            self.clear_schedule_replication_block(schedule)?;
             self.schedule_workspace_retries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -14883,7 +15124,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .remove(&schedule.subject);
             return Ok(());
         }
-        if !self.schedules_caught_up()? {
+        if !self.schedules_caught_up(schedule)? {
             self.arm_restart("stage/schedule-sync", now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
             return Ok(());
         }
@@ -15915,6 +16156,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .or_else(|| {
                         observer_actual
                             .as_ref()
+                            .filter(|actual| actual.get("revision").and_then(Value::as_str)
+                                == Some(revision.as_str()))
                             .and_then(|actual| actual.get("next_check_unix_ms"))
                             .and_then(Value::as_str)
                             .and_then(|value| value.parse().ok())
@@ -15926,6 +16169,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         if watched_ref && refresh_attempt.is_none() && observer_actual.as_ref().is_none_or(|actual|
             actual["error_code"] != "rate-limited") {
             next_check = next_check.min(now_ms().saturating_add(u128::from(spec.every_ms.unwrap())));
+        }
+        // Provider retry deadlines remain a lower bound even after a restart or a
+        // desired revision change. Older rate-limit receipts have no revision.
+        if refresh_attempt.is_none()
+            && let Some(retry_at) = observer_actual.as_ref()
+                .filter(|actual| actual["error_code"] == "rate-limited")
+                .and_then(|actual| actual.get("next_check_unix_ms"))
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<u128>().ok())
+        {
+            next_check = next_check.max(retry_at);
         }
         let observer_prefix = format!("{}:", observer.subject);
         let operation_prefix = format!("{observer_prefix}{revision}:{}:",
@@ -15956,6 +16210,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         #[cfg(any(test, feature = "test-support"))]
         let completion_fault = self.fault_injection.clone();
         let deadlines = self.observer_deadlines.clone();
+        let intervals = self.observer_intervals.clone();
+        let standing = crate::graph::observer_spec(&observer.desired).is_some_and(|authored|
+            crate::github_watch::is_standing_observer(&observer.subject, &authored));
+        let mut standing_interval = if refresh_attempt.is_some() {
+            None
+        } else {
+            intervals.lock().unwrap_or_else(PoisonError::into_inner).get(&deadline_key).copied()
+        };
         let cursors = self.observer_cursors.clone();
         let observer_subject = observer.subject.clone();
         let mut previous_facts = self
@@ -16069,15 +16331,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 &agent_workspaces,
                             );
                         }
-                        // A declared interval replaces the provider's own deadline, except a
-                        // provider that asks to continue at once, such as a listing longer than
-                        // one read.
-                        if let Some(every_ms) = spec.every_ms
-                            && observation.next_check_unix_ms
-                                > now_ms().saturating_add(crate::resource::PROVIDER_CONTINUE_MS)
-                        {
+                        let observed_at = now_ms();
+                        let continuing = observation.next_check_unix_ms
+                            <= observed_at.saturating_add(crate::resource::PROVIDER_CONTINUE_MS);
+                        // Standing identity, not the authored interval, selects scheduling.
+                        // Quiet backoff and deadlines are local scheduler state. After restart,
+                        // poll once immediately, then use active cadence until quiet backoff.
+                        let interval = if standing { Some(180_000) } else { spec.every_ms };
+                        // Pagination remains immediate. Provider errors, including rate limits,
+                        // never enter this successful-observation scheduling path.
+                        if !continuing && let Some(interval) = interval {
                             observation.next_check_unix_ms =
-                                now_ms().saturating_add(every_ms as u128);
+                                observed_at.saturating_add(u128::from(interval));
                         }
                         match store.record_resource_observation_outcome(
                             &observer_subject,
@@ -16090,7 +16355,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                             &selected,
                             Some(&current),
                         ) {
-                            Ok((_, wrote)) => {
+                            Ok((outcome, wrote)) => {
+                                if standing {
+                                    let interval = match standing_interval {
+                                        _ if outcome.baseline || !outcome.changed_fields.is_empty() => 180_000,
+                                        None => 180_000,
+                                        Some(interval) if continuing => interval,
+                                        Some(180_000) => 360_000,
+                                        Some(_) => 600_000,
+                                    };
+                                    standing_interval = Some(interval);
+                                    if !continuing {
+                                        observation.next_check_unix_ms =
+                                            observed_at.saturating_add(u128::from(interval));
+                                    }
+                                }
                                 durable_changed = wrote;
                                 previous_facts = Some(observation.facts);
                                 completed_deadline = Some(observation.next_check_unix_ms);
@@ -16204,6 +16483,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         if let Some(next_check) = completed_deadline {
                             deadlines.lock().unwrap_or_else(PoisonError::into_inner)
                                 .insert(deadline_key.clone(), next_check);
+                            if let Some(interval) = standing_interval {
+                                intervals.lock().unwrap_or_else(PoisonError::into_inner)
+                                    .insert(deadline_key.clone(), interval);
+                            }
                         }
                         if let Some(next_cursor) = completed_cursor {
                             cursors.lock().unwrap_or_else(PoisonError::into_inner)
@@ -17585,6 +17868,7 @@ fn permanent_observation_error(code: &str) -> bool {
 const DISK_CHECK_EVERY_MS: u128 = 30_000;
 /// How often a host sends new faults to the agents it runs.
 const FAULT_DELIVERY_EVERY_MS: u128 = 30_000;
+const FAULT_DELIVERY_MAX_MS: u128 = 10 * 60_000;
 
 type DiskProbe = Arc<dyn Fn(&Path) -> std::io::Result<crate::disk::DiskSpace> + Send + Sync>;
 const RECONCILER_FAILING_TITLE: &str = "The reconciler is failing";
@@ -19037,6 +19321,7 @@ pub mod tests {
     mod slo_breach_flow_tests;
     mod gate_on_demand;
     mod github_watch_selection;
+    mod helper_launcher;
     mod incremental_deadlines;
     #[cfg(test)]
     mod schedule_standby_parent;
@@ -19110,6 +19395,50 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 runtime.read_exec_log(id).unwrap().unwrap(),
                 "from-declaration"
             );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agent_start_receipt_records_only_exact_runtime_process_provenance() {
+        for provenance in ["current", "stale", "missing"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(&store, &format!(
+                "version 2\nagent \"worker\" {{ workspace {:?}; command \"sleep 600\"; }}",
+                root.path().display().to_string(),
+            ), "process-provenance");
+            let subject = store.desired_subjects().unwrap().remove(0);
+            let mut member = subject.member.clone().unwrap();
+            // Client-controlled identity-looking variables must never supply a fallback.
+            member.environment.insert("runtime_pid".into(), "123".into());
+            member.environment.insert("runtime_pid_start_token".into(), "forged".into());
+            let runtime = Arc::new(FakeRuntime::default());
+            runtime.ptys.lock().unwrap().push(RuntimeObservation {
+                runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+                exit_code: None, incarnation_id: Some("current".into()),
+            });
+            let pid = std::process::id();
+            let token = fractal_runtime::process_start_token(pid).unwrap();
+            if provenance != "missing" {
+                runtime.process_identities.lock().unwrap_or_else(PoisonError::into_inner).insert(
+                    (member.runtime_id.clone(), provenance.into()), (pid, token),
+                );
+            }
+            let reconciler = Reconciler::new(
+                store.clone(), runtime, "node".into(), Arc::new(Notify::new()),
+            );
+            reconciler.perform_start(&subject, &member, "test process provenance").unwrap();
+            let receipt = store.observations_for(&subject.subject, "runtime.action.succeeded")
+                .unwrap().into_iter().find(|claim| claim.body["fields"]["action"] == "start").unwrap();
+            assert_eq!(receipt.body["fields"]["incarnation_id"], "current");
+            if provenance == "current" {
+                assert_eq!(receipt.body["fields"]["runtime_pid"], pid);
+                assert_eq!(receipt.body["fields"]["runtime_pid_start_token"], token.to_string());
+            } else {
+                assert!(receipt.body["fields"].get("runtime_pid").is_none());
+                assert!(receipt.body["fields"].get("runtime_pid_start_token").is_none());
+            }
         }
     }
 
@@ -19414,6 +19743,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         failed_stops: Mutex<std::collections::HashSet<String>>,
         pub started_members: Mutex<Vec<MemberSpec>>,
         start_operations: Mutex<HashMap<(String, String), String>>,
+        process_identities: Mutex<HashMap<(String, String), (u32, u64)>>,
         pub stops: Mutex<Vec<String>>,
         kills: Mutex<Vec<String>>,
         removes: Mutex<Vec<String>>,
@@ -19532,6 +19862,10 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     }
 
     impl RuntimeControl for FakeRuntime {
+        fn start_process_identity(&self, member: &MemberSpec, incarnation: &str) -> Result<Option<(u32, u64)>> {
+            Ok(self.process_identities.lock().unwrap_or_else(PoisonError::into_inner)
+                .get(&(member.runtime_id.clone(), incarnation.into())).copied())
+        }
         fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
             let started = self
                 .started_members
@@ -23413,7 +23747,7 @@ agent "worker" {{
             Some("ada/two")
         );
         let plain = environment("agent/node.plain");
-        assert!(!plain.contains_key("CODEX_HOME") && !plain.contains_key("ST3_ACCOUNT"));
+        assert!(plain.contains_key("CODEX_HOME") && !plain.contains_key("ST3_ACCOUNT"));
     }
 
     #[test]
@@ -23577,6 +23911,21 @@ agent "import/omp/repair-order" {{
         old.import_replication("author", &declaration.export_replication(0).unwrap())
             .unwrap();
         let append_binding = |store: &Store, incarnation: &str| {
+            // A driver's binding is accepted only while its incarnation is the running one.
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some(seat.into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("incarnation_id".into(), Value::String(incarnation.into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
             store
                 .append_claim(&ClaimInput {
                     subject: seat.into(),
@@ -23775,6 +24124,20 @@ agent "import/omp/repair-order" {{
         old_build
             .append_claim(&ClaimInput {
                 subject: seat.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(seat.into()),
+                fields: BTreeMap::from([
+                    ("status".into(), Value::String("running".into())),
+                    ("incarnation_id".into(), Value::String("old-build".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        old_build
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
                 kind: "harness.session-file".into(),
                 actor: Some(seat.into()),
                 fields: BTreeMap::from([
@@ -23847,6 +24210,21 @@ agent "import/omp/fixture" {{
                     "desired_token".into(),
                     Value::String(store.launch_lineage(&subject.subject).unwrap().pop().unwrap()),
                 );
+                // A driver's binding is accepted only while its incarnation is the running one.
+                store
+                    .append_claim(&ClaimInput {
+                        subject: subject.subject.clone(),
+                        kind: "runtime.observed".into(),
+                        actor: Some(subject.subject.clone()),
+                        fields: BTreeMap::from([
+                            ("status".into(), Value::String("running".into())),
+                            ("incarnation_id".into(), Value::String(incarnation.into())),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
             }
             store
                 .append_claim(&ClaimInput {
@@ -24249,6 +24627,44 @@ agent "import/omp/fixture" {{
         let reason = last.body.pointer("/fields/reason").and_then(Value::as_str).unwrap();
         assert!(reason.contains("absent") && reason.contains("nothing was started"), "{reason}");
         assert!(!reason.contains("recovered"), "{reason}");
+    }
+
+    #[test]
+    fn a_peer_that_does_not_run_the_seat_leaves_its_member_fault_alone() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, "version 2\nagent \"seat\" { command \"sleep 100\" }", "seat");
+        let subject = "agent/seat";
+        let reconciler = |host: &str| {
+            Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                host.into(),
+                Arc::new(Notify::new()),
+            )
+        };
+        let (host, peer) = (reconciler("node"), reconciler("peer"));
+        let decisions = || {
+            store
+                .claims_for(subject, Some("runtime.reconcile-decision"))
+                .unwrap()
+                .into_iter()
+                .filter_map(|claim| claim.body.pointer("/fields/decision").and_then(Value::as_str).map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        host.record_member_reconcile_result(subject, Err(anyhow::anyhow!("spawn PTY failed: launcher-incompatible")))
+            .unwrap();
+        // The peer's pass only retired its own leftover process, over and over: the seat is
+        // still parked on its host, and the fault stays, once.
+        for _ in 0..3 {
+            peer.record_member_reconcile_result(subject, Ok(())).unwrap();
+            host.record_member_reconcile_result(subject, Err(anyhow::anyhow!("spawn PTY failed: launcher-incompatible")))
+                .unwrap();
+        }
+        assert_eq!(decisions(), ["member-fault"]);
+        assert!(store.member_reconcile_fault(subject, None).unwrap().is_some());
+        // The host that runs the seat answers it.
+        host.record_member_reconcile_result(subject, Ok(())).unwrap();
+        assert_eq!(decisions(), ["member-fault", "member-pass-clean"]);
     }
 
     #[test]
@@ -33858,6 +34274,26 @@ version 2
             desired.subject == format!("agent/{run_id}/worker") && desired.kind == "stop"
         }));
 
+        // While nothing the answer read changes, the held seat's minute rechecks reuse it: a
+        // seat's mailbox is not read again, however many messages it holds.
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        let start = now_ms();
+        SEAT_RETENTION_READS.with(|count| count.set(0));
+        for minute in 1..=3 {
+            smallclaims::store::set_thread_clock(Some(
+                start + minute * (SEAT_RETENTION_CHECK_MS + 1_000),
+            ));
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(SEAT_RETENTION_READS.with(std::cell::Cell::get), 0);
+        assert!(runtime.stops.lock().unwrap().is_empty());
+
         // Once the message is read the stop goes ahead.
         for (kind, status) in [
             ("message.staged", "staged"),
@@ -33876,7 +34312,6 @@ version 2
                 })
                 .unwrap();
         }
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
     }
@@ -33954,7 +34389,6 @@ version 2
         store
             .set_step_state(&elsewhere[0], "completed", None)
             .unwrap();
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
         assert!(store.fault_items(None).unwrap().is_empty());
@@ -34205,7 +34639,6 @@ mission "held-stop" state="ready" {
                 })
                 .unwrap();
         }
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
         assert!(store.fault_items(None).unwrap().is_empty());
@@ -34946,6 +35379,36 @@ observer "repo" {
     }
 
     #[tokio::test]
+    async fn standing_watch_cadence_preserves_rate_limit_deadlines() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            &SCRIPTED_OBSERVER.replace("observer \"repo\"", "observer \"github/example/repo\""),
+            "standing-rate-limit",
+        );
+        let subject = "observer/github/example/repo";
+        let revision = store.selected_desired_revision(subject).unwrap().unwrap();
+        let key = format!("{subject}:{revision}");
+        let reset = now_ms() + 900_000;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (events, mut changed) = watch::channel(0_u64);
+        let reconciler = Reconciler::new(
+            store, Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).with_resource_provider(Arc::new(RateLimitedResourceProvider {
+            calls: calls.clone(), retry_at_unix_ms: reset,
+        })).with_event_notify(events);
+        reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), changed.changed()).await.unwrap().unwrap();
+        assert_eq!(
+            reconciler.observer_deadlines.lock().unwrap_or_else(PoisonError::into_inner)[&key],
+            reset,
+        );
+        assert!(reconciler.observer_intervals.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+        reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn an_observer_unreachable_for_an_hour_requests_attention_once() {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("observer.sqlite");
@@ -35197,6 +35660,151 @@ observer "repo" {
   locator "example/repo"
   field "issues"
 }"#;
+
+    #[tokio::test]
+    async fn standing_watch_cadence_adapts_without_migrating_declarations() {
+        struct AdaptiveProvider {
+            calls: Arc<AtomicUsize>,
+            changed: Arc<AtomicUsize>,
+            continuation: Arc<AtomicBool>,
+        }
+        impl ResourceProvider for AdaptiveProvider {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                // Scheduling must keep passing the opaque provider cursor through.
+                if request.previous_facts.is_some() {
+                    assert_eq!(request.cursor.as_deref(), Some("etag-and-pagination-state"));
+                }
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let change = self.changed.load(Ordering::SeqCst);
+                let continuing = self.continuation.load(Ordering::SeqCst);
+                let mut facts = serde_json::json!({"repository_id": 7});
+                if change != 2 {
+                    facts["issues"] = serde_json::json!([{
+                        "node_id": "I_fixture", "number": 1, "state": "open",
+                        "url": "https://github.com/example/repo/issues/1",
+                        "title": if change == 0 { "before" } else { "after" },
+                    }]);
+                }
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts,
+                    cursor: Some("etag-and-pagination-state".into()),
+                    next_check_unix_ms: now_ms() + if continuing {
+                        crate::resource::PROVIDER_CONTINUE_MS
+                    } else {
+                        300_000
+                    },
+                }) })
+            }
+        }
+
+        async fn poll(
+            reconciler: &Reconciler<FakeRuntime>,
+            calls: &AtomicUsize,
+            subject: &str,
+            force: bool,
+            interval: u128,
+        ) {
+            let revision = reconciler.store.selected_desired_revision(subject).unwrap().unwrap();
+            let key = format!("{subject}:{revision}");
+            if force {
+                reconciler.armed_observers.lock().unwrap()
+                    .retain(|operation| !operation.starts_with(&format!("{subject}:")));
+                reconciler.observer_deadlines.lock().unwrap().insert(key.clone(), 0);
+            }
+            let old = reconciler.observer_deadlines.lock().unwrap().get(&key).copied();
+            let expected = calls.load(Ordering::SeqCst) + 1;
+            let before = now_ms();
+            // This scheduler fixture has no live subscription; the full pass would
+            // correctly stop an unwatched standing observer before it can poll.
+            reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let deadline = reconciler.observer_deadlines.lock().unwrap().get(&key).copied();
+                    if calls.load(Ordering::SeqCst) == expected
+                        && let Some(deadline) = deadline.filter(|deadline| Some(*deadline) != old) {
+                        let actual = reconciler.store.latest_actual_value(subject).unwrap().unwrap();
+                        assert_eq!(actual["state"], "healthy", "{subject} poll {expected}: {actual}");
+                        assert!(deadline >= before + interval,
+                            "{subject} poll {expected}: next delay {}ms, expected at least {interval}ms", deadline.saturating_sub(before));
+                        assert!(deadline <= now_ms() + interval,
+                            "{subject} poll {expected}: next delay {}ms, expected at most {interval}ms", deadline.saturating_sub(now_ms()));
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("scheduled observation completes");
+        }
+
+        for subject in ["github/example/repo", "custom"] {
+            let standing = subject.starts_with("github/");
+            let subject_id = format!("observer/{subject}");
+            let source = format!(r#"version 2
+resource "github/example/repo" {{ kind "vcs.repository" }}
+observer "{subject}" {{
+  resource "resource/github/example/repo"
+  provider "github.repository"
+  locator "example/repo"
+  field "issues"
+  every "30s"
+}}"#);
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(&store, &source, "adaptive-watch");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let changed = Arc::new(AtomicUsize::new(0));
+            let continuation = Arc::new(AtomicBool::new(false));
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            ).with_resource_provider(Arc::new(AdaptiveProvider {
+                calls: calls.clone(), changed: changed.clone(), continuation: continuation.clone(),
+            }));
+            // Legacy standing every=30s adapts, while an explicitly faster custom observer
+            // stays at 30s through every quiet/change boundary.
+            for interval in [180_000, 360_000, 600_000, 600_000] {
+                poll(&reconciler, &calls, &subject_id, true,
+                    if standing { interval } else { 30_000 }).await;
+            }
+            changed.store(1, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 180_000 } else { 30_000 }).await;
+            // Real repository observations are item deltas. An identity-only quiet poll
+            // after a changed item, and re-emitting the identical item, are both quiet.
+            changed.store(2, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 360_000 } else { 30_000 }).await;
+            changed.store(3, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 600_000 } else { 30_000 }).await;
+            continuation.store(true, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                crate::resource::PROVIDER_CONTINUE_MS).await;
+            continuation.store(false, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 600_000 } else { 30_000 }).await;
+
+            let revision = store.selected_desired_revision(&subject_id).unwrap().unwrap();
+            store.append_claim(&ClaimInput {
+                subject: subject_id.clone(),
+                kind: "observer.refresh-requested".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("revision".into(), Value::String(revision)),
+                    ("attempt".into(), Value::String("adaptive-refresh".into())),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            // No forced deadline: refresh must interrupt the existing sleeping arm.
+            poll(&reconciler, &calls, &subject_id, false,
+                if standing { 180_000 } else { 30_000 }).await;
+            assert!(store.pending_observer_refresh_attempt(&subject_id).unwrap().is_none());
+
+            // A new revision starts immediately at active cadence, not the old deadline.
+            apply_source(&store, &source.replace("30s", "31s"), "adaptive-watch-revision");
+            poll(&reconciler, &calls, &subject_id, false,
+                if standing { 180_000 } else { 31_000 }).await;
+        }
+    }
 
     /// Run one observation now and wait until it has recorded its outcome. An unchanged or
     /// backing-off poll keeps its arm sleeping toward its own deadline, so retire that arm, as

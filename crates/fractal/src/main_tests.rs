@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
+    let value = "fabric://devbox/st3-client-v0";
+    let cli = Cli::try_parse_from(["st", "--endpoint", value, "now"]).unwrap();
+    let endpoint = Endpoint::parse(cli.endpoint.unwrap()).unwrap();
+    assert!(matches!(endpoint, Endpoint::Fabric(_)));
+    assert_eq!(endpoint_label(&endpoint), value);
+    let client = generated_client(&endpoint, Some("person/operator")).unwrap();
+    assert!(!client.is_local_socket());
+}
+
+#[test]
+fn malformed_native_fabric_endpoint_is_not_a_local_socket() {
+    for value in [
+        "fabric://devbox", "fabric://devbox/replication",
+        "fabric://devbox/st3-client-v0/../admin",
+    ] {
+        assert!(Endpoint::parse(value).is_err(), "{value}");
+    }
+}
+
+#[test]
 fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
     let plan = OperationalRepairPlan {
         api_version: "st3.operational-repair.v0".into(),
@@ -119,7 +140,7 @@ fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
         json!({"id": "ada/claude/weekly", "kind": "budget", "status": "stale", "target": "100% allowance",
             "current": "40% used", "window": "weekly", "remaining_percent": 60.0,
             "resets_at_unix_ms": 86_400_000u64, "explain": "An allowance that resets."}),
-        json!({"id": "cpu", "kind": "objective", "status": "no-data", "target": "≤ 2 cores",
+        json!({"id": "cpu", "kind": "objective", "status": "no-data", "target": "≤ 1 core over the hour",
             "current": "not measured", "window": "1h", "remaining_percent": null, "explain": "x"}),
     ];
     let list = render_slo_list(&rows);
@@ -288,7 +309,7 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     assert!(shown.contains("smalltalk-ios 1.0 (42)  person/avery (Pocket)  via gateway  connected now, since 2m ago"), "{shown}");
     assert!(shown.contains("  follows: agents, conversation:agent/example/harbor"), "{shown}");
     assert!(shown.contains("(unnamed client)  person/avery  via local  last seen 3m ago"), "{shown}");
-    let devices = "DEVICES\ndevice/001122  active  person/avery/session/0011  scopes 4\n  action: st devices --as person/avery revoke device/001122\n";
+    let devices = "DEVICES\ndevice/001122  active  person/avery/session/0011  scopes 4\n  action: fractal devices --as person/avery revoke device/001122\n";
     let marked = with_device_presence(devices, Some(&found), now);
     assert!(marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"), "{marked}");
     assert_eq!(with_device_presence(devices, None, now), devices);
@@ -372,7 +393,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         node: "todo-liveness".into(), state_dir: root.path().into(),
         pty_root: root.path().join("pty"), pty_binary: "pty".into(),
         fleet_id: None, configured_peers: vec![], client_relay: None,
-        native_session_home: None, planner_default: Default::default(),
+        native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
     };
     let path = root.path().join("api.sock");
     let socket = path.clone();
@@ -475,6 +496,96 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
         "start the terminal: st changed while this was on its way, so it was not applied (stale-fence)"
     );
     assert_eq!(plain_error(&anyhow::anyhow!("plain")), "plain");
+    assert_eq!(
+        cli_error_message(&error, false),
+        "start the terminal: Fractal changed while this was on its way, so it was not applied (stale-fence)"
+    );
+    assert_eq!(cli_error_message(&error, true), plain_error(&error));
+}
+
+#[test]
+fn gate_subprocess_stderr_keeps_stable_client_errors() {
+    const CHILD: &str = "ST_TEST_GATE_ERROR_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let api: fractal_client::ErrorEnvelope = serde_json::from_value(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/gate-test",
+            "code": "internal",
+            "message": "the store failed",
+            "retryable": false
+        })).unwrap();
+        let error = anyhow::Error::from(fractal_client::ClientError::Api(
+            api.code.clone(), api.message.clone(), Box::new(api),
+        ));
+        eprintln!("{}", cli_error_message(&error, false));
+        let mut stalled = None;
+        // Exercise the actual Resync notice sink, including duplicate suppression.
+        for _ in 0..2 {
+            conversations_cli::report_resync(
+                Some(&fractal_client::ErrorCode::Internal),
+                "the stream failed",
+                &mut stalled,
+            );
+        }
+        return;
+    }
+    for gate in [false, true] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "tests::gate_subprocess_stderr_keeps_stable_client_errors", "--nocapture"])
+            .env(CHILD, "1")
+            .env_remove(fractal_daemon::gate_report::ENV);
+        if gate {
+            command.env(fractal_daemon::gate_report::ENV, "/unused/gate-report");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(stderr.trim(), if gate {
+            "st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
+        } else {
+            "Fractal hit a problem: the store failed (internal)\nst: Fractal hit a problem: the stream failed · trying again"
+        });
+    }
+}
+
+#[tokio::test]
+async fn blob_errors_keep_their_type_until_the_rendering_boundary() {
+    use axum::{Json, Router, http::StatusCode};
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("blob.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = Router::new().fallback(|| async {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/blob-test",
+            "code": "internal",
+            "message": "the blob store failed",
+            "retryable": false
+        })))
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let endpoint = Endpoint::Unix(socket);
+    let file = directory.path().join("image.png");
+    fs::write(&file, b"image").unwrap();
+    let upload = upload_attachment(&endpoint, "person/test", &file, Some("image/png"))
+        .await.unwrap_err();
+    let read = run_blobs(&endpoint, None, BlobCommand::Get {
+        reference: format!("blob/{}", "a".repeat(64)),
+        message: None,
+        output: None,
+        actor: Some("person/test".into()),
+    }, false).await.unwrap_err();
+    for error in [upload, read] {
+        assert!(error.downcast_ref::<fractal_client::ClientError>().is_some(), "{error:#}");
+        assert_eq!(render_client_error(&error, ClientMessage::Human),
+            "Fractal hit a problem: the blob store failed (internal)");
+        assert_eq!(plain_error(&error),
+            "st hit a problem: the blob store failed (internal)");
+    }
+    server.abort();
+    let _ = server.await;
 }
 
 #[test]
@@ -948,6 +1059,30 @@ fn usage_marks_a_reading_older_than_the_limits_cadence_as_stale() {
 }
 
 #[test]
+fn usage_lists_every_declared_account_with_its_limit_or_credits() {
+    let report = json!({
+        "rows": [],
+        "limits": [
+            {"account": "claude/aaaa", "account_ref": "ada/claude-1", "weekly_percent": 24.0,
+             "weekly_resets_at_unix_ms": 1_799_500_000_000_u64, "stale": false,
+             "measured_at_unix_ms": 1_799_000_000_000_u64},
+        ],
+        "accounts": [
+            {"name": "ada/claude-1", "account": "claude/aaaa", "provider": "anthropic", "kind": "subscription"},
+            {"name": "ada/claude-2", "account": "claude/bbbb", "provider": "anthropic", "kind": "subscription"},
+            {"name": "ada/key", "account": "omp/cccc", "provider": "anthropic", "kind": "api-key",
+             "credits": {"budget_microusd": 200_000_000_u64, "used_microusd": 154_300_000_u64,
+                         "unpriced_tokens": 7, "period_start_ms": 0}},
+        ],
+    });
+    let output = render_usage_report(&report, 24, None);
+    assert!(output.contains("ACCOUNTS  3 · every declared account\n"), "{output}");
+    assert!(output.contains("ada/claude-1  weekly 24% resets 2027-01-09 "), "{output}");
+    assert!(output.contains("ada/claude-2  no limits reported\n"), "{output}");
+    assert!(output.contains("ada/key  credits $154+ of $200 this month\n"), "{output}");
+}
+
+#[test]
 fn usage_names_a_declared_account_beside_the_providers_label() {
     let report = json!({
         "rows": [
@@ -1343,6 +1478,19 @@ fn a_harness_cannot_mutate_as_a_peer_or_person() {
 }
 
 #[test]
+fn harness_actor_rejection_keeps_st_work_ask_at_the_error_rendering_boundary() {
+    let cli = Cli::try_parse_from([
+        "fractal", "work", "wake", "step-run/example/work", "--as", "person/operator",
+    ]).unwrap();
+    let error = guard_mutating_cli_actor(&cli.command, Some("agent/worker"), None).unwrap_err();
+    for native_driver in [false, true] {
+        let output = cli_error_message(&error, native_driver);
+        assert!(output.contains("`st work ask --as \"$ST_AGENT\"`"), "{output}");
+        assert!(!output.contains("fractal work ask"), "{output}");
+    }
+}
+
+#[test]
 fn a_claim_prints_each_host_document_under_its_reference() {
     let documents = [(
         "doc/hosts/example@abc".to_owned(),
@@ -1727,6 +1875,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
                 tokens: 0,
                 refilled_at_ms: 1_234,
             },
+            claude_attachment_polled: Some((("incarnation".into(), 4, "token".into()), 1_234)),
             settle: ResumeSettle::resumed(),
         },
     };
@@ -1753,6 +1902,8 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert!(back.loop_state.predecessor_harness_record.is_none());
     // Nor does a settle: the replacement image draws its own.
     assert!(back.loop_state.settle.0.is_none());
+    // An unpushed attachment poll is not carried: the replacement image polls once at once.
+    assert!(back.loop_state.claude_attachment_polled.is_none());
 }
 
 #[test]
@@ -1899,7 +2050,7 @@ fn agent_tree_nests_running_subagents_under_their_agent() {
         "page": {"limit": 50, "has_more": false}
     }))
     .unwrap();
-    let tree = render_client_agents(&page, true, false, "st agents tree");
+    let tree = render_client_agents(&page, true, false, "fractal agents tree");
     assert_eq!(
         tree,
         "AGENT TREE  1\n\
@@ -2144,6 +2295,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -2237,6 +2389,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -2313,6 +2466,7 @@ async fn trace_wait_starts_after_existing_events() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let app = router(state).layer(axum::middleware::from_fn(
@@ -2687,6 +2841,8 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const SCHEDULES_SOURCE: &str = include_str!("schedules_cli.rs");
     #[cfg(test)]
     const DEPLOY_SOURCE: &str = include_str!("deploy_cli.rs");
+    #[cfg(test)]
+    const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -2704,6 +2860,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("schedules", SCHEDULES_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
+        ("waiting_on", WAITING_ON_SOURCE),
         ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
     ];
     let main_source = /* sqlite-large-value: allow-for-now lv-h47a0a723f1b0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("main.rs");
@@ -3103,7 +3260,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
             diverged_since: None,
         }],
     });
-    let output = render_now_page(&page, "st3 now --as person/alex");
+    let output = render_now_page(&page, "fractal now --as person/alex");
     assert!(
         output.starts_with(
             "SYNCING  ExampleMac has 1 envelope this host lacks · estimating time to catch up · \
@@ -3119,7 +3276,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
         render_sync_notice(page.sync.as_ref().unwrap(), 1_000_000),
         "SYNCING  ExampleMac has 1 envelope this host lacks · estimating time to catch up · \
              last exchange 2s ago\n  Until then, items below can be out of date. \
-             Progress: st3 replication status\n\n"
+             Progress: fractal replication status\n\n"
     );
     assert_eq!(catch_up_estimate(Some(0)), "caught up");
     assert_eq!(catch_up_estimate(Some(59)), "caught up in under a minute");
@@ -3135,11 +3292,11 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
         render_sync_notice(page.sync.as_ref().unwrap(), 1_000_000),
         "DIVERGED  ExampleMac projects a different graph from the same envelopes · since 3m ago\n\
              \x20 Exchanges cannot fix this, so items below can be wrong. \
-             Details: st3 replication status\n\n"
+             Details: fractal replication status\n\n"
     );
 
     page.sync = None;
-    assert!(!render_now_page(&page, "st3 now").contains("SYNCING"));
+    assert!(!render_now_page(&page, "fractal now").contains("SYNCING"));
 }
 
 #[test]
@@ -3175,9 +3332,9 @@ fn terminal_list_shows_a_working_peek_target() {
     } else {
         panic!("expected runtime fixture");
     }
-    let rendered = render_product_page("TERMINALS", &page, "st terminals");
+    let rendered = render_product_page("TERMINALS", &page, "fractal terminals");
     assert!(
-        rendered.contains("peek: st terminals peek agent/release"),
+        rendered.contains("peek: fractal terminals peek agent/release"),
         "{rendered}"
     );
 }
@@ -3191,14 +3348,14 @@ fn work_detail_labels_a_reason_blocked_only_for_blocked_work() {
     let mut work = work.clone();
     work.blocked_reason = Some("the step's lease expired".into());
     work.state = "claimed".into();
-    let claimed = render_client_work_detail(&work);
+    let claimed = render_client_work_detail(&work, Some(false));
     assert!(!claimed.contains("Blocked:"), "{claimed}");
     assert!(
         claimed.contains("\nReason: the step's lease expired\n"),
         "{claimed}"
     );
     work.state = "blocked".into();
-    let blocked = render_client_work_detail(&work);
+    let blocked = render_client_work_detail(&work, Some(false));
     assert!(
         blocked.contains("\nBlocked: the step's lease expired\n"),
         "{blocked}"
@@ -3212,9 +3369,9 @@ fn work_detail_says_when_its_holder_was_nudged() {
         panic!("expected work fixture");
     };
     let mut work = work.clone();
-    assert!(!render_client_work_detail(&work).contains("Nudged:"));
+    assert!(!render_client_work_detail(&work, Some(false)).contains("Nudged:"));
     work.nudged_at_unix_ms = Some(1_791_581_505_000);
-    let rendered = render_client_work_detail(&work);
+    let rendered = render_client_work_detail(&work, Some(false));
     assert!(
         rendered.contains("\nNudged: 2026-10-09T21:31:45Z ("),
         "{rendered}"
@@ -3224,7 +3381,7 @@ fn work_detail_says_when_its_holder_was_nudged() {
 #[test]
 fn attention_from_a_retired_requester_says_who_can_close_it() {
     let mut page = fixture_product_page(&["attention"], false);
-    let before = render_product_page("NOW", &page, "st now");
+    let before = render_product_page("NOW", &page, "fractal now");
     assert!(!before.contains("requester retired"), "{before}");
     let ClientResource::Attention(attention) = &mut page.items[0] else {
         panic!("expected attention fixture");
@@ -3236,7 +3393,7 @@ fn attention_from_a_retired_requester_says_who_can_close_it() {
         owner_generation: None,
         runtime_incarnation: None,
     });
-    let rendered = render_product_page("NOW", &page, "st now");
+    let rendered = render_product_page("NOW", &page, "fractal now");
     assert!(
         rendered.contains("  requester retired: only person/alex can close it\n"),
         "{rendered}"
@@ -3247,25 +3404,25 @@ fn attention_from_a_retired_requester_says_who_can_close_it() {
 fn document_continuation_preserves_prefix_and_history() {
     assert_eq!(
         document_continuation_command(Some("doc/type case"), true, 1, "document/abc"),
-        "st documents ls 'doc/type case' --limit 1 --all --cursor document/abc"
+        "fractal documents ls 'doc/type case' --limit 1 --all --cursor document/abc"
     );
 }
 
 #[test]
 fn product_renderers_have_exact_empty_and_mixed_now_output() {
     assert_eq!(
-        render_product_page("NOW", &fixture_product_page(&[], false), "st now"),
+        render_product_page("NOW", &fixture_product_page(&[], false), "fractal now"),
         "NOW  0\nNo current items.\n"
     );
     let mixed = render_product_page(
         "NOW",
         &fixture_product_page(&["attention", "work", "operation"], false),
-        "st now",
+        "fractal now",
     );
     // An attention item leads with its kind and title, then who it is from and how long ago
     // (which moves with the clock) and its priority when it is not normal.
     let (head, rest) = mixed
-        .split_once("  action: st alerts show")
+        .split_once("  action: fractal alerts show")
         .expect(&mixed);
     assert!(
         head.starts_with("NOW  3\n\nrequest   Review release\n          "),
@@ -3279,9 +3436,9 @@ fn product_renderers_have_exact_empty_and_mixed_now_output() {
             "  id: attention/release-review\n",
             "work/release/1/build  work  claimed  build  attempt 1\n",
             "  assigned: agent/release\n",
-            "  action: st work show work/release/1/build\n",
+            "  action: fractal work show work/release/1/build\n",
             "operation/transport-host-b  operation  warning  degraded  Peer is retrying\n",
-            "  recovery: st doctor\n",
+            "  recovery: fractal doctor\n",
         )
     );
 }
@@ -3322,9 +3479,9 @@ fn an_attention_item_names_its_kind_sender_and_age() {
     if let Some(ClientResource::Attention(shown)) = page.items.first_mut() {
         shown.update = item.update.clone();
     }
-    let rendered = render_product_page("NOW", &page, "st now");
+    let rendered = render_product_page("NOW", &page, "fractal now");
     assert!(
-        rendered.contains("  action (marks it read): st alerts show launch/release"),
+        rendered.contains("  action (marks it read): fractal alerts show launch/release"),
         "{rendered}"
     );
     item.state = "snoozed".into();
@@ -3338,23 +3495,23 @@ fn an_attention_item_names_its_kind_sender_and_age() {
 fn now_page_without_work_does_not_claim_zero_working() {
     let attention_only = render_now_page(
         &fixture_product_page(&["attention"], false),
-        "st now --as person/alex",
+        "fractal now --as person/alex",
     );
     assert!(attention_only.starts_with("1 alert\n"), "{attention_only}");
     assert!(!attention_only.contains("WORKING"), "{attention_only}");
     assert!(!attention_only.contains("UNHEALTHY"), "{attention_only}");
     assert!(
-        attention_only.ends_with("\nWork: st work ls · Health: st doctor\n"),
+        attention_only.ends_with("\nWork: fractal work ls · Health: fractal doctor\n"),
         "{attention_only}"
     );
 
     let with_work = render_now_page(
         &fixture_product_page(&["attention", "work"], false),
-        "st now --as person/alex --owner-run mission-run/release/1",
+        "fractal now --as person/alex --owner-run mission-run/release/1",
     );
     assert!(with_work.contains("\nWORKING  1\n"), "{with_work}");
     assert!(!with_work.contains("UNHEALTHY"), "{with_work}");
-    assert!(!with_work.contains("Work: st work ls"), "{with_work}");
+    assert!(!with_work.contains("Work: fractal work ls"), "{with_work}");
 }
 
 #[test]
@@ -3363,9 +3520,9 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     let mut alerts = page.clone();
     alerts.items = [page.items.clone(), page.items.clone()].concat();
     assert!(
-        render_now_page(&alerts, "st now").starts_with("2 alerts\n"),
+        render_now_page(&alerts, "fractal now").starts_with("2 alerts\n"),
         "{}",
-        render_now_page(&alerts, "st now")
+        render_now_page(&alerts, "fractal now")
     );
     // An update asks nothing: it is listed apart and never counted as an alert.
     let mut updates = page.clone();
@@ -3380,18 +3537,18 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
         summary: None,
     });
     update.alert = Some(false);
-    let now = render_now_page(&updates, "st now");
+    let now = render_now_page(&updates, "fractal now");
     assert!(now.starts_with("UPDATES  1\n"), "{now}");
     assert!(!now.contains("1 alert\n") && !now.contains("0 alerts"), "{now}");
     // Nothing waits: no line about alerts at all, not even a zero.
     assert_eq!(
-        render_now_page(&fixture_product_page(&[], false), "st now"),
-        "Work: st work ls · Health: st doctor\n"
+        render_now_page(&fixture_product_page(&[], false), "fractal now"),
+        "Work: fractal work ls · Health: fractal doctor\n"
     );
     // `st alerts ls` counts the alerts under its heading, then lists updates apart.
     let mut mixed = page.clone();
     mixed.items.extend(updates.items.clone());
-    let listed = render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "st alerts ls");
+    let listed = render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "fractal alerts ls");
     assert!(listed.starts_with("ALERTS FOR person/alex  1\n"), "{listed}");
     assert!(listed.contains("\nUPDATES  1\n"), "{listed}");
     // A daemon that predates alerts says nothing: an update is still not an alert.
@@ -3400,7 +3557,7 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     };
     update.alert = None;
     assert_eq!(
-        render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "st alerts ls"),
+        render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "fractal alerts ls"),
         listed
     );
 }
@@ -3440,7 +3597,7 @@ fn context_occupancy_alone_is_not_reported_as_zero_tokens() {
         }))
         .unwrap(),
     );
-    let rendered = render_product_page("SESSIONS", &page, "st conversations sessions");
+    let rendered = render_product_page("SESSIONS", &page, "fractal conversations sessions");
     assert!(!rendered.contains("0 tokens"), "{rendered}");
     assert!(
         rendered.contains("  usage not reported · context 319465 tokens\n"),
@@ -3453,7 +3610,7 @@ fn context_occupancy_alone_is_not_reported_as_zero_tokens() {
     let usage = session.usage.as_mut().unwrap();
     usage.incarnation_count = 1;
     usage.total_tokens = 1200;
-    let rendered = render_product_page("SESSIONS", &page, "st conversations sessions");
+    let rendered = render_product_page("SESSIONS", &page, "fractal conversations sessions");
     assert!(rendered.contains("  usage 1200 tokens\n"), "{rendered}");
 }
 
@@ -3702,7 +3859,7 @@ fn machine_and_device_renderers_have_exact_operational_output() {
         render_product_page(
             "MACHINES",
             &fixture_product_page(&["machine"], true),
-            "st machines"
+            "fractal machines"
         ),
         concat!(
             "MACHINES  1\n",
@@ -3711,20 +3868,20 @@ fn machine_and_device_renderers_have_exact_operational_output() {
             "  runtimes 1 running · 1 known\n",
             "  assigned work 1\n",
             "  transport unix local · last success 2026-09-20T11:09:10Z\n",
-            "  inspect: st subject show host/host-a\n",
-            "More items are available: st machines --cursor cursor/next --limit 100\n",
+            "  inspect: fractal subject show host/host-a\n",
+            "More items are available: fractal machines --cursor cursor/next --limit 100\n",
         )
     );
     assert_eq!(
         render_product_page(
             "DEVICES",
             &fixture_product_page(&["device"], false),
-            "st devices --as person/alex"
+            "fractal devices --as person/alex"
         ),
         concat!(
             "DEVICES  1\n",
             "device/ios-release  active  person/alex/session/ios-release  scopes 4\n",
-            "  action: st devices --as person/alex revoke device/ios-release\n",
+            "  action: fractal devices --as person/alex revoke device/ios-release\n",
         )
     );
     let mut assistant = fixture_product_page(&["device"], false);
@@ -3732,8 +3889,8 @@ fn machine_and_device_renderers_have_exact_operational_output() {
     device.person_id = None;
     device.grant_id = Some("assistant-grant/0123456789abcdef01234567".into());
     device.session_actor = "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567".into();
-    let shown = render_product_page("DEVICES", &assistant, "st devices");
-    assert!(shown.contains("action: st devices grant revoke assistant-grant/0123456789abcdef01234567"));
+    let shown = render_product_page("DEVICES", &assistant, "fractal devices");
+    assert!(shown.contains("action: fractal devices grant revoke assistant-grant/0123456789abcdef01234567"));
     assert!(!shown.contains("--as person/"));
 }
 
@@ -4038,6 +4195,7 @@ fn pty_attach_accepts_an_explicit_nested_override() {
 fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
     let actor = "agent/worker";
     assert_eq!(
+        // Agent-only continuations deliberately keep the executable available in agent seats.
         wait_interruption_reason(actor, true, &[], &["message/new".into()]),
         Some(
             "the wait stopped because agent/worker has a new message: message/new. Run `st conversations ls`"
@@ -5436,6 +5594,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -5525,6 +5684,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
         pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
         client_relay: None, native_session_home: None, owning_person: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
@@ -5656,6 +5816,32 @@ fn agent_new_args(arguments: &[&str]) -> AgentNewArgs {
         panic!("agents new did not parse");
     };
     args
+}
+
+#[test]
+fn agent_new_cli_normalizes_qualified_ids_without_changing_host_scoping() {
+    for (identity, expected) in [
+        ("worker", "agent/test.worker"),
+        ("team/worker", "agent/team/worker"),
+        ("test.worker", "agent/test.worker"),
+    ] {
+        for name in [identity.to_owned(), format!("agent/{identity}")] {
+            let args = agent_new_args(&[&name, "--harness", "codex"]);
+            let source = agent_new_document(&args, "/work/worker", false);
+            let intent = fractal_daemon::graph::parse_intent(&source, "test").unwrap();
+            assert_eq!(intent.subjects.len(), 1, "{source}");
+            assert!(intent.subjects.contains_key(expected), "{source}");
+        }
+    }
+}
+
+#[test]
+fn agent_lifecycle_subject_normalization_accepts_bare_and_qualified_ids() {
+    for identity in ["worker", "test.worker", "team/worker"] {
+        let subject = format!("agent/{identity}");
+        assert_eq!(normalize_agent_subject(identity), subject);
+        assert_eq!(normalize_agent_subject(&subject), subject);
+    }
 }
 
 #[test]
@@ -7403,6 +7589,7 @@ async fn serve_test_store(
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -8147,4 +8334,52 @@ fn native_identity_rename_allows_generated_idempotency_key() {
         panic!("expected identity rename");
     };
     assert_eq!(args.idempotency_key, None);
+}
+
+#[test]
+fn github_watch_continuation_keeps_the_agent_executable() {
+    assert_eq!(GH_UNWATCH_HINT, "To stop: st gh unwatch");
+}
+
+    #[test]
+    fn work_detail_explains_managed_and_unmanaged_leases() {
+        let page = fixture_product_page(&["work"], false);
+        let ClientResource::Work(work) = &page.items[0] else {
+            panic!("expected work fixture");
+        };
+        let mut work = work.clone();
+        work.claimant = Some("agent/example".into());
+        work.claim_incarnation = Some("incarnation/current".into());
+        work.claim_expires_at_unix_ms = Some(62_001);
+        let managed = render_client_work_detail(&work, Some(true));
+        assert!(managed.contains("\nLease: The Fractal driver renews the lease on claimed Fractal work. A managed agent must not run a renewal loop.\n"));
+        assert!(!managed.contains("fractal work renew"));
+        let unmanaged = render_client_work_detail(&work, Some(false));
+        assert!(unmanaged.contains(&format!("\nLease: The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: fractal work renew {} --as agent/example --incarnation incarnation/current\n", work.header.id)));
+        assert!(!unmanaged.contains("Fractal driver renews"));
+        work.claim_incarnation = None;
+        let unmanaged = render_client_work_detail(&work, Some(false));
+        assert!(unmanaged.contains(" --as agent/example\n"));
+        assert!(!unmanaged.contains("--incarnation"));
+    }
+
+
+#[tokio::test]
+async fn fabric_work_lease_guidance_unavailable_still_renders_detail() {
+    let client = Client::new(Endpoint::parse("fabric://unresolved/st3-client-v0").unwrap());
+    let page = fixture_product_page(&["work"], false);
+    let ClientResource::Work(work) = &page.items[0] else {
+        panic!("expected work fixture");
+    };
+    let mut work = work.clone();
+    work.claimant = Some("agent/example".into());
+    work.claim_incarnation = Some("incarnation/current".into());
+    work.claim_expires_at_unix_ms = Some(62_001);
+    let ownership = claim_has_driver(&client, work.claimant.as_deref(), work.claim_incarnation.as_deref()).await;
+    assert_eq!(ownership, None);
+    let rendered = render_client_work_detail(&work, ownership);
+    assert!(rendered.contains(&format!("WORK  {}", work.header.id)));
+    assert!(rendered.contains("Lease renewal ownership is unavailable."));
+    assert!(!rendered.contains("Renew it with:"));
+    assert!(!rendered.contains("The lease expires at"));
 }

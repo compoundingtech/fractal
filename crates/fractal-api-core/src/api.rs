@@ -72,6 +72,8 @@ mod client_blobs;
 mod client_documents;
 #[cfg(test)]
 mod terminal_gate_evidence;
+#[cfg(all(test, target_os = "linux"))]
+mod peer_process_tests;
 mod message_bodies;
 mod client_adapters;
 mod client_diagnostics;
@@ -118,6 +120,7 @@ pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
 mod launch_card;
+pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
@@ -213,6 +216,9 @@ pub struct AppState {
     pub client_relay: Option<crate::peer::ClientRelay>,
     pub native_session_home: Option<std::path::PathBuf>,
     pub planner_default: PlannerSpec,
+    /// Caller-bound assistant read receipts committed off the request path. Shut it down before
+    /// the store closes; the last state reference to drop commits what remains.
+    pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
 }
 
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
@@ -812,6 +818,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/mission-runs/{run}/report-to",
             post(runs::set_mission_run_report),
         )
+        .route(
+            "/v1/mission-runs/{run}/waiting-on",
+            get(waiting_on::get_run_waiting_on),
+        )
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
@@ -1342,8 +1352,6 @@ fn request_trace(
     if !crate::otel::export_enabled() {
         return None;
     }
-    use opentelemetry::trace::TraceContextExt as _;
-    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
     let span_name = format!("{} {route}", method.as_str());
     let span = tracing::info_span!(
         target: "st3::http",
@@ -1369,16 +1377,7 @@ fn request_trace(
         "st.writer.wait_ms" = tracing::field::Empty,
         "st.writer.ops" = tracing::field::Empty,
     );
-    let remote = crate::otel::extract_remote_context(headers);
-    let parent = remote.span();
-    let context = parent.span_context();
-    if context.is_valid() {
-        span.record(
-            "st.parent.sampled",
-            context.is_sampled() && context.trace_state().get("st").is_none(),
-        );
-    }
-    span.set_parent(remote);
+    crate::otel::set_remote_parent(&span, crate::otel::extract_remote_context(headers));
     Some(span)
 }
 
@@ -1435,6 +1434,68 @@ pub fn request_latency_target_windows() -> Value {
 /// Every target's live windows, and every path's: see `slo/targets.toml`.
 pub fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
+}
+
+/// Note what keeps this minute of the member's CPU from being idle.
+fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
+    request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu_minutes().note(busy);
+}
+
+/// Close each UTC minute of the member's CPU as it ends, for the CPU targets in
+/// `slo/targets.toml`: read the daemon's CPU at the boundary beside the newest reading each of
+/// the `workers` replication workers this member runs has sent, note a replication catch-up, and
+/// check the seats of the minute closed one boundary earlier, once every harness observation
+/// stamped inside it has committed. The first boundary is this daemon's start.
+pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
+    use smallclaims::windows::cpu_minutes::Busy;
+    // This member's seats as of `seats_until`, which each minute's check carries into the next.
+    let mut seats = None;
+    let mut seats_until = 0;
+    let mut unsettled = None;
+    loop {
+        let minute = client_now_ms() as u64 / 60_000;
+        let (at, daemon_ns) = (Instant::now(), smallclaims::windows::process_cpu_ns());
+        let catching_up = store.replication_catching_up();
+        let closed = {
+            let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cpu = meter.cpu_minutes();
+            if catching_up {
+                cpu.note(Busy::CatchUp);
+            }
+            let closed = cpu.boundary(minute, at, daemon_ns, workers);
+            if catching_up {
+                cpu.note(Busy::CatchUp);
+            }
+            closed
+        };
+        if let Some(closed) = closed
+            && let Some(check) = unsettled.replace(closed)
+        {
+            let (from, until) = (check * 60_000, (check + 1) * 60_000);
+            let carried = seats.take().filter(|_| seats_until == from);
+            let reading = store.clone();
+            let checked = tokio::task::spawn_blocking(move || {
+                smallclaims::task_cpu::blocking("slo.cpu_minutes", || {
+                    reading.local_seats_busy(from, until, carried)
+                })
+            })
+            .await;
+            let busy = match checked {
+                Ok(Ok((busy, newest))) => {
+                    (seats, seats_until) = (Some(newest), until);
+                    Some(busy)
+                }
+                _ => None,
+            };
+            request_latency()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cpu_minutes()
+                .settle(check, busy);
+        }
+        let now = client_now_ms() as u64;
+        tokio::time::sleep(Duration::from_millis((now / 60_000 + 1) * 60_000 - now + 5)).await;
+    }
 }
 
 pub use crate::peer::track_remote_reads;
@@ -6268,6 +6329,9 @@ async fn serve_reserved_unix_with_ancestor_ready(
         // Every local connection names its caller, so request counts by client are always on.
         let mut diagnostic_connection = crate::relay_trace::Connection::capture();
         let peer_pid = local_peer_pid(&stream);
+        // This must precede dispatch: the numeric peer PID can be recycled while
+        // a descendant continues using the connector's inherited socket.
+        let peer_process = local_peer_process(&stream).ok();
         let app = app.clone();
         tokio::spawn(async move {
             if let Some(connection) = &mut diagnostic_connection {
@@ -6303,6 +6367,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                 let bound_agent = bound_agent.clone();
                 let caller = caller.clone();
                 let delivery_peer = delivery_peer.clone();
+                let peer_process = peer_process.clone();
                 async move {
                     let mut request = request.map(Body::new);
                     if let Some(connection) = diagnostic_connection {
@@ -6311,6 +6376,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(pid) = peer_pid {
                         request.extensions_mut().insert(LocalPeer {
                             pid,
+                            peer_process,
                             ancestor: bound_agent.clone(),
                         });
                     }
@@ -6440,6 +6506,43 @@ fn native_delivery_identity(
         archives_inbox,
     })
 }
+/// Capture the kernel connector generation, independently of generic local auth.
+pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fractal_runtime::PeerProcessIdentity> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::{FromRawFd as _, OwnedFd};
+        let pid = local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?;
+        // Linux 6.5 added SO_PEERPIDFD; older libc headers may not name it yet.
+        const SO_PEERPIDFD: libc::c_int = 77;
+        let mut fd: libc::c_int = -1;
+        let mut length = std::mem::size_of_val(&fd) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, SO_PEERPIDFD,
+                (&mut fd as *mut libc::c_int).cast(), &mut length)
+        };
+        let pidfd = if result == 0 {
+            anyhow::ensure!(fd >= 0, "SO_PEERPIDFD returned an invalid descriptor");
+            // Successful SO_PEERPIDFD transfers a fresh descriptor to us.
+            let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+            anyhow::ensure!(length as usize == std::mem::size_of_val(&fd),
+                "SO_PEERPIDFD returned an invalid descriptor length");
+            owned
+        } else {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ENOPROTOOPT | libc::EINVAL)) {
+                anyhow::bail!("helper credential inheritance requires Linux SO_PEERPIDFD (kernel 6.5+): {error}");
+            }
+            anyhow::bail!("SO_PEERPIDFD failed: {error}");
+        };
+        fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
+    }
+}
+
 
 #[cfg(target_os = "linux")]
 pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
@@ -8175,12 +8278,24 @@ fn replication_receive_has_new_data(received: usize) -> bool {
 }
 
 /// Pure local memory update. Older daemons answer 404 rather than interpreting worker
-/// progress as a failed exchange during a worker/daemon rolling restart.
+/// progress as a failed exchange during a worker/daemon rolling restart. A report of the
+/// worker's process CPU, which carries no peer, feeds the member's CPU minutes instead.
 async fn replication_worker_status(
     State(state): State<AppState>,
     Json(request): Json<smallclaims::replication::ReplicationWorkerStatusRequest>,
 ) -> Json<Value> {
-    state.store.record_replication_worker(&request.peer, request.worker);
+    if let Some(worker) = request.worker {
+        state.store.record_replication_worker(&request.peer, worker);
+    }
+    if let Some(process) = request.process {
+        let catching_up = state.store.replication_catching_up();
+        let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cpu = meter.cpu_minutes();
+        cpu.note_worker((process.pid, process.started_at_unix_ms), process.cpu_ns, Instant::now());
+        if catching_up {
+            cpu.note(smallclaims::windows::cpu_minutes::Busy::CatchUp);
+        }
+    }
     Json(json!({ "recorded": true, "changed": false }))
 }
 
@@ -10075,6 +10190,8 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
 #[derive(Clone, Debug)]
 pub struct LocalPeer {
     pub pid: u32,
+    /// Accept-time generation witness; absent if the platform cannot prove it.
+    pub peer_process: Option<fractal_runtime::PeerProcessIdentity>,
     pub ancestor: Option<String>,
 }
 

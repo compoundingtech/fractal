@@ -287,6 +287,7 @@ impl Fixture {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            assistant_receipts: Default::default(),
         };
         let socket = root.path().join("st3.sock");
         let router = make_router(state.clone());
@@ -1197,7 +1198,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
         )
         .await,
     );
-    assert!(running.contains("st agents restart"), "{running}");
+    assert!(running.contains("fractal agents restart"), "{running}");
     succeeded(
         &st(
             &socket,

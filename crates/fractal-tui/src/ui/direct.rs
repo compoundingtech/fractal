@@ -153,7 +153,7 @@ async fn open_in(
                     }
                 }
                 None => Err(Miss::NotThisTerminal(format!(
-                    "st does not say which host runs `{}`",
+                    "Fractal does not say which host runs `{}`",
                     terminal.subject
                 ))),
             };
@@ -181,7 +181,7 @@ async fn open_in(
                 (Ok(_), None) => unreachable!("a Fabric stream needs an owner"),
             }
         }
-        Err(error) => gateway(terminal, "local PTY discovery", &error.plain(), false),
+        Err(error) => gateway(terminal, "local PTY discovery", &error.human(), false),
     }
 }
 
@@ -245,7 +245,7 @@ async fn over_fabric(
     }
     if terminal.name.is_empty() || terminal.incarnation.is_empty() {
         return Err(Miss::NotThisTerminal(format!(
-            "st has no running terminal for `{}` on {owner} yet",
+            "Fractal has no running terminal for `{}` on {owner} yet",
             terminal.subject
         )));
     }
@@ -254,13 +254,13 @@ async fn over_fabric(
     let capabilities = client
         .capabilities()
         .await
-        .map_err(|error| Miss::NotThisTerminal(error.plain()))?;
+        .map_err(|error| Miss::NotThisTerminal(error.human()))?;
     for scope in ["terminal.read", "terminal.control"] {
         if !capabilities.value.capabilities.iter().any(|capability| {
             capability.id == scope && capability.state == fractal_client::CapabilityState::Granted
         }) {
             return Err(Miss::NotThisTerminal(format!(
-                "st does not grant you `{scope}` for a direct attachment"
+                "Fractal does not grant you `{scope}` for a direct attachment"
             )));
         }
     }
@@ -360,6 +360,7 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: fractal_daemon::model::PlannerSpec::default(),
+            assistant_receipts: Default::default(),
         }
     }
 

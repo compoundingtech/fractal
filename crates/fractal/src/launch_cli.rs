@@ -22,7 +22,7 @@ pub(super) async fn run_launch(
             "LAUNCHES",
             &response,
             json_output,
-            &format!("st launch ls{history}"),
+            &format!("fractal launch ls{history}"),
         );
     }
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -89,7 +89,7 @@ pub(super) async fn run_launch(
             );
             if args.print_kdl {
                 eprintln!(
-                    "Store the request first: st documents put {} --as {}",
+                    "Store the request first: fractal documents put {} --as {}",
                     args.request
                         .as_deref()
                         .map(|path| path.display().to_string())
@@ -178,7 +178,7 @@ pub(super) async fn run_launch(
             let kdl = planning_feedback_intent(session, &operation, &reference, "default");
             if args.print_kdl {
                 eprintln!(
-                    "Store the feedback first: st documents put {} --as {}",
+                    "Store the feedback first: fractal documents put {} --as {}",
                     args.feedback.display(),
                     document_name
                 );
@@ -375,6 +375,14 @@ pub(super) async fn run_launch(
     Ok(())
 }
 
+/// The `quiet_after_ms` query a `--quiet` duration asks for, or none for the daemon's default.
+fn quiet_query(quiet: Option<&str>) -> Result<String> {
+    Ok(match quiet {
+        Some(quiet) => format!("?quiet_after_ms={}", fractal_daemon::graph::parse_duration(quiet, true)?),
+        None => String::new(),
+    })
+}
+
 pub(super) async fn run_mission_view(
     client: &Client,
     endpoint: &Endpoint,
@@ -448,8 +456,22 @@ pub(super) async fn run_mission_view(
                 "MISSIONS",
                 &response,
                 json_output,
-                &format!("st missions ls{history}"),
+                &format!("fractal missions ls{history}"),
             )
+        }
+        MissionViewCommand::WaitingOn { run, quiet } => {
+            let path = format!(
+                "/v1/mission-runs/{}/waiting-on{}",
+                urlencoding::encode(&run),
+                quiet_query(quiet.as_deref())?
+            );
+            let view: fractal_daemon::waiting_on::RunWaitingOn = client.get(&path).await?;
+            if json_output {
+                print_value(&serde_json::to_value(&view)?, true)
+            } else {
+                print!("{}", crate::waiting_on_cli::render_run_waiting_on(&view));
+                Ok(())
+            }
         }
         MissionViewCommand::Show(args) => {
             notice_ignored_read_actor(args.ignored_actor.as_deref());
@@ -521,7 +543,7 @@ pub(super) async fn run_mission_view(
         }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         MissionViewCommand::Publish(args) => {
-            eprintln!("st: missions publish is legacy; use st apply FILE with the same options");
+            eprintln!("st: missions publish is legacy; use fractal apply FILE with the same options");
             publish_mission_file(client, args, json_output).await
         }
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
@@ -755,7 +777,7 @@ fn print_mission_tree_continuation(
 ) {
     if let Some(cursor) = &page.next_cursor {
         println!(
-            "\nTREE      More runs follow; st missions show {} --cursor {cursor} --limit {limit}",
+            "\nTREE      More runs follow; fractal missions show {} --cursor {cursor} --limit {limit}",
             selected.subject,
         );
     }

@@ -76,7 +76,7 @@ pub(super) async fn run_work(
                 print_value(&response, true)
             } else {
                 println!(
-                    "{}\t{}\nClaim: st work claim {} --as {}",
+                    "{}\t{}\nClaim: fractal work claim {} --as {}",
                     response.status, response.subject, response.subject, args.actor
                 );
                 Ok(())
@@ -283,7 +283,7 @@ pub(super) async fn run_work(
                     .work_list(cursor.as_deref(), Some(limit), all)
                     .await?
             };
-            let mut command = "st work ls".to_owned();
+            let mut command = "fractal work ls".to_owned();
             if let Some(actor) = actor.as_deref() {
                 command.push_str(&format!(" --as {actor}"));
             }
@@ -308,7 +308,8 @@ pub(super) async fn run_work(
                 let ClientResource::Work(work) = &response.value else {
                     anyhow::bail!("`{normalized}` is not a work resource");
                 };
-                print!("{}", render_client_work_detail(work));
+                let driver_held = claim_has_driver(client, work.claimant.as_deref(), work.claim_incarnation.as_deref()).await;
+                print!("{}", render_client_work_detail(work, driver_held));
                 Ok(())
             }
         }
@@ -454,7 +455,7 @@ pub(super) async fn run_work(
             );
             if args.print_kdl {
                 eprintln!(
-                    "Submit the candidate with `st work revise` after reviewing {} as {}",
+                    "Submit the candidate with `fractal work revise` after reviewing {} as {}",
                     args.file.display(),
                     actor
                 );
@@ -676,9 +677,10 @@ async fn post_work(
         print_value(&response, true)
     } else {
         if action == "claim" {
+            let driver_held = claim_has_driver(client, response.claimant.as_deref(), response.claim_incarnation.as_deref()).await;
             print!(
                 "{}",
-                render_step_run(&response, OutputStyle::stdout(), current_unix_ms()?)
+                render_step_run(&response, OutputStyle::stdout(), current_unix_ms()?, driver_held)
             );
             if let Some((node, documents)) = host_facts(client).await {
                 print!(

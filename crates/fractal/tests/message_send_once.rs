@@ -38,6 +38,7 @@ async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()
         client_relay: None,
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let store = state.store.clone();
     let server_socket = socket.clone();
@@ -360,7 +361,7 @@ async fn a_send_whose_answer_was_lost_is_found_and_never_sent_twice() {
     let error = stderr(&lost);
     let key = rerun["idempotency_key"].as_str().unwrap();
     assert!(
-        error.contains(&format!("st conversations status --idempotency-key {key}")),
+        error.contains(&format!("fractal conversations status --idempotency-key {key}")),
         "{error}"
     );
     assert!(error.contains("safe"), "{error}");

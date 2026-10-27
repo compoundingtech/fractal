@@ -2,7 +2,7 @@
 // account's spend and limits, a summary, then every group, the largest first. Row ids are the
 // subject a group names (agent/…, mission/…, step-run/…, machine/…) or account/…, model/… and
 // usage/no-… for what st has no subject for, so a detail screen can be opened by id alone.
-import type { UsageLimit, UsageRow } from '../../clients/typescript/fractal-client';
+import type { UsageAccount, UsageLimit, UsageRow } from '../../clients/typescript/fractal-client';
 
 export const BY = ['agent', 'mission', 'step', 'model', 'account', 'host'] as const;
 export type By = typeof BY[number];
@@ -77,9 +77,11 @@ export function groups(rows: readonly UsageRow[], by: By): Array<{ id: string; t
 export type Names = { agents: ReadonlyMap<string, string>; missions: ReadonlyMap<string, string> };
 
 /** A group as a person reads it: an agent's or mission's name, a step with its mission, an account by provider. */
-export function label(id: string, names: Names, rows: readonly UsageRow[]): string {
+export function label(id: string, names: Names, rows: readonly UsageRow[], declared: readonly UsageAccount[] = []): string {
   if (id.startsWith('account/')) {
     const account = id.slice('account/'.length);
+    const named = declared.find(entry => entry.account === account);
+    if (named) return named.name;
     const cut = account.indexOf('/');
     if (cut < 0) return account;
     const driver = account.slice(0, cut), digest = account.slice(cut + 1);
@@ -87,7 +89,7 @@ export function label(id: string, names: Names, rows: readonly UsageRow[]): stri
   }
   if (id.startsWith('usage/no-')) {
     const what = id.slice('usage/no-'.length);
-    return what === 'account' ? 'no account recorded (before st kept accounts)'
+    return what === 'account' ? 'no account recorded (before Fractal kept accounts)'
       : what === 'mission' ? 'no mission (standing seats)'
       : what === 'step' ? 'no step (standing seats)' : `unknown ${what}`;
   }
@@ -96,16 +98,44 @@ export function label(id: string, names: Names, rows: readonly UsageRow[]): stri
   if (id.startsWith('step-run/')) {
     const step = id.split('/').pop() ?? id;
     const run = rows.find(row => row.step === id)?.mission_run;
-    return run ? `${label(missionOf(run), names, rows)} · ${step}` : step;
+    return run ? `${label(missionOf(run), names, rows, declared)} · ${step}` : step;
   }
   return id.includes('/') ? id.slice(id.indexOf('/') + 1) : id;
 }
 
-/** Every account that spent in the period or reported limits, the largest spender first, unattributed spend last. */
-export function accounts(rows: readonly UsageRow[], limits: readonly UsageLimit[]): Array<{ id: string; total: Total; limit?: UsageLimit }> {
-  const found = groups(rows, 'account').map(({ id, total }) => ({ id, total, limit: limits.find(limit => id === `account/${limit.account}`) }));
-  for (const limit of limits) if (!found.some(entry => entry.id === `account/${limit.account}`)) found.push({ id: `account/${limit.account}`, total: empty(), limit });
-  return [...found.filter(entry => !entry.id.startsWith('usage/')), ...found.filter(entry => entry.id.startsWith('usage/'))];
+/** The id an account is listed under: the label its spend and limits carry. */
+const accountId = (account: UsageAccount) => `account/${account.account ?? account.name}`;
+
+/**
+ * Every declared account in name order, whether or not it spent or reported limits; then any
+ * account that spent or reported limits without a declaration, the largest spender first, and
+ * unattributed spend last. Nothing st recorded is left out.
+ */
+export function accounts(rows: readonly UsageRow[], limits: readonly UsageLimit[], declared: readonly UsageAccount[] = []): Array<{ id: string; total: Total; limit?: UsageLimit; declared?: UsageAccount }> {
+  const spent = groups(rows, 'account');
+  const limitOf = (id: string) => limits.find(limit => id === `account/${limit.account}`);
+  const listed = declared.map(account => {
+    const id = accountId(account);
+    return { id, total: spent.find(group => group.id === id)?.total ?? empty(), limit: limitOf(id), declared: account };
+  });
+  const others: Array<{ id: string; total: Total; limit?: UsageLimit; declared?: UsageAccount }> = spent
+    .filter(({ id }) => !listed.some(entry => entry.id === id))
+    .map(({ id, total }) => ({ id, total, limit: limitOf(id) }));
+  for (const limit of limits) {
+    const id = `account/${limit.account}`;
+    if (!listed.some(entry => entry.id === id) && !others.some(entry => entry.id === id)) others.push({ id, total: empty(), limit });
+  }
+  return [...listed, ...others.filter(entry => !entry.id.startsWith('usage/')), ...others.filter(entry => entry.id.startsWith('usage/'))];
+}
+
+/** An api-key account's spend this month against its budget; the + marks tokens with no price. */
+export function creditsLine(credits: NonNullable<UsageAccount['credits']>) {
+  const percent = credits.budget_microusd > 0 ? credits.used_microusd * 100 / credits.budget_microusd : null;
+  return {
+    used: `${money(credits.used_microusd)}${credits.unpriced_tokens > 0 ? '+' : ''}`,
+    budget: money(credits.budget_microusd),
+    tone: share(percent).tone,
+  };
 }
 
 export type Tone = 'ok' | 'warning' | 'fault' | 'quiet';

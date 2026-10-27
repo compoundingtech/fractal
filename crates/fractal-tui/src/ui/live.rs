@@ -306,10 +306,10 @@ async fn legacy_inventory(client: &Client, inventory: Inventory) -> InventoryRea
         Inventory::Machines => InventoryRead::Rows(inventory, model::read_machines(client).await.map_err(|error| error.to_string())),
         Inventory::Devices => InventoryRead::Rows(inventory, model::read_devices(client).await.map_err(|error| error.to_string())),
         Inventory::Sessions => InventoryRead::Rows(inventory, model::read_native_sessions(client).await.map_err(|error| error.to_string())),
-        Inventory::Terminals => InventoryRead::Terminals(client.terminals_list(None, Some(200), false).await.map(|reply| (reply.value.items, reply.value.page.has_more)).map_err(|error| error.plain())),
+        Inventory::Terminals => InventoryRead::Terminals(client.terminals_list(None, Some(200), false).await.map(|reply| (reply.value.items, reply.value.page.has_more)).map_err(|error| error.human())),
         Inventory::Clients => InventoryRead::Clients(client.clients_list().await.map(|reply| reply.value).map_err(|error| match error {
-            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this st does not list its clients yet: its daemon needs an update".into(),
-            error => error.plain(),
+            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this Fractal does not list its clients yet: its daemon needs an update".into(),
+            error => error.human(),
         })),
         Inventory::Usage(hours) => {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
@@ -360,12 +360,12 @@ fn usage_error(error: &fractal_client::ClientError) -> String {
     match error {
         // A daemon from before the read answers its path with a bare 404.
         fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound, _, _) => {
-            "This st does not serve usage yet: its daemon needs an update.".into()
+            "This Fractal does not serve usage yet: its daemon needs an update.".into()
         }
         fractal_client::ClientError::Protocol(message) if message.starts_with("HTTP 404") => {
-            "This st does not serve usage yet: its daemon needs an update.".into()
+            "This Fractal does not serve usage yet: its daemon needs an update.".into()
         }
-        error => format!("Could not read usage: {}", error.plain()),
+        error => format!("Could not read usage: {}", error.human()),
     }
 }
 
@@ -481,7 +481,7 @@ fn save_glass(
                     )
                     .await
                     .map(|saved| Some(saved.value.header.revision))
-                    .map_err(|error| error.plain()),
+                    .map_err(|error| error.human()),
                 Err(error) => Err(error.to_string()),
             },
             GlassWrite::Delete { id, base, key } => client
@@ -494,7 +494,7 @@ fn save_glass(
                 )
                 .await
                 .map(|_| None)
-                .map_err(|error| error.plain()),
+                .map_err(|error| error.human()),
         };
         let _ = tx.send(Fetched::GlassSaved {
             id: write.id().to_owned(),
@@ -670,7 +670,7 @@ pub fn run(context: Context) -> Result<()> {
         let turn_started = Instant::now();
         // A program written over on disk while it runs is told to the person at once, and noted.
         if started.elapsed().as_secs().is_multiple_of(10) && super::lastrun::binary_replaced() {
-            ui.flash("st was updated on disk while this was running: restart it, the system may stop it");
+            ui.flash("Fractal was updated on disk while this was running: restart it, the system may stop it");
         }
         ui.tick = (started.elapsed().as_millis() / 100) as u64;
         if ui
@@ -967,7 +967,7 @@ pub fn run(context: Context) -> Result<()> {
                     extras.offline = None;
                     extras.offline_since = None;
                     ui.flash(format!(
-                        "Live stream lost ({reason}); st answers, reconnecting"
+                        "Live stream lost ({reason}); Fractal answers, reconnecting"
                     ));
                     extras.degraded = Some(reason);
                     attached = None;
@@ -1265,7 +1265,7 @@ pub fn run(context: Context) -> Result<()> {
             resources_stale = false; resources_reading = true;
             let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
             runtime.spawn(async move {
-                let outcome = super::observed_resources::read(&reader, focused_resource.as_deref()).await.map_err(|error| format!("Not available on this connection: {}", error.plain()));
+                let outcome = super::observed_resources::read(&reader, focused_resource.as_deref()).await.map_err(|error| format!("Not available on this connection: {}", error.human()));
                 let _ = tx.send(Fetched::Observations { generation, outcome });
             });
         }
@@ -1282,7 +1282,7 @@ pub fn run(context: Context) -> Result<()> {
                     .document_get(&reference)
                     .await
                     .map(|document| String::from_utf8_lossy(&document.value.bytes).into_owned())
-                    .map_err(|error| error.plain());
+                    .map_err(|error| error.human());
                 let _ = tx.send(Fetched::Document(reference, outcome));
             });
         }
@@ -1369,7 +1369,7 @@ pub fn run(context: Context) -> Result<()> {
                                 .conversation_search(&query, None, None, None, Some(20))
                                 .await
                                 .map(|envelope| envelope.value)
-                                .map_err(|error| error.plain());
+                                .map_err(|error| error.human());
                             let _ = tx.send(Fetched::Said(query, outcome));
                         });
                     }
@@ -1542,7 +1542,7 @@ pub fn run(context: Context) -> Result<()> {
                     ui.content.finish(key, Err("Offline · reconnect, then load again".into()));
                 }
                 ui.flash(if extras.degraded.is_some() {
-                    "Reconnecting to st · try again in a moment; nothing was queued"
+                    "Reconnecting to Fractal · try again in a moment; nothing was queued"
                 } else {
                     "Offline · reconnect before acting; nothing was queued"
                 });
@@ -2467,13 +2467,13 @@ async fn older_page(
         match read(cursor).await {
             Ok(page) => return Ok(page),
             Err(ClientError::Api(fractal_client::ErrorCode::PageCursorExpired, _, _)) => {}
-            Err(error) => return Err(error.plain()),
+            Err(error) => return Err(error.human()),
         }
     }
     let mut cursor = None;
     // Bounded: a session longer than this many pages stops loading with a reason.
     for _ in 0..50 {
-        let page = read(cursor).await.map_err(|error| error.plain())?;
+        let page = read(cursor).await.map_err(|error| error.human())?;
         let reaches = oldest.as_ref().is_none_or(|(at, sequence)| {
             page.items
                 .first()
@@ -2484,7 +2484,7 @@ async fn older_page(
         }
         cursor = page.cursor;
     }
-    Err("this session is too long to read further back here; st conversations timeline reads it all".into())
+    Err("this session is too long to read further back here; fractal conversations timeline reads it all".into())
 }
 
 /// How long a message st did not confirm waits before it is sent again by itself, for each time.
@@ -2580,7 +2580,7 @@ fn history_note(timeline: &fractal_conversation_ui::Timeline) -> Option<super::v
     } else if timeline.items.is_empty() {
         return None;
     } else {
-        "Start of this session · earlier ones: st conversations sessions".to_owned()
+        "Start of this session · earlier ones: fractal conversations sessions".to_owned()
     };
     Some(super::view::Entry {
         id: HISTORY_NOTE.into(),
@@ -2672,7 +2672,7 @@ pub(crate) fn plain(error: &anyhow::Error) -> String {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ClientError>())
-        .map(ClientError::plain)
+        .map(ClientError::human)
         .unwrap_or_else(|| error.to_string())
 }
 
@@ -2782,7 +2782,7 @@ async fn perform(
             agent_control(client, &agent, control).await?;
             Ok((
                 format!(
-                    "{} {}: asked st",
+                    "{} {}: asked Fractal",
                     control.verb(),
                     agent.trim_start_matches("agent/")
                 ),
@@ -3086,7 +3086,7 @@ async fn perform(
                         text.push_str(&super::attach::mention(&rest));
                         break;
                     }
-                    Err(error) => anyhow::bail!("the image was not sent: {}", error.plain()),
+                    Err(error) => anyhow::bail!("the image was not sent: {}", error.human()),
                 }
             }
             let id = send_message(
@@ -3294,15 +3294,15 @@ mod tests {
             fractal_client::ErrorCode::StaleFence,
         ] {
             assert!(
-                super::worth_retrying(&fractal_client::plain_message(Some(&code), "")),
+                super::worth_retrying(&fractal_client::human_message(Some(&code), "")),
                 "{code:?} is not retried"
             );
         }
-        assert!(super::worth_retrying(&fractal_client::plain_message(
+        assert!(super::worth_retrying(&fractal_client::human_message(
             Some(&fractal_client::ErrorCode::RemoteUnavailable),
             "host/example is away"
         )));
-        assert!(!super::worth_retrying(&fractal_client::plain_message(
+        assert!(!super::worth_retrying(&fractal_client::human_message(
             Some(&fractal_client::ErrorCode::NotFound),
             "terminal/x"
         )));
@@ -3402,7 +3402,7 @@ mod tests {
         assert!(unknown.downcast_ref::<ClientError>().unwrap().outcome_unknown());
         assert_eq!(
             super::plain(&unknown),
-            "st may have taken it and has not confirmed it yet; sending it again is safe"
+            "Fractal may have taken it and has not confirmed it yet; sending it again is safe"
         );
         // `applied: "none"` with a full queue (rate limited): nothing was queued, so try again.
         assert!(not_applied(&answer("none", fractal_client::ErrorCode::RateLimited), &send));
@@ -3536,7 +3536,7 @@ mod tests {
         assert!(!not_applied(&error, &send));
         assert_eq!(
             super::plain(&error),
-            "st may have taken it and has not confirmed it yet; sending it again is safe"
+            "Fractal may have taken it and has not confirmed it yet; sending it again is safe"
         );
         assert_eq!(daemon.lock().unwrap().posted.len(), 1, "not sent again by itself");
         // The agent moved to a new session before the person sent it again.
@@ -3719,7 +3719,7 @@ mod tests {
         assert_eq!(connecting_text(Duration::from_secs(3)), "connecting 3s");
         assert_eq!(
             connecting_text(Duration::from_secs(12)),
-            "connecting 12s, st is slow to answer"
+            "connecting 12s, Fractal is slow to answer"
         );
     }
 
@@ -4083,6 +4083,7 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            assistant_receipts: Default::default(),
         };
         let path = socket.clone();
         let server = tokio::spawn(async move {
@@ -4128,7 +4129,7 @@ mod tests {
                 owning_person: None,
                 store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
-                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(),
+                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
             };
             let path = socket.to_owned();
             let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap(); });
@@ -4190,6 +4191,7 @@ mod tests {
                 client_relay: None,
                 native_session_home: None,
                 planner_default: Default::default(),
+                assistant_receipts: Default::default(),
             };
             let path = socket.to_owned();
             let server = tokio::spawn(async move {
@@ -4614,6 +4616,7 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: fractal_daemon::model::PlannerSpec::default(),
+            assistant_receipts: Default::default(),
         };
         let socket = root.path().join("daemon.sock");
         let server_path = socket.clone();
@@ -5074,7 +5077,7 @@ fn connecting_text(waited: Duration) -> String {
     match waited.as_secs() {
         0..2 => "connecting".into(),
         2..8 => format!("connecting {}s", waited.as_secs()),
-        seconds => format!("connecting {seconds}s, st is slow to answer"),
+        seconds => format!("connecting {seconds}s, Fractal is slow to answer"),
     }
 }
 
@@ -5164,7 +5167,7 @@ async fn attach_direct(
                         tries += 1;
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
-                    Err(error) => return Err(error.plain()),
+                    Err(error) => return Err(error.human()),
                 }
             };
             found.push((
@@ -5264,13 +5267,13 @@ async fn attach_terminal(
     };
     let attachment = attach::phase("raw terminal attachment", attach::GATEWAY, async {
         client.raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
-            .await.map_err(|error| format!("{route}: {}", error.plain()))
+            .await.map_err(|error| format!("{route}: {}", error.human()))
     }).await?;
     // An unused capability opens no PTY and expires on the server after 60 seconds.
     // Once upgraded, dropping the stream cancels its bridge, including on task abort.
     let stream = attach::phase("raw terminal stream", attach::GATEWAY, async {
         client.raw_terminal_stream(&attachment).await
-            .map_err(|error| format!("{route}: {}", error.plain()))
+            .map_err(|error| format!("{route}: {}", error.human()))
     }).await?;
     stream
         .into_std()
