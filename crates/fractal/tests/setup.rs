@@ -646,6 +646,30 @@ fn harness_probe_uses_login_path_order_and_flags_without_starting_a_seat() {
 }
 
 #[test]
+fn an_explicit_claude_choice_never_falls_back_after_channel_install_failure() {
+    let fixture = Fixture::new();
+    for (harness, script) in [
+        ("claude", "#!/bin/sh\nif [ \"$*\" = 'plugin disable --help' ]; then echo 'Usage: claude plugin disable'; exit 0; fi\necho 'Claude Code is older than the minimum version required by your organization' >&2\nexit 1\n"),
+        ("codex", "#!/bin/sh\nexit 0\n"),
+    ] {
+        let path = fixture.path(&format!("bin/{harness}"));
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = fixture.setup_config_only(&["--harness", "claude", "--assistant", "false"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Claude channel installation failed"), "{stderr}");
+    assert!(stderr.contains("minimum version required by your organization"), "{stderr}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Selected harness: codex"));
+    assert!(!fixture.path("home/.local/state/st3/claims.sqlite3").exists());
+
+    // An automatic selection still permits the existing fallback.
+    let automatic = success(&fixture.setup_config_only(&["--assistant", "false"]));
+    assert!(automatic.contains("Selected harness: codex"), "{automatic}");
+}
+
+#[test]
 fn scripts_can_create_a_custom_config_and_missing_answers_never_prompt() {
     let fixture = Fixture::new();
     let output = fixture.cli().arg("setup").output().unwrap();
@@ -844,7 +868,7 @@ fn plain_st_first_run_shows_the_setup_screen_starts_daemon_and_opens_home() {
     });
     let mut output = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(45);
-    // The checklist screen, driven by keys: the machine's name is cleared and typed, "Start st when
+    // The checklist screen, driven by keys: the machine's name is cleared and typed, "Start Fractal when
     // I log in" is unticked, and the one action is pressed. Without any agent installed it ends
     // by itself and the interface opens.
     for (prompt, answer) in [
