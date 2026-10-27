@@ -97,7 +97,8 @@ const restoringStoryUrl = (play: NonNullable<Story['play']>): NonNullable<Story[
 }
 
 const workspace = async (canvasElement: HTMLElement) => {
-  await waitFor(() => expect(within(canvasElement).getByText('Let me find where groups close.')).toBeVisible(), { timeout: 60000 })
+  // Readiness follows the mounted transcript lane, not a historical fixture row outside its initial suffix.
+  await expect(await within(canvasElement).findByTestId('transcript-scroll', {}, { timeout: 60000 })).toBeVisible()
   const narrow = window.matchMedia(narrowLayoutQuery).matches
   return { canvas: within(canvasElement), narrow, header: within(within(canvasElement).getByTestId('thread-header')) }
 }

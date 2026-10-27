@@ -81,7 +81,7 @@ try {
       await snapshot.setViewportSize({ width: 1200, height: 800 })
       await snapshot.goto(`${origin}/embed.html?theme=${theme}#${fragment}`)
       await snapshot.locator(`html[data-scheme="${theme}"]`).waitFor()
-      if (fragment.startsWith('web')) await snapshot.getByText('Let me find where groups close.', { exact: true }).waitFor()
+      if (fragment.startsWith('web')) await snapshot.getByTestId('transcript-scroll').waitFor()
       else {
         assert.equal(await snapshot.getByRole('main').count(), 0)
         await snapshot.getByRole('region', { name: fragment === 'codex' ? 'Codex' : 'Claude Code', exact: true }).getByRole('status').waitFor()
