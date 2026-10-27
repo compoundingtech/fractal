@@ -15,8 +15,11 @@ fn row(index: usize, text: &str) -> Value {
 
 fn publish(state: &AppState, cut: u64, rows: Vec<Value>) -> Arc<crate::store::agents_publication::AgentsPublication> {
     let build = state.store.agents_publication_build().unwrap();
-    let mut source = state.store.agents_publication_source(state.store.index().unwrap()).unwrap();
-    source.watermark = AgentsStatusWatermark { store_index: cut, local_frontier: cut };
+    let source = crate::store::evidence::AgentsPublicationSource {
+        watermark: AgentsStatusWatermark { store_index: cut, local_frontier: cut },
+        rows: Arc::new(Vec::new()),
+        valid_until_ms: None,
+    };
     state.store.publish_presented_agents(build, source, 1_791_633_600_000 + cut, None, rows).unwrap();
     state.store.agents_publication().unwrap()
 }
