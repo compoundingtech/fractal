@@ -5896,7 +5896,7 @@ async fn custom_reply_survives_fences_cli_and_daemon_restarts() {
     let manifest = daemon.root.path().join("garden-review.json");
     std::fs::write(
         &manifest,
-        include_str!("../../../examples/st3/custom-review.json"),
+        include_str!("../../../examples/fractal/custom-review.json"),
     )
     .unwrap();
     let registered = cli_value(
@@ -6111,7 +6111,7 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
     let manifest = daemon.root.path().join("decision-tree.json");
     std::fs::write(
         &manifest,
-        include_str!("../../../examples/st3/decision-tree.json"),
+        include_str!("../../../examples/fractal/decision-tree.json"),
     )
     .unwrap();
     let registered = cli_value(
@@ -6540,7 +6540,7 @@ async fn image_file_reference_manifest_registers_validates_replicates_and_restar
         fields[name] = value;
         malformed.push(fields);
     }
-    let source = include_str!("../../../examples/st3/image-file-reference.json");
+    let source = include_str!("../../../examples/fractal/image-file-reference.json");
     reference_manifest_proof(source, good.clone(), malformed).await;
     // The media type is optional; the hash and file identity remain required.
     let mut without_media = good;
@@ -6580,7 +6580,7 @@ async fn onepassword_field_reference_manifest_registers_validates_replicates_and
     ] {
         malformed.push(json!({"locator":locator}));
     }
-    let source = include_str!("../../../examples/st3/onepassword-field-reference.json");
+    let source = include_str!("../../../examples/fractal/onepassword-field-reference.json");
     reference_manifest_proof(
         source,
         json!({"locator":"op://garden-vault/seed-service/token"}),

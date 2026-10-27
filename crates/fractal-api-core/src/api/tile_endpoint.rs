@@ -425,36 +425,103 @@ pub fn bind(directory: &Path, uid: u32) -> anyhow::Result<tokio::net::UnixListen
     Ok(listener)
 }
 
-/// Waiting for a path to change without polling: a watch on it, or on its nearest existing
-/// ancestor while it does not exist.
+/// Waiting for a mutation of a path without polling, following its next missing component.
 struct Change;
 
 impl Change {
-    /// Resolves at the next change to `path` or, while it is missing, to its nearest existing
-    /// ancestor's entries. The watch starts before this returns, so nothing between is missed.
-    fn watch(path: &Path) -> impl std::future::Future<Output = ()> + Send + 'static {
+    /// Watch the parent directory so atomic file replacement is visible too.
+    fn target(path: &Path) -> Option<(PathBuf, PathBuf)> {
+        let directory = path.parent()?.ancestors().find(|path| path.is_dir())?;
+        let next = path.strip_prefix(directory).ok()?.components().next()?;
+        // FSEvents reports canonical paths (for example /private/etc, not /etc).
+        let directory = directory.canonicalize().ok()?;
+        let next = directory.join(next);
+        Some((directory, next))
+    }
+
+    /// Starts synchronously, before the caller reads the file. Missing ancestors wake this
+    /// once they appear; the next iteration installs a watch closer to the target.
+    #[cfg(target_os = "linux")]
+    fn watch(path: &Path) -> impl Future<Output = ()> + Send + 'static {
+        use futures_util::StreamExt as _;
+        use inotify::{EventMask, Inotify, WatchMask};
+
+        let watcher = Self::target(path).and_then(|(directory, next)| {
+            // notify 8's Config exposes no event mask and its inotify backend always
+            // subscribes to OPEN. Filter in the kernel, not after waking a notify thread.
+            let watcher = Inotify::init().ok()?;
+            watcher
+                .watches()
+                .add(
+                    &directory,
+                    WatchMask::CREATE
+                        | WatchMask::DELETE
+                        | WatchMask::MODIFY
+                        | WatchMask::ATTRIB
+                        | WatchMask::CLOSE_WRITE
+                        | WatchMask::MOVED_FROM
+                        | WatchMask::MOVED_TO
+                        | WatchMask::DELETE_SELF
+                        | WatchMask::MOVE_SELF,
+                )
+                .ok()?;
+            let events = watcher.into_event_stream([0; 4096]).ok()?;
+            Some((events, next.file_name()?.to_os_string()))
+        });
+        async move {
+            if let Some((mut events, name)) = watcher {
+                while let Some(event) = events.next().await {
+                    match event {
+                        Ok(event)
+                            if event.name.as_ref() == Some(&name)
+                                || event.mask.intersects(
+                                    EventMask::DELETE_SELF
+                                        | EventMask::MOVE_SELF
+                                        | EventMask::IGNORED
+                                        | EventMask::Q_OVERFLOW,
+                                ) =>
+                        {
+                            return;
+                        }
+                        Err(_) => return,
+                        _ => {}
+                    }
+                }
+            }
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[cfg(any(test, not(target_os = "linux")))]
+    fn relevant(event: &notify::Event, directory: &Path, next: &Path) -> bool {
+        // A backend rescan has no trustworthy path list: reload the registry.
+        event.need_rescan()
+            || (matches!(
+                event.kind,
+                notify::EventKind::Create(_)
+                    | notify::EventKind::Modify(_)
+                    | notify::EventKind::Remove(_)
+            ) && (event.paths.is_empty()
+                || event.paths.iter().any(|path| path == next || path == directory)))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn watch(path: &Path) -> impl Future<Output = ()> + Send + 'static {
         use notify::Watcher as _;
         let wake = Arc::new(tokio::sync::Notify::new());
         let signal = Arc::clone(&wake);
-        let watched = std::iter::successors(Some(path), |path| path.parent())
-            .find(|path| path.exists())
-            .map(Path::to_path_buf);
-        // Watch the directory holding `path`, so replacing the file is seen too.
-        let target = match &watched {
-            Some(found) if found == path => path.parent().map(Path::to_path_buf),
-            other => other.clone(),
-        };
-        let watcher = target.and_then(|target| {
+        let watcher = Self::target(path).and_then(|(directory, next)| {
+            let watched_directory = directory.clone();
             let mut watcher =
                 notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                    if event.is_ok_and(|event| !matches!(event.kind, notify::EventKind::Access(_)))
-                    {
+                    if event.is_ok_and(|event| Self::relevant(&event, &directory, &next)) {
                         signal.notify_one();
                     }
                 })
                 .ok()?;
+            let directory = watched_directory;
             watcher
-                .watch(&target, notify::RecursiveMode::NonRecursive)
+                .watch(&directory, notify::RecursiveMode::NonRecursive)
                 .ok()?;
             Some(watcher)
         });
@@ -484,6 +551,91 @@ pub use crate::api::tile_endpoint_tests_shared_client_v0_tests::{call, caller, g
 use super::*;
     use std::io::{Read as _, Write as _};
     use std::sync::Mutex;
+    use std::time::Duration;
+
+    #[test]
+    fn registry_watch_rescans_after_lost_or_unscoped_mutations() {
+        let directory = Path::new("/watched");
+        let target = directory.join("tiles.toml");
+        let rescan = notify::Event::new(notify::EventKind::Other)
+            .set_flag(notify::event::Flag::Rescan);
+        assert!(Change::relevant(&rescan, directory, &target));
+        for kind in [
+            notify::EventKind::Create(notify::event::CreateKind::Any),
+            notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            notify::EventKind::Remove(notify::event::RemoveKind::Any),
+        ] {
+            assert!(Change::relevant(&notify::Event::new(kind), directory, &target));
+        }
+        let read = notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Any));
+        assert!(!Change::relevant(&read, directory, &target));
+    }
+
+    #[tokio::test]
+    async fn registry_watch_follows_a_symlinked_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("real");
+        std::fs::create_dir(&directory).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&directory, &alias).unwrap();
+        let path = alias.join("tiles.toml");
+        let (watched, next) = Change::target(&path).unwrap();
+        assert_eq!(watched, directory.canonicalize().unwrap());
+        assert_eq!(next, watched.join("tiles.toml"));
+        let changed = Change::watch(&path);
+        std::fs::write(directory.join("tiles.toml"), "registry").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), changed)
+            .await
+            .expect("canonicalized parent paths still observe registry creation");
+    }
+
+    #[tokio::test]
+    async fn registry_watch_ignores_reads_and_unrelated_entries_but_sees_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("tiles.toml");
+        std::fs::write(&path, "initial").unwrap();
+        let changed = Change::watch(&path);
+        tokio::pin!(changed);
+        std::fs::read(&path).unwrap();
+        std::fs::write(root.path().join("unrelated"), "noise").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut changed)
+                .await
+                .is_err()
+        );
+        let replacement = root.path().join("replacement");
+        std::fs::write(&replacement, "new").unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), changed)
+            .await
+            .expect("atomic replacement wakes the registry watcher");
+    }
+
+    #[tokio::test]
+    async fn registry_watch_follows_missing_ancestors_until_the_registry_appears() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("st-tiles");
+        let path = directory.join("tiles.toml");
+        let ancestor_changed = Change::watch(&path);
+        tokio::pin!(ancestor_changed);
+        std::fs::write(root.path().join("unrelated"), "noise").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut ancestor_changed)
+                .await
+                .is_err()
+        );
+        std::fs::create_dir(&directory).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), ancestor_changed)
+            .await
+            .expect("the next missing component wakes the watcher");
+        let registry_changed = Change::watch(&path);
+        std::fs::write(&path, "registry").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), registry_changed)
+            .await
+            .expect("the registry is picked up when it appears");
+        Change::exists(&path).await;
+    }
+
 
     struct FakeKernel(Mutex<String>);
 

@@ -79,7 +79,7 @@ you remove the file yourself.
 
 Stop the current bridge before launching its replacement. To run it under Fractal,
 adapt the invented paths, placement and subjects in
-[`examples/st3/discord-bridge.kdl`](../../examples/st3/discord-bridge.kdl), then
+[`examples/fractal/discord-bridge.kdl`](../../examples/fractal/discord-bridge.kdl), then
 preview and apply that declaration:
 
 ```sh
