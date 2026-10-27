@@ -121,6 +121,8 @@ fn channel_policy_refusal_stops_without_spending_retries_and_survives_daemon_res
     *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
     let error = recover(&reconciler, &desired, "orchid-one", since).unwrap_err();
     assert!(error.to_string().contains("channelsEnabled: true"), "{error}");
+    reconciler.record_member_reconcile_result(SEAT, Err(error)).unwrap();
+    assert!(store.member_reconcile_fault(SEAT, None).unwrap().unwrap().contains("channelsEnabled"));
     assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
     assert!(attempts(&store).is_empty());
     let fault = store.latest_observation(SEAT, "runtime.action.failed").unwrap().unwrap();
