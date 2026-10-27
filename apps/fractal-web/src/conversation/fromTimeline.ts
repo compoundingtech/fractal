@@ -1,7 +1,7 @@
 // Project decoded st3 conversation chunks into the conversation view model.
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
-import { TimelineEntryId, Timestamp, type TimelineEntry } from '@fractal/client/schema'
+import { TimelineEntryId, Timestamp, type TimelineEntry, type SubagentSummary } from '@fractal/client/schema'
 import type { ConversationChunk, UnrecognizedEntry } from '@fractal/sdk/effect'
 import { DateTime, Option, Schema } from 'effect'
 
@@ -381,6 +381,21 @@ export class LiveTimeline {
 
   get size(): number {
     return this.entries.size
+  }
+
+  /** Task views alone supply child conversation identities; roster session_id belongs to the parent. */
+  get subagents(): readonly SubagentSummary[] {
+    const children = new Map<string, SubagentSummary>()
+    for (const entry of this.entries.values()) {
+      if (entry.type !== 'content' && entry.type !== 'tool_call' && entry.type !== 'tool_result') continue
+      for (const block of entry.body.blocks ?? []) {
+        if (block.view?.type !== 'task' || !('agents' in block.view)) continue
+        for (const child of block.view.agents ?? []) {
+          if (child.conversation !== undefined) children.set(child.conversation.session_id, child)
+        }
+      }
+    }
+    return [...children.values()]
   }
 
   /** Applies one follow frame (CAG.CLI.WEB.CNV-R01/R02); returns whether anything changed. */

@@ -803,6 +803,7 @@ export const liveSource = ({
       } else changedFrom = Math.min(changedFrom, projection.changedFrom)
       return {
         items,
+        subagents: timeline.subagents,
         ...(lastSendId === undefined ? {} : { lastSendId }),
         hasOlder: timeline.hasOlder,
         change: { from: publishedItems, index: changedFrom },
