@@ -1297,7 +1297,8 @@ mod tests {
                 .env("OBSERVER_REDIRECT_TEST_STATE", state_dir)
                 .output().unwrap()
         }).await.unwrap();
-        assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stdout));
+        assert!(child.status.success(), "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
         let requests = server.await.unwrap();
         assert!(requests[0].starts_with("GET /repos/redirect-fixture/repo "));
         assert!(requests[1].starts_with("GET /repos/redirect-fixture/repo/pulls "));
