@@ -5,6 +5,8 @@ use crate::model::PersonRenameRequest;
 
 /// SQL for the reviewer assigned to this exact request. An answer uses the assignment at its
 /// canonical moment, so later repairs cannot erase an answer already made by its reviewer.
+/// Apply accepted edges in canonical order only when their previous reviewer is the
+/// effective reviewer so far; a downstream repair cannot revive a losing concurrent hop.
 /// Unary `+` removes the request ID's TEXT affinity so its JSON-expression index is seekable;
 /// both IDs remain strings, as in the operation-conflict query.
 pub fn reviewer_sql(request: &str, answer: Option<&str>) -> String {
@@ -17,16 +19,29 @@ pub fn reviewer_sql(request: &str, answer: Option<&str>) -> String {
         "reviewer",
     );
     format!(
-        "COALESCE((SELECT json_extract(reassignment.body, '$.fields.reviewer')
-           FROM claims reassignment INDEXED BY claims_human_gate_reassignment_request_index
-           WHERE reassignment.subject={request}.subject
-             AND reassignment.kind='gate.reviewer-reassigned'
-             AND json_extract(reassignment.body, '$.fields.request')=+{request}.id
-             AND json_extract(reassignment.body, '$.fields.owner')=json_extract({request}.body, '$.fields.owner')
-             AND {accepted}
-             {before_answer}
-           ORDER BY {} LIMIT 1), json_extract({request}.body, '$.fields.reviewer'))",
-        canonical::order_sql("reassignment", true),
+        "(WITH RECURSIVE ordered_reassignments(position, previous_reviewer, reviewer) AS MATERIALIZED (
+             SELECT row_number() OVER (ORDER BY {}),
+                    json_extract(reassignment.body, '$.fields.previous_reviewer'),
+                    json_extract(reassignment.body, '$.fields.reviewer')
+             FROM claims reassignment INDEXED BY claims_human_gate_reassignment_request_index
+             WHERE reassignment.subject={request}.subject
+               AND reassignment.kind='gate.reviewer-reassigned'
+               AND json_extract(reassignment.body, '$.fields.request')=+{request}.id
+               AND json_extract(reassignment.body, '$.fields.owner')=json_extract({request}.body, '$.fields.owner')
+               AND {accepted}
+               {before_answer}
+         ), reviewer_chain(position, reviewer) AS (
+             SELECT 0, json_extract({request}.body, '$.fields.reviewer')
+             UNION ALL
+             SELECT edge.position,
+                    CASE WHEN edge.previous_reviewer=chain.reviewer
+                         THEN edge.reviewer ELSE chain.reviewer END
+             FROM reviewer_chain chain
+             JOIN ordered_reassignments edge ON edge.position=chain.position+1
+         )
+         SELECT reviewer FROM reviewer_chain
+         WHERE position=(SELECT count(*) FROM ordered_reassignments))",
+        canonical::order_sql("reassignment", false),
     )
 }
 

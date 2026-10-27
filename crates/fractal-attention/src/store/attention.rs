@@ -752,8 +752,8 @@ mission "replicated-repair" state="ready" {
                 (&second, &second_report, &first)
             };
             let before = claim_count(&target);
-            assert_eq!(target.rename_person(winning_input).unwrap(), *winning_report);
-            assert_eq!(target.rename_person(losing_input).unwrap_err().code, "person-rename-conflict");
+            assert_eq!(target.rename_person(winning_input, &[]).unwrap(), *winning_report);
+            assert_eq!(target.rename_person(losing_input, &[]).unwrap_err().code, "person-rename-conflict");
             assert_eq!(claim_count(&target), before);
             target.replay_replication_graph().unwrap();
             assert_eq!(target.step_run(&work.subject).unwrap().unwrap().assigned_to.as_deref(), Some(winner.as_str()));
@@ -1010,6 +1010,101 @@ mission "review-repair" state="ready" {
         assert_eq!(reopened.claim_by_id(&request.id).unwrap().unwrap().body, request.body);
         assert_eq!(reopened.claim_by_id(&request.id).unwrap().unwrap().actor, request.actor);
         assert!(repair(&reopened, OLD, NEW, "first-rename").is_empty());
+    }
+
+    #[test]
+    fn losing_concurrent_first_hop_cannot_authorize_a_downstream_reviewer_after_convergence() {
+        for losing_evidence_first in [false, true] {
+            let (source, run) = fixture();
+            let request = request(&source, &run, "pending", "losing-chain", 0);
+            let owner = request.body["fields"]["owner"].as_str().unwrap();
+            for person in [NEW, "person/blair", "person/alex"] {
+                source.append_claim(&ClaimInput {
+                    subject: format!("message/known-{}", person.strip_prefix("person/").unwrap()),
+                    kind: "message.sent".into(),
+                    actor: Some(person.into()),
+                    fields: BTreeMap::from([
+                        ("from".into(), json!(person)),
+                        ("to".into(), json!(OLD)),
+                        ("content".into(), json!("Identity evidence predates the repair.")),
+                        ("status".into(), json!("sent")),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("known:{person}")),
+                }).unwrap();
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("reviews.sqlite3");
+            let replica = Store::open(&path, "birch").unwrap();
+            replica.project_replication_backlog().unwrap();
+            receive(&source, &replica);
+            let rename = |store: &Store, old: &str, new: &str, key: &str, offset| {
+                store.set_write_clock_at(request.accepted_at_unix_ms + offset).unwrap();
+                let report = store.rename_person(&PersonRenameRequest {
+                    old_person: old.into(),
+                    new_person: new.into(),
+                    actor: old.into(),
+                    idempotency_key: key.into(),
+                }, &[]).unwrap();
+                assert_eq!(report.reassigned_reviews, vec![owner.to_owned()]);
+            };
+            // The earlier receipt wins OLD, but the disconnected replica can first
+            // complete its competing hop and then repair that losing destination.
+            rename(&source, OLD, NEW, "winning-first-hop", 10);
+            rename(&replica, OLD, "person/blair", "losing-first-hop", 20);
+            rename(&replica, "person/blair", "person/alex", "downstream-hop", 30);
+            assert_eq!(replica.human_review_reviewer(&request).unwrap(), "person/alex");
+            replica.set_write_clock_at(request.accepted_at_unix_ms + 40).unwrap();
+            let losing_answer = answer(&replica, &request, "person/alex", "downstream-answer");
+            assert_eq!(
+                replica.human_review_answer(&request.id).unwrap().unwrap().id,
+                losing_answer.id,
+            );
+            if losing_evidence_first {
+                receive(&replica, &source);
+                receive(&source, &replica);
+            } else {
+                receive(&source, &replica);
+                receive(&replica, &source);
+            }
+            for store in [&source, &replica] {
+                for replay in [false, true] {
+                    if replay { store.replay_replication_graph().unwrap(); }
+                    assert_eq!(store.human_review_reviewer(&request).unwrap(), NEW);
+                    assert!(store.human_review_answer(&request.id).unwrap().is_none());
+                    for rejected in [OLD, "person/blair", "person/alex"] {
+                        assert!(store.pending_human_reviews(Some(rejected)).unwrap().is_empty());
+                    }
+                    let pending = store.pending_human_reviews(Some(NEW)).unwrap();
+                    assert_eq!(pending.len(), 1);
+                    assert_eq!(pending[0].request, request.id);
+                    assert_eq!(pending[0].operation, request.subject);
+                    assert_eq!(pending[0].requested_at_unix_ms, request.accepted_at_unix_ms);
+                    assert_eq!(store.pending_human_reviews(None).unwrap()[0].reviewer, NEW);
+                }
+            }
+            source.set_write_clock_at(request.accepted_at_unix_ms + 50).unwrap();
+            let winning_answer = answer(&source, &request, NEW, "winning-reviewer-answer");
+            receive(&source, &replica);
+            replica.replay_replication_graph().unwrap();
+            drop(replica);
+            let reopened = Store::open(&path, "birch").unwrap();
+            for store in [&source, &reopened] {
+                assert_eq!(store.human_review_reviewer(&request).unwrap(), NEW);
+                assert_eq!(
+                    store.human_review_answer(&request.id).unwrap().unwrap().id,
+                    winning_answer.id,
+                );
+                assert!(store.pending_human_reviews(None).unwrap().is_empty());
+                assert_eq!(store.claim_by_id(&request.id).unwrap().unwrap().body, request.body);
+                assert_eq!(store.claim_by_id(&request.id).unwrap().unwrap().actor, request.actor);
+                assert_eq!(
+                    store.claim_by_id(&losing_answer.id).unwrap().unwrap().actor.as_deref(),
+                    Some("person/alex"),
+                );
+            }
+        }
     }
 
     #[test]
