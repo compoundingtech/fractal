@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from evidence_test_support import tool_path  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-loader = importlib.machinery.SourceFileLoader('st_test', str(ROOT / 'scripts/fractal-test'))
+loader = importlib.machinery.SourceFileLoader('st_test', str(ROOT / 'scripts/st-test'))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 st_test = importlib.util.module_from_spec(spec)
 loader.exec_module(st_test)
@@ -1046,67 +1046,78 @@ class StTest(unittest.TestCase):
         self.assertIn(expected, json.dumps(statement))
         self.assertEqual(self.run_st_test('--status', '--check', 'demo')[0], 0, 'the tree CI judges now is the one signed')
 
-    def test_a_branch_runs_the_canonical_base_copy_once(self):
+    def test_a_branch_runs_the_self_contained_base_copy_once(self):
         stub = ('import json, os, sys\n'
                 'print(json.dumps({"copy": "base", "argv": sys.argv[1:], "guard": os.environ.get("ST_TEST_REEXEC")}))\n')
-        self.main_commits('scripts/fractal-test', stub)  # main's fractal-test now differs from the copy this branch runs
+        self.main_commits('scripts/st-test', stub)
         base = git(self.work, 'rev-parse', 'origin/main')
         run = lambda **extra_env: subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--list', '--base', 'origin/main'], cwd=self.work,
                                                 capture_output=True, text=True, timeout=60, env=dict(GIT_ENV, HOME=str(self.home), **extra_env))
         done = run()
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(json.loads(done.stdout), {'copy': 'base', 'argv': ['--list', '--base', 'origin/main'], 'guard': base})
-        self.assertIn("running the base's fractal-test (origin/main at", done.stderr)
+        self.assertIn("running the base's st-test (origin/main at", done.stderr)
         done = run(ST_TEST_REEXEC=base)  # already the base's copy: it runs itself, never re-executes again
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertNotIn('"copy": "base"', done.stdout)
         self.assertIn('linux-gate:', done.stdout)  # this copy's own --list
-        # A real base copy (this fractal-test, one line newer) runs and removes the copy it was written to when it ends.
-        self.main_commits('scripts/fractal-test', (ROOT / 'scripts/fractal-test').read_text() + '# newer\n')
+        # The self-contained implementation runs with no adjacent shim and cleans up its copy.
+        self.main_commits('scripts/st-test', (ROOT / 'scripts/st-test').read_text() + '# newer\n')
         scratch = Path(self.tmp.name) / 'tmp'
         scratch.mkdir()
         done = run(TMPDIR=str(scratch))
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("running the base's fractal-test", done.stderr)
+        self.assertIn("running the base's st-test", done.stderr)
         self.assertIn('linux-gate:', done.stdout)
         self.assertEqual(list(scratch.iterdir()), [])
 
-    def test_old_only_bases_are_supported_and_canonical_bases_win_over_the_shim(self):
-        legacy = 'import json, sys\nprint(json.dumps({"copy": "legacy", "argv": sys.argv[1:]}))\n'
-        preferred = 'import json, sys\nprint(json.dumps({"copy": "canonical", "argv": sys.argv[1:]}))\n'
-        self.main_commits('scripts/st-test', legacy)
+    def test_base_readers_copy_st_test_even_when_the_human_shim_exists(self):
+        implementation = 'import json, sys\nprint(json.dumps({"copy": "implementation", "argv": sys.argv[1:]}))\n'
+        self.main_commits('scripts/st-test', implementation)
         command = [sys.executable, str(ROOT / 'scripts/fractal-test'), '--list', '--base', 'origin/main']
         def run():
             return subprocess.run(command, cwd=self.work, capture_output=True, text=True, timeout=60,
                                   env=dict(GIT_ENV, HOME=str(self.home)))
-        done = run()
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(json.loads(done.stdout), {'copy': 'legacy', 'argv': ['--list', '--base', 'origin/main']})
-        self.assertIn("running the base's st-test", done.stderr)
-        self.main_commits('scripts/fractal-test', preferred)
-        done = run()
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(json.loads(done.stdout), {'copy': 'canonical', 'argv': ['--list', '--base', 'origin/main']})
-        self.assertIn("running the base's fractal-test", done.stderr)
-        # Identical canonical source means no re-exec; do not fall through to the legacy path.
-        self.main_commits('scripts/fractal-test', (ROOT / 'scripts/fractal-test').read_text())
+        for shim in (None, 'raise RuntimeError("a copy-only reader must never select the shim")\n'):
+            if shim is not None:
+                self.main_commits('scripts/fractal-test', shim)
+            done = run()
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(json.loads(done.stdout), {'copy': 'implementation', 'argv': ['--list', '--base', 'origin/main']})
+            self.assertIn("running the base's st-test", done.stderr)
+        self.main_commits('scripts/st-test', (ROOT / 'scripts/st-test').read_text())
         done = run()
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn('linux-gate:', done.stdout)
-        self.assertNotIn('"copy": "legacy"', done.stdout)
         self.assertNotIn("running the base's", done.stderr)
 
-    def test_legacy_shim_execs_the_canonical_runner_and_forwards_arguments_and_exit_status(self):
+    def test_old_copy_only_readers_can_execute_the_implementation_without_its_neighbor(self):
+        copied = Path(self.tmp.name) / 'copied-st-test'
+        copied.write_bytes((ROOT / 'scripts/st-test').read_bytes())
+        done = subprocess.run([sys.executable, str(copied), '--list'], cwd=self.work,
+                              capture_output=True, text=True, timeout=60,
+                              env=dict(GIT_ENV, ST_TEST_REEXEC='copy-only-proof', HOME=str(self.home)))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('linux-gate:', done.stdout)
+
+    def test_both_runner_paths_support_direct_and_python_invocations_with_identical_arguments_and_exit_status(self):
         for arguments, code in ((['--list'], 0), (['--does-not-exist'], 2)):
             with self.subTest(arguments=arguments):
-                results = [
-                    subprocess.run([str(ROOT / 'scripts' / name), *arguments], cwd=self.work,
-                                   capture_output=True, text=True, env=dict(GIT_ENV, ST_TEST_REEXEC='shim-proof'))
-                    for name in ('fractal-test', 'st-test')
+                invocations = [
+                    [str(ROOT / 'scripts/fractal-test')],
+                    [sys.executable, str(ROOT / 'scripts/fractal-test')],
+                    [str(ROOT / 'scripts/st-test')],
+                    [sys.executable, str(ROOT / 'scripts/st-test')],
                 ]
-                self.assertEqual([done.returncode for done in results], [code, code])
-                self.assertEqual(results[0].stdout, results[1].stdout)
-                self.assertEqual(results[0].stderr, results[1].stderr)
+                results = [
+                    subprocess.run([*invocation, *arguments], cwd=self.work,
+                                   capture_output=True, text=True, env=dict(GIT_ENV, ST_TEST_REEXEC='shim-proof'))
+                    for invocation in invocations
+                ]
+                self.assertEqual([done.returncode for done in results], [code] * len(invocations))
+                for done in results[1:]:
+                    self.assertEqual(results[0].stdout, done.stdout)
+                    self.assertEqual(results[0].stderr, done.stderr)
 
     def test_when_main_moved_only_unprotected_files_the_head_tree_is_signed_as_before(self):
         self.branch_from_a_base_with_the_gate()

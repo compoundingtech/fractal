@@ -4,6 +4,7 @@ and when load keeps it from starting or stops it. gh, fractal-test and the host'
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKER = ROOT / 'scripts/evidence-presign-worker'
 CLEAN = dict(PATH=os.environ['PATH'], GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null',
              GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
-# The base's fractal-test, as the worker reads it from origin/main: --list, --status and a run, each recorded.
+# The base's self-contained st-test, as the worker reads it from origin/main: --list, --status and a run, each recorded.
 STUB = '''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 argv = sys.argv[1:]
@@ -66,7 +67,7 @@ class Worker(unittest.TestCase):
         git(tmp, 'clone', '-q', str(self.origin), str(self.work))
         git(self.work, 'checkout', '-q', '-b', 'main')
         (self.work / 'scripts').mkdir()
-        (self.work / 'scripts/fractal-test').write_text(STUB)
+        (self.work / 'scripts/st-test').write_text(STUB)
         git(self.work, 'add', '.')
         git(self.work, 'commit', '-q', '-m', 'base')
         git(self.work, 'push', '-q', 'origin', 'main')
@@ -134,7 +135,20 @@ class Worker(unittest.TestCase):
         git(self.work, 'commit', '-q', '-m', 'base runners')
         git(self.work, 'push', '-q', 'origin', 'main')
 
-    def test_an_old_only_base_still_runs_and_reads_its_summary(self):
+    def test_the_full_base_implementation_runs_when_copied_without_neighbors(self):
+        self.base_runners({'st-test': (ROOT / 'scripts/st-test').read_text(),
+                           'fractal-test': 'raise RuntimeError("POISON: shim must not be copied")\n'})
+        base_tools = runpy.run_path(str(WORKER))['base_tools']
+        with tempfile.TemporaryDirectory() as scratch:
+            copied = base_tools(self.work, scratch)
+            self.assertEqual(copied.name, 'st-test')
+            self.assertEqual(list(Path(scratch).iterdir()), [copied])
+            done = subprocess.run([sys.executable, '-I', str(copied), '--help'], cwd=self.work,
+                                  capture_output=True, text=True, env=CLEAN)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout, 'the copied implementation prints its help without adjacent files')
+
+    def test_a_st_test_only_base_reads_the_old_summary_header(self):
         self.base_runners({'st-test': STUB.replace('fractal-test: tree ', 'st-test: tree ')})
         self.pr(1)
         done = self.tick()
@@ -142,8 +156,8 @@ class Worker(unittest.TestCase):
         self.assertTrue(self.runs())
         self.assertEqual(set(self.attempts()[0]['checks'].values()), {'passed'})
 
-    def test_both_base_names_prefer_canonical_over_the_shell_shim(self):
-        self.base_runners({'fractal-test': STUB, 'st-test': '#!/bin/sh\necho POISON >&2\nexit 7\n'})
+    def test_both_base_names_copy_st_test_not_the_python_shim(self):
+        self.base_runners({'st-test': STUB, 'fractal-test': 'raise RuntimeError("POISON: shim must not be copied")\n'})
         self.pr(1)
         done = self.tick()
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -157,12 +171,19 @@ class Worker(unittest.TestCase):
         self.assertEqual(done.returncode, 2, done.stderr)
         self.assertEqual(self.runs(), [])
 
-    def test_a_broken_canonical_runner_does_not_fall_back_to_the_old_runner(self):
-        self.base_runners({'fractal-test': 'raise RuntimeError("canonical refused")\n', 'st-test': STUB})
+    def test_a_base_with_only_the_human_runner_fails_without_running_it(self):
+        self.base_runners({'fractal-test': STUB})
         self.pr(1)
         done = self.tick()
         self.assertEqual(done.returncode, 2, done.stderr)
-        self.assertIn('canonical refused', done.stderr)
+        self.assertEqual(self.runs(), [])
+
+    def test_a_broken_st_test_does_not_fall_back_to_the_human_runner(self):
+        self.base_runners({'st-test': 'raise RuntimeError("implementation refused")\n', 'fractal-test': STUB})
+        self.pr(1)
+        done = self.tick()
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn('implementation refused', done.stderr)
         self.assertEqual(self.runs(), [])
 
     def test_without_an_author_list_it_refuses_to_run_anything(self):

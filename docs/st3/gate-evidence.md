@@ -1441,11 +1441,18 @@ the record it used.
 
 ### Running the checks locally (`scripts/fractal-test`)
 
-The canonical runner is `scripts/fractal-test`; its script tests are `scripts/fractal-test-test`.
-The temporary `scripts/st-test` shell shim forwards old invocations. Base-pinned readers prefer
-`scripts/fractal-test` and fall back to the old Python `scripts/st-test` only when the base predates
-the rename (`arn:lmig:smalltalk:2026-10-27-st-test-shim`; removed at contraction). Host cache, config
-and run-ledger paths below, and the `ST_*` environment settings, keep their existing names.
+The human-facing runner is `scripts/fractal-test`; its script tests remain `scripts/fractal-test-test`.
+During the bridge (`arn:lmig:smalltalk:2026-10-27-st-test-shim`), `scripts/fractal-test` is an executable Python
+exec shim to the adjacent `scripts/st-test`, which retains the complete, self-contained implementation.
+Base-pinned readers always copy and run `scripts/st-test` with their existing Python invocation: supported
+older heads copy only that file from the new base, so it must work without an adjacent shim or implementation file.
+Internal Python module loaders also load `scripts/st-test`, not the exec shim. Human commands and diagnostics
+remain `scripts/fractal-test`; host cache, config, evidence, report and run-ledger paths below, and the `ST_*`
+environment settings, keep their existing names.
+
+Contract only after every supported base includes this PR: first move the implementation to `scripts/fractal-test`,
+then give base readers a `scripts/st-test` fallback for pre-contraction bases, and finally delete `scripts/st-test`
+and this bridge marker. Do not prefer or copy the shim while copy-only bases remain supported.
 
 `scripts/fractal-test` runs the whole per-PR suite: each required check that has a local command (today `typescript-client`, `genie-freshness`, `ci-script-tests`
 and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and means the same) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
@@ -1472,8 +1479,8 @@ evicts whole slots, least recently used first, the old per-clone layout included
 `megarepo.lock`, its members are materialized under `repos/` first with the command CI's `megarepoApplyStep` runs (`mr apply`
 from the flake's effect-utils pin; a test pins the two together): `genie-freshness` imports `repos/effect-utils`, and the dev
 shells only warn when it is missing. If that fails, no check runs and nothing is signed. A failing run is
-recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base, and so does `fractal-test` itself: a
-run started from a branch whose `scripts/fractal-test` differs from the base's re-executes the base's copy first (once: `ST_TEST_REEXEC` names the base
+recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base, and so does the `fractal-test` implementation:
+a run started from a branch whose `scripts/st-test` differs from the base's re-executes the base's self-contained `scripts/st-test` first (once: `ST_TEST_REEXEC` names the base
 commit; no opt-out), so how runs queue for pool trees and build slots, and which commit they sign, is always main's, however old the branch. A
 branch's own `fractal-test` changes are tested by its `ci-script-tests`, which run `fractal-test-test` from the tree. It prints one
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered

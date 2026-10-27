@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SIGNER = ROOT / 'scripts/evidence-queue-signer'
 CLEAN = dict(PATH=os.environ['PATH'], GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null',
              GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
-# The base's fractal-test: --list (two light checks, one heavy) and a run, recorded with the commit it ran on.
+# The base's self-contained st-test: --list (two light checks, one heavy) and a run, recorded with the commit it ran on.
 ST_TEST = '''#!/usr/bin/env python3
 import json, os, subprocess, sys
 argv = sys.argv[1:]
@@ -101,7 +101,7 @@ class QueueSigner(unittest.TestCase):
         git(tmp, 'clone', '-q', str(self.origin), str(self.work))
         git(self.work, 'checkout', '-q', '-b', 'main')
         (self.work / 'scripts').mkdir()
-        (self.work / 'scripts/fractal-test').write_text(ST_TEST)
+        (self.work / 'scripts/st-test').write_text(ST_TEST)
         (self.work / 'a').write_text('a\n')
         git(self.work, 'add', '.')
         git(self.work, 'commit', '-q', '-m', 'base')
@@ -199,14 +199,14 @@ class QueueSigner(unittest.TestCase):
         git(self.work, 'push', '-q', 'origin', 'main')
         self.main = git(self.work, 'rev-parse', 'HEAD')
 
-    def test_an_old_only_base_still_seeds_and_reads_its_summary(self):
+    def test_a_st_test_only_base_seeds_and_reads_the_old_summary_header(self):
         self.base_runners({'st-test': ST_TEST.replace('fractal-test: tree ', 'st-test: tree ')})
         self.run_signer('seed')
         self.assertEqual(len(self.runs()), 1)
         self.assertEqual(self.lines('seeds.jsonl')[0]['outcome'], 'seeded')
 
-    def test_both_base_names_seed_with_canonical_not_the_shell_shim(self):
-        self.base_runners({'fractal-test': ST_TEST, 'st-test': '#!/bin/sh\necho POISON >&2\nexit 7\n'})
+    def test_both_base_names_seed_with_st_test_not_the_python_shim(self):
+        self.base_runners({'st-test': ST_TEST, 'fractal-test': 'raise RuntimeError("POISON: shim must not be copied")\n'})
         self.run_signer('seed')
         self.assertEqual(len(self.runs()), 1)
         self.assertEqual(self.lines('seeds.jsonl')[0]['outcome'], 'seeded')
@@ -217,7 +217,7 @@ class QueueSigner(unittest.TestCase):
         self.run_signer('seed')
         self.assertEqual(self.runs(), [])
 
-    def test_an_old_only_base_preserves_per_check_timing(self):
+    def test_a_st_test_only_base_preserves_old_header_per_check_timing(self):
         self.base_runners({'st-test': ST_TEST.replace('fractal-test: tree ', 'st-test: tree ')})
         self.pull(1, 'one')
         self.enqueue(1, self.main, 1)

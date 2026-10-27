@@ -458,7 +458,7 @@ def seeding_elsewhere():
             argv = cmdline.read_bytes().split(b'\0')
         except OSError:
             continue
-        # arn:lmig:smalltalk:2026-10-27-st-test-shim — recognize seeds started from old bases until contraction.
+        # arn:lmig:smalltalk:2026-10-27-st-test-shim — both human-entry and copied implementation process names own the seed.
         if b'--seed' in argv and any(Path(arg.decode(errors='replace')).name in ('fractal-test', 'st-test') for arg in argv):
             return True
     return False

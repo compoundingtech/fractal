@@ -373,7 +373,7 @@ class Rule5SameKeysAndRecordsAsStTest(Fixture):
         self.assertTrue(all(re.fullmatch(r'[0-9a-f]{40}', key) for key in ci.values()), ci)
 
     def keys_both(self, repo, base, tree):
-        st_test = load('st_test_for_ci_rust_test_notes', ROOT / 'scripts/fractal-test')
+        st_test = load('st_test_for_ci_rust_test_notes', ROOT / 'scripts/st-test')
         scratch = Path(tempfile.mkdtemp(prefix='keys-', dir=self.tmp))
         cwd = os.getcwd()
         os.chdir(repo)

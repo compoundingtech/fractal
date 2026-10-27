@@ -80,7 +80,7 @@ class Hook(unittest.TestCase):
         (self.work / '.st/evidence-keys').write_text('host/box namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n')
         for name in ('evidence-prepush', 'install-git-hooks'):
             shutil.copy(ROOT / 'scripts' / name, self.work / 'scripts' / name)
-        (self.work / 'scripts/fractal-test').write_text(STUB)
+        (self.work / 'scripts/st-test').write_text(STUB)
         for path in (self.work / 'scripts').rglob('*'):
             if path.is_file():
                 path.chmod(0o755)
@@ -151,14 +151,13 @@ class Hook(unittest.TestCase):
         git(self.work, '-c', 'core.hooksPath=/dev/null', 'push', '-q', 'origin', 'main')
         git(self.work, 'checkout', '-q', 'feature')
 
-    def test_an_old_only_base_still_checks_coverage(self):
-        self.base_runners({'st-test': STUB})
+    def test_a_st_test_only_base_still_checks_coverage(self):
         done = self.push(STUB_STATUS='0')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([c['argv'][0] for c in self.calls()], ['--status'])
 
-    def test_both_base_names_prefer_canonical_over_the_shell_shim(self):
-        self.base_runners({'fractal-test': STUB, 'st-test': '#!/bin/sh\necho POISON >&2\nexit 7\n'})
+    def test_both_base_names_copy_st_test_not_the_python_shim(self):
+        self.base_runners({'st-test': STUB, 'fractal-test': 'raise RuntimeError("POISON: shim must not be copied")\n'})
         done = self.push(STUB_STATUS='0')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertNotIn('POISON', done.stderr)
@@ -168,8 +167,11 @@ class Hook(unittest.TestCase):
         self.base_runners({})
         self.untouched(self.push())
 
-    def test_an_old_only_base_still_refuses_an_uncovered_agent_push(self):
-        self.base_runners({'st-test': STUB})
+    def test_a_base_with_only_the_human_runner_does_no_work(self):
+        self.base_runners({'fractal-test': STUB})
+        self.untouched(self.push())
+
+    def test_a_st_test_only_base_still_refuses_an_uncovered_agent_push(self):
         done = self.push(ST_AGENT='agent/some/seat', STUB_STATUS='3')
         self.assertNotEqual(done.returncode, 0, done.stderr)
         self.assertIn('scripts/fractal-test --push origin', done.stderr)

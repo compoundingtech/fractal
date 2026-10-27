@@ -92,6 +92,12 @@ relevant set (including already-covered crates) so the export is complete. `--ou
 An export's success is not verified coverage: the publisher must publish and verify its records. See
 [the evidence guide](docs/st3/gate-evidence.md) for per-crate and `--seed --out` behavior.
 
+The command remains `scripts/fractal-test`. During the compatibility bridge
+(`arn:lmig:smalltalk:2026-10-27-st-test-shim`), it execs the self-contained implementation in
+`scripts/st-test`, which older base-pinned readers must be able to copy and run alone.
+See [the bridge and contraction sequence](docs/st3/gate-evidence.md#running-the-checks-locally-scriptsfractal-test)
+before changing either path.
+
 
 **Keep it within 12 minutes.** A full warm run of `scripts/fractal-test` (build, test and sign) has a budget of 12 minutes on a dev box
 today. Keep your changes, and any tests you add, inside it. The table fractal-test prints at the end gives each check's time in seconds.
