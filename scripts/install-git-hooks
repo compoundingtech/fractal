@@ -3,7 +3,7 @@
 #   scripts/install-git-hooks [--uninstall]
 #
 # The hook is a small stub. At push time it does NOT run anything from the tree being pushed: it takes
-# scripts/evidence-prepush and scripts/st-test from the base branch of the remote (<remote>/main) into a temporary
+# scripts/evidence-prepush and scripts/fractal-test from the base branch of the remote (<remote>/main) into a temporary
 # directory and runs those copies, so the hook and the runner are never the pushed branch's. (The checks the runner then
 # runs, nix develop, pnpm install and the tests, are the tree's code, on this machine as this user with the key within
 # reach: cooperative trust, known defect 22.) When the base has no such files the stub does nothing.
@@ -54,7 +54,12 @@ cd "$top" || exit 0
 git rev-parse -q --verify "refs/remotes/$remote/main" >/dev/null 2>&1 || exit 0
 work=$(mktemp -d 2>/dev/null) || exit 0
 trap 'rm -rf "$work"' EXIT
-git archive "refs/remotes/$remote/main" scripts/evidence-prepush scripts/st-test 2>/dev/null | tar -x -C "$work" 2>/dev/null || exit 0
+runner=scripts/fractal-test
+if ! git cat-file -e "refs/remotes/$remote/main:$runner" 2>/dev/null; then
+  # arn:lmig:smalltalk:2026-10-27-st-test-shim — remove the old-base fallback at contraction.
+  runner=scripts/st-test
+fi
+git archive "refs/remotes/$remote/main" scripts/evidence-prepush "$runner" 2>/dev/null | tar -x -C "$work" 2>/dev/null || exit 0
 [ -f "$work/scripts/evidence-prepush" ] || exit 0
 if command -v python3 >/dev/null 2>&1; then
   python3 "$work/scripts/evidence-prepush" "$@"

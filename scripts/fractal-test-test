@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/st-test against real repositories: the tree it signs (the head), the lag, failures, refusals."""
+"""scripts/fractal-test against real repositories: the tree it signs (the head), the lag, failures, refusals."""
 import atexit
 import contextlib
 import fcntl
@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from evidence_test_support import tool_path  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-loader = importlib.machinery.SourceFileLoader('st_test', str(ROOT / 'scripts/st-test'))
+loader = importlib.machinery.SourceFileLoader('st_test', str(ROOT / 'scripts/fractal-test'))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 st_test = importlib.util.module_from_spec(spec)
 loader.exec_module(st_test)
@@ -344,7 +344,7 @@ class StTest(unittest.TestCase):
         self.assertRegex(out, r'demo +not signed +0s +this tree edits its lane \(scripts/lane\.sh\); CI runs it')
         self.assertNotIn('FAILED', out)
         code, out, err = self.run_st_test('--check', 'demo', '--status')
-        self.assertEqual(code, 0, out + err)  # st-test still reports it so; the pre-push hook refuses it (evidence-prepush)
+        self.assertEqual(code, 0, out + err)  # fractal-test still reports it so; the pre-push hook refuses it (evidence-prepush)
         self.assertRegex(out, r'demo +lane edit: CI runs it +this tree edits its lane \(scripts/lane\.sh\)')
 
     def main_moves(self, name, content):
@@ -648,8 +648,8 @@ class StTest(unittest.TestCase):
             times = dict(line.split() for line in marks.read_text().splitlines())
             self.assertLess(float(times['light-start']), float(times['build-end']))  # it ran during the build, not after it
             # Its output is kept and printed after the build lane under its own header, never interleaved with the build's.
-            self.assertLess(out.index('----- st-test: light output -----'), out.index('LIGHT-OUTPUT'))
-            self.assertLess(out.index('LIGHT-OUTPUT'), out.index('st-test: tree'))
+            self.assertLess(out.index('----- fractal-test: light output -----'), out.index('LIGHT-OUTPUT'))
+            self.assertLess(out.index('LIGHT-OUTPUT'), out.index('fractal-test: tree'))
             self.assertRegex(out, r'demo +passed')
             self.assertRegex(out, r'light +passed')
             marks.unlink()
@@ -658,7 +658,7 @@ class StTest(unittest.TestCase):
             self.assertEqual(code, 0, out + err)
             times = dict(line.split() for line in marks.read_text().splitlines())
             self.assertGreater(float(times['light-start']), float(times['build-end']))  # one after another, in the listed order
-            self.assertNotIn('----- st-test:', out)
+            self.assertNotIn('----- fractal-test:', out)
 
     def test_a_check_that_builds_uses_its_trees_kept_target_and_another_does_not(self):
         self.commit('b.txt', 'two')
@@ -1045,30 +1045,67 @@ class StTest(unittest.TestCase):
         self.assertIn(expected, json.dumps(statement))
         self.assertEqual(self.run_st_test('--status', '--check', 'demo')[0], 0, 'the tree CI judges now is the one signed')
 
-    def test_a_branch_with_an_old_st_test_runs_the_base_s_copy_once(self):
+    def test_a_branch_runs_the_canonical_base_copy_once(self):
         stub = ('import json, os, sys\n'
                 'print(json.dumps({"copy": "base", "argv": sys.argv[1:], "guard": os.environ.get("ST_TEST_REEXEC")}))\n')
-        self.main_commits('scripts/st-test', stub)  # main's st-test now differs from the copy this branch runs
+        self.main_commits('scripts/fractal-test', stub)  # main's fractal-test now differs from the copy this branch runs
         base = git(self.work, 'rev-parse', 'origin/main')
-        run = lambda **extra_env: subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', '--base', 'origin/main'], cwd=self.work,
+        run = lambda **extra_env: subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--list', '--base', 'origin/main'], cwd=self.work,
                                                 capture_output=True, text=True, timeout=60, env=dict(GIT_ENV, HOME=str(self.home), **extra_env))
         done = run()
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(json.loads(done.stdout), {'copy': 'base', 'argv': ['--list', '--base', 'origin/main'], 'guard': base})
-        self.assertIn("running the base's st-test (origin/main at", done.stderr)
+        self.assertIn("running the base's fractal-test (origin/main at", done.stderr)
         done = run(ST_TEST_REEXEC=base)  # already the base's copy: it runs itself, never re-executes again
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertNotIn('"copy": "base"', done.stdout)
         self.assertIn('linux-gate:', done.stdout)  # this copy's own --list
-        # A real base copy (this st-test, one line newer) runs and removes the copy it was written to when it ends.
-        self.main_commits('scripts/st-test', (ROOT / 'scripts/st-test').read_text() + '# newer\n')
+        # A real base copy (this fractal-test, one line newer) runs and removes the copy it was written to when it ends.
+        self.main_commits('scripts/fractal-test', (ROOT / 'scripts/fractal-test').read_text() + '# newer\n')
         scratch = Path(self.tmp.name) / 'tmp'
         scratch.mkdir()
         done = run(TMPDIR=str(scratch))
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("running the base's st-test", done.stderr)
+        self.assertIn("running the base's fractal-test", done.stderr)
         self.assertIn('linux-gate:', done.stdout)
         self.assertEqual(list(scratch.iterdir()), [])
+
+    def test_old_only_bases_are_supported_and_canonical_bases_win_over_the_shim(self):
+        legacy = 'import json, sys\nprint(json.dumps({"copy": "legacy", "argv": sys.argv[1:]}))\n'
+        preferred = 'import json, sys\nprint(json.dumps({"copy": "canonical", "argv": sys.argv[1:]}))\n'
+        self.main_commits('scripts/st-test', legacy)
+        command = [sys.executable, str(ROOT / 'scripts/fractal-test'), '--list', '--base', 'origin/main']
+        def run():
+            return subprocess.run(command, cwd=self.work, capture_output=True, text=True, timeout=60,
+                                  env=dict(GIT_ENV, HOME=str(self.home)))
+        done = run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout), {'copy': 'legacy', 'argv': ['--list', '--base', 'origin/main']})
+        self.assertIn("running the base's st-test", done.stderr)
+        self.main_commits('scripts/fractal-test', preferred)
+        done = run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout), {'copy': 'canonical', 'argv': ['--list', '--base', 'origin/main']})
+        self.assertIn("running the base's fractal-test", done.stderr)
+        # Identical canonical source means no re-exec; do not fall through to the legacy path.
+        self.main_commits('scripts/fractal-test', (ROOT / 'scripts/fractal-test').read_text())
+        done = run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('linux-gate:', done.stdout)
+        self.assertNotIn('"copy": "legacy"', done.stdout)
+        self.assertNotIn("running the base's", done.stderr)
+
+    def test_legacy_shim_execs_the_canonical_runner_and_forwards_arguments_and_exit_status(self):
+        for arguments, code in ((['--list'], 0), (['--does-not-exist'], 2)):
+            with self.subTest(arguments=arguments):
+                results = [
+                    subprocess.run([str(ROOT / 'scripts' / name), *arguments], cwd=self.work,
+                                   capture_output=True, text=True, env=dict(GIT_ENV, ST_TEST_REEXEC='shim-proof'))
+                    for name in ('fractal-test', 'st-test')
+                ]
+                self.assertEqual([done.returncode for done in results], [code, code])
+                self.assertEqual(results[0].stdout, results[1].stdout)
+                self.assertEqual(results[0].stderr, results[1].stderr)
 
     def test_when_main_moved_only_unprotected_files_the_head_tree_is_signed_as_before(self):
         self.branch_from_a_base_with_the_gate()
@@ -1190,7 +1227,7 @@ class StTest(unittest.TestCase):
             if already_signed:
                 self.assertIn('already signed', out)
             else:
-                self.assertIn('st-test: evidence-wrap argv:', err)
+                self.assertIn('fractal-test: evidence-wrap argv:', err)
                 self.assertIn('--push origin', err)
                 self.assertIn("-- sh -c 'echo ran'", err)
                 self.assertNotIn('test-https-token', err)
@@ -1259,7 +1296,7 @@ class StTest(unittest.TestCase):
             st_test.wait_for_load(20.0, read_load=lambda: next(loads), sleep=sleep, clock=lambda: now[0])
         self.assertEqual(len(slept), 3)
         said = err.getvalue().splitlines()
-        self.assertEqual(said[0], 'st-test: waiting: load1 34 > 20 (host limit)')
+        self.assertEqual(said[0], 'fractal-test: waiting: load1 34 > 20 (host limit)')
         self.assertEqual(len(said), 2)  # once at the start, again after a minute: not every poll
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
@@ -1365,9 +1402,9 @@ class StTest(unittest.TestCase):
     def test_the_command_line_maps_a_refusal_to_exit_2_and_a_failed_check_to_exit_1(self):
         self.commit('b.txt', 'two')
         env = dict(GIT_ENV, HOME=str(self.home))
-        done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--base', '--bad'], capture_output=True, text=True, cwd=self.work, env=env)
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--base', '--bad'], capture_output=True, text=True, cwd=self.work, env=env)
         self.assertEqual(done.returncode, 2)
-        done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--check', 'genie-freshness', '--base', 'origin/main'],
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--check', 'genie-freshness', '--base', 'origin/main'],
                               capture_output=True, text=True, cwd=self.work, env=dict(env, PATH='/nonexistent'))
         self.assertEqual(done.returncode, 1, done.stderr)  # the check could not run its command: a failed check, not a refusal
 
@@ -1459,7 +1496,7 @@ class StTest(unittest.TestCase):
         self.assertEqual(len(self.statements()), 1)
 
     def test_the_real_table_lists_only_checks_with_a_command_and_prints_them(self):
-        done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list'], capture_output=True, text=True)
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--list'], capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'fractal-web', 'rust-tests'])
 
@@ -1495,7 +1532,7 @@ class StTest(unittest.TestCase):
             (tmp / 'no-bus').mkdir()
             code, out, err = self.run_st_test('--check', 'demo', extra_env=dict(env, XDG_RUNTIME_DIR=str(tmp / 'no-bus')))  # no user bus: runs anyway, and says so
             self.assertEqual(code, 0, err)
-            self.assertIn('st-test: demo runs without the host build cap (no user systemd bus for a builds.slice scope)', err)
+            self.assertIn('fractal-test: demo runs without the host build cap (no user systemd bus for a builds.slice scope)', err)
             self.assertFalse(calls.exists())  # neither a scope nor a ticket
         self.commit('e.txt', 'five')
         self.assertEqual(self.run_st_test('--check', 'demo', extra_env=env)[0], 0)
@@ -1593,11 +1630,11 @@ class StTest(unittest.TestCase):
         self.assertEqual(set(host['required_inputs']), standard | set(st_test.WEB_INPUTS))
 
     def test_every_check_of_the_per_pr_suite_runs_by_default_and_all_means_the_same(self):
-        # No subset for signing: with no flag st-test runs the whole per-PR suite; --all is an accepted alias; --check selects.
+        # No subset for signing: with no flag fractal-test runs the whole per-PR suite; --all is an accepted alias; --check selects.
         # The VM tests and the mail redelivery canaries run daily, not here.
         suite = ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'fractal-web', 'rust-tests']
         for args, names in (([], suite), (['--all'], suite), (['--check', 'linux-gate'], ['linux-gate'])):
-            done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
+            done = subprocess.run([sys.executable, str(ROOT / 'scripts/fractal-test'), '--list', *args], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], names, args)
 
@@ -1659,7 +1696,7 @@ class StTest(unittest.TestCase):
             self.commit('c.txt', str(expected))
             code, out, err = self.run_st_test('--check', 'demo', command=command, extra_env={'ST_TEST_RUNS': str(blocked / 'runs.jsonl')})
             self.assertEqual(code, expected, out + err)
-            self.assertEqual(err.count("st-test: could not record this run's times: "), 1, err)
+            self.assertEqual(err.count("fractal-test: could not record this run's times: "), 1, err)
 
     def test_scripts_ci_local_s_stage_table_is_read_from_its_output_and_lines_that_are_not_rows_are_not(self):
         log = Path(self.tmp.name) / 'gate.log'
@@ -1692,7 +1729,7 @@ class StTest(unittest.TestCase):
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             code, out, err = self.run_st_test(command=command, extra_env=env)
             self.assertEqual(code, 0, out + err)
-            self.assertLess(out.index('gate output'), out.index('st-test: tree'))  # streamed to the terminal, before the summary
+            self.assertLess(out.index('gate output'), out.index('fractal-test: tree'))  # streamed to the terminal, before the summary
             self.assertIn('queue: 2 waits, 31s', out)  # stderr too, as one stream
             record, = self.runs()
             self.assertEqual([(stage['name'], stage['seconds'], stage['exit']) for stage in record['stages']], [('setup', 70, None), ('tests', 500, 0)])
@@ -1867,7 +1904,7 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(rank('agent/crew/leads/lead-2'), 4)
         self.assertEqual(rank('agent/other'), 12)
         self.assertEqual(rank(''), 50)
-        # The shim's caller: ST_AGENT, else CARGO_PRIORITY_CALLER (st-test and ci-local stages run without ST_* variables).
+        # The shim's caller: ST_AGENT, else CARGO_PRIORITY_CALLER (fractal-test and ci-local stages run without ST_* variables).
         by = lambda environment: st_test.priority_rank(dict(environment, CARGO_PRIORITY_FILE=str(priority)))
         self.assertEqual(by({'CARGO_PRIORITY_CALLER': 'agent/crew/hot/2026-10-26/hot-builder'}), 3)
         self.assertEqual(by({'ST_AGENT': 'agent/crew/leads/lead-2', 'CARGO_PRIORITY_CALLER': 'agent/crew/hot/x/hot-builder'}), 4)
@@ -1886,7 +1923,7 @@ class PoolQueue(unittest.TestCase):
 
 
 class PerCrate(StTest):
-    """scripts/st-test --check rust-tests: one signature per crate, and only the crates without a passing note for their key run."""
+    """scripts/fractal-test --check rust-tests: one signature per crate, and only the crates without a passing note for their key run."""
 
     def setUp(self):
         super().setUp()

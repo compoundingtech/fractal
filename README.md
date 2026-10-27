@@ -75,7 +75,7 @@ author your pull requests must be listed in `.st/evidence-authors.json`.
 **Before each push**, from a clean checkout of the commit:
 
 ```sh
-scripts/st-test --all --push origin
+scripts/fractal-test --all --push origin
 ```
 
 - It runs `linux-gate` (tests, clippy, fleet compatibility), `typescript-client`, `genie-freshness`, `fractal-web` (only when a web
@@ -93,8 +93,8 @@ An export's success is not verified coverage: the publisher must publish and ver
 [the evidence guide](docs/st3/gate-evidence.md) for per-crate and `--seed --out` behavior.
 
 
-**Keep it within 12 minutes.** A full warm run of `scripts/st-test` (build, test and sign) has a budget of 12 minutes on a dev box
-today. Keep your changes, and any tests you add, inside it. The table st-test prints at the end gives each check's time in seconds.
+**Keep it within 12 minutes.** A full warm run of `scripts/fractal-test` (build, test and sign) has a budget of 12 minutes on a dev box
+today. Keep your changes, and any tests you add, inside it. The table fractal-test prints at the end gives each check's time in seconds.
 
 The pre-push hook, which `nix develop` installs (`scripts/install-git-hooks`), checks this for you. For an agent whose key is listed,
 it refuses a push whose tree is not covered and prints the command to run.
@@ -113,7 +113,7 @@ Its decision line reads `evidence-decision v1 check=... decision=skip outcome=sa
 
 Details: [the evidence gate and the skip policy](docs/st3/gate-evidence.md#evidence-gate-and-the-skip-policy),
 [agent keys](docs/st3/gate-evidence.md#agent-keys) and
-[running the checks locally](docs/st3/gate-evidence.md#running-the-checks-locally-scriptsst-test). Questions or problems: open an
+[running the checks locally](docs/st3/gate-evidence.md#running-the-checks-locally-scriptsfractal-test). Questions or problems: open an
 issue in this repository.
 
 ## Reference

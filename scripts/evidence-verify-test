@@ -503,7 +503,7 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
 ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
-# The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
+# The checks a host or agent may sign (scripts/fractal-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
 HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests'})
 HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests'})
@@ -1330,7 +1330,7 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_the_committed_lane_file_is_valid_exists_at_head_and_matches_what_st_test_runs(self):
         text = (ROOT / '.st/required-lanes.json').read_text()
-        loader = importlib.machinery.SourceFileLoader('st_test_script', str(ROOT / 'scripts/st-test'))
+        loader = importlib.machinery.SourceFileLoader('st_test_script', str(ROOT / 'scripts/fractal-test'))
         module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(module)
         policy = (ROOT / '.st/evidence-skip-policy.json').read_text()
@@ -1510,8 +1510,8 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(policy['checks'][check].get('enforce', False), check in ENFORCED, check)
             rules = self.rules(check)
             self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request'])
-        # The commands are the ones scripts/st-test records, so a local note can match.
-        script = ROOT / 'scripts/st-test'
+        # The commands are the ones scripts/fractal-test records, so a local note can match.
+        script = ROOT / 'scripts/fractal-test'
         if script.exists():
             loader = importlib.machinery.SourceFileLoader('st_test_policy', str(script))
             spec = importlib.util.spec_from_loader(loader.name, loader)
