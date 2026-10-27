@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "No checkpoint rules or digest changes. No skip policy admits the host trust level yet and every check stays enforce false, so the keys vouch for nothing today."
+    "detail": "No checkpoint rules or digest changes. The skip policy already admits the host level for the wrapper kind on pull_request runs; this key adds one signer it counts. The merge queue never skips on it."
   },
   "compatibility": {
     "status": "none",
