@@ -4,3 +4,4 @@ record 80dcdca7876c5f5f4bece2fff50f881606d6abef linux-gate 1 fleet/ci 2026-10-26
 record 8e706fcf952dc96206daf87764eb12496b173ac9 linux-clippy 0 fleet/ci 2026-10-26T07:16:54Z
 record 99ae9bca53a17b58c88a1ce1e890cafa283be9a4 ci-script-tests 0 fleet/ci 2026-10-26T07:18:51Z
 record c5acbbd59d65f732c5bfe8673fef5285f02801ab linux-fleet-compat 0 fleet/ci 2026-10-26T07:17:54Z
+gc 2026-10-27T03:43:15+00:00 1015290c469b49f9b8a28f93655c8a0f053877b0e23e5a76dc13b8038f9d38e5

@@ -5,3 +5,4 @@ record 5e748f119272eabfa81aaea00c34f1b7f058b733 linux-fleet-compat 0 fleet/ci 20
 record 7c1be0a71af6a8a207b3f95658ac30ebc3624ec9 linux-gate 0 fleet/ci 2026-10-27T02:35:43Z
 record 887f4d86f5b7c484f855347aacf0d45f6f5af1ab genie-freshness 0 fleet/ci 2026-10-27T02:33:03Z
 record b8f3ebbedbc6387093ecd7ff70dfa157fb4b1c3c linux-clippy 0 fleet/ci 2026-10-27T02:27:25Z
+gc 2026-10-27T03:43:15+00:00 1015290c469b49f9b8a28f93655c8a0f053877b0e23e5a76dc13b8038f9d38e5

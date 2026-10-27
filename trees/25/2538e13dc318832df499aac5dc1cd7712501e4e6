@@ -9,3 +9,4 @@ record bd04029175c14f7212ebf894febe29a89dfcbdb4 typescript-client 0 fleet/ci 202
 record d3790dfc136edd0531f9719c52199f6e9bf8c406 linux-tests-shard-4 0 fleet/ci 2026-10-23T15:29:03Z
 record d9c2027552177633ff6b36ad0301db73c7dbe64b linux-fleet-compat 0 fleet/ci 2026-10-23T15:13:19Z
 record e7ffbde9cba4a11d86692b1b819c7a10a3be7d16 isolation-vm 0 fleet/ci 2026-10-23T15:20:54Z
+gc 2026-10-27T03:43:15+00:00 1015290c469b49f9b8a28f93655c8a0f053877b0e23e5a76dc13b8038f9d38e5

@@ -6,3 +6,4 @@ record bde8e2a73c5d1c5e7f130287a5b9a351e3e45c3a ci-script-tests 0 fleet/ci 2026-
 record cdca3d1d23b880f6ab83f973f18ffb29f7ff1d50 linux-tests-shard-2 0 fleet/ci 2026-10-27T03:04:43Z
 record f4918248bc8cbe238cb875fef12487bb843113c3 linux-gate 0 fleet/ci 2026-10-27T03:06:02Z
 record fc91606c72846357a12b57ff3fa749f9e826b373 linux-fleet-compat 0 fleet/ci 2026-10-27T02:54:44Z
+gc 2026-10-27T03:43:15+00:00 1015290c469b49f9b8a28f93655c8a0f053877b0e23e5a76dc13b8038f9d38e5
