@@ -2,6 +2,10 @@
 export const KIT_CPU_ANCHOR_SECONDS = 413.9
 const CPU_HEADROOM = 1.1
 
+function roundSecondsToMilliseconds(seconds) {
+  return Math.round(seconds * 1000) / 1000
+}
+
 export function kitPlayBudget(env) {
   const raw = env.KIT_PLAY_WALL_GUARD_SECONDS
   const wallGuardSeconds = raw === undefined || raw === '' ? null : Number(raw)
@@ -12,9 +16,9 @@ export function kitPlayBudget(env) {
 }
 
 export function assessKitPlayCost({ wallGuardSeconds }, { elapsedSeconds, busyCoreMinutes, costRequired }) {
-  const cpuSeconds = busyCoreMinutes * 60
+  const cpuSeconds = roundSecondsToMilliseconds(busyCoreMinutes * 60)
   const cpuAnchorSeconds = costRequired ? KIT_CPU_ANCHOR_SECONDS : null
-  const maxCpuSeconds = cpuAnchorSeconds === null ? null : cpuAnchorSeconds * CPU_HEADROOM
+  const maxCpuSeconds = cpuAnchorSeconds === null ? null : roundSecondsToMilliseconds(cpuAnchorSeconds * CPU_HEADROOM)
   const overCpuBudget = maxCpuSeconds !== null && cpuSeconds > maxCpuSeconds
   const overWallGuard = wallGuardSeconds !== null && elapsedSeconds > wallGuardSeconds
   return {
