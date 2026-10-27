@@ -41,12 +41,18 @@ const NativeTranscript = ({ scheme }: { readonly scheme: 'dark' | 'light' }) => 
     <DataSourceProvider source={source} registry={registry}><ConversationPane agentRef={agentRef} agentName="Native transcript review" onOpenTool={() => undefined} /></DataSourceProvider>
   </main>
 }
-const meta = {
+const meta = { excludeStories: ['scenarioExemptions'],
   title: 'Fractal/App/Native transcript', component: NativeTranscript,
   args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'Synthetic native wire blocks exercise the production ConversationPane through SDK decoding and the fixture data source.' } },
 } satisfies Meta<typeof NativeTranscript>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Dark:contract-fixture',
+  'Light:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const assertNative: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const canvas = within(canvasElement)

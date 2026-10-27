@@ -5753,7 +5753,7 @@ impl MissionsStore for Store {
                 }
                 // A revision carries a claim into the successor generation. Its worker may still name the
                 // step by the predecessor subject.
-                let (subject, current) = match (action != "claim")
+                let (subject, mut current) = match (action != "claim")
                     .then(|| carried_claim_successor_tx(transaction, &current, &actor))
                     .transpose()
                     .map_err(internal)?
@@ -5762,6 +5762,9 @@ impl MissionsStore for Store {
                     Some(successor) => (successor.subject.clone(), successor),
                     None => (subject, current),
                 };
+                if handoff.is_some() {
+                    enrich_step_summaries_at(transaction, &mut current, now).map_err(internal)?;
+                }
                 let (run_status, run_phase, current_generation, generation_status, root_status, root_phase): (
                     String,
                     String,
@@ -6150,6 +6153,9 @@ impl MissionsStore for Store {
                                     claim_expiry.expect("a renewal has a lease expiry").to_string(), now.to_string()],
                         )
                         .map_err(internal)?;
+                }
+                if let Some(input) = handoff {
+                    adhoc_work::clear_eta_tx(transaction, &self.origin, &current, input)?;
                 }
                 let mut view = transaction.query_row(
                     "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,

@@ -117,6 +117,7 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        assistant_receipts: Default::default(),
     };
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
