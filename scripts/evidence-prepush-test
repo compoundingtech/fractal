@@ -534,7 +534,7 @@ class Hook(unittest.TestCase):
 
     def test_when_the_base_has_no_hook_files_the_stub_does_nothing_silently(self):
         git(self.work, 'checkout', '-q', 'main')
-        git(self.work, 'rm', '-q', 'scripts/evidence-prepush', 'scripts/fractal-test')
+        git(self.work, 'rm', '-q', 'scripts/evidence-prepush', 'scripts/st-test')
         git(self.work, 'commit', '-q', '-m', 'remove')
         git(self.work, 'push', '-q', 'origin', 'main')
         git(self.work, 'checkout', '-q', 'feature')
