@@ -294,26 +294,29 @@ describe('tail-first transcript mounting', () => {
     expect(summary()).toContain('All 41 entries shown')
   })
 
-  it('mounts a cut reasoning run whole and keeps its open disclosure while Show all reveals the thoughts a tool call separated', async () => {
+  it('mounts all reasoning in a crossing work-log disclosure and keeps it open while Show all reveals deferred tools and prose', async () => {
     const tool: ConversationItem = { _tag: 'ToolCall', id: 'split/tool', callId: 'split/tool', name: 'read', input: { path: 'split.ts' }, status: 'success', callSeen: true, at: sourceAt }
     const items = [...range('before', 0, 6).map(answerRow), thought('early/0'), thought('early/1'), tool, ...range('run', 0, 5).map(thought), ...range('after', 0, 3).map(answerRow)]
     await render(transcript([sourceTurn('reasoning-turn', items)]))
-    // The newest six rows cut the run at run/2; the whole run mounts, and the tool call ends it.
-    expect(mountedSourceIds()).toEqual([...range('run', 0, 5), ...range('after', 0, 3)])
+    // The suffix starts at run/2, but early/* and run/* belong to the same work-log disclosure.
+    // Complete its reasoning without mounting the interleaved tool or earlier prose.
+    const reasoningIds = ['early/0', 'early/1', ...range('run', 0, 5)]
+    expect(mountedSourceIds()).toEqual([...reasoningIds, ...range('after', 0, 3)])
+    expect(container.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('10/17 entries')
     // Work-log call rows carry data-tool-status, not an item id; this turn has exactly one tool call.
     expect(container.querySelectorAll('[data-testid="work-log"] [data-tool-status]')).toHaveLength(0)
     const thinking = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="thinking-entry"] > button')]
     expect(thinking).toHaveLength(1)
     await act(async () => { thinking[0]!.click() })
     expect(thinking[0]!.getAttribute('aria-expanded')).toBe('true')
-    expect(thinkingIds()).toEqual(range('run', 0, 5))
+    expect(thinkingIds()).toEqual(reasoningIds)
     await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
     await flushHistory(items.length)
     expect(mountedSourceIds()).toEqual(items.map(item => item.id))
     expect(container.querySelectorAll('[data-testid="work-log"] [data-tool-status]')).toHaveLength(1)
     expect(container.querySelector('[data-testid="thinking-entry"] > button')).toBe(thinking[0])
     expect(thinking[0]!.getAttribute('aria-expanded')).toBe('true')
-    expect(thinkingIds()).toEqual(['early/0', 'early/1', ...range('run', 0, 5)])
+    expect(thinkingIds()).toEqual(reasoningIds)
   })
 
   it('keeps the focused scroll lane and visible anchor while prepending through the keyboard', async () => {
