@@ -145,6 +145,13 @@ else:
 del packages["@fixture/uncovered"]
 print("passed: workspace dependency fixture runs kit lanes; uncovered dependencies fail the scope guard")
 
+# The real workspace's tab metadata hook is bundled by NarrowLayout stories, not its browser fixture or tests.
+assert detector_contract["kit_paths"](["apps/fractal-web/src/web/useTabMetadata.ts"])
+assert not detector_contract["kit_paths"]([
+    "apps/fractal-web/src/web/useTabMetadata.browser.tsx",
+    "apps/fractal-web/src/web/useTabMetadata.integration.test.tsx",
+])
+print("passed: workspace tab metadata selects kit lanes; its browser fixture and tests do not")
 # Keep the raw terminal's bundled dependencies in kit scope without selecting its unit tests.
 raw_terminal_kit_inputs = (
     "apps/fractal-web/src/terminal/RawTerminal.tsx",
