@@ -58,10 +58,18 @@ with tempfile.TemporaryDirectory() as tmp:
         assert marked.wait(10) == 0, marked.stderr.read()
         assert "perf slot free" in status() and not holder.exists()
 
+    # A run that holds the slot until the test releases it: a fixed sleep ends on a loaded host before
+    # the runs meant to queue behind it have joined the line (each is a process start and status polls).
+    # It gives up after 30 s, so a failed assertion leaves no run behind.
+    release = root / "release"
+
+    def held(then):
+        return 'n=0; until [ -e %s ] || [ $n -ge 1500 ]; do sleep 0.02; n=$((n + 1)); done; %s' % (release, then)
+
     # Two runs started at once take turns: the second starts only after the first ends, and the
     # waiting one is told who holds the slot and for what.
     log = root / "turns"
-    script = 'echo "start $1" >> %s; sleep 1; echo "end $1" >> %s' % (log, log)
+    script = 'echo "start $1" >> %s; %s' % (log, held('echo "end $1" >> %s' % log))
     first = start(env, "--for", "branch-one", command=["bash", "-c", script, "x", "one"])
     until(holder.exists, "first run holds the slot")
     second = start(env, "--for", "branch-two", command=["bash", "-c", script, "x", "two"])
@@ -69,6 +77,7 @@ with tempfile.TemporaryDirectory() as tmp:
     shown = status()
     assert "held by" in shown and "branch-one" in shown, shown
     assert "waiting since" in shown, shown
+    release.touch()
     assert first.wait(20) == 0 and second.wait(20) == 0
     assert log.read_text().split("\n")[:-1] == ["start one", "end one", "start two", "end two"], log.read_text()
     assert "busy: held by" in second.stderr.read(), "the waiting run says who holds the slot"
@@ -76,12 +85,14 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # Waiters go in the order they asked.
     order = root / "order"
-    blocker = start(env, command=["sleep", "1.5"])
+    release.unlink()
+    blocker = start(env, command=["bash", "-c", held("true")])
     until(holder.exists, "blocker holds the slot")
     waiters = []
     for name in ("a", "b", "c"):
         waiters.append(start(env, command=["bash", "-c", "echo %s >> %s" % (name, order)]))
         until(lambda: status().count("waiting since") == len(waiters), "%s in line" % name)
+    release.touch()
     for process in [blocker, *waiters]:
         assert process.wait(20) == 0
     assert order.read_text().split() == ["a", "b", "c"]
