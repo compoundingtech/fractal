@@ -67,6 +67,10 @@ contributor's pull requests later, so set it up now.
 **You need** a Linux x86_64 machine with Nix. On our machines a run peaks at about 16 cores and 18 GB of RAM. The kept build
 folder takes 60 to 110 GB of disk. A full warm run takes about 12 minutes (our target is 12 minutes or less).
 
+**Clone without the evidence tags.** Signed records are tags under `refs/tags/evidence/`, tens of thousands of them. Clone with
+`git clone --no-tags https://github.com/compoundingtech/fractal`; `nix develop` (`scripts/install-git-hooks`) then sets a negative
+refspec, so a later `git fetch --tags` brings every other tag and none of these.
+
 **Once, enrol a key.** Run `scripts/evidence-keygen --level agent --name ALIAS`. Use an invented alias, never a machine or account
 name. It prints one line; open a pull request that adds that line to `.st/evidence-keys`. Keys are read from `main`, so the key counts
 once that pull request merges. Deleting the line revokes everything the key signed. The accounts and commit emails that open and

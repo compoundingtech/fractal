@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/install-git-hooks (run by nix develop) adds the negative refspec ^refs/tags/evidence/* to the origin remote once per clone, so `git fetch --tags` no longer pulls tens of thousands of evidence record tags and the pull request commits they reach. The README's pre-signing section says to clone with --no-tags.",
+  "replay": {"status": "none", "detail": "No record or signature changes."},
+  "schema": {"status": "none", "detail": "No schema or persistent data changes."},
+  "rules": {"status": "none", "detail": "No gate or verifier change; a fetch that names the evidence refs still gets them."},
+  "compatibility": {"status": "none", "detail": "Only the local clone's fetch configuration changes; CI already passes the same negative refspec."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "Existing clones get the refspec the next time nix develop runs scripts/install-git-hooks; evidence tags already fetched stay until deleted (git tag -l 'evidence/*' | xargs git tag -d)."},
+  "recovery": {"status": "none", "detail": "scripts/install-git-hooks --uninstall removes the refspec, or revert the change."}
+}
