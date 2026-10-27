@@ -255,6 +255,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/fixtures/AppStoryHarness.tsx",
     "apps/fractal-web/src/fixtures/appStoryAssertions.ts",
     "apps/fractal-web/src/fixtures/appStoryStates.ts",
+    # appStoryStates seeds each state's feed sync from the production initial value.
+    "apps/fractal-web/src/data/feedSync.ts",
 )
 SHA = re.compile(r"[0-9a-f]{40}")
 

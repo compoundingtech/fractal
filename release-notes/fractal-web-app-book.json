@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Add production-mounted Fractal/App/LiveAgentWorkspace and Fractal/App/ConversationPane suites to the kit Storybook, with loading, empty, populated, failed-tool, offline, unavailable and streaming repair states over the fixture world, a lazy-inclusive bidirectional story/module identity guard with planted-copy controls, and a Git-publication-aware synthetic-fixture privacy scan with negative controls.",
+  "summary": "Add production-mounted Fractal/App/LiveAgentWorkspace and Fractal/App/ConversationPane suites to the kit Storybook, with loading, empty, populated, failed-tool, offline, unavailable and streaming repair states over the fixture world. The fixtures supply production sync observations and plays require the offline banner, failed-tool error and streaming repair activity; app-suite plays use one dark desktop case per state, without redundant light aliases or per-commit admission.",
   "replay": { "status": "none", "detail": "No replay or rebuild of stored data." },
   "schema": { "status": "none", "detail": "No wire or storage schema changes; stories serve the existing strict-decoded fixture world through fixtureSource." },
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },

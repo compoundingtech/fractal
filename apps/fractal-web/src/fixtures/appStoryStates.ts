@@ -6,16 +6,19 @@
  * no gateway is contacted and no session, agent or clock is invented here.
  */
 import * as Atom from 'effect/reactivity/Atom'
+import * as Option from 'effect/Option'
 
 import { stLiveFrames } from '../conversation/fixtures.ts'
 import { timelineItems } from '../conversation/fromTimeline.ts'
 import { fixtureSource } from '../data/fixtureSource.ts'
+import { initialFeedSync, type FeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import {
   observed,
   unavailable,
   waiting,
   type ConversationPage,
   type DataSource,
+  type Feed,
 } from '../data/source.ts'
 import { fixtureProjections } from './projections.ts'
 
@@ -78,9 +81,41 @@ export const createAppStoryFixture = (state: AppStoryState): AppStoryFixture => 
         : {}),
     },
   })
+  // Production status surfaces consume decoded sync observations, not socket tags.
+  // Project every story feed so availability, stale content and repair pages agree
+  // with the same channels read by the live components.
+  const observedAt = fixtureProjections.now
+  const syncFeed = <TValue,>(feed: Atom.Atom<Feed<TValue>>): Atom.Atom<FeedSync<TValue>> =>
+    Atom.make<FeedSync<TValue>>((get) => {
+      const value = get(feed)
+      if (value._tag === 'Waiting') return initialFeedSync<TValue>(observedAt)
+      if (value._tag === 'Unavailable') return {
+        last: Option.none(),
+        sync: { observedAt, status: { _tag: 'Failed', cause: { _tag: 'Server', code: value.code ?? value.reason, message: value.detail ?? 'Fixture feed unavailable' } } },
+      }
+      return {
+        last: Option.some({ value: value.value, observedAt }),
+        sync: { observedAt, status: value.freshness === 'stale'
+          ? { _tag: 'Stale', reason: { _tag: 'Unknown' } }
+          : { _tag: 'Live', since: observedAt } },
+      }
+    })
+  const sync: NonNullable<DataSource['sync']> = {
+    gateway: Atom.make<FeedSyncObservation>({ observedAt, status: state === 'offline'
+      ? { _tag: 'Stale', reason: { _tag: 'Unknown' } }
+      : { _tag: 'Live', since: observedAt } }),
+    agents: syncFeed(source.agents),
+    missions: syncFeed(source.missions),
+    attention: syncFeed(source.attention),
+    conversation: Atom.family((ref: string) => syncFeed(source.conversation(ref))),
+    terminal: Atom.family((ref: string) => syncFeed(source.terminal(ref))),
+  }
   return {
-    source:
-      state === 'offline' ? { ...source, network: Atom.make({ _tag: 'Offline' as const }) } : source,
+    source: {
+      ...source,
+      sync,
+      ...(state === 'offline' ? { network: Atom.make({ _tag: 'Offline' as const }) } : {}),
+    },
     agentRef,
     agentName: agent.name,
   }

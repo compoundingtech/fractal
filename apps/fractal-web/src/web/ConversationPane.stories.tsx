@@ -38,36 +38,24 @@ export default meta
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'Empty:contract-fixture',
-  'EmptyLight:contract-fixture',
   'FailedTool:contract-fixture',
-  'FailedToolLight:contract-fixture',
   'Loading:contract-fixture',
-  'LoadingLight:contract-fixture',
   'Offline:contract-fixture',
-  'OfflineLight:contract-fixture',
   'Populated:contract-fixture',
-  'PopulatedLight:contract-fixture',
   'ScriptedRepair:contract-fixture',
-  'ScriptedRepairLight:contract-fixture',
   'Unavailable:contract-fixture',
-  'UnavailableLight:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
 
+// One story per state; the scheme control switches light and dark. The kit play gate runs each in one
+// dark desktop case (APP_CASE_OVERRIDES in packages/fractal-ui/scripts/kit-play-commit-set.mjs).
 export const Loading: Story = { args: { state: 'loading' } }
-export const LoadingLight: Story = { args: { state: 'loading', scheme: 'light' } }
 export const Empty: Story = { args: { state: 'empty' } }
-export const EmptyLight: Story = { args: { state: 'empty', scheme: 'light' } }
 export const Populated: Story = { args: { state: 'populated' } }
-export const PopulatedLight: Story = { args: { state: 'populated', scheme: 'light' } }
 export const FailedTool: Story = { args: { state: 'failed-tool' } }
-export const FailedToolLight: Story = { args: { state: 'failed-tool', scheme: 'light' } }
 export const Offline: Story = { args: { state: 'offline' } }
-export const OfflineLight: Story = { args: { state: 'offline', scheme: 'light' } }
 export const Unavailable: Story = { args: { state: 'unavailable' } }
-export const UnavailableLight: Story = { args: { state: 'unavailable', scheme: 'light' } }
 export const ScriptedRepair: Story = { args: { state: 'scripted-repair' } }
-export const ScriptedRepairLight: Story = { args: { state: 'scripted-repair', scheme: 'light' } }
 
 const styles = stylex.create({
   root: { height: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: color.canvas, color: color.fg, fontFamily: type.fontSans, fontSize: type.uiSize, lineHeight: type.uiLeading },

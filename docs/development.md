@@ -328,11 +328,19 @@ production file and mounted by the story. `Fractal/App/LiveAgentWorkspace` and
 `Fractal/App/ConversationPane` mount the real modules under `DataSourceProvider` over
 `fixtureSource` feeds of the deterministic fixture world (`src/fixtures/appStoryStates.ts`);
 they never start the live runtime or contact a gateway. Each suite has one story per state,
-dark and light: loading, empty, populated, failed tool, offline (stale feeds, reconnecting
-socket, browser offline), unavailable and the streaming repair session. Each story mounts
-exactly one production boundary; its play waits for the real transcript, composer and, for the
-workspace, the workspace root, then marks the canvas `data-proof="passed"`. The responsive
-phone layout stays in `Fractal/Narrow layout`.
+with a scheme control for light and dark: loading, empty, populated, failed tool, offline (stale
+feeds, reconnecting socket, browser offline), unavailable and the streaming repair session. Each
+story mounts exactly one production boundary; its play waits for the real transcript, composer
+and, for the workspace, the workspace root, then marks the canvas `data-proof="passed"`. The
+responsive phone layout stays in `Fractal/Narrow layout`.
+
+These states do not depend on width or scheme, so `APP_CASE_OVERRIDES` in
+`packages/fractal-ui/scripts/kit-play-commit-set.mjs` runs each of the 14 stories in one case,
+dark at 1440 px: 14 merge-gate cases instead of the full four-case matrix. A state whose
+behaviour does depend on width needs its own reviewed override. The suites carry no `critical`
+tag, so the per-commit set does not run them; they run in the merge gate (`KIT_PLAY_SET=all`).
+Every file they bundle is listed in `KIT_PATTERNS` in `scripts/ci-fractal-web-changes`, so a
+change to any of them selects kit plays.
 
 `LiveAgentWorkspace.graph.integration.test.ts` keeps the eager startup boundary and adds a
 lazy-inclusive identity check: it follows literal `import()` edges from `main.tsx` without

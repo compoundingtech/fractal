@@ -21,4 +21,10 @@ export const assertProductionAppState = (canvas: HTMLElement, state: AppStorySta
     throw new Error(`Production populated transcript missing in ${state}`)
   if (state === 'unavailable' && specimen.querySelector('[data-wf-unavailable]') === null)
     throw new Error('Production unavailable transcript missing')
+  if (state === 'offline' && workspace && specimen.querySelector('[data-connection-state="offline"]') === null)
+    throw new Error('Production offline banner missing')
+  if (state === 'failed-tool' && specimen.querySelector('[data-error-overlay-id^="work-failure-"]') === null)
+    throw new Error('Production failed-tool error missing')
+  if (state === 'scripted-repair' && specimen.querySelector('[data-testid="live-work"][aria-label="Response in progress"]') === null)
+    throw new Error('Production streaming repair activity missing')
 }
