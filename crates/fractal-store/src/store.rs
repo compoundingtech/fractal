@@ -18603,6 +18603,34 @@ pub fn step_timing_events(
 ) -> rusqlite::Result<Vec<(String, Value, u128)>> {
     #[cfg(any(test, feature = "test-support"))]
     STEP_TIMING_FOLD_CALLS.with(|calls| calls.set(calls.get() + 1));
+    // A committed read of a database file keys the events on the newest index and the count of
+    // these claims, which an append or a trim changes; the key is read from the index alone.
+    let file = connection
+        .path()
+        .filter(|path| !path.is_empty() && connection.is_autocommit())
+        .map(|path| (path.to_owned(), subject.to_owned()));
+    let key = match &file {
+        Some(_) => Some(connection.query_row(
+            "SELECT COALESCE(MAX(store_index), 0), COUNT(*)
+             FROM claims INDEXED BY claims_subject_kind_index
+             WHERE subject=?1
+               AND kind IN ('step-run.state','step-run.carried','work.claimed','work.renewed',
+                            'work.progress','work.submitted','work.failed','work.released','work.extended','work.person-asked','work.person-done','work.person-cancelled')",
+            [subject],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+        )?),
+        None => None,
+    };
+    if let (Some(file), Some(key)) = (&file, key)
+        && let Some(events) = STEP_TIMING_EVENTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(file)
+            .filter(|(kept, _)| *kept == key)
+            .map(|(_, events)| events.clone())
+    {
+        return Ok(events.as_ref().clone());
+    }
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h42f5449c246c owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.kind, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id
@@ -18622,7 +18650,7 @@ pub fn step_timing_events(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     #[cfg(any(test, feature = "test-support"))]
     STEP_TIMING_ROWS_PARSED.with(|rows| rows.set(rows.get() + events.len()));
-    Ok(events
+    let events = events
         .into_iter()
         .map(|(kind, body, accepted)| {
             (
@@ -18631,8 +18659,22 @@ pub fn step_timing_events(
                 accepted.parse::<u128>().unwrap_or(0),
             )
         })
-        .collect())
+        .collect::<Vec<_>>();
+    if let (Some(file), Some(key)) = (file, key) {
+        let mut kept = STEP_TIMING_EVENTS.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() >= ACTUAL_CACHE_LIMIT && !kept.contains_key(&file) {
+            kept.clear();
+        }
+        kept.insert(file, (key, Arc::new(events.clone())));
+    }
+    Ok(events)
 }
+
+/// Each step's timing events by database file and subject, under the newest index and the
+/// count of its timing claims when they were read.
+type KeptStepTimings = HashMap<(String, String), ((u64, u64), Arc<Vec<(String, Value, u128)>>)>;
+static STEP_TIMING_EVENTS: std::sync::LazyLock<Mutex<KeptStepTimings>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// A step's execution timing as of one snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
