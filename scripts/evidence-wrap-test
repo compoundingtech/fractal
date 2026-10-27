@@ -268,7 +268,7 @@ def main(argv):
         git(repo, 'update-ref', '--stdin', stdin=''.join(
             f'update refs/tags/evidence/{"a" * 40}/cached-{i} {record}\n' for i in range(2000)))
         for token in ('', 'secret-token-xyz'):
-            pushed = run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain,
+            pushed = run([sys.executable, str(WRAP), '--check', 'transport-check', '--toolchain-sha256', toolchain,
                           '--signer', signer, '--keys', str(signers), '--push', 'https-sink',
                           '--input', f'source_inputs={head_tree}', '--attempt', '2' if token else '1', '--', 'true'],
                          repo, home, EVIDENCE_PUSH_TOKEN=token, **transport)
@@ -277,8 +277,8 @@ def main(argv):
             assert published['verified'] and published['pushed'], published
             expected = {
                 published['tag'], published['ref'],
-                f'refs/tags/evidence/input/linux-gate/{head_tree}/{published["record"]}',
-                f'refs/notes/evidence-input/linux-gate/{head_tree}/{published["record"]}',
+                f'refs/tags/evidence/input/transport-check/{head_tree}/{published["record"]}',
+                f'refs/notes/evidence-input/transport-check/{head_tree}/{published["record"]}',
             }
             actual = set(git(https_sink, 'for-each-ref', '--format=%(refname)').splitlines())
             if not token:
