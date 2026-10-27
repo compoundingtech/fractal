@@ -10,7 +10,6 @@ import { commitSetCases, fullCases, FULL_CASE_OVERRIDES, validateCaseOverrides }
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
 import { shardStories } from './kit-play-shards.mjs'
 import { readinessTimings, summarizeTimings } from './kit-play-timings.mjs'
-import { runKitCalibration } from './kit-play-calibration.mjs'
 import { captureKitCpu, kitCpuDelta } from './kit-play-cpu.mjs'
 import { assessKitPlayCost, kitPlayBudget } from './kit-play-budget.mjs'
 export function assertStrictEvidence(records, id, a11y) {
@@ -31,8 +30,8 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   const shardCount = Number(process.env.KIT_PLAY_SHARD_COUNT ?? 1)
   // KIT_PLAY_SET=critical runs only stories tagged `critical`; KIT_PLAY_SET=commit is the per-commit
   // set, a narrowing of those (see kit-play-commit-set.mjs for what it leaves out);
-  // Commit plays use CPU cost per fixed calibration unit; wall time is only
-  // a hang guard. Empty environment values mean unset.
+  // Commit plays use raw CPU seconds; wall time is only a hang guard.
+  // Empty environment values mean unset.
   const option = (name, allowed, fallback) => {
     const value = process.env[name] || fallback
     if (!allowed.includes(value)) throw new Error(`${name} must be one of ${allowed.join(', ')}`)
@@ -74,15 +73,13 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   const base = `http://127.0.0.1:${server.address().port}`
   let playStarted = performance.now(), elapsedSeconds
   let cpuStarted = initialCpu, cpuDelta, loadStarted = loadavg(), loadEnded
-  let calibrationBefore, calibrationAfter
   const rows = []
   const workers = playWorkers(process.env, availableParallelism())
   let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError, storyFiles = {}
   await mkdir(outputDirectory, { recursive: true })
   const writeReceipt = async () => {
     const cost = assessKitPlayCost(budget, {
-      elapsedSeconds, busyCoreMinutes: cpuDelta.busyCoreMinutes,
-      before: calibrationBefore, after: calibrationAfter, costRequired: set === 'commit',
+      elapsedSeconds, busyCoreMinutes: cpuDelta.busyCoreMinutes, costRequired: set === 'commit',
     })
     const receipt = {
       pass: !fatalError && !cost.overBudget && (shardCount > 1 ? fullIds : ids).length > 0 && rows.length === expectedCases && rows.every(row => row.pass),
@@ -109,8 +106,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
       await appendFile(process.env.GITHUB_STEP_SUMMARY, `\n| Shard | Cases (completed/expected) | Passed | Failed | Play minutes | Result |\n| --- | --- | --- | --- | --- | --- |\n| kit ${shardIndex}/${shardCount} | ${receipt.cases}/${receipt.expectedCases} | ${receipt.passed} | ${receipt.failed} | ${receipt.playMinutes.toFixed(2)} | ${receipt.pass ? 'PASS' : 'FAIL'} |\n`)
       await appendFile(process.env.GITHUB_STEP_SUMMARY, `\nkit ${shardIndex}/${shardCount} Storybook build: ${(receipt.storybookBuildSeconds / 60).toFixed(2)} runner-minutes (included in this shard; duplicate build cost is the sum of nonzero-shard builds).\n`)
     }
-    if (cost.costStatus === 'unstable_vm') console.warn('Kit plays: unstable_vm — calibration drift exceeds 25%; only the wall hang guard is enforced.')
-    if (cost.overCostBudget) console.error(`Kit plays (${set}) calibrated cost: ${cost.costStatus}; cost=${cost.normalizedCost}, anchor=${cost.costAnchor}, limit=${cost.maxNormalizedCost}.`)
+    if (cost.overCpuBudget) console.error(`Kit plays (${set}) used ${cost.cpuSeconds.toFixed(2)} CPU s, over the ${cost.maxCpuSeconds} CPU s limit (anchor ${cost.cpuAnchorSeconds} s +10%).`)
     if (cost.overWallGuard) console.error(`Kit plays (${set}) took ${elapsedSeconds.toFixed(1)} s, over the ${cost.wallGuardSeconds} s wall hang guard.`)
     return receipt
   }
@@ -134,9 +130,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
       omitted = { stories: ids.filter(id => overrides.get(id)?.length === 0), cases: ids.length * 4 - cases.length }
     }
     expectedCases = cases.length
-    if (set === 'commit') calibrationBefore = await runKitCalibration()
-    // Calibration is outside both raw play measurements. Record proc/stat
-    // deltas, including steal ticks, around exactly the measured play phase.
+    // Record CPU and proc/stat deltas, including steal ticks, around the play phase.
     cpuStarted = await captureKitCpu()
     loadStarted = loadavg()
     playStarted = performance.now()
@@ -231,13 +225,6 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     elapsedSeconds = (performance.now() - playStarted) / 1000
     cpuDelta = kitCpuDelta(cpuStarted, await captureKitCpu())
     loadEnded = loadavg()
-    if (calibrationBefore) {
-      try {
-        calibrationAfter = await runKitCalibration({ cpuCount: calibrationBefore.cpuCount })
-      } catch (error) {
-        fatalError = `${fatalError ?? ''} calibration after plays: ${error}`
-      }
-    }
   }
   const receipt = await writeReceipt()
   // The complete receipt stays in CI logs even when the gate fails.

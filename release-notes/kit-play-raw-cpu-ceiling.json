@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "commits": ["7fd7f4508762f938afacbd7269bda48b31d0b898", "c2741ecb4bb99d84120ce935d77c7376a6dfe950"],
+  "summary": "Gate commit strict plays on a frozen raw CPU ceiling and retain independent wall and steal telemetry",
+  "replay": {"status": "none", "detail": "CI harness only."},
+  "schema": {"status": "none", "detail": "No database changes."},
+  "rules": {"status": "none", "detail": "No product rule or case-set changes."},
+  "compatibility": {"status": "changed", "detail": "Commit receipts report CPU seconds, anchor and derived ceiling, plus raw CPU core-minutes, wall seconds and Linux proc/stat deltas including steal. The single 413.9-second CPU anchor allows exactly 10% headroom. KIT_PLAY_WALL_GUARD_SECONDS replaces KIT_PLAY_MAX_SECONDS as an independent wall hang ceiling. Experimental normalization and calibration are removed."},
+  "downtime": {"status": "none", "detail": "No deployment impact."},
+  "manual": {"status": "changed", "detail": "After PR #3982 lands, lower the CPU anchor once to the new measured cost; never raise it later."},
+  "recovery": {"status": "none", "detail": "No persisted state changes."}
+}

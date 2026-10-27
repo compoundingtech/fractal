@@ -124,7 +124,7 @@ const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides 
 
 test('full set with a11y requires one passed a11y report per case', { timeout: 60000 }, async () => {
   // Empty values are unset, as a workflow expression with no value yields them.
-  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: '', KIT_PLAY_A11Y: '', KIT_PLAY_WALL_GUARD_SECONDS: '', KIT_PLAY_COST_ANCHOR: '' } })
+  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: '', KIT_PLAY_A11Y: '', KIT_PLAY_WALL_GUARD_SECONDS: '' } })
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
   assert.deepEqual([receipt.set, receipt.a11y, receipt.wallGuardSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 8, 21])
@@ -290,7 +290,7 @@ test('a run over its wall hang guard fails after running every case', { timeout:
 })
 
 test('invalid options fail before any case runs', { timeout: 60000 }, async () => {
-  for (const env of [{ KIT_PLAY_SET: 'some' }, { KIT_PLAY_A11Y: 'no' }, { KIT_PLAY_WALL_GUARD_SECONDS: '-1' }, { KIT_PLAY_COST_ANCHOR: 'soon' },
+  for (const env of [{ KIT_PLAY_SET: 'some' }, { KIT_PLAY_A11Y: 'no' }, { KIT_PLAY_WALL_GUARD_SECONDS: '-1' },
     // Only the full set is sharded.
     { KIT_PLAY_SET: 'commit', KIT_PLAY_SHARD_COUNT: '2' }, { KIT_PLAY_SET: 'critical', KIT_PLAY_SHARD_INDEX: '1', KIT_PLAY_SHARD_COUNT: '2' }]) {
     await assert.rejects(() => runGate({ env }), /ENOENT/)
