@@ -16732,9 +16732,10 @@ async fn renew_claimed_work(
         .into_iter()
         .filter(|step| work_claim_has_active_harness(step, subject, harness))
     {
+        // Nothing here reads the answer, so ask for the lease view: the step's row alone.
         let renewed: Result<StepRunView> = client
             .post(
-                &format!("/v1/work/renew/{}", urlencoding::encode(&step.subject)),
+                &format!("/v1/work/renew/{}?view=lease", urlencoding::encode(&step.subject)),
                 &WorkRequest {
                     wait_ms: None,
                     actor: Some(subject.into()),
