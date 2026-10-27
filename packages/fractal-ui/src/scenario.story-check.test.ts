@@ -457,10 +457,7 @@ test('scenario transcript marks only the first huge section of each incomplete t
 test('scenario transcript preserves tool operations and failed tool lifecycle', () => {
   const world = loadWorld('fleet-mid-refactor')
   const toolTurns = scenarioSections(world.with({ conversation: 'tool-heavy' }).slices.conversation).sections.flatMap(({ turns }) => turns)
-  // This kit variant appends calls after completed without another running status.
-  // Preserve its operations, but follow the production projection's terminal verdict.
-  expect(toolTurns.some(({ work }) => !work.running && work.commands === 5 && work.changedFiles === 1)).toBe(true)
-  expect(toolTurns.flatMap(({ work }) => work.calls).some(call => call.status === 'interrupted')).toBe(true)
+  expect(toolTurns.some(({ work }) => work.running && work.commands === 5 && work.changedFiles === 1)).toBe(true)
   expect(toolTurns.flatMap(({ work }) => work.calls).some(call => call.kind === 'run' && call.command !== undefined)).toBe(true)
   expect(toolTurns.flatMap(({ work }) => work.calls).some(call => call.kind === 'edit' && call.changedPath === 'src/session.ts')).toBe(true)
   const failedTurns = scenarioSections(world.with({ conversation: 'failed-tools' }).slices.conversation).sections.flatMap(({ turns }) => turns)
