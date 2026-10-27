@@ -1473,6 +1473,12 @@ branch's own `st-test` changes are tested by its `ci-script-tests`, which run `s
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
+Publication delegates the remote name to git unchanged: its configured URL, pushurl, URL rewrites and credential helper apply,
+including transport configuration supplied through `GIT_CONFIG_*`. `EVIDENCE_PUSH_TOKEN` adds an HTTP header without replacing
+that configuration. The child `evidence-wrap` argv is echoed before each signed check (never the token).
+Only the selected checks' covering records are sent, not the checkout's cached evidence namespace; per-crate publication batches at most
+40 explicit refs per push. Repeating `scripts/st-test --check CHECK --push origin` publishes already-covered evidence without rerunning that check.
+
 **Break-glass for a broken `st-test` on main:** `ST_TEST_REEXEC` set to any value skips st-test's re-execution of the base's copy, so the
 branch's own copy runs. It is only for signing and pushing a fix to `st-test` itself, only on the coordinating lead's word for that one run, and
 never otherwise.
@@ -1485,11 +1491,22 @@ Use that run's full tree ID, not necessarily `HEAD^{tree}`: when protected files
 `origin/main`. Without a run record, expand the summary's short ID with `tree=$(git for-each-ref --format='%(refname)'
 "refs/notes/evidence/SHORT*" | cut -d/ -f4 | sort -u)`; proceed only if `test "$(printf '%s\n' "$tree" | wc -l)" -eq 1 &&
 test "${#tree}" -eq 40` succeeds (one full tree ID, not an absent or ambiguous prefix).
-To publish by hand, set `tree` to that full ID and push only that tree's refs: `git push origin $(git for-each-ref
---format='%(refname):%(refname)' "refs/tags/evidence/$tree/" "refs/notes/evidence/$tree/")`. Add the run's
-`refs/tags/evidence/input/...` and `refs/notes/evidence-input/...` refs that the remote lacks as explicit `REF:REF` arguments to that push
-(compare with `git ls-remote --refs origin 'refs/tags/evidence/input/*' 'refs/notes/evidence-input/*'`). Do not push the full evidence globs:
-a shared clone holds other runs' records too, and sending them all can fail with a remote `Internal Server Error` per ref.
+Prefer `scripts/st-test --check CHECK --push origin` for publication, so the runner selects the covering record and its input indexes.
+To publish by hand, set `tree` to that full ID and batch only that tree's explicit refs (Bash):
+
+```bash
+refs=()
+while IFS= read -r ref; do refs+=("$ref:$ref"); done < <(
+  git for-each-ref --format='%(refname)' "refs/tags/evidence/$tree/" "refs/notes/evidence/$tree/"
+)
+for ((i=0; i<${#refs[@]}; i+=40)); do
+  git push origin "${refs[@]:i:40}" || break
+done
+```
+
+Add only that run's `refs/tags/evidence/input/...` and `refs/notes/evidence-input/...` names to `refs` as explicit `REF:REF`
+arguments before the loop, if needed. Do not push the full evidence globs: a shared clone holds other runs' records too,
+and sending thousands together can fail with a remote `Internal Server Error` per ref.
 Push the evidence refs before `git push origin HEAD:BRANCH`, so the branch's first CI run finds them; existing evidence refs are never
 updated or deleted (a ruleset protects `refs/tags/evidence/**`). An agent note can yield `decision=skip ... signer=<principal>` only for
 wrapper-kind checks on `pull_request` runs, never in the merge queue (see "Agent keys"), and only when all skip conditions hold.
