@@ -381,8 +381,23 @@ pub struct UnhealthyProjection {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReplicationWorkerStatusRequest {
+    /// Empty, with no `worker`, on a report of the worker's process CPU alone.
+    #[serde(default)]
     pub peer: String,
-    pub worker: ReplicationWorkerStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<ReplicationWorkerStatus>,
+    /// The worker process's own CPU, for the member's CPU targets. Older workers send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ReplicationWorkerProcess>,
+}
+
+/// A replication worker's cumulative process CPU, and which process it is.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReplicationWorkerProcess {
+    pub pid: u32,
+    /// When the process started, in Unix milliseconds: with the pid, its identity.
+    pub started_at_unix_ms: u64,
+    pub cpu_ns: u64,
 }
 
 /// Host-local worker state; absent after restart until the worker next attempts a peer.

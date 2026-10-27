@@ -194,7 +194,7 @@ impl State {
                         }
                         ui.flash(format!("Could not open the terminal: {reason}"));
                     } else {
-                        ui.flash(format!("No direct terminal ({reason}); trying st's view"));
+                        ui.flash(format!("No direct terminal ({reason}); trying Fractal's view"));
                     }
                 }
             }
@@ -218,7 +218,12 @@ fn apply_current_terminal_update(ui: &mut Ui, update: TerminalUpdate, attached: 
         TerminalUpdate::Screen(screen) => {
             if let Some(view) = ui.terminal.as_mut() {
                 view.lines = screen_lines(&screen);
-                view.cursor = screen.cursor.visible.then_some((screen.cursor.row, screen.cursor.column));
+                view.cursor = screen.cursor.visible.then(|| {
+                    Some((
+                        usize::try_from(screen.cursor.row).ok()?,
+                        usize::try_from(screen.cursor.column).ok()?,
+                    ))
+                }).flatten().filter(|(row, column)| *row < screen.rows && *column < screen.columns);
                 view.stale = None;
                 if !screen.title.is_empty() {
                     view.title = format!("{} · {}", view.name, screen.title);

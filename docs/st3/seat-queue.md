@@ -79,7 +79,7 @@ MOVES        1 total
 `move` takes exactly one of `--top`, `--bottom`, `--before RUN`, or `--after RUN`. The run and any
 anchor must be queued for the seat. After a move, the command prints the new queue.
 
-A person moves runs with `--as person/NAME` or `person` in the st config, like other client-v0
+A person moves runs with `--as person/NAME` or `person` in the Fractal config, like other client-v0
 mutations. With `--json`, it prints the action result.
 
 An agent moves runs in any seat's queue, including its own, with `--as agent/PATH`; in

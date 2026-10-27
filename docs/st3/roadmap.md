@@ -1,6 +1,6 @@
-# st product roadmap
+# Fractal product roadmap
 
-This file records accepted future work that is not built yet. Active fleet work belongs in st missions.
+This file records accepted future work that is not built yet. Active fleet work belongs in Fractal missions.
 
 ## Agent continuity
 
@@ -9,7 +9,7 @@ This file records accepted future work that is not built yet. Active fleet work 
 
 ## User interfaces
 
-- [ ] Hold a product design session for `st` and the Fractal mobile application.
+- [ ] Hold a product design session for Fractal and the Fractal mobile application.
 
 ## Runtime containment
 

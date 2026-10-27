@@ -8,7 +8,7 @@ extension and consumes `sendUserMessage`. No model or LLM judge runs, and the re
 never polls a mailbox. This measures the transport and harness integration boundary;
 it does not prove a real model's response time or every harness's integration.
 
-Run outside an st seat, since the sender acts as `person/eval`. For example:
+Run outside a Fractal seat, since the sender acts as `person/eval`. For example:
 
 ```sh
 setsid -f env -i HOME="$HOME" USER="$USER" PATH="$PATH" \
@@ -111,6 +111,18 @@ ten-second read gate. The runner refuses a short outage below two seconds, a lon
 outage below two minutes, or an observation tail below the startup grace plus 5 seconds (25 seconds at
 the real grace). It exits nonzero
 for a failed gate or fixture error and writes partial results after each case.
+
+Readiness waits use one outer deadline, including an in-flight observation. A CLI
+probe's five-second timeout is an incomplete sample, not the end of readiness.
+Non-timeout errors still fail immediately. Each wait writes a
+`messaging_faults.wait` JSON event to stderr with `condition`, `ended_by`
+(`ready`, `outer-deadline`, or `error`), `elapsed_ms`, `outer_timeout_ms`, and
+`probe_timeouts`. Cancellation still allows the existing subprocess cleanup to
+finish. These setup budgets do not change the ten-second delivery gate.
+
+The runtime regressions inject a probe timeout followed by readiness and expire
+an outer deadline while a probe is blocked. They use explicit async coordination,
+not sleeps to order events.
 
 The oracle's negative controls run with:
 

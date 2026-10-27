@@ -37,6 +37,8 @@ pub struct Config {
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
     pub pty_root: Option<PathBuf>,
+    /// Owner-local catalog roots supplying declared private-notes carrier provenance.
+    pub private_notes_catalogs: Vec<PathBuf>,
     pub socket: PathBuf,
     pub client_gateway_socket: PathBuf,
     pub peer_listen: Option<String>,
@@ -547,6 +549,7 @@ impl Default for Config {
             shared_secret_file: None,
             state_dir,
             pty_root: None,
+            private_notes_catalogs: Vec::new(),
             socket,
             client_gateway_socket,
             peer_listen: None,
@@ -754,6 +757,11 @@ impl Config {
         self.reconcile.validate()?;
         self.asks.validate()?;
         self.github.validate()?;
+        anyhow::ensure!(
+            self.private_notes_catalogs.iter().all(|path| path.is_absolute()
+                && path.components().all(|part| matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_)))),
+            "private_notes_catalogs must contain absolute paths without parent components"
+        );
         if self.work_root.is_some() {
             self.work_root()?;
         }

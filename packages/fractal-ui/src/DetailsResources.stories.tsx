@@ -57,6 +57,7 @@ const styles = stylex.create({
   comparison: { display: 'flex', flexWrap: 'wrap', gap: 16, backgroundColor: surface.canvas },
 })
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Details Resources',
   component: Workbench,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Production DetailsPane mounted in Workbench. Cases preserve inherited chart, resource, scope and geometry gates without the former ExploreDetails or DetailsWorkbench harness. Host counters observe Details callbacks only; terminal drawers, split-tree wiring and sidebar selection are intentionally not rendered.' } } },
@@ -80,6 +81,21 @@ const meta = {
   },
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'CappedResourceStates:contract-fixture',
+  'CardResourceStates:contract-fixture',
+  'DenseResourceStates:contract-fixture',
+  'E3ChartMatrix:contract-fixture',
+  'Interactions:contract-fixture',
+  'OrientationAnchor:contract-fixture',
+  'PresentationMatrix:contract-fixture',
+  'ResourceGeometry:contract-fixture',
+  'SharedResourceActionNames:contract-fixture',
+  'SpendScope:contract-fixture',
+  'TraceContracts:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 function requireContract(value: unknown, reason: string): asserts value { if (!value) throw new Error(reason) }
 async function rejectsControl(reason: string, assertion: () => void | Promise<void>) {

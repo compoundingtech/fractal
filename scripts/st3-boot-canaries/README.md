@@ -1,7 +1,7 @@
 # Boot canaries
 
-A seat that cannot start must never ship. `run` boots seats of one harness against a real st3
-daemon and a stand-in provider, and checks that each seat reaches a claimed step and reads an st
+A seat that cannot start must never ship. `run` boots seats of one harness against a real Fractal
+daemon and a stand-in provider, and checks that each seat reaches a claimed step and reads a Fractal
 message.
 
     run BINARY EVIDENCE_DIR HARNESS SCENARIO [--bound SECONDS] [--scratch DIR] [--replacement-binary BINARY]
@@ -14,6 +14,15 @@ or `channel-missing`, `channel-uninitialized` and `channel-parked` (Claude);
 back on the session it suspended on, holds hour-old mail, and consumes recent never-offered
 mail exactly once. The Rust wrapper
 `crates/fractal/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
+
+OMP also runs `ask-sigterm` and `ask-sigkill`. Each opens an unanswered ask, stops the private
+daemon with the named signal, removes its PTY processes to model a host shutdown, and starts
+the daemon again. The stand-in requires the real driver's F5 bytes before it publishes a
+live picker from the saved transcript. The tests compare the native session, tool-call id,
+question and options, and count every provider handoff between interruption and picker
+recovery. No answer, prompt, manual retry or seat restart command is sent in that interval.
+This checks the Fractal bridge with a deterministic provider; it does not certify native
+picker behavior in a released OMP binary. Evidence is saved in `pending-ask-restart.json`.
 
 The boot, no-st2 and subagent fixtures put their private bin directory first, followed by
 inherited `PATH` entries that neither contain an `st2` executable nor name an `st2` path.
@@ -70,7 +79,7 @@ the exact selected ID, claim work and read mail using the pinned originating `CO
 
 ## What is real and what is not
 
-Real: the st3 daemon, `pty` sessions, the driver and channel processes, the extension files st
+Real: the Fractal daemon, `pty` sessions, the driver and channel processes, the extension files Fractal
 loads into pi and omp, the mailbox, the work graph, and the `st` CLI the stand-in calls.
 
 Stand-in: the provider only. Each `stub-*` speaks the wire contract of its harness and does what a

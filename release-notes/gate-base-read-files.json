@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The CI evidence gate keeps judging a pull request's head tree when main changed only the signing keys, the author list or the evidence log's key after the branch point: those are read at the accepted base when a note is judged, so a key rotation on main no longer voids every head signature made before it",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "changed", "detail": "branch_point_verdict ignores main-side changes to .st/evidence-keys, .st/evidence-authors.json and .st/evidence-log-key (BASE_READ). Every other protected file still makes the run fall back to the merge tree, and the branch's own edits to these files still count as protected changes. Trust is unchanged: keys, authors and the log key are read from the base, so a note the change distrusts is refused."},
+  "compatibility": {"status": "none", "detail": "st-test asks the base's branch_point_verdict, so it picks the rule up from main once this merges."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

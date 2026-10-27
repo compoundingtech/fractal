@@ -295,6 +295,13 @@ def allow_wire_contract(pr, row):
 
 def prepare_clone():
     """Only this disposable integration clone is reset; live serves immutable builds."""
+    # Reconcile by refusing drift, not deleting operator config (even inert GC keys).
+    # The host-git boundary is the single allowlist; its refusal becomes tick detail.
+    git('config', '--local', '--list', capture=True)
+    # Host Git intentionally ignores global identity; commits belong to this service.
+    git('config', 'user.name', os.environ.get('FRACTAL_INTEGRATOR_GIT_USER_NAME', 'Fractal live-r3 integrator'))
+    git('config', 'user.email', os.environ.get('FRACTAL_INTEGRATOR_GIT_USER_EMAIL',
+                                             'live-r3@fractal-integrator.invalid'))
     if git('rev-parse', '--verify', 'MERGE_HEAD', capture=True, check=False).returncode == 0:
         git('merge', '--abort')
     git('checkout', '-f', '-B', 'live-r3', 'origin/main')
@@ -514,13 +521,19 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
             result=candidate_sandbox.run(command, worktree=cwd or C, shell=sandbox_shell,
                                         network=network, **options)
         else:
+            host_git = command[0] == 'git'
             if command[0] == 'git':
                 command = ['python3', '-I', str(SCRIPT_DIR/'host-git.py'), *command[1:]]
             result=subprocess.run(command, cwd=SCRIPT_DIR, text=True,
                                   stdout=subprocess.PIPE if capture or log_capture else None,
-                                  stderr=subprocess.PIPE if capture or log_capture else None,
-                                  check=check and not log_capture, timeout=timeout,
+                                  stderr=subprocess.PIPE if capture or log_capture or host_git else None,
+                                  check=check and not log_capture and not host_git, timeout=timeout,
                                   env={**os.environ, 'CI':'1'})
+            if host_git:
+                if not capture and result.stderr:
+                    print(result.stderr, end='', file=sys.stderr, flush=True)
+                if check:
+                    result.check_returncode()
         if selection_api:
             selection_remaining()
         if log_capture:
@@ -880,7 +893,9 @@ def tick():
     except Exception as e:
         row['error']=str(e)
         if isinstance(e,subprocess.CalledProcessError):
-            row['detail']=((e.stdout or '') + '\n' + (e.stderr or '')).strip()[-4000:]
+            detail=((e.stdout or '') + '\n' + (e.stderr or '')).strip()
+            # Host Git refusals must name every rejected key, without truncation.
+            row['detail']=detail if str(SCRIPT_DIR/'host-git.py') in e.cmd else detail[-4000:]
         print('tick failed:',row['error'],row.get('detail',''),flush=True)
     finally:
         SELECTION_DEADLINE = None

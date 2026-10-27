@@ -15,9 +15,9 @@ use serde_json::{Value, json};
 pub const MARKETPLACE: &str = "st2";
 pub const PLUGIN: &str = "st2-channel";
 pub const CHANNEL: &str = "plugin:st2-channel@st2";
-pub const ST3_MARKETPLACE: &str = "st";
-pub const ST3_PLUGIN: &str = "st-channel";
-pub const ST3_CHANNEL: &str = "plugin:st-channel@st";
+pub const FRACTAL_MARKETPLACE: &str = "st";
+pub const FRACTAL_PLUGIN: &str = "st-channel";
+pub const FRACTAL_CHANNEL: &str = "plugin:st-channel@st";
 const PLUGINS: [&str; 1] = [PLUGIN];
 
 const MARKETPLACE_MANIFEST: &[u8] =
@@ -25,13 +25,13 @@ const MARKETPLACE_MANIFEST: &[u8] =
 const PLUGIN_MANIFEST: &[u8] =
     include_bytes!("../../../claude-channel/plugins/st2-channel/.claude-plugin/plugin.json");
 const MCP_CONFIG: &[u8] = include_bytes!("../../../claude-channel/plugins/st2-channel/.mcp.json");
-const ST3_PLUGIN_MANIFEST: &[u8] =
+const FRACTAL_PLUGIN_MANIFEST: &[u8] =
     include_bytes!("../../../plugins/claude/st-channel/.claude-plugin/plugin.json");
-const ST3_MCP_CONFIG: &[u8] = include_bytes!("../../../plugins/claude/st-channel/.mcp.json");
-const ST3_MARKETPLACE_MANIFEST: &[u8] =
+const FRACTAL_MCP_CONFIG: &[u8] = include_bytes!("../../../plugins/claude/st-channel/.mcp.json");
+const FRACTAL_MARKETPLACE_MANIFEST: &[u8] =
     include_bytes!("../../../plugins/claude/.claude-plugin/marketplace.json");
 const POLICY_FILE: &str = "50-st2-channel.json";
-const ST3_POLICY_FILE: &str = "50-st-channel.json";
+const FRACTAL_POLICY_FILE: &str = "50-st-channel.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallPaths {
@@ -155,45 +155,45 @@ pub fn verify_installed() -> Result<()> {
     Ok(())
 }
 
-pub fn verify_st3_installed() -> Result<()> {
-    verify_st3_plugin()?;
+pub fn verify_fractal_installed() -> Result<()> {
+    verify_fractal_plugin()?;
     anyhow::ensure!(
-        st3_policy_available(),
+        fractal_policy_available(),
         "the st Claude channel policy is not installed"
     );
     Ok(())
 }
 
 /// User-owned assets are usable with Claude's development channel admission.
-pub fn verify_st3_plugin() -> Result<()> {
-    let marketplace = st3_marketplace_root()?;
-    verify_st3_marketplace_at(&marketplace)?;
-    if !st3_marketplace_is_registered_at(&marketplace)? {
+pub fn verify_fractal_plugin() -> Result<()> {
+    let marketplace = fractal_marketplace_root()?;
+    verify_fractal_marketplace_at(&marketplace)?;
+    if !fractal_marketplace_is_registered_at(&marketplace)? {
         bail!("the st Claude marketplace is not registered; run `fractal claude-channel install`");
     }
-    if !st3_plugin_is_installed()? {
+    if !fractal_plugin_is_installed()? {
         bail!("the st Claude channel plugin is not installed; run `fractal claude-channel install`");
     }
     Ok(())
 }
 
-pub fn st3_policy_available() -> bool {
-    st3_policy_path().is_ok_and(|path| st3_policy_is_current_at(&path))
+pub fn fractal_policy_available() -> bool {
+    fractal_policy_path().is_ok_and(|path| fractal_policy_is_current_at(&path))
 }
 
 /// Install the ST3-owned Claude channel under an ST3 marketplace identity. This is deliberately
 /// separate from [`install`]: the migration may add or remove ST3 without changing ST2's public
 /// plugin identity or command behavior.
-pub fn install_st3(no_policy: bool) -> Result<InstallPaths> {
-    let marketplace = st3_marketplace_root()?;
-    install_st3_marketplace_at(&marketplace)?;
-    install_st3_with_claude(&marketplace)?;
-    let policy = st3_policy_path()?;
+pub fn install_fractal(no_policy: bool) -> Result<InstallPaths> {
+    let marketplace = fractal_marketplace_root()?;
+    install_fractal_marketplace_at(&marketplace)?;
+    install_fractal_with_claude(&marketplace)?;
+    let policy = fractal_policy_path()?;
     if !no_policy {
-        ensure_st3_policy_with_elevation(&policy)?;
+        ensure_fractal_policy_with_elevation(&policy)?;
     }
     println!("marketplace\t{}", marketplace.display());
-    println!("plugin\t{ST3_PLUGIN}@{ST3_MARKETPLACE}");
+    println!("plugin\t{FRACTAL_PLUGIN}@{FRACTAL_MARKETPLACE}");
     if no_policy {
         println!("policy\tskipped");
     } else {
@@ -205,19 +205,19 @@ pub fn install_st3(no_policy: bool) -> Result<InstallPaths> {
     })
 }
 
-pub fn status_st3() -> Result<()> {
-    let marketplace = st3_marketplace_root()?;
-    let policy = st3_policy_path()?;
-    let assets = verify_st3_marketplace_at(&marketplace).is_ok();
-    let marketplace_ready = st3_marketplace_registration()
+pub fn status_fractal() -> Result<()> {
+    let marketplace = fractal_marketplace_root()?;
+    let policy = fractal_policy_path()?;
+    let assets = verify_fractal_marketplace_at(&marketplace).is_ok();
+    let marketplace_ready = fractal_marketplace_registration()
         .ok()
         .flatten()
         .is_some_and(|entry| marketplace_entry_matches(&entry, &marketplace));
     let installed = claude_json(["plugin", "list", "--json"]).ok();
     let plugin_ready = installed
         .as_ref()
-        .is_some_and(|value| json_contains(value, &format!("{ST3_PLUGIN}@{ST3_MARKETPLACE}")));
-    let policy_ready = st3_policy_is_current_at(&policy);
+        .is_some_and(|value| json_contains(value, &format!("{FRACTAL_PLUGIN}@{FRACTAL_MARKETPLACE}")));
+    let policy_ready = fractal_policy_is_current_at(&policy);
     println!("assets\t{}", state(assets));
     println!("marketplace\t{}", state(marketplace_ready));
     println!("plugin\t{}", state(plugin_ready));
@@ -237,50 +237,50 @@ pub fn status_st3() -> Result<()> {
     }
 }
 
-pub fn uninstall_st3(keep_policy: bool) -> Result<()> {
-    remove_st3_channel(keep_policy)?;
+pub fn uninstall_fractal(keep_policy: bool) -> Result<()> {
+    remove_fractal_channel(keep_policy)?;
     println!("uninstalled");
     Ok(())
 }
 
 /// Unregister st's Claude plugin and marketplace and delete the marketplace files, saying nothing.
-pub fn remove_st3_channel(keep_policy: bool) -> Result<()> {
-    let marketplace = st3_marketplace_root()?;
+pub fn remove_fractal_channel(keep_policy: bool) -> Result<()> {
+    let marketplace = fractal_marketplace_root()?;
     // Asking Claude about its plugins creates its own state files, so a machine that has never
     // registered st's channel (no marketplace files and no Claude user config) is not asked.
     if !marketplace.exists() && !claude_user_config_exists() {
-        let policy = st3_policy_path()?;
+        let policy = fractal_policy_path()?;
         if !keep_policy && policy.exists() {
-            remove_st3_policy_with_elevation(&policy)?;
+            remove_fractal_policy_with_elevation(&policy)?;
         }
         return Ok(());
     }
-    let owns_marketplace = st3_marketplace_registration()?
+    let owns_marketplace = fractal_marketplace_registration()?
         .is_some_and(|entry| marketplace_entry_matches(&entry, &marketplace));
-    if st3_plugin_is_installed()? {
+    if fractal_plugin_is_installed()? {
         anyhow::ensure!(
             owns_marketplace,
-            "refusing to uninstall {ST3_PLUGIN}@{ST3_MARKETPLACE} from another marketplace source"
+            "refusing to uninstall {FRACTAL_PLUGIN}@{FRACTAL_MARKETPLACE} from another marketplace source"
         );
         run_claude(&[
             "plugin",
             "uninstall",
-            &format!("{ST3_PLUGIN}@{ST3_MARKETPLACE}"),
+            &format!("{FRACTAL_PLUGIN}@{FRACTAL_MARKETPLACE}"),
             "--scope",
             "user",
             "--yes",
         ])?;
     }
     if owns_marketplace {
-        run_claude(&["plugin", "marketplace", "remove", ST3_MARKETPLACE])?;
+        run_claude(&["plugin", "marketplace", "remove", FRACTAL_MARKETPLACE])?;
     }
     if marketplace.exists() {
         fs::remove_dir_all(&marketplace)
             .with_context(|| format!("removing {}", marketplace.display()))?;
     }
-    let policy = st3_policy_path()?;
+    let policy = fractal_policy_path()?;
     if !keep_policy && policy.exists() {
-        remove_st3_policy_with_elevation(&policy)?;
+        remove_fractal_policy_with_elevation(&policy)?;
     }
     Ok(())
 }
@@ -294,15 +294,15 @@ fn claude_user_config_exists() -> bool {
     directory.is_some_and(|directory| directory.join(".claude.json").exists())
 }
 
-pub fn install_st3_policy() -> Result<PathBuf> {
-    let path = st3_policy_path()?;
-    install_st3_policy_at(&path)?;
+pub fn install_fractal_policy() -> Result<PathBuf> {
+    let path = fractal_policy_path()?;
+    install_fractal_policy_at(&path)?;
     println!("policy\t{}", path.display());
     Ok(path)
 }
 
-pub fn uninstall_st3_policy() -> Result<()> {
-    let path = st3_policy_path()?;
+pub fn uninstall_fractal_policy() -> Result<()> {
+    let path = fractal_policy_path()?;
     remove_policy_at(&path)?;
     println!("policy removed\t{}", path.display());
     Ok(())
@@ -324,7 +324,7 @@ fn marketplace_root() -> Result<PathBuf> {
     Ok(data_home()?.join("st2/claude-channel/marketplace"))
 }
 
-pub fn st3_marketplace_root() -> Result<PathBuf> {
+pub fn fractal_marketplace_root() -> Result<PathBuf> {
     Ok(data_home()?.join("st/plugins/claude/marketplace"))
 }
 
@@ -334,8 +334,8 @@ fn policy_path() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn st3_policy_path() -> Result<PathBuf> {
-    Ok(PathBuf::from("/etc/claude-code/managed-settings.d").join(ST3_POLICY_FILE))
+fn fractal_policy_path() -> Result<PathBuf> {
+    Ok(PathBuf::from("/etc/claude-code/managed-settings.d").join(FRACTAL_POLICY_FILE))
 }
 
 #[cfg(target_os = "macos")]
@@ -347,10 +347,10 @@ fn policy_path() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn st3_policy_path() -> Result<PathBuf> {
+fn fractal_policy_path() -> Result<PathBuf> {
     Ok(
         PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.d")
-            .join(ST3_POLICY_FILE),
+            .join(FRACTAL_POLICY_FILE),
     )
 }
 
@@ -360,7 +360,7 @@ fn policy_path() -> Result<PathBuf> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn st3_policy_path() -> Result<PathBuf> {
+fn fractal_policy_path() -> Result<PathBuf> {
     bail!("the Claude channel policy installer supports Linux and macOS")
 }
 
@@ -396,26 +396,26 @@ pub fn verify_marketplace_at(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn st3_embedded_files() -> [(&'static str, &'static [u8]); 3] {
+fn fractal_embedded_files() -> [(&'static str, &'static [u8]); 3] {
     [
-        (".claude-plugin/marketplace.json", ST3_MARKETPLACE_MANIFEST),
-        ("st-channel/.claude-plugin/plugin.json", ST3_PLUGIN_MANIFEST),
-        ("st-channel/.mcp.json", ST3_MCP_CONFIG),
+        (".claude-plugin/marketplace.json", FRACTAL_MARKETPLACE_MANIFEST),
+        ("st-channel/.claude-plugin/plugin.json", FRACTAL_PLUGIN_MANIFEST),
+        ("st-channel/.mcp.json", FRACTAL_MCP_CONFIG),
     ]
 }
 
-pub fn install_st3_marketplace_at(root: &Path) -> Result<()> {
-    for (relative, bytes) in st3_embedded_files() {
+pub fn install_fractal_marketplace_at(root: &Path) -> Result<()> {
+    for (relative, bytes) in fractal_embedded_files() {
         let path = root.join(relative);
         let parent = path.parent().expect("an embedded file has a parent");
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
     }
-    verify_st3_marketplace_at(root)
+    verify_fractal_marketplace_at(root)
 }
 
-pub fn verify_st3_marketplace_at(root: &Path) -> Result<()> {
-    for (relative, expected) in st3_embedded_files() {
+pub fn verify_fractal_marketplace_at(root: &Path) -> Result<()> {
+    for (relative, expected) in fractal_embedded_files() {
         let path = root.join(relative);
         let actual = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         if actual != expected {
@@ -430,7 +430,7 @@ fn policy_value() -> Value {
         "channelsEnabled": true,
         "allowedChannelPlugins": [
             {"marketplace": MARKETPLACE, "plugin": PLUGIN},
-            {"marketplace": MARKETPLACE, "plugin": ST3_PLUGIN}
+            {"marketplace": MARKETPLACE, "plugin": FRACTAL_PLUGIN}
         ]
     })
 }
@@ -442,35 +442,35 @@ fn policy_bytes() -> Vec<u8> {
     bytes
 }
 
-fn st3_policy_value() -> Value {
+fn fractal_policy_value() -> Value {
     json!({
         "channelsEnabled": true,
         "allowedChannelPlugins": [
-            {"marketplace": ST3_MARKETPLACE, "plugin": ST3_PLUGIN}
+            {"marketplace": FRACTAL_MARKETPLACE, "plugin": FRACTAL_PLUGIN}
         ]
     })
 }
 
-fn st3_policy_bytes() -> Vec<u8> {
-    let mut bytes = serde_json::to_vec_pretty(&st3_policy_value())
+fn fractal_policy_bytes() -> Vec<u8> {
+    let mut bytes = serde_json::to_vec_pretty(&fractal_policy_value())
         .expect("the built-in st channel policy is serializable");
     bytes.push(b'\n');
     bytes
 }
 
-fn install_st3_policy_at(path: &Path) -> Result<()> {
+fn install_fractal_policy_at(path: &Path) -> Result<()> {
     let parent = path.parent().context("the policy path has no parent")?;
     fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    fs::write(path, st3_policy_bytes()).with_context(|| format!("writing {}", path.display()))?;
-    if st3_policy_is_current_at(path) {
+    fs::write(path, fractal_policy_bytes()).with_context(|| format!("writing {}", path.display()))?;
+    if fractal_policy_is_current_at(path) {
         Ok(())
     } else {
         bail!("Claude channel policy differs at {}", path.display())
     }
 }
 
-fn st3_policy_is_current_at(path: &Path) -> bool {
-    fs::read(path).is_ok_and(|bytes| bytes == st3_policy_bytes())
+fn fractal_policy_is_current_at(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|bytes| bytes == fractal_policy_bytes())
 }
 
 pub fn install_policy_at(path: &Path) -> Result<()> {
@@ -517,24 +517,24 @@ fn remove_policy_with_elevation(path: &Path) -> Result<()> {
     run_elevated("uninstall-policy")
 }
 
-fn ensure_st3_policy_with_elevation(path: &Path) -> Result<()> {
-    if st3_policy_is_current_at(path) {
+fn ensure_fractal_policy_with_elevation(path: &Path) -> Result<()> {
+    if fractal_policy_is_current_at(path) {
         return Ok(());
     }
     if is_root() {
-        return install_st3_policy_at(path);
+        return install_fractal_policy_at(path);
     }
-    run_st3_elevated("install-policy")
+    run_fractal_elevated("install-policy")
 }
 
-fn remove_st3_policy_with_elevation(path: &Path) -> Result<()> {
+fn remove_fractal_policy_with_elevation(path: &Path) -> Result<()> {
     if is_root() {
         return remove_policy_at(path);
     }
-    run_st3_elevated("uninstall-policy")
+    run_fractal_elevated("uninstall-policy")
 }
 
-fn run_st3_elevated(action: &str) -> Result<()> {
+fn run_fractal_elevated(action: &str) -> Result<()> {
     let exe = env::current_exe().context("resolving the current st executable")?;
     let status = Command::new("sudo")
         .arg(exe)
@@ -611,7 +611,7 @@ fn install_with_claude(marketplace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_st3_with_claude(marketplace: &Path) -> Result<()> {
+fn install_fractal_with_claude(marketplace: &Path) -> Result<()> {
     // Check before any marketplace/plugin side effects: install itself enables user scope.
     let disable_help = Command::new("claude")
         .args(["plugin", "disable", "--help"])
@@ -629,13 +629,13 @@ fn install_st3_with_claude(marketplace: &Path) -> Result<()> {
             }),
         "Claude must support `plugin disable` before installing st-channel; update Claude first"
     );
-    match st3_marketplace_registration()? {
+    match fractal_marketplace_registration()? {
         Some(entry) if marketplace_entry_matches(&entry, marketplace) => {
-            run_claude(&["plugin", "marketplace", "update", ST3_MARKETPLACE])?;
+            run_claude(&["plugin", "marketplace", "update", FRACTAL_MARKETPLACE])?;
         }
         Some(entry) => {
             bail!(
-                "Claude marketplace name '{ST3_MARKETPLACE}' already belongs to another source: {entry}"
+                "Claude marketplace name '{FRACTAL_MARKETPLACE}' already belongs to another source: {entry}"
             );
         }
         None => {
@@ -645,11 +645,11 @@ fn install_st3_with_claude(marketplace: &Path) -> Result<()> {
             run_claude(&["plugin", "marketplace", "add", path, "--scope", "user"])?;
         }
     }
-    if st3_plugin_is_installed()? {
+    if fractal_plugin_is_installed()? {
         run_claude(&[
             "plugin",
             "uninstall",
-            &format!("{ST3_PLUGIN}@{ST3_MARKETPLACE}"),
+            &format!("{FRACTAL_PLUGIN}@{FRACTAL_MARKETPLACE}"),
             "--scope",
             "user",
             "--yes",
@@ -659,7 +659,7 @@ fn install_st3_with_claude(marketplace: &Path) -> Result<()> {
     run_claude(&[
         "plugin",
         "install",
-        &format!("{ST3_PLUGIN}@{ST3_MARKETPLACE}"),
+        &format!("{FRACTAL_PLUGIN}@{FRACTAL_MARKETPLACE}"),
         "--scope",
         "user",
         "--yes",
@@ -669,7 +669,7 @@ fn install_st3_with_claude(marketplace: &Path) -> Result<()> {
     run_claude(&[
         "plugin",
         "disable",
-        &format!("{ST3_PLUGIN}@{ST3_MARKETPLACE}"),
+        &format!("{FRACTAL_PLUGIN}@{FRACTAL_MARKETPLACE}"),
         "--scope",
         "user",
     ])
@@ -685,19 +685,19 @@ fn marketplace_registration() -> Result<Option<Value>> {
     }))
 }
 
-fn st3_marketplace_registration() -> Result<Option<Value>> {
+fn fractal_marketplace_registration() -> Result<Option<Value>> {
     let value = claude_json(["plugin", "marketplace", "list", "--json"])?;
     Ok(value.as_array().and_then(|entries| {
         entries
             .iter()
-            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(ST3_MARKETPLACE))
+            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(FRACTAL_MARKETPLACE))
             .cloned()
     }))
 }
 
-fn st3_marketplace_is_registered_at(root: &Path) -> Result<bool> {
+fn fractal_marketplace_is_registered_at(root: &Path) -> Result<bool> {
     Ok(
-        st3_marketplace_registration()?
+        fractal_marketplace_registration()?
             .is_some_and(|entry| marketplace_entry_matches(&entry, root)),
     )
 }
@@ -716,11 +716,11 @@ fn plugin_is_installed(plugin: &str) -> Result<bool> {
     Ok(json_contains(&value, &format!("{plugin}@{MARKETPLACE}")))
 }
 
-fn st3_plugin_is_installed() -> Result<bool> {
+fn fractal_plugin_is_installed() -> Result<bool> {
     let value = claude_json(["plugin", "list", "--json"])?;
     Ok(json_contains(
         &value,
-        &format!("{ST3_PLUGIN}@{ST3_MARKETPLACE}"),
+        &format!("{FRACTAL_PLUGIN}@{FRACTAL_MARKETPLACE}"),
     ))
 }
 
@@ -805,7 +805,7 @@ mod tests {
         .unwrap();
         assert_eq!(plugin["version"], env!("CARGO_PKG_VERSION"));
 
-        install_st3_marketplace_at(temp.path()).unwrap();
+        install_fractal_marketplace_at(temp.path()).unwrap();
         let st3_mcp: Value =
             serde_json::from_slice(&fs::read(temp.path().join("st-channel/.mcp.json")).unwrap())
                 .unwrap();
@@ -834,25 +834,25 @@ mod tests {
     }
 
     #[test]
-    fn st3_has_an_independent_marketplace_and_policy_identity() {
+    fn fractal_has_an_independent_marketplace_and_policy_identity() {
         let temp = tempfile::tempdir().unwrap();
-        install_st3_marketplace_at(temp.path()).unwrap();
-        verify_st3_marketplace_at(temp.path()).unwrap();
+        install_fractal_marketplace_at(temp.path()).unwrap();
+        verify_fractal_marketplace_at(temp.path()).unwrap();
 
         let marketplace: Value = serde_json::from_slice(
             &fs::read(temp.path().join(".claude-plugin/marketplace.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(marketplace["name"], ST3_MARKETPLACE);
-        assert_eq!(marketplace["plugins"][0]["name"], ST3_PLUGIN);
+        assert_eq!(marketplace["name"], FRACTAL_MARKETPLACE);
+        assert_eq!(marketplace["plugins"][0]["name"], FRACTAL_PLUGIN);
         assert_eq!(marketplace["plugins"].as_array().unwrap().len(), 1);
-        assert_eq!(ST3_CHANNEL, "plugin:st-channel@st");
+        assert_eq!(FRACTAL_CHANNEL, "plugin:st-channel@st");
 
-        let policy = temp.path().join(ST3_POLICY_FILE);
-        install_st3_policy_at(&policy).unwrap();
-        assert!(st3_policy_is_current_at(&policy));
+        let policy = temp.path().join(FRACTAL_POLICY_FILE);
+        install_fractal_policy_at(&policy).unwrap();
+        assert!(fractal_policy_is_current_at(&policy));
         let value: Value = serde_json::from_slice(&fs::read(policy).unwrap()).unwrap();
-        assert_eq!(value, st3_policy_value());
+        assert_eq!(value, fractal_policy_value());
         assert_eq!(value["allowedChannelPlugins"][0]["marketplace"], "st");
     }
 

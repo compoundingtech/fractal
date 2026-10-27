@@ -29,7 +29,7 @@ export const syntheticFirstRunOnboarding: WorldDefinition = {
     const launch = resources.attention(ctx, { key: 'first-launch', kind: 'human-gate', person, source: member.id, requester: member, title: 'Launch your first mission', detail: 'Run the sprout smoke check on the newly connected machine.', priority: 'normal', requestedMs: 3_000, actions: ['custom.reply'] })
     const roster: Slice<'roster'> = {
       kind: 'roster', variant: 'default', source, decode: 'strict', loading: false,
-      state: { agents: [], runtimes: [], machines: [], order: [] },
+      state: { sessions: [], devices: [], agents: [], runtimes: [], machines: [], order: [] },
       timeline: [
         { _tag: 'changes', at_ms: 1_000, store: 0, upserts: [joined], removes: [] },
         { _tag: 'changes', at_ms: 2_000, store: 0, upserts: [starting.agent, starting.runtime!, { ...joined, revision: 'mh-start', updated_at: ctx.t.at(2_000), runtime_ids: [starting.runtime!.id], occupancy: { running_runtimes: 1 } }], removes: [], order: [member.id] },
@@ -39,7 +39,7 @@ export const syntheticFirstRunOnboarding: WorldDefinition = {
       ],
     }
     const details: Slice<'details'> = {
-      kind: 'details', variant: 'default', source, decode: 'strict', loading: false, state: { missions: [], work: [] },
+      kind: 'details', variant: 'default', source, decode: 'strict', loading: false, state: { launches: [], launch_variants: [], missions: [], work: [] },
       timeline: [5_000, 16_000].map((at_ms) => ({ _tag: 'changes', at_ms, store: 0, upserts: [resources.mission(ctx, mission, at_ms === 5_000 ? 'running' : 'completed', at_ms), resources.work(ctx, { mission, step: 0, claimant: member, state: at_ms === 5_000 ? 'claimed' : 'completed', updatedMs: at_ms, goals: ['pnpm test smoke exits successfully'] })], removes: [] })),
     }
     const attention: Slice<'attention'> = {

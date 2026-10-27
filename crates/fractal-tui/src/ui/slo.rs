@@ -321,7 +321,7 @@ pub fn panic() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    if std::thread::current().name() == Some("stui-slo") {
+    if std::thread::current().name() == Some("tui-slo") {
         return;
     }
     if let Some(dir) = directory() {
@@ -352,7 +352,7 @@ impl Session {
             let host = host();
             let build = crate::version::display_version();
             std::thread::Builder::new()
-                .name("stui-slo".into())
+                .name("tui-slo".into())
                 .spawn(move || {
                     let mut window = hour();
                     let mut since = Instant::now();
