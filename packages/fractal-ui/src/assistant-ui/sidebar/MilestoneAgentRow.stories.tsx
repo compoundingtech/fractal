@@ -629,14 +629,14 @@ export const ReportedDetails: Story = {
 
 /** Count fixtures: plural, singular, zero (no chip), unreported, and long titles that must truncate before the count. */
 const countRow = (key: string, title: string, subagentCount: number | undefined, extra: Partial<Row> = {}): Row => ({
-  ...base, ref: `agent/example-count-${key}`, id: `count-${key}`, title, status: 'working', statusLabel: 'Working', host: 'build-3', subagentCount, childrenKnown: subagentCount !== undefined,
+  ...base, ref: `agent/example-count-${key}`, id: `count-${key}`, title, status: 'working', statusLabel: 'Working', host: 'build-3', subagentCount, subagentObservation: { _tag: subagentCount === undefined ? 'Unavailable' : 'Reported' },
   lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 95_000 }, ...extra,
 })
 const countRows = [
   countRow('plural', 'Align the metric track across every row', 3, { needsMe: true }),
   countRow('singular', 'Fix tabs', 1),
   countRow('zero', 'Ship the sidebar count', 0),
-  countRow('unknown', 'Harness without subagent reports for this agent', undefined),
+  countRow('unknown', 'OMP agent awaiting its first subagent report', undefined),
   countRow('many', 'Coordinate the long release train across every package', 14, { unread: 2 }),
 ] as const satisfies readonly Row[]
 const countChild = countRow('child', 'Reported child with its own children', 2, { parentRef: countRows[0].ref })

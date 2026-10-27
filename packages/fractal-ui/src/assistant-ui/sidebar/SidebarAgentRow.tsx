@@ -60,7 +60,7 @@ export const sidebarRowTitle = (row: Row): string => row.title
 /** Concise label-in-name for the tree host, which cannot attach a row description. */
 export const sidebarRowAccessibleName = (row: Row): string => {
   const parts = [row.title, row.statusLabel]
-  if (row.parentRef === undefined && row.childrenKnown !== undefined && row.subagentCount !== 0) {
+  if (row.parentRef === undefined && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0) {
     parts.splice(1, 0, row.subagentCount === undefined ? '? subagents' : `${row.subagentCount} ${row.subagentCount === 1 ? 'subagent' : 'subagents'}`)
   }
   if (row.missionContext?._tag === 'Mission') {
@@ -100,7 +100,7 @@ export function sidebarRowDescription(row: Row, reportedStatusOnly = false): str
     if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
     if (queued.length > 0) parts.push(`Queued missions: ${queued.map(mission => mission.slug).join(', ')}`)
   }
-  if (row.childrenKnown !== false) parts.push(`Subagents: ${row.children.length}`)
+  parts.push(row.subagentObservation?._tag === 'Reported' ? `Subagents: ${row.children.length}` : 'Subagent observations unavailable')
   parts.push(`ID: ${row.ref}`)
   return `${parts.join('. ')}.`
 }
@@ -138,7 +138,7 @@ export function AgentRowDetails({ row, reportedStatusOnly = false, ...clock }: {
       {row.subagent.session_id !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Session</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.session_id}</dd></>}
       {row.subagent.started_at !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Started</dt><dd {...stylex.props(styles.detailValue)}><time dateTime={row.subagent.started_at}>{row.subagent.started_at}</time></dd></>}
       <dt {...stylex.props(styles.detailLabel)}>Lease expires</dt><dd {...stylex.props(styles.detailValue)}><time dateTime={row.subagent.lease_expires_at}>{row.subagent.lease_expires_at}</time></dd></>}
-    <dt {...stylex.props(styles.detailLabel)}>Subagents</dt><dd {...stylex.props(styles.detailValue)}>{row.childrenKnown === false ? 'Subagent observations unavailable' : `${row.children.length} collapsed children`}{row.children.length > 0 && <ul>{row.children.map(child => <li key={child.ref}>{[sidebarRowTitle(child), child.ref, ...(child.subagent !== undefined ? [child.subagent.subagent_type, child.subagent.work_id, `lease ${child.subagent.lease_expires_at}`] : [])].filter((part): part is string => part !== undefined).join('; ')}</li>)}</ul>}</dd>
+    <dt {...stylex.props(styles.detailLabel)}>Subagents</dt><dd {...stylex.props(styles.detailValue)}>{row.subagentObservation?._tag === 'Reported' ? `${row.children.length} collapsed children` : 'Subagent observations unavailable'}{row.subagentObservation?._tag === 'Reported' && row.children.length > 0 && <ul>{row.children.map(child => <li key={child.ref}>{[sidebarRowTitle(child), child.ref, ...(child.subagent !== undefined ? [child.subagent.subagent_type, child.subagent.work_id, `lease ${child.subagent.lease_expires_at}`] : [])].filter((part): part is string => part !== undefined).join('; ')}</li>)}</ul>}</dd>
   </dl>
 }
 /** Only reported facts render; unknown or unavailable fields are omitted rather than shown as placeholders. */

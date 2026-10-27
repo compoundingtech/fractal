@@ -68,7 +68,8 @@ export interface SidebarAgentRow extends SidebarReported {
   readonly lastTurn: SidebarLastTurn
   /** Running children reported by the harness; absent means unreported, not zero. */
   readonly subagentCount?: number
-  readonly childrenKnown?: boolean
+  /** Absent on display-only rows; roster rows explicitly distinguish unsupported reports from missing observations. */
+  readonly subagentObservation?: { readonly _tag: 'NotReported' } | { readonly _tag: 'Unavailable' } | { readonly _tag: 'Reported' }
   readonly children: readonly SidebarAgentRow[]
 }
 

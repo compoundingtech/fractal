@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { sidebarRow, sidebarMissionFeeds } from './sidebarRow.ts'
-import { sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
+import { AgentRowDetails, sidebarRowAccessibleName, sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import type { Agent } from '../data/source.ts'
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
 import * as Option from 'effect/Option'
@@ -80,7 +82,7 @@ describe('controlled native sidebar observations', () => {
     expect(result.lastTurn).toEqual({_tag:'Unknown'})
     expect(result.needsMe).toBeUndefined()
     expect(result.unread).toBeUndefined()
-    expect(result.childrenKnown).toBeUndefined()
+    expect(result.subagentObservation).toEqual({ _tag: 'NotReported' })
     expect(result.terminal).toBeUndefined()
   })
   it('keeps generic activity distinct from a completed turn', () => {
@@ -130,7 +132,7 @@ describe('controlled native sidebar observations', () => {
       id: 'reviewer', driver: 'omp', description: 'Review', session_id: 'session/review',
       started_at: '2026-10-18T12:00:00Z', lease_expires_at: '2026-10-18T12:01:00Z',
     }] })
-    expect(result.childrenKnown).toBe(true)
+    expect(result.subagentObservation).toEqual({ _tag: 'Reported' })
     expect(result.subagentCount).toBe(1)
     expect(sidebarRowAccessibleName(result)).toBe('Reported name, 1 subagent, Working')
     expect(result.children[0]).toMatchObject({ title: 'Review', parentRef: agent.ref, status: 'unobserved', statusLabel: 'Not observed', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' } })
@@ -139,7 +141,7 @@ describe('controlled native sidebar observations', () => {
     expect(result.children[0]?.needsMe).toBeUndefined()
     expect(result.children[0]?.unread).toBeUndefined()
     expect(result.children[0]?.terminal).toBeUndefined()
-    expect(row({ subagents: [] }).childrenKnown).toBe(true)
+    expect(row({ subagents: [] }).subagentObservation).toEqual({ _tag: 'Reported' })
     expect(row({ subagents: [] }).subagentCount).toBe(0)
     expect(sidebarRowAccessibleName(row({ subagents: [] }))).toBe('Reported name, Idle')
     expect(row().subagentCount).toBeUndefined()
@@ -147,17 +149,39 @@ describe('controlled native sidebar observations', () => {
   })
   it('shows unknown counts only for subagent-capable OMP observations', () => {
     for (const harness of [undefined, 'codex', 'claude'] as const) {
-      expect(row({ harness }).childrenKnown).toBeUndefined()
+      expect(row({ harness }).subagentObservation).toEqual({ _tag: 'NotReported' })
       expect(sidebarRowAccessibleName(row({ harness }))).toBe('Reported name, Idle')
     }
     const missing = row({ harness: 'omp' })
-    expect(missing.childrenKnown).toBe(false)
+    expect(missing.subagentObservation).toEqual({ _tag: 'Unavailable' })
     expect(sidebarRowAccessibleName(missing)).toBe('Reported name, ? subagents, Idle')
     const stale = row({ harness: 'omp', subagents: [] }, true)
-    expect(stale.childrenKnown).toBe(false)
-    expect(stale.subagentCount).toBeUndefined()
-    expect(sidebarRowAccessibleName(stale)).toBe('Reported name, ? subagents, Last verified · Idle')
+    expect(stale.subagentObservation).toEqual({ _tag: 'Reported' })
+    expect(stale.subagentCount).toBe(0)
+    expect(sidebarRowAccessibleName(stale)).toBe('Reported name, Last verified · Idle')
     expect(sidebarRowAccessibleName(row({ harness: 'omp', subagents: [] }))).toBe('Reported name, Idle')
+  })
+  it('does not invent zero subagents in Claude Reported details or the row description', () => {
+    const claude = row({ harness: 'claude' })
+    expect(claude.subagentObservation).toEqual({ _tag: 'NotReported' })
+    const details = renderToStaticMarkup(createElement(AgentRowDetails, { row: claude }))
+    expect(details).toContain('Subagent observations unavailable')
+    expect(details).not.toContain('0 collapsed children')
+    expect(sidebarRowDescription(claude)).toContain('Subagent observations unavailable')
+    expect(sidebarRowDescription(claude)).not.toContain('Subagents: 0')
+  })
+  it('retains stale OMP children and their count as last-verified facts', () => {
+    const stale = row({ harness: 'omp', subagents: [{
+      id: 'reviewer', driver: 'omp', description: 'Review',
+      lease_expires_at: '2026-10-18T12:01:00Z',
+    }] }, true)
+    expect(stale.subagentObservation).toEqual({ _tag: 'Reported' })
+    expect(stale.subagentCount).toBe(1)
+    expect(stale.children).toHaveLength(1)
+    expect(stale.children[0]?.freshness).toBe('stale')
+    expect(sidebarRowAccessibleName(stale)).toBe('Reported name, 1 subagent, Last verified · Idle')
+    expect(sidebarRowDescription(stale)).toContain('Subagents: 1')
+    expect(renderToStaticMarkup(createElement(AgentRowDetails, { row: stale }))).toContain('1 collapsed children')
   })
 })
 

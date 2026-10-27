@@ -108,7 +108,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} statusSince={row.statusSince} variant="SG-1" discRefinement="G3" freshness={row.freshness} frozen={frozen} iconOnly /></span>
     <span data-row-column="name" {...stylex.props(styles.name, !hasTrailing && styles.titleToEdge)}>
       <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
-      {!displayOnly && row.childrenKnown !== undefined && row.subagentCount !== 0 && <SubagentCount count={row.subagentCount} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} />}
+      {!displayOnly && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0 && <SubagentCount count={row.subagentCount} frozen={frozen} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} />}
     </span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
     {hasTrailing && <span data-row-column="trailing" {...stylex.props(styles.trailing)}>
@@ -148,12 +148,12 @@ const unreportedReason = 'The number of subagents isn’t reported.'
  * word kept for assistive tech, then drops the count so the title keeps a readable stretch; the count never paints past
  * the name column.
  */
-function SubagentCount({ count, onPress, onExplain }: { readonly count: number | undefined; readonly onPress: (() => void) | undefined; readonly onExplain: (open: boolean) => void }) {
+function SubagentCount({ count, frozen, onPress, onExplain }: { readonly count: number | undefined; readonly frozen: boolean; readonly onPress: (() => void) | undefined; readonly onExplain: (open: boolean) => void }) {
   const reasonId = React.useId()
   const unknown = count === undefined
   const label = unknown ? unreportedLabel : `${count} ${count === 1 ? 'subagent' : 'subagents'}`
   const id = unknown ? 'unknown' : String(count)
-  const tag = <span aria-hidden={unknown || undefined} data-count-text {...stylex.props(styles.countTag)}>{unknown ? '?' : count}<span data-count-word {...stylex.props(styles.countWord)}>{count === 1 ? ' subagent' : ' subagents'}</span></span>
+  const tag = <span aria-hidden={unknown || undefined} data-count-text {...stylex.props(styles.countTag, frozen && styles.frozenInk)}>{unknown ? '?' : count}<span data-count-word {...stylex.props(styles.countWord)}>{count === 1 ? ' subagent' : ' subagents'}</span></span>
   const reason = unknown ? <span id={reasonId} hidden>{unreportedReason}</span> : null
   if (onPress !== undefined) return <Tooltip label={unknown ? unreportedReason : label} placement="top" onOpenChange={onExplain}>
     <Button data-subagent-count={id} aria-label={label} aria-describedby={unknown ? reasonId : undefined} onPress={onPress} {...stylex.props(styles.countHit, styles.countButton)}>{tag}{reason}</Button>
