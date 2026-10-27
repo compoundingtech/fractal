@@ -195,7 +195,9 @@ fn scenarios_strict_preserves_explicit_error_detail_maps() {
     let decoded = slice.decode().expect("strict must accept the committed cursor-gap details");
     assert!(decoded.iter().any(|value| matches!(
         &value.value,
-        WireValue::ErrorEnvelope(error) if error.details == envelope["details"]
+        WireValue::ErrorEnvelope(error)
+            if error.details.len() == envelope["details"].as_object().unwrap().len()
+                && error.details.iter().all(|(key, value)| envelope["details"].get(key) == Some(value))
     )));
     // Opaque JSON bags must not be mistaken for unknown union/enum cases.
     slice.timeline[0]["envelope"]["details"]["opaque"] =
