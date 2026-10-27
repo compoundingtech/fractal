@@ -26,6 +26,12 @@ st agents show agent/garden/worker
 
 When repeated failed starts have parked an agent, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the agent parks again and its cause stays visible in `fractal agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
 
+A failed start with unverified producer closure can be superseded only by a still-current restart request accepted within the last hour. The selected desired declaration must still match the request, with no later suspension, resume, stop, termination or retirement; a current suspension also blocks recovery. Otherwise reconciliation records `restart-retired-obsolete-request` and completes the request as `retired` without launching or asserting producer closure. A new explicit restart is required after intent changes or expiry. The existing minimum failed-start age, absent-runtime check and kernel launch lock still apply. Synthesized start control requests are attributed to `agent/st3/reconciler`, with the original requester-authored restart retained as evidence; they do not impersonate a new request from that actor.
+
+Physical preflight does not release the failed operation. With the launch lock held, one admission writer transaction checks lifecycle intent, closes that exact failed hold, and records the replacement admission. Its retained `stale_failed_start` metadata keeps the same request fence active in the dispatch writer and the backend's physical launch guard, including after queueing or daemon restart. A control committed between preflight and admission leaves the old hold unresolved; a control committed after admission prevents dispatch or fails the physical launch guard.
+
+A queued recovery rejected before dispatch is revoked and completed by the existing `never-dispatched` cancellation protocol in the same writer transaction. Reconciliation applies that nonlaunch proof and frees admission, so a later valid restart can launch without restarting the daemon.
+
 The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
 
 ```sh

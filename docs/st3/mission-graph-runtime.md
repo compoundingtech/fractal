@@ -1470,6 +1470,15 @@ An unknown variable or a variable that is not available in the current phase is 
 
 ## Agent start
 
+Typed harness bodies are optional: `harness "codex"` and `harness "codex" {}` use
+the same native defaults, as do the other supported providers (`claude`, `pi`,
+`omp`, `opencode`). Each accepts an optional `executable` string, for example
+`harness "codex" { executable "/opt/codex/bin/codex"; }`, to replace only the native
+program in the typed driver's argv. It is not a shell command; flags belong in
+`args`. The default program is the provider name on the seat's PATH. See the
+[configuration reference](../site/reference/configuration.md#executable-selection-and-path)
+for login-shell environment capture, agent PATH overrides, and executable examples.
+
 A native harness starts idle by default. Its creator can supply an explicit first message:
 
 ```kdl

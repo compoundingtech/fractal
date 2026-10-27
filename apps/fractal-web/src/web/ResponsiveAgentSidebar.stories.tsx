@@ -282,8 +282,24 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   } finally { observer.disconnect() }
 }
 
-const meta = { title: 'wf/Sidebar/Responsive navigation', component: ResponsiveSidebarSurface, args: { viewport: 440 }, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Two fixed rows in the production sidebar frame, tree and thread header pin drawer modality, resize ranges and layout stability.' }, layout: 'fullscreen', docs: { description: { component: 'Navigation has a 240px floor. Below 900px it is a closed-by-default React Aria modal drawer: aria-modal=true and the background workspace is inert or hidden from assistive technology until dismissal. The thread keeps its full width. Escape or selection closes it and restores opener focus. Cmd/Ctrl+B opens navigation outside editable/terminal input. Opening the drawer must produce zero raw thread layout shift, including input-associated entries. Play tests reject injected non-modal and unmasked-background regressions.' } } } } satisfies Meta<typeof ResponsiveSidebarSurface>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'wf/Sidebar/Responsive navigation', component: ResponsiveSidebarSurface, args: { viewport: 440 }, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Two fixed rows in the production sidebar frame, tree and thread header pin drawer modality, resize ranges and layout stability.' }, layout: 'fullscreen', docs: { description: { component: 'Navigation has a 240px floor. Below 900px it is a closed-by-default React Aria modal drawer: aria-modal=true and the background workspace is inert or hidden from assistive technology until dismissal. The thread keeps its full width. Escape or selection closes it and restores opener focus. Cmd/Ctrl+B opens navigation outside editable/terminal input. Opening the drawer must produce zero raw thread layout shift, including input-associated entries. Play tests reject injected non-modal and unmasked-background regressions.' } } } } satisfies Meta<typeof ResponsiveSidebarSurface>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'At1440:contract-fixture',
+  'At1440Light:contract-fixture',
+  'At440:contract-fixture',
+  'At440Light:contract-fixture',
+  'At700:contract-fixture',
+  'At700Light:contract-fixture',
+  'At900:contract-fixture',
+  'At900Light:contract-fixture',
+  'DragUnmountCleanup:contract-fixture',
+  'FixedResizeRange:contract-fixture',
+  'NonfiniteResizeRange:contract-fixture',
+  'ReversedResizeRange:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 export const At440: Story = { args: { viewport: 440 }, play: drawerPlay }
 export const At700: Story = { args: { viewport: 700 }, play: drawerPlay }

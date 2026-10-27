@@ -4,7 +4,6 @@ import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook/c
 import { loadWorld } from '@fractal/scenarios'
 import { useScenarioSlice } from '@fractal/scenarios/react'
 import { scenarioSections, type TranscriptSection } from './scenario-transcript.story-harness'
-import { scenarioExemptionIds } from './scenario-exemption-ids.ts'
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -412,9 +411,26 @@ test('app mode debt matches its reviewed shrink-only pin', () => {
   for (const id of undeclaredApp) process.stdout.write(`${id}: undeclared — owned by ${deferredAppStoryModes[id]}\n`)
 })
 
-test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(574)
-  expect(exemptions.sort()).toEqual(scenarioExemptionIds)
+const isExemptionList = (value: unknown): value is readonly string[] => Array.isArray(value) && value.every(entry => typeof entry === 'string')
+
+// Each stories file reviews its own exemptions, so parallel PRs only meet when they edit the same file.
+test('scenario exemptions match the reviewed list exported by each stories file and their reasons are printed by each check', () => {
+  const listed: string[] = []
+  for (const [path, module] of Object.entries(storyModules)) {
+    const { default: storyMeta, scenarioExemptions } = module
+    if (scenarioExemptions === undefined) continue
+    expect(isExemptionList(scenarioExemptions), `${path} scenarioExemptions must be a list of export:mode ids`).toBe(true)
+    if (!isExemptionList(scenarioExemptions)) continue
+    expect(isExportStory('scenarioExemptions', storyMeta), `${path} must list scenarioExemptions in its meta excludeStories`).toBe(false)
+    expect(scenarioExemptions.length, `${path} exports an empty scenarioExemptions list`).toBeGreaterThan(0)
+    expect(scenarioExemptions, `${path} scenarioExemptions must be sorted with no id listed twice`).toEqual([...new Set(scenarioExemptions)].sort())
+    for (const entry of scenarioExemptions) {
+      const name = entry.slice(0, entry.lastIndexOf(':'))
+      expect(isExportStory(name, storyMeta) && isStory(module[name]), `${path}#${entry} names no story`).toBe(true)
+      listed.push(`${path}#${entry}`)
+    }
+  }
+  expect(exemptions.sort()).toEqual(listed.sort())
 })
 
 test('scenario transcript preserves the active migrator turn without a terminal status', () => {

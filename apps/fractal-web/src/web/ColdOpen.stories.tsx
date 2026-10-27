@@ -4,8 +4,15 @@ import { expect, waitFor } from 'storybook/test'
 import { coldOpenDocument } from './coldOpen.fixtures.ts'
 
 const BootstrapSurface = ({ scheme = 'dark' }: { readonly scheme?: 'dark' | 'light' }) => <iframe title="Cold workspace" data-scheme={scheme} srcDoc={coldOpenDocument(undefined, scheme)} onLoad={event => { event.currentTarget.dataset.loaded = 'true' }} style={{ width: '100%', height: 900, border: 0 }} />
-const meta = { title: 'Fractal/App/Shell/Cold open', component: BootstrapSurface, args: { scheme: 'dark' }, argTypes: { scheme: { control: 'inline-radio', options: ['dark', 'light'] } }, parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'The production index.html with application modules stripped pins the pre-hydration theme bootstrap, page background and shell skeleton; no agent or scenario data exists before hydration.' } } } satisfies Meta<typeof BootstrapSurface>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal/App/Shell/Cold open', component: BootstrapSurface, args: { scheme: 'dark' }, argTypes: { scheme: { control: 'inline-radio', options: ['dark', 'light'] } }, parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'The production index.html with application modules stripped pins the pre-hydration theme bootstrap, page background and shell skeleton; no agent or scenario data exists before hydration.' } } } satisfies Meta<typeof BootstrapSurface>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'DarkBeforeHydration:contract-fixture',
+  'LightBeforeHydration:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const assertBootstrap = (frame: HTMLIFrameElement): void => {
   const document = frame.contentDocument!

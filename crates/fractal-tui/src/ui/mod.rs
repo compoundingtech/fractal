@@ -3778,7 +3778,7 @@ impl Ui {
                 ("ctrl+v", "attach the clipboard's image"),
                 (
                     "ctrl+y",
-                    "speak instead of typing, with the box open or not (a Mac with SmallTalk.app's speech helper)",
+                    "speak instead of typing, with the box open or not (a Mac with the Fractal speech helper)",
                 ),
                 ("esc", "stop writing; the keys above work again"),
             ],
@@ -4089,11 +4089,17 @@ impl Ui {
     }
 
     /// Whether a held key may act again as a press. While text is being typed (a message box,
-    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may; outside
-    /// it only the keys that move. Never a pending confirmation or answer: Enter, y and the
+    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may;
+    /// the palette and focused sidebar own input even over a focused terminal.
+    /// Outside it only the keys that move.
+    /// Never a pending confirmation or answer: Enter, y and the
     /// commands that change things act once per press, so holding one can never repeat them.
     fn repeat_is_safe(&self, key: &KeyEvent) -> bool {
-        if self.confirm.is_some() || self.answering.is_some() || self.terminal_focused() {
+        if self.confirmation_open()
+            || (self.terminal_focused()
+                && !self.palette_open()
+                && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused))
+        {
             return false;
         }
         let typing = self.editing
@@ -4144,6 +4150,7 @@ impl Ui {
             if self.terminal_focused()
                 && !self.palette_open()
                 && !self.help
+                && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused)
                 && self.popover.is_none()
                 && self.voice.is_none()
                 && self.context.is_none()
@@ -4881,7 +4888,7 @@ impl Ui {
                 _ => "fractal agents start AGENT",
             };
             self.flash(format!(
-                "{what}: Fractal does not let Fractal TUI do this yet · use {hint}"
+                "{what}: Fractal does not let the Fractal terminal UI do this yet · use {hint}"
             ));
         } else {
             self.flash(format!("{what} · demo: nothing was sent"));
@@ -6379,6 +6386,7 @@ impl Ui {
                 self.world.machines = full.machines.clone();
                 self.world.usage = full.usage.clone();
                 self.world.usage_limits = full.usage_limits.clone();
+                self.world.usage_accounts = full.usage_accounts.clone();
                 self.world.agent_messages = full.agent_messages.clone();
                 self.world.worktrees = full.worktrees.clone();
                 self.world.conversations = full.conversations;
@@ -9563,7 +9571,7 @@ mod tests {
                 .map(|row| Line::from(format!("row {row}")))
                 .collect(),
             cursor: Some((5, 2)),
-            stale: Some("st closed the connection".into()),
+            stale: Some("Fractal closed the connection".into()),
             ended: None,
             native: None,
         });
@@ -9571,7 +9579,7 @@ mod tests {
         assert!(screen.contains("row 5"), "{screen}");
         assert!(!screen.contains("row 39"), "{screen}");
         assert!(
-            screen.contains("not current, reconnecting: st closed the connection"),
+            screen.contains("not current, reconnecting: Fractal closed the connection"),
             "{screen}"
         );
 

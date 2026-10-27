@@ -94,6 +94,7 @@ async fn verifier_cli_api_uses_signed_local_replica_and_fixed_policy() {
         node:"host-a".into(), state_dir:root.path().into(), pty_root:root.path().join("pty"), pty_binary:"pty".into(),
         fleet_id:Some(FLEET.into()), configured_peers:vec![], client_relay:None, native_session_home:None,
         planner_default:PlannerSpec::default(),
+        assistant_receipts:Default::default(),
     };
     // The Fabric router must refuse this route even if a caller bypasses the Unix-only client.
     use tower::ServiceExt as _;

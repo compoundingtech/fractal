@@ -2,6 +2,10 @@
 //!
 //! Every name is made up. The world moves: one agent streams a reply, a tool runs and
 //! finishes, a message arrives, so the scrolling and "new below" behaviour can be felt.
+//!
+//! `world()` also supplies the shared client contract fixture. Its serialized prose,
+//! recorded commands and sender labels retain their contract spelling; product
+//! branding belongs in rendering, not in these values or arbitrary conversation text.
 
 use super::view::*;
 use std::collections::BTreeMap;
@@ -99,6 +103,7 @@ pub fn world() -> World {
         quiet_missions: 6,
         usage: Load::Ready(usage()),
         usage_limits: usage_limits(),
+        usage_accounts: Vec::new(),
         agent_messages: None,
         slo: Load::Ready(slo()),
         slo_history: slo_history(),
@@ -164,6 +169,7 @@ pub fn loading() -> World {
         quiet_missions: 0,
         usage: Load::Loading,
         usage_limits: Vec::new(),
+        usage_accounts: Vec::new(),
         agent_messages: None,
         slo: Load::Loading,
         slo_history: BTreeMap::new(),
@@ -874,6 +880,7 @@ fn step(
         name: s(name),
         state,
         owner: owner.map(s),
+        owner_is_system: false,
         note: note.map(s),
         after: after.iter().map(|name| s(name)).collect(),
         age: s(age),

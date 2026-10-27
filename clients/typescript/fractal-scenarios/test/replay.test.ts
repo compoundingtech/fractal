@@ -911,6 +911,191 @@ describe('sync dispatch', () => {
 })
 
 describe('HTTP reads and actions', () => {
+  it('retains exactly captured unencoded conversation paths without admitting unmodelled children', async () => {
+    const world = loadRecordedWorld('long-debug-rabbit-hole', ANCHOR_MS).world
+    const captured = world.recording?.http.find((entry) => entry.value.kind === 'timeline' &&
+      entry.path.startsWith('/v1/client/sessions/agent/'))
+    expect(captured).toBeDefined()
+    if (captured === undefined) throw new Error('Expected a captured unencoded conversation path')
+    const h = setup(world)
+    h.clock.advance(captured.at_ms)
+    const capturedUrl = new URL(captured.path, 'http://scenario.invalid')
+    capturedUrl.search = captured.query
+    const response = await h.replay.fetch(capturedUrl)
+    expect(response.status).toBe(captured.status)
+    const body: unknown = await response.json()
+    expect(body).toMatchObject({ value: { kind: 'timeline-page' } })
+    const unsupported = await h.replay.fetch(new URL(`${captured.path}/child`, 'http://scenario.invalid'))
+    expect(unsupported.status).toBe(501)
+    expect(decodeUnknownSync(ErrorEnvelope, 'strict')(await unsupported.json()).code).toBe('unsupported-capability')
+  })
+
+  it('serves nonempty inventory lists and details, including synthetic reads in recorded worlds', async () => {
+    for (const recorded of [false, true]) {
+      const world = base()
+      const h = setup(recorded ? { ...world, recording: { frames: [], http: [] } } : world)
+      const inventories = [
+        { route: 'sessions', expected: world.slices.roster.state.sessions, read: () => h.client.sessionsList() },
+        { route: 'devices', expected: world.slices.roster.state.devices, read: () => h.client.devicesList() },
+        { route: 'launches', expected: world.slices.details.state.launches, read: () => h.client.launchesList() },
+      ]
+      for (const inventory of inventories) {
+        expect(inventory.expected.length, inventory.route).toBeGreaterThan(0)
+        expect((await inventory.read()).value.items).toEqual(inventory.expected)
+        for (const item of inventory.expected) {
+          const response = await h.replay.fetch(`http://scenario.invalid/v1/client/${inventory.route}/${encodeURIComponent(item.id)}`)
+          expect(response.status).toBe(200)
+          const body: unknown = await response.json()
+          decodeUnknownSync(Envelope, 'strict')(body)
+          expect(body).toMatchObject({ value: item })
+          if (inventory.route === 'sessions') expect((await h.client.sessionsGet(item.id)).value).toEqual(item)
+          if (inventory.route === 'launches') expect((await h.client.launchesGet(item.id)).value).toEqual(item)
+        }
+      }
+      expect(h.replay.served()).toEqual(new Set(['sync', 'roster', 'details']))
+    }
+  })
+
+  it('keeps sessions coherent with agent identity and conversation timelines', async () => {
+    const h = setup()
+    const sessions = (await h.client.sessionsList()).value.items
+    for (const thread of h.world.slices.conversation.state.threads) {
+      const session = sessions.find((item) => item.id === thread.session_id)
+      expect(session).toMatchObject({ kind: 'session', owner_id: thread.agent })
+      expect((await h.client.sessionsGet(thread.session_id)).value).toEqual(session)
+      expect((await h.client.timelineList(thread.session_id)).value).toMatchObject({ session_id: thread.session_id })
+      const agent = h.world.slices.roster.state.agents.find((item) => item.id === thread.agent)
+      expect(agent?.current_session_id).toBe(thread.session_id)
+    }
+    for (const agent of h.world.slices.roster.state.agents) {
+      if (agent.current_session_id == null) continue
+      expect(sessions.find((item) => item.id === agent.current_session_id)).toMatchObject({ kind: 'session', owner_id: agent.id })
+    }
+  })
+
+  it('keeps each launch variant linked to exactly its listed parent launch', async () => {
+    const h = setup()
+    const details = h.world.slices.details.state
+    expect(details.launch_variants.length).toBeGreaterThan(0)
+    for (const launch of details.launches) {
+      const variants = (await h.client.launchVariantsList(launch.id)).value.items
+      expect(variants.map((item) => item.id)).toEqual(launch.variants)
+      expect(variants).toEqual(details.launch_variants.filter((item) => item.launch_id === launch.id))
+    }
+    for (const variant of details.launch_variants) {
+      const launch = details.launches.find((item) => item.id === variant.launch_id)
+      expect(launch?.variants).toContain(variant.id)
+    }
+  })
+
+  it('serves launch variants as a paginated child inventory with ownership-checked details', async () => {
+    const world = base()
+    const details = world.slices.details
+    const launch = details.state.launches[0]!
+    const template = details.state.launch_variants.find((item) => item.launch_id === launch.id)!
+    expect(template).toBeDefined()
+    const variants = Array.from({ length: 5 }, (_, ordinal) => ({
+      ...template, id: `launch-variant/scenario-page-${ordinal}`, ordinal, launch_id: launch.id,
+    }))
+    const otherLaunch = { ...launch, id: 'launch/scenario-other', variants: [] }
+    const h = setup(world.with({ details: { ...details, timeline: [], state: { ...details.state,
+      launches: [{ ...launch, variants: variants.map((item) => item.id) }, otherLaunch], launch_variants: variants,
+    } } }))
+    const found: string[] = []
+    let cursor: string | undefined
+    do {
+      const page = (await h.client.launchVariantsList(launch.id, { limit: 2, ...(cursor === undefined ? {} : { cursor }) })).value
+      expect(page.collection).toBe(`launches/${launch.id}/variants`)
+      expect(page.items.length).toBeLessThanOrEqual(2)
+      for (const item of page.items) {
+        expect(item).toMatchObject({ kind: 'launch-variant', launch_id: launch.id })
+        const response = await h.replay.fetch(`http://scenario.invalid/v1/client/launches/${encodeURIComponent(launch.id)}/variants/${encodeURIComponent(item.id)}`)
+        expect(response.status).toBe(200)
+        const body: unknown = await response.json()
+        decodeUnknownSync(Envelope, 'strict')(body)
+        expect(body).toMatchObject({ value: item })
+      }
+      found.push(...page.items.map((item) => item.id))
+      cursor = page.page.next_cursor ?? undefined
+    } while (cursor !== undefined)
+    expect(found).toEqual(variants.map((item) => item.id))
+    expect(new Set(found).size).toBe(variants.length)
+    for (const path of [
+      `launches/${encodeURIComponent(launch.id)}/variants/launch-variant%2Fabsent`,
+      `launches/launch%2Fabsent/variants/${encodeURIComponent(variants[0]!.id)}`,
+      `launches/${encodeURIComponent(otherLaunch.id)}/variants/${encodeURIComponent(variants[0]!.id)}`,
+      'launches/launch%2Fabsent/variants',
+    ]) {
+      const response = await h.replay.fetch(`http://scenario.invalid/v1/client/${path}`)
+      expect(response.status).toBe(404)
+      expect(decodeUnknownSync(ErrorEnvelope, 'strict')(await response.json()).code).toBe('not-found')
+    }
+  })
+
+  it('paginates inventory lists and applies status, actor and resource-kind filters before pagination', async () => {
+    const h = setup()
+    const inventories = [
+      { expected: h.world.slices.roster.state.sessions, read: (cursor?: string) => h.client.sessionsList({ limit: 1, ...(cursor === undefined ? {} : { cursor }) }) },
+      { expected: h.world.slices.roster.state.devices, read: (cursor?: string) => h.client.devicesList({ limit: 1, ...(cursor === undefined ? {} : { cursor }) }) },
+      { expected: h.world.slices.details.state.launches, read: (cursor?: string) => h.client.launchesList({ limit: 1, ...(cursor === undefined ? {} : { cursor }) }) },
+    ]
+    for (const inventory of inventories) {
+      const ids: string[] = []
+      let cursor: string | undefined
+      do {
+        const page = (await inventory.read(cursor)).value
+        ids.push(...page.items.map((item) => item.id))
+        cursor = page.page.next_cursor ?? undefined
+      } while (cursor !== undefined)
+      expect(ids).toEqual(inventory.expected.map((item) => item.id))
+      expect(new Set(ids).size).toBe(ids.length)
+    }
+    const session = h.world.slices.roster.state.sessions[0]!
+    expect((await h.client.sessionsList({ actor: session.owner_id, status: session.state })).value.items)
+      .toEqual(h.world.slices.roster.state.sessions.filter((item) => item.owner_id === session.owner_id && item.state === session.state))
+    const device = h.world.slices.roster.state.devices[0]!
+    expect((await h.client.devicesList({ status: device.state })).value.items)
+      .toEqual(h.world.slices.roster.state.devices.filter((item) => item.state === device.state))
+    const launch = h.world.slices.details.state.launches[0]!
+    expect((await h.client.launchesList({ status: launch.phase })).value.items)
+      .toEqual(h.world.slices.details.state.launches.filter((item) => item.phase === launch.phase))
+    for (const [kind, expected] of [
+      ['session', h.world.slices.roster.state.sessions],
+      ['device', h.world.slices.roster.state.devices],
+      ['launch', h.world.slices.details.state.launches],
+      ['launch-variant', h.world.slices.details.state.launch_variants],
+    ] as const) {
+      const resources = (await h.client.resourcesList({ kind })).value.items
+      expect(resources.map((item) => item.id)).toEqual(expected.map((item) => item.id))
+      expect(resources.map((item) => item.facts)).toEqual(expected)
+    }
+  })
+
+  it('refuses unmodelled routes and children instead of returning empty pages or parent resources', async () => {
+    const h = setup()
+    const agent = encodeURIComponent(h.world.slices.roster.state.agents[0]!.id)
+    const launch = encodeURIComponent(h.world.slices.details.state.launches[0]!.id)
+    const session = encodeURIComponent(h.world.slices.roster.state.sessions[0]!.id)
+    for (const path of [
+      'schedules', 'notes', 'not-a-collection', `agents/${agent}/declaration`,
+      `agents/${agent}/timeline`, `launches/${launch}/decisions`, `launches/${launch}/approvals`,
+      `launches/${launch}/unknown`, `launches/${launch}/variants/unknown/child`,
+      `sessions/${session}/unknown`, `sessions/${session}/timeline/child`,
+      'resources/unknown', 'capabilities/unknown', 'events/unknown',
+      'variants', 'variants/launch-variant%2Fabsent',
+    ]) {
+      const response = await h.replay.fetch(`http://scenario.invalid/v1/client/${path}`)
+      expect(response.status, path).toBe(501)
+      expect(decodeUnknownSync(ErrorEnvelope, 'strict')(await response.json()))
+        .toMatchObject({ code: 'unsupported-capability', retryable: false })
+    }
+    for (const path of ['sessions/session%2Fabsent', 'devices/device%2Fabsent', 'launches/launch%2Fabsent']) {
+      const response = await h.replay.fetch(`http://scenario.invalid/v1/client/${path}`)
+      expect(response.status).toBe(404)
+      expect(decodeUnknownSync(ErrorEnvelope, 'strict')(await response.json()).code).toBe('not-found')
+    }
+  })
+
   it('strict-decodes discovery, pages, resources, gets, timeline, screen, errors and actions', async () => {
     const h = setup()
     await h.client.capabilities()

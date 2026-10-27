@@ -29,6 +29,7 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: crate::model::PlannerSpec::default(),
+            assistant_receipts: Default::default(),
         };
         claim(
             &state,

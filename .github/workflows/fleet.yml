@@ -1534,7 +1534,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}"
+          key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}"
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Install the frozen workspace
         shell: bash
@@ -3749,6 +3749,9 @@ jobs:
               "apps/fractal-web/src/web/coldOpen.fixtures.ts",
               # The image composer integration story exercises the app's live imageUploadAdapter in kit Storybook.
               "apps/fractal-web/src/web/ComposerImages.stories.tsx",
+              # The transcript image integration story exercises the app's production transcript image cache in kit Storybook.
+              "apps/fractal-web/src/web/TranscriptImages.stories.tsx",
+              "apps/fractal-web/src/web/transcriptImages.ts",
               # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
               "apps/fractal-web/.changelog/**",
               "packages/fractal-sdk/src/**",
@@ -4011,7 +4014,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '{"shard":[0,1,2,3]}' || '{"shard":[0]}') }}
     needs: [fractal-web-changes, genie-freshness, evidence-gate-fractal-web]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.skip == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -4028,13 +4031,12 @@ jobs:
         run: |
           cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
           printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
-        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 1
       - name: Fetch the whole history without evidence tags
-        if: (github.event_name == 'pull_request') && needs.evidence-gate-fractal-web.outputs.skip != 'true'
+        if: github.event_name == 'pull_request'
         env:
           FETCH_TOKEN: ${{ github.token }}
         run: |
@@ -4061,41 +4063,34 @@ jobs:
             ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
             ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
-        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Materialize megarepo members
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
         run: |
           nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
-        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Check web shell identity invariants
         run: python3 scripts/ci-web-shell-test
-        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Identify the web shell inputs
         id: web-shell-key
         shell: bash
         env:
           CI_WEB_SHELL_SOURCE_HASH: ${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}
         run: bash scripts/ci-web-shell key
-        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Restore the pnpm store
         id: pnpm-store
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
-        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
+          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
       - name: Enable user namespaces for Buck TypeScript sandbox
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Restore the web shell closure
         id: web-shell
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/web-shell"
           key: ${{ steps.web-shell-key.outputs.key }}
-        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Run the fractal-web lanes and dependency license check
         id: run
         shell: bash
@@ -4114,15 +4109,14 @@ jobs:
           APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Preserve kit shard receipt
-        if: (always()) && needs.evidence-gate-fractal-web.outputs.skip != 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}"
           path: "${{ runner.temp }}/kit-play-receipts/"
           if-no-files-found: ignore
-      - if: (always()) && needs.evidence-gate-fractal-web.outputs.skip != 'true'
+      - if: always()
         continue-on-error: true
         name: Take the evidence signer from the base commit
         id: evidence-base
@@ -4132,7 +4126,7 @@ jobs:
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
           git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
-      - if: (always() && steps.evidence-base.outcome == 'success') && needs.evidence-gate-fractal-web.outputs.skip != 'true'
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
         continue-on-error: true
         name: May this job use the signing key?
         id: evidence-guard
@@ -4142,7 +4136,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
-      - if: (always() && steps.evidence-guard.outcome == 'success') && needs.evidence-gate-fractal-web.outputs.skip != 'true'
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
         name: Write the signer configuration and key
         id: evidence-configure
@@ -4151,7 +4145,7 @@ jobs:
         run: |
           set -o pipefail
           python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
-      - if: (always() && steps.evidence-configure.outcome == 'success') && needs.evidence-gate-fractal-web.outputs.skip != 'true'
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
         continue-on-error: true
         name: Sign this job result
         env:
@@ -4172,11 +4166,11 @@ jobs:
             --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
             --out "$RUNNER_TEMP/evidence-notes" \
             --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"
-      - if: (always()) && needs.evidence-gate-fractal-web.outputs.skip != 'true'
+      - if: always()
         continue-on-error: true
         name: Remove the key
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
-      - if: (always()) && needs.evidence-gate-fractal-web.outputs.skip != 'true'
+      - if: always()
         continue-on-error: true
         name: Retain the signed note
         uses: actions/upload-artifact@v4
@@ -4185,11 +4179,6 @@ jobs:
           path: "${{ runner.temp }}/evidence-notes/"
           if-no-files-found: ignore
           retention-days: 7
-      - name: evidence covered by a trusted note
-        if: needs.evidence-gate-fractal-web.outputs.skip == 'true'
-        env:
-          RECORD: ${{ needs.evidence-gate-fractal-web.outputs.record }}
-        run: echo "covered by trusted evidence note $RECORD" >> "$GITHUB_STEP_SUMMARY"
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -4217,24 +4206,28 @@ jobs:
           CHANGES_RESULT: ${{ needs.fractal-web-changes.result }}
           RELEVANT: ${{ needs.fractal-web-changes.outputs.relevant }}
           EXECUTION_RESULT: ${{ needs.fractal-web-execution.result }}
+          EVIDENCE_SKIP: ${{ needs.evidence-gate-fractal-web.outputs.skip }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           python3 - <<'PY'
           #!/usr/bin/env python3
           """The always-emitted fractal-web check: pass only for a deliberate skip or a successful run.
 
-          Detection must have succeeded. A relevant change then requires a successful execution job; a
-          change without web inputs requires that execution was skipped. Failure, timeout, cancellation and
-          an unexpected skip all fail the gate.
+          Detection must have succeeded. A relevant change requires successful execution, except when
+          an explicit trusted evidence decision covers a pull request. Queue and manual runs always
+          require execution. Failure, timeout, cancellation and an unexpected skip fail the gate.
           """
 
           import os
           import sys
 
 
-          def verdict(changes, relevant, execution):
+          def verdict(changes, relevant, execution, evidence_skip="", event=""):
               if changes != "success":
                   return f"change detection ended with {changes or 'no result'}"
               if relevant == "true":
+                  if execution == "skipped" and evidence_skip == "true" and event == "pull_request":
+                      return None
                   return None if execution == "success" else f"web inputs changed but execution ended with {execution or 'no result'}"
               if relevant == "false":
                   return None if execution == "skipped" else f"no web inputs changed but execution ended with {execution or 'no result'}"
@@ -4244,7 +4237,7 @@ jobs:
           def main():
               changes, relevant, execution = (os.environ.get(name, "") for name in ("CHANGES_RESULT", "RELEVANT", "EXECUTION_RESULT"))
               print(f"detection: {changes}, relevant: {relevant}, execution: {execution}")
-              failure = verdict(changes, relevant, execution)
+              failure = verdict(changes, relevant, execution, os.environ.get("EVIDENCE_SKIP", ""), os.environ.get("EVENT_NAME", ""))
               if failure:
                   print(f"::error::fractal-web gate failed: {failure}")
                   return 1

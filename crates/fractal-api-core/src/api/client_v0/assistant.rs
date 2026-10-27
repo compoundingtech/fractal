@@ -3,6 +3,7 @@ use super::*;
 use rusqlite::OptionalExtension as _;
 pub mod authorization;
 pub mod reads;
+pub mod receipts;
 pub mod native;
 
 pub use authorization::{ReadReceipt, finish as finish_read, pin as pin_read_trust, read as read_projection};
