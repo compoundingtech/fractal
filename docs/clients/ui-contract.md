@@ -372,6 +372,33 @@ disagree. st serves each of these once, as a presentation projection, so every c
 same answer and one place is measured and optimized
 ([#2646](https://github.com/compoundingtech/fractal/issues/2646)).
 
+### Complete revisioned agents streams
+
+A daemon granting `collections.agents.revisioned.v1` accepts an agents collection
+subscription with `agents_publication_version: 1`, no limit and no selectors.
+This opt-in is separate from legacy bounded windows and the exact-agent selector.
+Those existing contracts, including HTTP list reads, do not change.
+
+An initial or replacement subscription receives a complete immutable publication
+as consecutive `snapshot` chunks. Each carries the same `publication` metadata
+(`node_epoch`, `revision`, `status_watermark`, `materialized_at_ms`) and snapshot,
+with zero-based `chunk_index` and a fixed `chunk_count`. Concatenate each chunk's
+`items` and `order`, then replace the visible roster only after the final chunk.
+Do not expose a partial roster as a complete result. `has_more` is always false.
+
+Subsequent `changes` carry complete-row `upserts`, `removes`, the complete target
+`order`, and `base_revision`. Apply them only when the held epoch and revision
+match their publication epoch and base revision. Metadata-only revisions can have
+empty upserts/removes. An epoch change or an oversized delta starts a new complete
+snapshot sequence instead. There is no replay history: reconnect starts over.
+
+Every frame is at most 1 MiB. A row that cannot fit intact permanently refuses the
+subscription with `agents-publication-row-too-large`, before any snapshot chunk.
+Publication notices coalesce for a non-sliding 50 ms; slower readers skip obsolete
+pending targets rather than queueing every revision. A contiguous sequence has an
+eight-second total deadline and revalidates authority before every data frame.
+Other collection data cannot interleave with that sequence.
+
 ### Rules for every projection
 
 - **On a published view, never derived on read.** A projection is a `presentation` object on the

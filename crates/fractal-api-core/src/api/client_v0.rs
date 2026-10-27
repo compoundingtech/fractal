@@ -65,6 +65,8 @@ pub struct CollectionSubscribe {
     #[serde(default, deserialize_with = "collection_name")]
     pub collection: String,
     pub limit: Option<usize>,
+    /// Opt in to complete revision-fenced agents publications, independently of legacy windows.
+    pub agents_publication_version: Option<u8>,
     pub person: Option<String>,
     /// Follow one arrangement instead of the owner's bounded prefix window.
     pub subject: Option<String>,
@@ -73,8 +75,8 @@ pub struct CollectionSubscribe {
     pub agent: Option<String>,
     pub status: Option<String>,
     /// Usage period boundaries; an omitted end follows new usage through the current time.
-    since_ms: Option<u64>,
-    until_ms: Option<u64>,
+    pub since_ms: Option<u64>,
+    pub until_ms: Option<u64>,
     /// Complete process coverage captured by an inventory read, before window truncation.
     #[serde(skip)]
     pub native_processes: Option<Arc<Mutex<Vec<u32>>>>,
@@ -590,6 +592,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"inventory-collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":EXACT_AGENT_SELECTOR_CAPABILITY, "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"collections.agents.revisioned.v1", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"custom-subjects", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     // `documents.list`, `document-references.get`, and `document.get` by bare name with its
     // version and changed time.

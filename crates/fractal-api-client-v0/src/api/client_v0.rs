@@ -46,6 +46,10 @@ mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
 pub mod summary;
+mod agents_publication_frames;
+mod agents_publication_stream;
+#[cfg(test)]
+mod agents_publication_stream_tests;
 #[cfg(test)]
 mod agents_window_tests;
 #[cfg(test)]
@@ -1191,6 +1195,7 @@ async fn deliver_collection(
 enum CollectionRead {
     Legacy(Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>),
     Ivm(Box<Result<collection_ivm::Candidate, ApiError>>),
+    Revisioned(Result<agents_publication_stream::Delivery, ApiError>),
 }
 
 async fn deliver_ivm_collection(
@@ -1955,6 +1960,9 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     let windows = collection_windows::Windows::attach(&state.store);
     let mut window_revisions = [0; collection_windows::COLLECTIONS.len()];
     let mut subscriptions = BTreeMap::<String, CollectionSubscription>::new();
+    let mut revisioned = BTreeMap::<String, agents_publication_stream::Subscription>::new();
+    let mut publications: Option<watch::Receiver<u64>> = None;
+    let mut publication_due: Option<tokio::time::Instant> = None;
     let mut terminals = BTreeMap::<String, watch::Receiver<TerminalFrame>>::new();
     // When each terminal subscription began, until its first screen is sent.
     let mut terminals_opened = BTreeMap::<String, std::time::Instant>::new();
@@ -1988,6 +1996,8 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     loop {
         // The subscriptions to read after this wake-up.
         let mut refresh = Vec::<String>::new();
+        revisioned.retain(|id, _| subscriptions.contains_key(id));
+        if revisioned.is_empty() { publications = None; publication_due = None; }
         if !subscriptions.values().any(|s| s.request.collection == "sessions") { native_watch = None; }
         if native_watch_pending.is_some() {
             reread_due.retain(|id| subscriptions.get(id).is_some_and(|s| s.request.collection != "sessions"));
@@ -2023,6 +2033,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         if request.kind == "unsubscribe" {
                             if let Some(presence) = &presence { presence.unfollow(&request.id); }
                             subscriptions.remove(&request.id);
+                            revisioned.remove(&request.id);
                             reread_due.remove(&request.id);
                             terminals.remove(&request.id);
                             terminals_opened.remove(&request.id);
@@ -2033,6 +2044,12 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         let held = subscriptions.contains_key(&request.id) || terminals.contains_key(&request.id) || conversations.0.contains_key(&request.id);
                         if request.kind != "subscribe" || request.id.is_empty() || request.id.len() > 128 || subscriptions.len() + terminals.len() + conversations.0.len() >= COLLECTION_MAX_SUBSCRIPTIONS && !held {
                             if !send_collection(&mut socket, json!({"kind":"error", "id":request.id, "message":"invalid subscription or subscription limit exceeded"})).await { return; }
+                            break 'command;
+                        }
+                        if let Err(error) = agents_publication_stream::validate(&request) {
+                            if !send_collection(&mut socket, json!({"kind":"error", "id":request.id,
+                                "collection":request.collection, "code":error.code, "message":error.message,
+                                "retryable":false})).await { return; }
                             break 'command;
                         }
                         if inventory::is_inventory(&request.collection) {
@@ -2062,6 +2079,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                         // A subscription with a held ID replaces it.
                         subscriptions.remove(&request.id);
+                        revisioned.remove(&request.id);
                         reread_due.remove(&request.id);
                         terminals.remove(&request.id);
                         terminals_opened.remove(&request.id);
@@ -2132,7 +2150,14 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                         refresh.push(request.id.clone());
                         // Collection results and conversation frames share the same generation fence.
-                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, owner_revision: None, request });
+                        if request.agents_publication_version.is_some() {
+                            if publications.is_none() { publications = Some(state.store.subscribe_agents_publications()); }
+                            revisioned.insert(request.id.clone(), agents_publication_stream::Subscription::default());
+                        }
+                        let ivm = if request.agents_publication_version.is_none() {
+                            sources.as_ref().and_then(|sources| sources.adapter(&request.collection))
+                        } else { None };
+                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm, cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, owner_revision: None, request });
 
                     }
                     next = futures_util::FutureExt::now_or_never(socket.recv());
@@ -2143,7 +2168,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 let Some(subscription) = subscriptions.get_mut(&id) else { continue; };
                 if subscription.generation != generation { continue; }
                 subscription.reading = None;
-                if std::mem::take(&mut subscription.dirty) { refresh.push(id.clone()); }
+                if std::mem::take(&mut subscription.dirty) && !revisioned.contains_key(&id) { refresh.push(id.clone()); }
                 if subscription.request.collection == "sessions"
                     && let CollectionRead::Legacy(Ok(_)) = &result
                     && let Some(watch) = &mut native_watch
@@ -2172,13 +2197,23 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                             && client_error_retryable(error.status, Some(&error.code)) => Refreshed::NotReady,
                         CollectionRead::Legacy(result) => deliver_collection(&mut socket, subscription, result).await,
                         CollectionRead::Ivm(result) => deliver_ivm_collection(&mut socket, subscription, *result, &mut refresh).await,
+                        CollectionRead::Revisioned(result) => agents_publication_stream::deliver(&mut socket, &state, &session,
+                            subscription, revisioned.get_mut(&id).expect("revisioned generation is current"), result).await,
                     }
                 }).await;
                 if subscription.delivered { first_frames.remove(&id); }
                 subscription.waiting_for_view = matches!(refreshed, Refreshed::NotReady) && governed;
+                if matches!(refreshed, Refreshed::Current) && revisioned.get(&id)
+                    .is_some_and(|held| !held.is_current(state.store.agents_publication().as_deref())) {
+                    publication_due.get_or_insert_with(tokio::time::Instant::now);
+                }
                 match refreshed {
                     Refreshed::Current => {}
                     Refreshed::Retry => {
+                        if revisioned.contains_key(&id) {
+                            agents_publication_stream::schedule_notice(&mut publication_due);
+                            continue;
+                        }
                         if subscription.ivm.is_some() { subscription.dirty = true; }
                         else { reread_due.insert(id.clone()); }
                     }
@@ -2194,6 +2229,26 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     Refreshed::Dropped => { subscriptions.remove(&id); reread_due.remove(&id); first_frames.remove(&id); }
                     Refreshed::Closed => return,
                 }
+            }
+            notice = async {
+                match &mut publications {
+                    Some(receiver) => receiver.changed().await,
+                    None => std::future::pending().await,
+                }
+            }, if !command_waiting && publications.is_some() => {
+                if notice.is_err() { return; }
+                if let Some(receiver) = &mut publications { receiver.borrow_and_update(); }
+                agents_publication_stream::schedule_notice(&mut publication_due);
+            }
+            () = async {
+                match publication_due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending().await,
+                }
+            }, if !command_waiting && publication_due.is_some() => {
+                publication_due = None;
+                refresh.extend(revisioned.iter().filter(|(_, held)|
+                    !held.is_current(state.store.agents_publication().as_deref())).map(|(id, _)| id.clone()));
             }
             notice = async {
                 match &mut ivm_notices {
@@ -2222,7 +2277,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 // a commit that can change the agents roster asks its refresher to publish.
                 let index = state.store.index().unwrap_or(weighed);
                 let roster_refresher = state.store.agent_roster_refresher_running();
-                let followed = |s: &CollectionSubscription| s.ivm.is_none()
+                let followed = |s: &CollectionSubscription| s.ivm.is_none() && s.request.agents_publication_version.is_none()
                     && !state.store.collection_view_published(&s.request.collection);
                 if !subscriptions.values().any(followed) {
                     weighed = index;
@@ -2340,7 +2395,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 if result.is_err() { return; }
                 // A window read before this roster was published rereads it.
                 let published = *roster.borrow_and_update();
-                let stale = subscriptions.iter().filter(|(_, s)| s.ivm.is_none()
+                let stale = subscriptions.iter().filter(|(_, s)| s.ivm.is_none() && s.request.agents_publication_version.is_none()
                     && s.request.collection == "agents" && s.roster_revision < published);
                 if publication_rereads(stale, &mut reread_due, &mut refresh, last_reread) { continue; }
             }
@@ -2348,7 +2403,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 if result.is_err() { return; }
                 // The same for every other published view.
                 let published = *views.borrow_and_update();
-                let stale = subscriptions.iter().filter(|(_, s)| s.ivm.is_none()
+                let stale = subscriptions.iter().filter(|(_, s)| s.ivm.is_none() && s.request.agents_publication_version.is_none()
                     && s.view_revision < crate::store::published_views::revision(&published, &s.request.collection));
                 if publication_rereads(stale, &mut reread_due, &mut refresh, last_reread) { continue; }
             }
@@ -2419,8 +2474,8 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
         }
         // Rereads are paced together: reading any due window, or every held window (as a lone
         // new subscription does), starts the next interval.
-        let legacy_windows = subscriptions.values().filter(|s| s.ivm.is_none()).count();
-        let refreshed_legacy = refresh.iter().filter(|id| subscriptions.get(*id).is_some_and(|s| s.ivm.is_none())).count();
+        let legacy_windows = subscriptions.values().filter(|s| s.ivm.is_none() && s.request.agents_publication_version.is_none()).count();
+        let refreshed_legacy = refresh.iter().filter(|id| subscriptions.get(*id).is_some_and(|s| s.ivm.is_none() && s.request.agents_publication_version.is_none())).count();
         if refresh.iter().any(|id| reread_due.contains(id)) || legacy_windows > 0 && refreshed_legacy == legacy_windows {
             last_reread = tokio::time::Instant::now();
         }
@@ -2449,6 +2504,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
             let adapter = subscription.ivm.clone();
             let cursor = subscription.cursor.clone();
             let previous = subscription.previous.clone();
+            let revisioned_previous = revisioned.get(&id).map(|held| held.delivered.clone());
             let first_span = first_frames.get_mut(&id).and_then(|first| {
                 std::mem::take(&mut first.read_pending).then(|| first.span.clone())
             });
@@ -2458,7 +2514,9 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     _ = canceled => None,
                     result = first_frame_work(first_span, async {
                         let permit = read_slots.acquire_owned().await.expect("socket read slots stay open");
-                        if let (Some(sources), Some(adapter)) = (sources, adapter) {
+                        if let Some(previous) = revisioned_previous {
+                            CollectionRead::Revisioned(agents_publication_stream::prepare(state, session, request, previous, permit).await)
+                        } else if let (Some(sources), Some(adapter)) = (sources, adapter) {
                             CollectionRead::Ivm(Box::new(collection_ivm::read(state, session, request, permit, sources, adapter, collection_ivm::Held {cursor, rows:previous}).await))
                         } else {
                             CollectionRead::Legacy(read(state, session, request, permit).await)
