@@ -26,6 +26,32 @@ pub(super) fn schedule_notice(due: &mut Option<tokio::time::Instant>) {
     due.get_or_insert(tokio::time::Instant::now() + Duration::from_millis(50));
 }
 
+/// Inspect only opted-in commands so null selectors and unknown window grammars cannot
+/// disappear during typed Option deserialization. Raw values borrow even escaped IDs and
+/// leave malformed telemetry under the existing ignore convention.
+pub(super) fn validate_command(request: &CollectionSubscribe, payload: &str) -> Result<(), ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RevisionedCommand<'a> {
+        #[serde(borrow, rename = "kind")]
+        _kind: &'a serde_json::value::RawValue,
+        #[serde(borrow, rename = "id")]
+        _id: &'a serde_json::value::RawValue,
+        #[serde(borrow, rename = "collection")]
+        _collection: &'a serde_json::value::RawValue,
+        #[serde(borrow, rename = "agents_publication_version")]
+        _version: &'a serde_json::value::RawValue,
+        #[serde(default, borrow, rename = "trace")]
+        _trace: Option<&'a serde_json::value::RawValue>,
+    }
+    if request.agents_publication_version.is_some() {
+        serde_json::from_str::<RevisionedCommand<'_>>(payload).map_err(|_| {
+            validation("revisioned agents subscriptions accept only kind, id, collection, agents_publication_version and optional trace")
+        })?;
+    }
+    validate(request)
+}
+
 pub(super) fn validate(request: &CollectionSubscribe) -> Result<(), ApiError> {
     if let Some(version) = request.agents_publication_version
         && (version != 1 || request.collection != "agents" || request.limit.is_some()

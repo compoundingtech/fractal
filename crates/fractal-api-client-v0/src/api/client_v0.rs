@@ -2046,7 +2046,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                             if !send_collection(&mut socket, json!({"kind":"error", "id":request.id, "message":"invalid subscription or subscription limit exceeded"})).await { return; }
                             break 'command;
                         }
-                        if let Err(error) = agents_publication_stream::validate(&request) {
+                        if let Err(error) = agents_publication_stream::validate_command(&request, &payload) {
                             if !send_collection(&mut socket, json!({"kind":"error", "id":request.id,
                                 "collection":request.collection, "code":error.code, "message":error.message,
                                 "retryable":false})).await { return; }

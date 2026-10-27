@@ -342,3 +342,46 @@ fn revisioned_agents_capability_is_explicit_and_trace_does_not_filter_the_roster
     })).unwrap();
     assert!(agents_publication_stream::validate(&legacy).is_ok());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revisioned_agents_command_shape_rejects_null_selectors_and_unknown_window_grammars_only_when_opted_in() {
+    let root = tempfile::tempdir().unwrap();
+    let state = tests::test_state_named(root.path(), "node");
+    let (mut socket, _server) = connect(state, ClientSession::local(None).unwrap()).await;
+    for extra in [
+        json!({"limit":null}), json!({"person":null}), json!({"agent":null}),
+        json!({"window":{}}), json!({"filters":{}}),
+    ] {
+        let mut request = json!({"kind":"subscribe", "id":"strict", "collection":"agents",
+            "agents_publication_version":1});
+        request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        command(&mut socket, request).await;
+        let error = frame(&mut socket).await;
+        assert_eq!(error["kind"], "error");
+        assert_eq!(error["id"], "strict");
+        assert_eq!(error["retryable"], false);
+
+        // The same selectors and unknown extension fields retain their legacy interpretation.
+        let mut legacy = json!({"kind":"subscribe", "id":"legacy", "collection":"agents"});
+        legacy.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        command(&mut socket, legacy).await;
+        assert_eq!(frame(&mut socket).await["kind"], "snapshot");
+    }
+    command(&mut socket, json!({"kind":"subscribe", "id":"null-version", "collection":"agents",
+        "agents_publication_version":null})).await;
+    assert_eq!(frame(&mut socket).await["kind"], "error");
+}
+
+#[test]
+fn revisioned_agents_raw_shape_borrows_escaped_ids_and_ignores_malformed_trace_values() {
+    for trace in ["null", "17", "\"not-an-object\"", "{\"ignored\":1e999}"] {
+        let payload = format!(r#"{{"kind":"subscribe","id":"escaped \"id\" λ","collection":"agents","agents_publication_version":1,"trace":{trace}}}"#);
+        let request = serde_json::from_str(&payload).unwrap();
+        assert!(agents_publication_stream::validate_command(&request, &payload).is_ok());
+    }
+    let absent: CollectionSubscribe = serde_json::from_str(r#"{"kind":"subscribe","id":"legacy","collection":"agents"}"#).unwrap();
+    assert_eq!(absent.agents_publication_version, None);
+    assert!(serde_json::from_str::<CollectionSubscribe>(
+        r#"{"kind":"subscribe","id":"invalid","collection":"agents","agents_publication_version":null}"#
+    ).is_err());
+}

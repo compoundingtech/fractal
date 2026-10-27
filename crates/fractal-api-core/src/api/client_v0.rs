@@ -66,6 +66,7 @@ pub struct CollectionSubscribe {
     pub collection: String,
     pub limit: Option<usize>,
     /// Opt in to complete revision-fenced agents publications, independently of legacy windows.
+    #[serde(default, deserialize_with = "deserialize_agents_publication_version")]
     pub agents_publication_version: Option<u8>,
     pub person: Option<String>,
     /// Follow one arrangement instead of the owner's bounded prefix window.
@@ -94,6 +95,13 @@ pub struct CollectionSubscribe {
     #[serde(rename = "trace", default, deserialize_with = "deserialize_frame_trace")]
     pub frame_trace: Option<crate::otel::FrameTraceContext>,
 }
+fn deserialize_agents_publication_version<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u8::deserialize(deserializer).map(Some)
+}
+
 fn deserialize_frame_trace<'de, D>(
     deserializer: D,
 ) -> Result<Option<crate::otel::FrameTraceContext>, D::Error>
