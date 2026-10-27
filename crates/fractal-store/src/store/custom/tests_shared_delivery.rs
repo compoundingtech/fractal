@@ -3,7 +3,7 @@ use crate::store::custom::*;
 
 pub fn example() -> Manifest {
     serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h8c55fb7ce93e owner=fractal_store::store::custom::tests_shared_delivery TODO=trace-statement-and-value-representation */ include_str!(
-        "../../../../../examples/st3/custom-review.json"
+        "../../../../../examples/fractal/custom-review.json"
     ))
     .unwrap()
 }
@@ -100,7 +100,7 @@ pub const RAW_KINDS: [&str; 6] = ["opened", "requested", "answered", "assumed", 
 
 pub fn decision_tree() -> Manifest {
     serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h414ce5dc6eae owner=fractal_store::store::custom::tests_shared_delivery TODO=trace-statement-and-value-representation */ include_str!(
-        "../../../../../examples/st3/decision-tree.json"
+        "../../../../../examples/fractal/decision-tree.json"
     ))
     .unwrap()
 }

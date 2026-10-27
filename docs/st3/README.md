@@ -92,7 +92,7 @@ Use these documents for implementation details:
 - [Operational-state contract](operational-state/README.md) separates immutable history, current
   projection, and actor-specific actionable views and defines screen/CLI parity.
 
-The [examples](../../examples/st3/README.md) show small, tested mission patterns. Use the evals for
+The [examples](../../examples/fractal/README.md) show small, tested mission patterns. Use the evals for
 failure proof, not as introductory examples.
 
 ## Observe, don't instruct

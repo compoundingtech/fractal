@@ -362,4 +362,4 @@ configured package. A systemd restart trigger or a build reference in the launch
 Home Manager restart the daemon when the package changes despite its stable executable path.
 
 `scripts/st3-graceful-messaging-eval/run` proves this end to end for each harness; see
-[the eval](../../evals/st3/graceful-messaging/README.md).
+[the eval](../../evals/fractal/graceful-messaging/README.md).
