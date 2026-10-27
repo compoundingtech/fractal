@@ -221,6 +221,9 @@ offers and progress. Its step IDs are the same `stepRun` IDs as `run_details`, a
 done count is the number of completed steps, not a client fallback.
 Work-only changes also publish the affected mission's joined run details. Recorded slices
 remain unmodified captures.
+`crates/fractal-ui-model/tests/scenarios.rs` proves synthetic presentations match the real
+daemon presentation function at the baseline and each committed details change, using
+the corresponding roster queues and open human gates rather than a second expected model.
 
 Creation events carry the complete thread or terminal record, including pagination or runtime,
 cast and screens metadata. Resources are genuinely absent before creation, rather than hidden
