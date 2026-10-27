@@ -99,11 +99,24 @@ function ComposerImages({ scheme, slow = false, previewImages = false, stateLabe
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal/App/Composer images', component: ComposerImages,
   args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'Exercises the live image adapter with deterministic local upload transport and controlled completion, not a server connection.' } },
 } satisfies Meta<typeof ComposerImages>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'LongFilename:contract-fixture',
+  'ResolvedImageFollowup:contract-fixture',
+  'SentImage:contract-fixture',
+  'SeveralImages:contract-fixture',
+  'SizeRefusal:contract-fixture',
+  'UploadCancelled:contract-fixture',
+  'UploadInProgress:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 const pasteImages = async (root: HTMLElement, names: readonly string[]) => {

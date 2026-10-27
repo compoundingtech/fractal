@@ -135,13 +135,43 @@ const rowFixture = (row: Row, attachment: { readonly name: string; readonly medi
   }
 }
 
-const meta = {
+const meta = { excludeStories: ['scenarioExemptions'],
   title: 'Fractal/App/Transcript images', component: TranscriptImages,
   args: { scheme: 'dark', width: 'desktop', fixture: 'loaded', gated: false, row: 'prompt' },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, width: { options: ['desktop', 'phone'], control: 'radio' }, fixture: { options: ['loading', 'unauthorized', 'failed', 'loaded', 'unavailable', 'decode-failed'], control: 'radio' }, gated: { control: 'boolean' }, row: { options: ['prompt', 'assistant', 'mailbox'], control: 'radio' } },
   parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'Exercises the production transcript image cache over a deterministic local chunk transport (pending, refused, failing, complete, undecodable then complete, and released on demand) on prompt, assistant and mailbox rows, not a server connection.' } },
 } satisfies Meta<typeof TranscriptImages>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'AssistantImage:contract-fixture',
+  'AssistantImagePhone:contract-fixture',
+  'Contract:contract-fixture',
+  'DecodeFailed:contract-fixture',
+  'DecodeFailedPhone:contract-fixture',
+  'Failed:contract-fixture',
+  'FailedPhone:contract-fixture',
+  'KeyboardFailed:contract-fixture',
+  'KeyboardFailedPhone:contract-fixture',
+  'KeyboardLoaded:contract-fixture',
+  'KeyboardLoadedPhone:contract-fixture',
+  'KeyboardNavigateAway:contract-fixture',
+  'KeyboardNavigateAwayPhone:contract-fixture',
+  'KeyboardUnauthorized:contract-fixture',
+  'KeyboardUnauthorizedPhone:contract-fixture',
+  'Loaded:contract-fixture',
+  'LoadedPhone:contract-fixture',
+  'Loading:contract-fixture',
+  'LoadingPhone:contract-fixture',
+  'MailboxImage:contract-fixture',
+  'MailboxImagePhone:contract-fixture',
+  'Unauthorized:contract-fixture',
+  'UnauthorizedPhone:contract-fixture',
+  'Unavailable:contract-fixture',
+  'UnavailablePhone:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 const card = (root: HTMLElement) => within(root).getByRole('group', { name: `Image: ${NAME}, PNG` })

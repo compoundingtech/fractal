@@ -61,6 +61,9 @@ pub mod start_jobs;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
+#[cfg(test)]
+mod schedule_admission_tests;
+mod schedule_replication_block;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -169,7 +172,10 @@ fn schedule_admission_ready(
     host: &str,
     configured: &[String],
     since: u128,
+    schedule: &DesiredSubject,
 ) -> Result<bool> {
+    // Include the due callback: an armed timer cannot bypass a staged or conflicting owner.
+    store.owned_desired_guard(schedule).map_err(anyhow::Error::new)?;
     if store.replication_projection_deferred()
         || store.replication_catching_up()
         || store
@@ -178,29 +184,57 @@ fn schedule_admission_ready(
     {
         return Ok(false);
     }
-    let membership = store.fleet_membership()?;
-    let peers = configured
-        .iter()
-        .cloned()
-        .chain(
-            membership
-                .incarnations()
-                .filter(|member| member.end.is_none())
-                .map(|member| member.name.clone()),
-        )
-        .filter(|peer| peer != host && !matches!(membership.state(peer),
-            crate::fleet::MemberState::Ended(_) | crate::fleet::MemberState::LegacyRemoved(_)))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let peers = schedule_admission_peers(store, host, configured)?;
     if peers.is_empty() {
         return Ok(true);
     }
     let sync = store.replication_peer_sync(&peers);
-    Ok(!sync.values().any(|peer| peer.peer_only_envelopes > 0)
-        && sync
-            .values()
-            .any(|peer| peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0))
+    let strict = sync.values().any(|peer| peer.stale && peer.peer_only_envelopes > 0)
+        && schedule_requires_complete_history(store, schedule)?;
+    Ok(schedule_progress_ready(sync.values(), since, strict))
+}
+
+fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) -> Result<Vec<String>> {
+    let membership = store.fleet_membership()?;
+    Ok(configured.iter().cloned()
+        .chain(membership.incarnations().filter(|member| member.end.is_none())
+            .map(|member| member.name.clone()))
+        .filter(|peer| peer != host && !matches!(membership.state(peer),
+            crate::fleet::MemberState::Ended(_) | crate::fleet::MemberState::LegacyRemoved(_)))
+        .collect::<BTreeSet<_>>().into_iter().collect())
+}
+
+/// Moving a schedule (or removing its standby) must not turn an old missing-history
+/// comparison into permission to run on a second host. Conservatively retain the strict
+/// policy for the entire retained history after any role/owner change, not just a timeout.
+fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) -> Result<bool> {
+    let Some(current) = owned_schedule_spec(store, schedule)? else { return Ok(true) };
+    if current.standby.is_some() { return Ok(true); }
+    for claim in store.claims_for(&schedule.subject, Some("intent.desired"))? {
+        let Some(previous) = crate::graph::schedule_spec(&claim.body["desired"], &claim.origin) else {
+            return Ok(true);
+        };
+        if previous.host != current.host || previous.standby.is_some()
+            || claim.body["owner_run"].as_str() != schedule.owner_run.as_deref()
+            || claim.body["owner_generation"].as_str() != schedule.owner_generation.as_deref()
+            || claim.body["owner_step"].as_str() != schedule.owner_step.as_deref() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn schedule_progress_ready<'a>(
+    sync: impl IntoIterator<Item = &'a smallclaims::replication::ReplicationPeerSync>,
+    since: u128,
+    strict: bool,
+) -> bool {
+    let mut complete = false;
+    for peer in sync {
+        if peer.peer_only_envelopes > 0 && (strict || !peer.stale) { return false; }
+        complete |= peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0;
+    }
+    complete
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1113,6 +1147,7 @@ pub struct Reconciler<R = NativeRuntime> {
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
     /// A locally selected future standby tick is not a replicated scheduling claim.
     standby_due_ticks: Mutex<HashMap<String, (String, u64, i64)>>,
+    schedule_replication_blocks: Mutex<HashMap<String, schedule_replication_block::BlockedTick>>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
     /// never enters the replicated graph; durable diagnostic dedupe survives a restart.
@@ -1298,6 +1333,7 @@ impl Reconciler<NativeRuntime> {
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
+            schedule_replication_blocks: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1460,6 +1496,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
+            schedule_replication_blocks: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -3812,6 +3849,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         })
     }
 
+    /// Whether this host may answer `subject`'s member fault: it recorded the fault, or the
+    /// seat's declaration places it here.
+    fn member_fault_is_ours(&self, subject: &str) -> Result<bool> {
+        if self.store.member_reconcile_fault_origin(subject)?.as_deref() == Some(self.host.as_str()) {
+            return Ok(true);
+        }
+        Ok(self
+            .store
+            .desired_subject_with_writer(subject)?
+            .and_then(|(desired, _)| desired.member)
+            .is_some_and(|member| member.host == self.host))
+    }
+
     fn record_member_reconcile_result(&self, subject: &str, result: Result<()>) -> Result<()> {
         let previous = self.store.member_reconcile_fault(subject, None)?;
         let (decision, reason) = match result {
@@ -3823,6 +3873,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 ("member-fault", reason)
             }
+            // A member fault is the word of the host that recorded it, or of the host that runs
+            // the seat now. Another peer's clean pass only retired its own leftover process: it
+            // says nothing about the seat, and answering the fault made the two hosts trade
+            // fault and recovery every few seconds while the seat stayed parked.
+            Ok(()) if previous.is_some() && !self.member_fault_is_ours(subject)? => return Ok(()),
             // A pass that returns Ok may have started nothing: the member loop returns early while a
             // start is pending, while a restart waits, or when nothing is due. Only a member seen
             // alive has recovered; for any other, say what the pass did, so an earlier fault does
@@ -7518,7 +7573,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        let mut starting = member_fields(member, "starting", incarnation.as_deref(), false);
+        // Native drivers must bind before readiness can be established. Publish running
+        // authority at launch completion only for the physically observed incarnation
+        // owned by this start operation; readiness and restart completion remain separate.
+        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some()) {
+            self.runtime.observe_start(member)?.is_some_and(|observation| {
+                observation.status == "running"
+                    && observation.incarnation_id.as_deref() == Some(incarnation)
+            }) && self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+                .as_deref() == Some(operation_id)
+        } else {
+            false
+        };
+        let mut starting = member_fields(
+            member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
+        );
         if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
             && let Some(from) = actual_field(&previous, "restarting_from")
         {
@@ -14565,13 +14634,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn schedules_caught_up(&self) -> Result<bool> {
-        schedule_admission_ready(
+    fn schedules_caught_up(&self, schedule: &DesiredSubject) -> Result<bool> {
+        let ready = schedule_admission_ready(
             &self.store,
             &self.host,
             &self.schedule_peers,
             self.started_at_unix_ms,
-        )
+            schedule,
+        )?;
+        self.observe_schedule_replication_gate(schedule, ready, now_ms())?;
+        Ok(ready)
     }
 
     /// A late standby wake cannot turn a past candidate into new catch-up policy.
@@ -14605,12 +14677,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         if spec.stopped || (spec.host != self.host
             && !spec.standby.as_ref().is_some_and(|standby| standby.host == self.host)) {
+            self.clear_schedule_replication_block(schedule)?;
             return Ok(());
         }
         if self.schedule_has_open_work(&schedule.subject)? {
+            if self.store.schedule_has_active_started_run(&schedule.subject)? {
+                self.clear_schedule_replication_block(schedule)?;
+            }
             return Ok(());
         }
-        if !self.schedules_caught_up()? {
+        if !self.schedules_caught_up(schedule)? {
             self.arm_restart("stage/schedule-sync", now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
             return Ok(());
         }
@@ -14863,7 +14939,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     },
                     _ => false,
                 };
-                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at)
+                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at, &schedule_declaration)
                     .unwrap_or(false);
                 let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
                 let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
@@ -15029,6 +15105,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let on_standby = spec.host != self.host
             && spec.standby.as_ref().is_some_and(|standby| standby.host == self.host);
         if spec.host != self.host && !on_standby {
+            self.clear_schedule_replication_block(schedule)?;
             self.schedule_workspace_retries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -15047,7 +15124,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .remove(&schedule.subject);
             return Ok(());
         }
-        if !self.schedules_caught_up()? {
+        if !self.schedules_caught_up(schedule)? {
             self.arm_restart("stage/schedule-sync", now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
             return Ok(());
         }
@@ -23834,6 +23911,21 @@ agent "import/omp/repair-order" {{
         old.import_replication("author", &declaration.export_replication(0).unwrap())
             .unwrap();
         let append_binding = |store: &Store, incarnation: &str| {
+            // A driver's binding is accepted only while its incarnation is the running one.
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some(seat.into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("incarnation_id".into(), Value::String(incarnation.into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
             store
                 .append_claim(&ClaimInput {
                     subject: seat.into(),
@@ -24032,6 +24124,20 @@ agent "import/omp/repair-order" {{
         old_build
             .append_claim(&ClaimInput {
                 subject: seat.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(seat.into()),
+                fields: BTreeMap::from([
+                    ("status".into(), Value::String("running".into())),
+                    ("incarnation_id".into(), Value::String("old-build".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        old_build
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
                 kind: "harness.session-file".into(),
                 actor: Some(seat.into()),
                 fields: BTreeMap::from([
@@ -24104,6 +24210,21 @@ agent "import/omp/fixture" {{
                     "desired_token".into(),
                     Value::String(store.launch_lineage(&subject.subject).unwrap().pop().unwrap()),
                 );
+                // A driver's binding is accepted only while its incarnation is the running one.
+                store
+                    .append_claim(&ClaimInput {
+                        subject: subject.subject.clone(),
+                        kind: "runtime.observed".into(),
+                        actor: Some(subject.subject.clone()),
+                        fields: BTreeMap::from([
+                            ("status".into(), Value::String("running".into())),
+                            ("incarnation_id".into(), Value::String(incarnation.into())),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
             }
             store
                 .append_claim(&ClaimInput {
@@ -24506,6 +24627,44 @@ agent "import/omp/fixture" {{
         let reason = last.body.pointer("/fields/reason").and_then(Value::as_str).unwrap();
         assert!(reason.contains("absent") && reason.contains("nothing was started"), "{reason}");
         assert!(!reason.contains("recovered"), "{reason}");
+    }
+
+    #[test]
+    fn a_peer_that_does_not_run_the_seat_leaves_its_member_fault_alone() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, "version 2\nagent \"seat\" { command \"sleep 100\" }", "seat");
+        let subject = "agent/seat";
+        let reconciler = |host: &str| {
+            Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                host.into(),
+                Arc::new(Notify::new()),
+            )
+        };
+        let (host, peer) = (reconciler("node"), reconciler("peer"));
+        let decisions = || {
+            store
+                .claims_for(subject, Some("runtime.reconcile-decision"))
+                .unwrap()
+                .into_iter()
+                .filter_map(|claim| claim.body.pointer("/fields/decision").and_then(Value::as_str).map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        host.record_member_reconcile_result(subject, Err(anyhow::anyhow!("spawn PTY failed: launcher-incompatible")))
+            .unwrap();
+        // The peer's pass only retired its own leftover process, over and over: the seat is
+        // still parked on its host, and the fault stays, once.
+        for _ in 0..3 {
+            peer.record_member_reconcile_result(subject, Ok(())).unwrap();
+            host.record_member_reconcile_result(subject, Err(anyhow::anyhow!("spawn PTY failed: launcher-incompatible")))
+                .unwrap();
+        }
+        assert_eq!(decisions(), ["member-fault"]);
+        assert!(store.member_reconcile_fault(subject, None).unwrap().is_some());
+        // The host that runs the seat answers it.
+        host.record_member_reconcile_result(subject, Ok(())).unwrap();
+        assert_eq!(decisions(), ["member-fault", "member-pass-clean"]);
     }
 
     #[test]
