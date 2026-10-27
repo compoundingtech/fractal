@@ -20,3 +20,8 @@ record db09bce9956977d3578d6e12ebb89423aeea823b rust-tests 0 host/anvil 2026-10-
 record f216b512e84273f14c51add0c02106e70e2a4426 rust-tests 0 host/anvil 2026-10-27T04:01:13Z
 record fb398d087d11cb8b630d10716cd3d71b35acf24b rust-tests 0 host/anvil 2026-10-27T04:01:13Z
 record fe881dd921870894a5dc39a8556941fa1deded38 rust-tests 0 host/anvil 2026-10-27T04:01:13Z
+record 23bfde5ba660369ac0c73b7f4d913b8d29f95434 linux-tests-shard-2 0 fleet/ci 2026-10-27T04:11:34Z
+record 2d5acbdcdba508fa0dc80a07755a9ce9d259c5a0 linux-clippy 0 fleet/ci 2026-10-27T03:53:38Z
+record bd68f77480fe437a9af1ac9f23aae5bdc4f72a6b linux-gate 0 fleet/ci 2026-10-27T04:14:13Z
+record c00645c3c669bdb4f3b0518a82d9f2869ddd4e60 linux-tests 0 fleet/ci 2026-10-27T04:11:38Z
+record e9374f47476048aa2688e71e9464aa16b4d56881 linux-fleet-compat 0 fleet/ci 2026-10-27T03:54:25Z
