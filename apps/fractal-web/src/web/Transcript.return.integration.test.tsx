@@ -176,6 +176,33 @@ describe('source-member anchors', () => {
     expect(lane().querySelector('[data-scroll-anchor-id]')!.getBoundingClientRect().top).toBe(-10)
   })
 
+  it.each(['switch', 'remount'] as const)('preserves a non-first leaf through folding, splitting and expansion (%s)', async path => {
+    const store = new ViewportStore()
+    const leafRows = [...plain('r', 10), { id: 'tool-b' }, ...plain('r', 9, 11)]
+    const foldedRows = [...plain('r', 10), summary('folded', ['tool-a', 'tool-b']), ...plain('r', 9, 11)]
+    const splitRows = [...plain('e', 3), ...plain('r', 10), summary('split-a', ['tool-a']), summary('split-b', ['tool-b']), ...plain('r', 9, 11)]
+    const leave = async () => {
+      await render(plain('other', 20), 'other', store)
+      if (path === 'remount') await act(async () => root.render(null))
+    }
+    await render(leafRows, 'a', store)
+    await readerScrollsTo(1010)
+    await leave()
+    expect(store.get('a')?.anchor).toEqual({ id: 'tool-b', offset: -10 })
+    await render(foldedRows, 'a', store)
+    expect(lane().scrollTop).toBe(1010)
+    await leave()
+    expect(store.get('a')?.anchor).toEqual({ id: '["work-summary","folded"]', offset: -10, memberId: 'tool-b' })
+    await render(splitRows, 'a', store)
+    expect(lane().scrollTop).toBe(1410)
+    await leave()
+    expect(store.get('a')?.anchor).toEqual({ id: '["work-summary","split-b"]', offset: -10, memberId: 'tool-b' })
+    await render(leafRows, 'a', store)
+    expect(lane().scrollTop).toBe(1010)
+    await leave()
+    expect(store.get('a')?.anchor).toEqual({ id: 'tool-b', offset: -10 })
+  })
+
   it('keeps a missing row pending while history is partial, then restores it when it mounts', async () => {
     const store = new ViewportStore()
     await readSummary(store)

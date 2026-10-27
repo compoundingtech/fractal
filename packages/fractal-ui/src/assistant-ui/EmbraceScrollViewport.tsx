@@ -211,7 +211,7 @@ class ViewportController {
     const member = saved.memberId ?? saved.id
     let row: HTMLElement | undefined
     for (const candidate of element.querySelectorAll<HTMLElement>(anchorSelector)) {
-      if (!isAnchorContainer(candidate) && rowKey(candidate) === saved.id && (saved.memberId === undefined || rowMembers(candidate).includes(saved.memberId))) { row = candidate; break }
+      if (!isAnchorContainer(candidate) && (rowKey(candidate) === member || (rowKey(candidate) === saved.id && (saved.memberId === undefined || rowMembers(candidate).includes(saved.memberId))))) { row = candidate; break }
     }
     if (row === undefined) {
       for (const candidate of element.querySelectorAll<HTMLElement>('[data-scroll-anchor-members]')) {
@@ -221,7 +221,10 @@ class ViewportController {
     if (row === undefined) return false
     this.writeTop(element.scrollTop + row.getBoundingClientRect().top - element.getBoundingClientRect().top - saved.offset)
     this.anchor = { element: row, offset: saved.offset }
-    this.snapshotAnchor = { ...saved, id: rowKey(row)! }
+    const id = rowKey(row)!
+    this.snapshotAnchor = rowMembers(row).includes(member)
+      ? { id, offset: saved.offset, memberId: member }
+      : { id, offset: saved.offset }
     this.pendingAnchor = undefined
     this.pendingTop = undefined
     return true
@@ -277,8 +280,9 @@ class ViewportController {
     const id = rowKey(row)
     if (id === undefined) { this.snapshotAnchor = undefined; return }
     const members = rowMembers(row)
-    // Keep the member already captured for this summary, so repeated captures do not drift to its first leaf.
-    const memberId = this.snapshotAnchor?.memberId !== undefined && members.includes(this.snapshotAnchor.memberId) ? this.snapshotAnchor.memberId : members[0]
+    // Preserve source identity when a leaf folds into a summary, not just across summary recaptures.
+    const previousMember = this.snapshotAnchor?.memberId ?? this.snapshotAnchor?.id
+    const memberId = previousMember !== undefined && members.includes(previousMember) ? previousMember : members[0]
     this.snapshotAnchor = memberId === undefined ? { id, offset } : { id, offset, memberId }
   }
   private scheduleCapture() {
