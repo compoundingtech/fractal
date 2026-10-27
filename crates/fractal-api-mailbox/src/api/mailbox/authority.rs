@@ -1137,6 +1137,24 @@ fn with_authority_mode<T>(
             "the channel is outside the exact live physical runtime",
         ));
     }
+    // Question publication runs in the managed `driver omp` wrapper, not in an
+    // arbitrary channel-shaped descendant. Bootstrap custody identifies the exact
+    // terminal wrapper generation (direct terminal child for a bound invocation).
+    // Only after proving that identity may its launch configuration opt in.
+    let observation_wrapper = if !promote {
+        let witness = bootstrap_witness(
+            state, &physical, peer, process_token, member.terminal_binding.is_some(),
+        )?;
+        if provider != "omp"
+            || !arguments.windows(2).any(|pair| pair == ["driver", "omp"])
+            || var("ST_OMP_WEB_ANSWERS").as_deref() != Some("1")
+        {
+            return Err(refused("the managed OMP wrapper did not opt into question observation"));
+        }
+        Some(witness)
+    } else {
+        None
+    };
     let identity = fence
         .subject
         .strip_prefix("agent/")
@@ -1286,8 +1304,13 @@ fn with_authority_mode<T>(
                     "the channel process generation changed",
                 )));
             }
-            let validate =
-                || validate_physical_runtime(state, &runtime, &physical, peer.pid);
+            let validate = || {
+                validate_physical_runtime(state, &runtime, &physical, peer.pid)?;
+                if let Some(wrapper) = &observation_wrapper {
+                    wrapper.validate(state)?;
+                }
+                Ok(())
+            };
             validate()?;
             // Terminal state may be written without changing session/sequence. Recheck
             // it while holding the record lock rather than admitting a completion race.
@@ -1680,6 +1703,76 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
                 .code,
             "stale-mailbox-session"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn same_seat_forged_omp_descendant_cannot_open_or_close_questions() {
+        use std::io::{Read as _, Write as _};
+        const TEST: &str = "api::mailbox::authority::tests::same_seat_forged_omp_descendant_cannot_open_or_close_questions";
+        const SOCKET: &str = "ST_TEST_FORGED_OMP_QUESTION_SOCKET";
+        if let Some(path) = std::env::var_os(SOCKET) {
+            let mut socket = std::os::unix::net::UnixStream::connect(path).unwrap();
+            socket.write_all(b"ready").unwrap();
+            let mut stop = [0];
+            socket.read_exact(&mut stop).unwrap();
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("peer.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture", "driver", "omp"])
+            .env(SOCKET, &path)
+            .env("ST_AGENT", "agent/example/question")
+            .env("FRACTAL_AGENT", "agent/example/question")
+            .env("ST_OMP_WEB_ANSWERS", "1")
+            .env("ST_OMP_CHANNEL_SESSION", "owner")
+            .env("ST_OMP_CHANNEL_SEQ", "1")
+            .env("ST_OMP_CHANNEL_RUNTIME_ID", "runtime-one")
+            .spawn().unwrap();
+        let (mut socket, _) = tokio::time::timeout(
+            Duration::from_secs(10), listener.accept(),
+        ).await.unwrap().unwrap();
+        // This identity comes from SO_PEERCRED + SO_PEERPIDFD, not the child's report.
+        let connector = crate::api::local_peer_process(&socket).unwrap();
+        let pid = connector.pid();
+        assert_eq!(pid, child.id());
+        let (arguments, env) = local_process_arguments(pid).unwrap();
+        assert!(arguments.windows(2).any(|pair| pair == ["driver", "omp"]));
+        for value in ["ST_AGENT=agent/example/question", "ST_OMP_WEB_ANSWERS=1",
+            "ST_OMP_CHANNEL_SESSION=owner", "ST_OMP_CHANNEL_SEQ=1",
+            "ST_OMP_CHANNEL_RUNTIME_ID=runtime-one"] {
+            assert!(env.iter().any(|entry| entry == value));
+        }
+        let peer = NativeDeliveryPeer { agent: "agent/example/question".into(),
+            transport: "omp-channel", pid, archives_inbox: false };
+        for bound in [false, true] {
+            // The test process stands in for the managed wrapper; the attacker is
+            // its real descendant. For a bound invocation the shell is one level up.
+            let wrapper = std::process::id();
+            let terminal = if bound { runtime_parent(wrapper).unwrap() } else { wrapper };
+            let daemon = runtime_parent(terminal).unwrap();
+            let mut stats = serde_json::to_value(fixture_stats()).unwrap();
+            stats["daemon"]["pid"] = daemon.into();
+            stats["process"]["pid"] = terminal.into();
+            let witness = BootstrapWitness {
+                name: "physical".into(), created_at: "generation-1".into(),
+                daemon: (daemon, process_birth(daemon).unwrap()),
+                terminal: (terminal, process_birth(terminal).unwrap()),
+                peer: (pid, process_birth(pid).unwrap()), bound,
+            };
+            assert!(belongs_to_runtime(pid, daemon), "the old descendant gate admits it");
+            super::super::questions::tests::assert_forged_binding_cannot_write(&peer, || {
+                connector.validate().map_err(|_| refused("connector unavailable"))?;
+                witness.validate_with(
+                    Ok(serde_json::from_value(stats.clone()).unwrap()),
+                    process_birth, runtime_parent,
+                )
+            });
+        }
+        tokio::io::AsyncWriteExt::write_all(&mut socket, b"x").await.unwrap();
+        assert!(child.wait().unwrap().success());
     }
 
     #[test]

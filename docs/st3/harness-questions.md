@@ -98,9 +98,11 @@ option counts retain native order without sending labels. OMP single-select posi
 answers require one option (`required:true`); native multi-select permits no selected
 options (`required:false`). Other/note values never cross this observation path.
 
-Only the authenticated native driver inside the selected physical managed OMP runtime
-can ingest observations, through the local native route. Agent, runtime incarnation
-and ready native-session binding must agree. Persons, tiles, ordinary agent requests
+Only the exact managed `driver omp` wrapper generation can ingest observations,
+through the local native route. Its kernel Unix connector PID/birth must agree with
+the physical terminal-wrapper witness, revalidated under the provider record lock.
+Its launch configuration must independently opt in. Agent, runtime incarnation and
+ready native-session binding must agree. Persons, tiles, ordinary agent requests
 and Fabric loopback cannot use that route. A close must refer to a question opened
 by that same binding; unknown/foreign closes write nothing. Replayed opens and closes
 are idempotent. A reused call identity with different descriptors is refused.
