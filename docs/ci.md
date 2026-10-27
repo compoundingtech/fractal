@@ -1482,7 +1482,7 @@ Apply the fifth live ruleset check after this workflow has passed on main.
 All workflow YAML and `.github/repo-settings.json` are generated from neighboring `.genie.ts`
 files. The `effect-utils` flake input supplies the genie CLI and the `effect-utils` member in
 `megarepo.lock` supplies the generator library: run `mr apply` first, which links
-`repos/effect-utils` (CI's `megarepoApplyStep` and `scripts/st-test` run the same command; the small,
+`repos/effect-utils` (CI's `megarepoApplyStep` and `scripts/fractal-test` run the same command; the small,
 separate `genie` shell only warns when it is missing). `repos/` is ignored. No local `node_modules` or megarepo adoption is needed. The default Rust
 shell is not changed to depend on genie, so generation does not build its PTY/collector tools.
 

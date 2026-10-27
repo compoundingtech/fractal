@@ -139,7 +139,7 @@ class StTestReport(unittest.TestCase):
         self.assertIn('**Within the objective.**', self.run_report(str(self.write([record(600)], 'ok.jsonl')), '--markdown')[1])
 
     def test_a_record_st_test_writes_is_one_the_report_reads(self):
-        """The two scripts agree on the record: st-test's own writer, read back here."""
+        """The two scripts agree on the record: fractal-test's own writer, read back here."""
         st_loader = importlib.machinery.SourceFileLoader('st_test_for_report', str(ROOT / 'scripts/st-test'))
         st_test = importlib.util.module_from_spec(importlib.util.spec_from_loader(st_loader.name, st_loader))
         st_loader.exec_module(st_test)

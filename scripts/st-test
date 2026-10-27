@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
-  scripts/st-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE | --out DIR] [--attempt N] [--time-limit SECONDS] [--queue-limit SECONDS]
-  scripts/st-test --seed [REF] [--base origin/main] [--push REMOTE | --out DIR]
-  scripts/st-test --list
-  scripts/st-test --status [--base origin/main]
+  scripts/fractal-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE | --out DIR] [--attempt N] [--time-limit SECONDS] [--queue-limit SECONDS]
+  scripts/fractal-test --seed [REF] [--base origin/main] [--push REMOTE | --out DIR]
+  scripts/fractal-test --list
+  scripts/fractal-test --status [--base origin/main]
 
-For every check that has a local command (the table below: the whole per-PR suite; run `scripts/st-test --push origin` on the head
+For every check that has a local command (the table below: the whole per-PR suite; run `scripts/fractal-test --push origin` on the head
 you mark ready, and --all, accepted, means the same) it runs that command once, on the tree the pull request will be tested as, through scripts/evidence-wrap, and the signer records the exit code and the digest of
 the output it measured under this host's key (scripts/evidence-keygen). A failing run is recorded too. It then
 asks the verifier, from the accepted base, whether the tree is now covered, and prints one line per check.
@@ -192,7 +192,7 @@ def wait_for_load(limit, read_load=lambda: os.getloadavg()[0], sleep=time.sleep,
         if now - started >= deadline_minutes * 60:
             raise Failure(f'the host stayed above its load limit: load1 {load:.0f} > {limit:g} (host limit) for {deadline_minutes:g} min; nothing was started')
         if announced is None or now - announced >= LOAD_ANNOUNCE_SECONDS:
-            print(f'st-test: waiting: load1 {load:.0f} > {limit:g} (host limit)', file=sys.stderr, flush=True)
+            print(f'fractal-test: waiting: load1 {load:.0f} > {limit:g} (host limit)', file=sys.stderr, flush=True)
             announced = now
         sleep(min(10, LOAD_ANNOUNCE_SECONDS))
 
@@ -340,12 +340,12 @@ REEXEC = 'ST_TEST_REEXEC'  # set to the base commit in the base's copy that run_
 
 
 def run_base_copy(argv):
-    """Replace this process with the base's own scripts/st-test, as BASE_SCRIPTS does for the wrapper, signer and verifier. Every seat runs
-    st-test from its own branch, so without this, how runs queue for pool trees and build slots (and which commit they sign) stays at whatever
-    the branch last merged, for days, and old branches keep racing while new ones queue. A branch's own st-test changes are still tested, by
-    its ci-script-tests (st-test-test runs from the tree), and that is what is signed. There is no opt-out: an opt-out would be a way around
-    the queue. This copy runs (the call returns) only when the base has no scripts/st-test, the base's copy is this file, or this already is
-    the base's copy (ST_TEST_REEXEC)."""
+    """Replace this process with the base's self-contained scripts/st-test, as BASE_SCRIPTS does for the wrapper, signer and verifier.
+    Every seat runs fractal-test from its own branch, so without this, how runs queue for pool trees and build slots (and which commit they
+    sign) stays at whatever the branch last merged, for days, and old branches keep racing while new ones queue. A branch's own runner
+    changes are still tested by ci-script-tests (fractal-test-test runs from the tree), and that is what is signed. There is no opt-out.
+    This copy runs only when the base's st-test is absent, empty or this file, or this already is the base's copy (ST_TEST_REEXEC).
+    The human-facing fractal-test shim cannot be copied alone; retain st-test until every supported base permits contraction."""
     if os.environ.get(REEXEC):
         return
     scrub_git_environment()
@@ -358,14 +358,15 @@ def run_base_copy(argv):
         commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
     if not commit:
         return
+    # arn:lmig:smalltalk:2026-10-27-st-test-shim — copy the self-contained implementation, never the adjacent-file shim.
     shown = git('show', f'{commit}:scripts/st-test', check=False)
-    if shown.returncode != 0 or not shown.stdout or shown.stdout == Path(__file__).read_bytes():
+    if shown.returncode or not shown.stdout or shown.stdout == Path(__file__).read_bytes():
         return
     scratch = Path(tempfile.mkdtemp(prefix='st-test-base-'))
     path = scratch / 'st-test'
     path.write_bytes(shown.stdout)
     path.chmod(0o700)
-    print(f"st-test: running the base's st-test ({base} at {commit[:12]}), not this branch's copy", file=sys.stderr, flush=True)
+    print(f"fractal-test: running the base's st-test ({base} at {commit[:12]}), not this branch's copy", file=sys.stderr, flush=True)
     os.execve(sys.executable, [sys.executable, str(path), *argv], dict(os.environ, **{REEXEC: commit}))
 
 
@@ -434,7 +435,7 @@ def shared_target(tree_target=None):
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        print(f'st-test: another run is using {target}; waiting for it (one run builds and tests in it at a time)', file=sys.stderr, flush=True)
+        print(f'fractal-test: another run is using {target}; waiting for it (one run builds and tests in it at a time)', file=sys.stderr, flush=True)
         fcntl.flock(lock, fcntl.LOCK_EX)
     trim(target)  # nobody else is using it: the moment to keep it small
     return target, lock
@@ -456,7 +457,7 @@ def governed(argv, name):
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
     if scope and runtime and Path(runtime, 'bus').exists():
         return [scope, '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--'] + argv
-    print(f'st-test: {name} runs without the host build cap (no user systemd bus for a builds.slice scope)', file=sys.stderr)
+    print(f'fractal-test: {name} runs without the host build cap (no user systemd bus for a builds.slice scope)', file=sys.stderr)
     return argv
 
 
@@ -687,11 +688,11 @@ def evict_to_cap(base, limit_gb, keep=None):
                 shutil.rmtree(path, ignore_errors=True)
             total -= sizes[(repo, n)]
             idle = max(0, int((time.time() - used) / 60))
-            print(f'st-test: pool over {limit_gb:g} GB: evicted {repo.name}/tree-{n} and target-{n} ({sizes[(repo, n)]:.1f} GB, idle {idle} min)', file=sys.stderr)
+            print(f'fractal-test: pool over {limit_gb:g} GB: evicted {repo.name}/tree-{n} and target-{n} ({sizes[(repo, n)]:.1f} GB, idle {idle} min)', file=sys.stderr)
         finally:
             lock.close()
     if total > limit_gb:
-        print(f'st-test: pool is {total:.1f} GB, over {limit_gb:g} GB, and every other tree is in use', file=sys.stderr)
+        print(f'fractal-test: pool is {total:.1f} GB, over {limit_gb:g} GB, and every other tree is in use', file=sys.stderr)
 
 
 PRIORITY_AGING_SECONDS, PRIORITY_FLOOR = 120, 5  # the cargo shim's rank aging: a waiting ticket's rank improves by 1 per 120 s, never below 5 (ranks under 5 never age)
@@ -781,7 +782,7 @@ def acquire_tree(root, size, rank=None):
                     except BlockingIOError:
                         lock.close()
             if not waited:
-                print(f'st-test: all {trees} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
+                print(f'fractal-test: all {trees} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
                 waited = True
             time.sleep(POOL_WAIT_SECONDS)
     finally:
@@ -912,7 +913,7 @@ def materialize_members(directory):
 
 
 def reap_stale():
-    """Remove worktrees an earlier st-test left when it was killed (no TERM, no cleanup): its scratch directory names its pid."""
+    """Remove worktrees an earlier fractal-test left when it was killed (no TERM, no cleanup): its scratch directory names its pid."""
     listing = text(git('worktree', 'list', '--porcelain', check=False))
     for block in listing.split('\n\n'):
         match = re.search(r'^worktree (\S*/st-test-[^/]+)/tree$', block, re.M)
@@ -1312,7 +1313,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
             wrap += ['--out', args.out]
         started = time.monotonic()
         command = wrap + ['--'] + RUST_TESTS_COMMAND
-        print(f'st-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
+        print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
         signed = subprocess.run(command, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if signed.returncode != 0:
@@ -1559,7 +1560,7 @@ def record_run(record):
         if written != len(line):
             raise OSError(f'short write to {path} ({written} of {len(line)} bytes)')
     except OSError as error:
-        print(f'st-test: could not record this run\'s times: {error}', file=sys.stderr)
+        print(f'fractal-test: could not record this run\'s times: {error}', file=sys.stderr)
 
 
 def utc(seconds):
@@ -1629,7 +1630,7 @@ def main(argv):
     if args.status:
         commit, why_merge = gate_commit(args.base)
         if why_merge:
-            print(f'st-test: {why_merge}')
+            print(f'fractal-test: {why_merge}')
         tree = text(git('rev-parse', f'{commit}^{{tree}}'))
         lane_base = branch_point(commit, base_commit)
         with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
@@ -1693,7 +1694,7 @@ def main(argv):
                 base_commit = fetch_base(args.base)
                 commit, why_merge = gate_commit(args.base)
                 if why_merge:
-                    print(f'st-test: {why_merge}', flush=True)
+                    print(f'fractal-test: {why_merge}', flush=True)
                 if pool_max_gb():
                     evict_to_cap(pool_base(), pool_max_gb(), keep=(root, n))
                 directory, tree_target = prepare_tree(root, n, commit), root / f'target-{n}'
@@ -1806,7 +1807,7 @@ def main(argv):
                 limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit)
                 environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
                 command = wrap + ['--'] + LOCAL[name]
-                print(f'st-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
+                print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
                 command = governed(command, name) if name in BUILDS else command
                 if output is None and CI_LOCAL in LOCAL[name]:
                     # scripts/ci-local ends with a table of its stages' times: its output still reaches this terminal as it comes, and is kept
@@ -1845,13 +1846,13 @@ def main(argv):
                                 results[name] = ((name, f'FAILED ({type(error).__name__})', 0, str(error)[:120]), True, False)
 
                 lane = threading.Thread(target=light_lane, name='st-test-light')
-                print(f'st-test: {", ".join(light)} run alongside {", ".join(builds)}; their output follows when it is done', flush=True)
+                print(f'fractal-test: {", ".join(light)} run alongside {", ".join(builds)}; their output follows when it is done', flush=True)
                 lane.start()
                 for name in builds:
                     results[name] = run_one(name)
                 lane.join()
                 for name in light:
-                    print(f'\n----- st-test: {name} output -----', flush=True)
+                    print(f'\n----- fractal-test: {name} output -----', flush=True)
                     sys.stdout.write(logs[name].read_text(errors='replace') if logs[name].exists() else '(no output)\n')
                     sys.stdout.flush()
             else:
@@ -1862,7 +1863,7 @@ def main(argv):
                 rows += row if isinstance(row, list) else [row]
                 failed = failed or check_failed
                 unsigned = unsigned or check_unsigned
-            print(f'\nst-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
+            print(f'\nfractal-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
             rows.insert(0, ('setup', 'done', setup_seconds, 'fetch and the clean tree (the megarepo members are fetched when a check first needs them)'))
             for name, result, seconds, why in rows:
                 print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
@@ -1898,5 +1899,5 @@ if __name__ == '__main__':
         run_base_copy(sys.argv[1:])
         sys.exit(main(sys.argv[1:]))
     except Failure as error:
-        print(f'st-test: {error}', file=sys.stderr)
+        print(f'fractal-test: {error}', file=sys.stderr)
         sys.exit(2)
