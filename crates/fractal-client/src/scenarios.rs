@@ -95,7 +95,7 @@ pub struct DecodedValue {
 
 #[derive(Debug)]
 pub enum WireValue {
-    Resource(crate::Resource),
+    Resource(Box<crate::Resource>),
     TimelineEntry(crate::TimelineEntry),
     TerminalScreen(crate::TerminalScreen),
     Capabilities(crate::Capabilities),
@@ -169,7 +169,7 @@ impl Slice {
                 "Capabilities" => WireValue::Capabilities(crate::Capabilities::deserialize(value)?),
                 "ErrorEnvelope" => WireValue::ErrorEnvelope(crate::ErrorEnvelope::deserialize(value)?),
                 "SyncPeer" => WireValue::SyncPeer(crate::SyncPeer::deserialize(value)?),
-                _ => WireValue::Resource(crate::Resource::deserialize(value)?),
+                _ => WireValue::Resource(Box::new(crate::Resource::deserialize(value)?)),
             };
             out.push(DecodedValue { pointer, value: decoded });
             Ok(())

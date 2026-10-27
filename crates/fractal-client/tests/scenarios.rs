@@ -91,7 +91,8 @@ fn scenarios_declared_mode_is_enforced_without_repairing_wire_values() {
     slice.decode = DecodeMode::Tolerant;
     let values = slice.decode().unwrap();
     let agent = values.iter().find(|value| value.pointer == "/state/agents/0").unwrap();
-    let WireValue::Resource(fractal_client::Resource::Agent(agent)) = &agent.value else { panic!("expected typed agent") };
+    let WireValue::Resource(resource) = &agent.value else { panic!("expected resource") };
+    let fractal_client::Resource::Agent(agent) = resource.as_ref() else { panic!("expected typed agent") };
     assert_eq!(agent.state, "reconciling");
 
     let mut slice = scenarios::load_slice(fixtures().join("fleet-mid-refactor/roster.json")).unwrap();
@@ -104,7 +105,10 @@ fn scenarios_declared_mode_is_enforced_without_repairing_wire_values() {
     let slice = scenarios::load_slice(fixtures().join("unknown-fields/roster.json")).unwrap();
     assert_eq!(slice.decode, DecodeMode::Tolerant);
     let decoded = slice.decode().unwrap();
-    assert!(decoded.iter().any(|value| matches!(&value.value, WireValue::Resource(fractal_client::Resource::Unknown(_)))));
+    assert!(decoded.iter().any(|value| matches!(
+        &value.value,
+        WireValue::Resource(resource) if matches!(resource.as_ref(), fractal_client::Resource::Unknown(_))
+    )));
 }
 
 #[test]
