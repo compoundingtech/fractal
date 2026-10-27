@@ -60,8 +60,14 @@ The dev server binds to localhost on a fixed port (53705). To view it from anoth
 The **Scenario** toolbar uses the shared `@fractal/scenarios` catalog.
 `scenario` selects the world and `scenarioNow` fixes its clock. Markdown prose,
 SyncLine's scenario previews, SystemState's roster and connection geometry,
-TranscriptComposer's column examples, TranscriptPress's scenario examples and
-DeclarationPanel's structured mission fallback consume declared slices.
+TranscriptComposer's column examples, TranscriptPress's scenario examples,
+Transcript's tool-call, tool-result, reasoning, streaming-revision and failed/cancelled
+families, and DeclarationPanel's structured mission fallback consume declared slices.
+The Transcript family stories pin `transcript-families` by default, project native
+conversation facts through the live timeline projection, and retain separate light variants.
+The streaming-revision plays reset the kit's manual clock, advance it past the catalog's
+2-second revision event, and assert one finalized row replaces the initial text in both themes.
+The existing Transcript contract-fixture stories remain unchanged.
 Composer and connection geometry checks pin populated data; separate scenario
 stories follow the toolbar. `OwnSendFollows` / `OwnSendFollowsLight` retain their
 30-turn contract fixture: the play needs a genuinely new incoming reply. Reusing
